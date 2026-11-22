@@ -1,8 +1,10 @@
+use arcanum_rs::content;
 use arcanum_rs::dat::{Archive, Format};
+use arcanum_rs::mes::EntryId;
 use arcanum_rs::mods::{Catalog, Package};
 use arcanum_rs::vfs::{self, Policy, Resolution, Vfs};
 use std::error::Error;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
@@ -19,7 +21,9 @@ const USAGE: &str = "Usage:
   arcanum-rs mods info <package-directory>
   arcanum-rs mods validate <mods-directory> [<mod-id> ...]
   arcanum-rs mods order <mods-directory> [<mod-id> ...]
-  arcanum-rs mods resolve <game-directory> <mods-directory> <resource-path> <mod-id> ...";
+  arcanum-rs mods resolve <game-directory> <mods-directory> <resource-path> <mod-id> ...
+  arcanum-rs [--ordered] mes inspect <game-directory> <resource-path> [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs [--ordered] mes get <game-directory> <resource-path> <entry-id> [--mods <mods-directory> <mod-id> ...]";
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -40,6 +44,12 @@ fn main() -> ExitCode {
         (Some("mounts"), [_, game]) => mounts(Path::new(game), policy),
         (Some("resolve"), [_, game, resource]) => resolve(Path::new(game), policy, resource),
         (Some("conflicts"), [_, game]) => conflicts(Path::new(game), policy),
+        (Some("mes"), [_, action, game, resource, options @ ..]) if action == "inspect" => {
+            inspect_mes(Path::new(game), resource, None, options, policy)
+        }
+        (Some("mes"), [_, action, game, resource, entry, options @ ..]) if action == "get" => {
+            inspect_mes(Path::new(game), resource, Some(entry), options, policy)
+        }
         (Some("mods"), [_, subcommand, directory])
             if policy == Policy::Ce && subcommand == "list" =>
         {
@@ -159,7 +169,7 @@ fn mod_info(directory: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn selected_mods(ids: &[std::ffi::OsString]) -> Result<Vec<&str>, Box<dyn Error>> {
+fn selected_mods(ids: &[OsString]) -> Result<Vec<&str>, Box<dyn Error>> {
     ids.iter()
         .map(|id| id.to_str().ok_or_else(|| "mod ID must be UTF-8".into()))
         .collect()
@@ -167,7 +177,7 @@ fn selected_mods(ids: &[std::ffi::OsString]) -> Result<Vec<&str>, Box<dyn Error>
 
 fn mod_order(
     directory: &Path,
-    selected: &[std::ffi::OsString],
+    selected: &[OsString],
     print_order: bool,
 ) -> Result<(), Box<dyn Error>> {
     let catalog = Catalog::discover(directory)?;
@@ -189,13 +199,73 @@ fn mod_resolve(
     game: &Path,
     directory: &Path,
     resource: &OsStr,
-    selected: &[std::ffi::OsString],
+    selected: &[OsString],
 ) -> Result<(), Box<dyn Error>> {
     let resource = resource_name(resource)?;
+    print_resolution(&modded_vfs(game, directory, selected)?, resource)
+}
+
+fn modded_vfs(game: &Path, directory: &Path, selected: &[OsString]) -> Result<Vfs, Box<dyn Error>> {
     let catalog = Catalog::discover(directory)?;
     let plan = catalog.load_order(&selected_mods(selected)?)?;
     let base = Vfs::from_game(game, Policy::Ordered)?;
-    print_resolution(&plan.apply(base)?, resource)
+    Ok(plan.apply(base)?)
+}
+
+fn inspect_mes(
+    game: &Path,
+    resource: &OsStr,
+    entry: Option<&OsStr>,
+    options: &[OsString],
+    policy: Policy,
+) -> Result<(), Box<dyn Error>> {
+    let resource = resource_name(resource)?;
+    let id = entry
+        .map(|entry| {
+            entry
+                .to_str()
+                .and_then(|entry| entry.parse::<EntryId>().ok())
+                .ok_or_else(|| {
+                    format!(
+                        "invalid MES entry ID {entry:?}; expected a signed 32-bit decimal integer"
+                    )
+                })
+        })
+        .transpose()?;
+    let mut vfs = match options {
+        [] => Vfs::from_game(game, policy)?,
+        [flag, directory, selected @ ..] if flag == "--mods" && !selected.is_empty() => {
+            modded_vfs(game, Path::new(directory), selected)?
+        }
+        _ => return Err("expected --mods <mods-directory> <mod-id> ...".into()),
+    };
+    let loaded = content::load_mes(&mut vfs, resource)?;
+    let mut out = io::stdout().lock();
+    writeln!(out, "Path: {}", loaded.source.virtual_path)?;
+    writeln!(out, "Source: {}", loaded.source)?;
+    if let Some(id) = &loaded.source.mod_id {
+        writeln!(out, "Mod: {id}")?;
+    }
+    writeln!(out, "Encoding: {}", loaded.encoding)?;
+    writeln!(out, "Entries: {}", loaded.mes.len())?;
+    if let Some(first) = loaded.duplicates.first() {
+        writeln!(
+            out,
+            "Duplicates: {} (last record wins; first replacement is ID {} at {})",
+            loaded.duplicates.len(),
+            first.id,
+            first.replacement
+        )?;
+    }
+    if let Some(id) = id {
+        let value = loaded
+            .mes
+            .get(id)
+            .ok_or_else(|| format!("MES entry {id} not found in {}", loaded.source.virtual_path))?;
+        writeln!(out, "Entry ID: {id}")?;
+        writeln!(out, "Value: {value}")?;
+    }
+    Ok(())
 }
 
 fn write_package(mut out: impl Write, package: &Package) -> io::Result<()> {

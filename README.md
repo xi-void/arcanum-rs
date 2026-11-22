@@ -7,13 +7,14 @@ The long-term objective is a standalone, extensible engine with
 original-game compatibility and OpenMW-style modding capabilities.
 
 **Current status:** Read-only resource explorer, virtual filesystem,
-and mod manifest infrastructure. The engine is not yet playable.
+mod manifest infrastructure, and mod-aware MES loading. The engine is not yet playable.
 
 ## Roadmap
 
 - [x] DAT archive reader and resource explorer
 - [x] Virtual filesystem and resource precedence
 - [x] Mod manifests and dependency resolution
+- [x] MES parsing and mod-aware content loading
 - [ ] Extensible content definitions
 - [ ] Lua scripting and gameplay interfaces
 - [ ] World simulation and engine modernization
@@ -137,6 +138,27 @@ target/debug/arcanum-rs mods resolve "$game" "$mods" 'art/interface/interface.me
 
 `list` and `info` read manifest metadata. `validate` and `order` check all installed mods when IDs are omitted. `mods resolve` takes at least one ID. Discovery permits one installed version per ID. Selection is per invocation, and packages are supplied as local directories. Mount validation checks metadata. Compressed payloads are checked when read.
 
+## MES content
+
+The MES CLI uses the existing VFS and mod selection. Without `--mods`, it defaults to CE-mode resource precedence. With `--mods`, it uses the ordered VFS and includes the selected mods' dependencies. A replacement supplies the whole MES table.
+
+```sh
+game="$HOME/Work/arcanum-ce-test"
+mods="$HOME/Work/arcanum-mods"
+target/debug/arcanum-rs mes inspect "$game" 'mes/gamedesc.mes'
+target/debug/arcanum-rs mes get "$game" 'mes/gamedesc.mes' 40000
+target/debug/arcanum-rs mes get "$game" 'MES\GAMEDESC.MES' 40000 --mods "$mods" vfs-smoke
+```
+
+`mes::Mes::parse_text` accepts native UTF-8 text. `Mes::parse` accepts resource bytes, and `Mes::parse_with_encoding` selects UTF-8 or Windows-1252 explicitly. `get` looks up an ID and `entries` iterates in numeric order. The native `Mes` table stores only IDs and Unicode text. Standalone `mes::parse_source` and the VFS loaders report selected encoding and duplicate locations alongside the table. `content::load_mes` and `load_mes_with_encoding` use a caller-owned `&mut Vfs` and also return the normalized path, mount, storage type, and optional mod ID. The loader bounds both the declared size and the bytes streamed by the VFS.
+
+### Syntax and compatibility
+
+- Records pair `{id}` with `{text}`. IDs are signed 32-bit decimal integers with optional surrounding ASCII whitespace. Values may be empty or multiline. The parser preserves punctuation, spaces, and tabs inside values and normalizes CRLF and lone CR to LF. Whitespace and free-text annotations outside fields are ignored. `//` starts a line comment only outside fields, so braces on a comment line are ignored and `//` inside a value remains literal.
+- The parser checks a UTF-8 BOM first, then valid UTF-8, then Windows-1252. The selected encoding is reported. Undefined Windows-1252 bytes, embedded NUL, and UTF-16 or UTF-32 BOMs produce errors. Other legacy encodings are unsupported. Input is limited to 4 MiB and 100,000 records, counting duplicate occurrences.
+- Within one table, the last occurrence of an ID wins and each replacement is reported. Invalid IDs, unmatched or nested delimiters, empty tables, and truncated records produce errors with one-based lines and zero-based byte offsets into the original input. Literal braces and block-comment syntax are unsupported.
+- CE revision `fb721982` in `src/game/mes.c` searches for braces in the raw text, including in comments. It uses `atoi` for IDs, retains duplicate records after sorting, and logs several malformed cases while continuing or returning the parsed prefix. CE leaves character encoding to callers and applies platform- or source-dependent text-mode newline handling. The Rust parser uses strict validation, deterministic duplicate handling, and explicit decoding and newline rules.
+
 ## Implementation and verification
 
 `dat` owns the index and keeps a seekable input for bounded payload reads. `resource_path` handles virtual path normalization independently of host paths. `vfs` owns mount ordering, discovery, and provenance. `mods` discovers packages, validates manifests, and plans the order before mounting resources. The CLI uses these library modules and owns output-file handling. `flate2` provides the Rust zlib backend. `cap-std` and `cap-fs-ext` confine filesystem access to mount roots and open manifest paths without following symlinks.
@@ -148,6 +170,23 @@ cargo test
 cargo build
 ```
 
-Synthetic tests cover archive parsing and decompression, mount precedence and re-registration, mixed sources, sidecars, directory and ignored records, missing paths, case collisions, traversal and symlink confinement. Mod tests cover manifest validation, dependency graphs, ordering conflicts, selected overrides, and mount provenance. The legacy DAT footer was verified with synthetic fixtures.
+Synthetic tests cover archive parsing and decompression, mount precedence and re-registration, mixed sources, sidecars, directory and ignored records, missing paths, case collisions, traversal and symlink confinement. Mod tests cover manifest validation, dependency graphs, ordering conflicts, selected overrides, and mount provenance. MES tests cover decoding, delimiters, source locations, deterministic duplicate handling, parser limits, and archive-to-mod replacement with provenance. The legacy DAT footer was verified with synthetic fixtures.
 
 A standalone differential test linked the prebuilt CE TIG library and exercised `tig_file_repository_add` and `tig_file_fopen` in binary mode. The test pointed TIG at original archives and scratch copies of selected loose resources, since registering a directory in TIG can clear its cache. Ten synthetic and twelve installed resolution cases matched TIG, including missing results and archive directory winners. Twelve direct extractions matched byte for byte, including resources from `Arcanum.PATCH0`, `Arcanum.PATCH1`, `Arcanum.PATCH6`, and `Arcanum.PATCH9`. Verification used CE and the game files as read-only inputs and ran without launching the game.
+
+The MES scan parsed 713 of 725 installed archive and loose tables. The remaining files fall into two diagnostic classes.
+
+| Classification | Tables | Finding |
+| --- | ---: | --- |
+| Malformed delimiters | 10 | Unexpected closing braces in variants of `pcvars.mes` and in `BuriedSecrets.dat`'s `mes/gamequestlogdumb.mes`. |
+| Unsupported source bytes | 2 | `rules/effect.mes` in `Arcanum5.dat` and `ArcanumXRaces.dat` contains `0x81`, which is undefined in Windows-1252. The source encoding of that byte is unconfirmed. |
+
+A standalone comparison with CE's MES parser checked 7,177 unique IDs across seven tables. Each Rust value matched a corresponding CE record after decoding and newline normalization. For duplicate IDs this comparison allows any of CE's retained records, while Rust applies its last-record rule.
+
+The external integration test checks that `mes/gamedesc.mes` comes from `Arcanum.PATCH6` in CE mode and that enabling `vfs-smoke` changes ID `40000` to `Arcanum-RS test override`, with `vfs-smoke` reported as the source. Run it against the existing read-only fixtures with the following command.
+
+```sh
+ARCANUM_GAME_DIR="$HOME/Work/arcanum-ce-test" \
+ARCANUM_MODS_DIR="$HOME/Work/arcanum-mods" \
+  cargo test --test installed_mes -- --ignored
+```
