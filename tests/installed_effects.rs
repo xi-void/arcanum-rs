@@ -11,17 +11,40 @@ fn selected_effects_match_an_independently_mounted_archive() {
     let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
     let mut archive = Vfs::new(Policy::Ce);
     let archive_mount = archive.mount_archive(game.join("Arcanum3.dat")).unwrap();
-    for (id, record, operation) in [
-        (128, "ac +1", EffectOperation::AddArmourClass { points: 1 }),
+    let cases: [(i32, &str, &[EffectOperation]); 3] = [
+        (
+            128,
+            "ac +1",
+            &[EffectOperation::AddArmourClass { points: 1 }],
+        ),
         (
             53,
             "resistfire min 50",
-            EffectOperation::ResistanceFloor {
+            &[EffectOperation::ResistanceFloor {
                 channel: ResistanceKind::Fire,
                 minimum_percent: 50,
-            },
+            }],
         ),
-    ] {
+        (
+            54,
+            "resistfire min 95, resistelectrical +8, resistpoison min 97",
+            &[
+                EffectOperation::ResistanceFloor {
+                    channel: ResistanceKind::Fire,
+                    minimum_percent: 95,
+                },
+                EffectOperation::AddResistance {
+                    channel: ResistanceKind::Electrical,
+                    percentage_points: 8,
+                },
+                EffectOperation::ResistanceFloor {
+                    channel: ResistanceKind::Poison,
+                    minimum_percent: 97,
+                },
+            ],
+        ),
+    ];
+    for (id, record, operations) in cases {
         let selected = load_effect(&mut vfs, LegacyEffectId(id)).unwrap();
         assert_eq!(selected.encoding, Encoding::Windows1252);
         assert_eq!(selected.source.storage, Storage::Loose);
@@ -38,7 +61,7 @@ fn selected_effects_match_an_independently_mounted_archive() {
             selected.definition.id,
             EffectId(format!("arcanum:effect/{id}"))
         );
-        assert_eq!(selected.definition.operation, operation);
+        assert_eq!(selected.definition.operations, operations);
         assert_eq!(selected.record, record);
 
         let archived = load_effect(&mut archive, LegacyEffectId(id)).unwrap();

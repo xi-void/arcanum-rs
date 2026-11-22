@@ -320,15 +320,27 @@ fn inspect_effect(
     writeln!(out, "Legacy effect ID: {}", effect.legacy_id.0)?;
     writeln!(out, "Native effect ID: {}", effect.definition.id.0)?;
     writeln!(out, "Record: {}", effect.record)?;
-    match effect.definition.operation {
-        EffectOperation::AddArmourClass { points } => {
-            writeln!(out, "Armour class adjustment (points): {points:+}")?;
-        }
-        EffectOperation::ResistanceFloor {
-            channel,
-            minimum_percent,
-        } => {
-            writeln!(out, "{channel:?} resistance floor: {minimum_percent}%")?;
+    writeln!(out, "Operations in source order for inspection:")?;
+    for operation in effect.definition.operations {
+        match operation {
+            EffectOperation::AddArmourClass { points } => {
+                writeln!(out, "  Armour class adjustment (points): {points:+}")?;
+            }
+            EffectOperation::AddResistance {
+                channel,
+                percentage_points,
+            } => {
+                writeln!(
+                    out,
+                    "  {channel:?} resistance adjustment: {percentage_points:+} percentage points"
+                )?;
+            }
+            EffectOperation::ResistanceFloor {
+                channel,
+                minimum_percent,
+            } => {
+                writeln!(out, "  {channel:?} resistance floor: {minimum_percent}%")?;
+            }
         }
     }
     Ok(())

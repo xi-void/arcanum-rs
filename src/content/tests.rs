@@ -424,9 +424,13 @@ path = "resources"
 #[test]
 fn effect_import_uses_mod_precedence_and_keeps_its_namespaced_id() {
     use super::effects::{EffectId, EffectOperation, LegacyEffectId, load_effect};
+    use super::items::ResistanceKind;
 
     let fixture = Fixture::new();
-    fixture.write("base/rules/effect.mes", b"{128}{ac +1}");
+    fixture.write(
+        "base/rules/effect.mes",
+        b"{128}{ac +1}\n{54}{resistfire min 40, resistelectrical +7}",
+    );
     fixture.write(
         "mods/patch/arcanum-mod.toml",
         br#"
@@ -442,7 +446,7 @@ path = "resources"
     );
     fixture.write(
         "mods/patch/resources/Rules/Effect.mes",
-        b"{128}{ac -2}\n{128}{ac +3}",
+        b"{128}{ac -2}\n{128}{ac +3}\n{54}{resistelectrical -2, resistpoison min 0}",
     );
 
     let mut vfs = Vfs::new(Policy::Ordered);
@@ -451,8 +455,8 @@ path = "resources"
     let original = load_effect(&mut vfs, legacy_id).unwrap();
     assert_eq!(original.source.mount_id, base);
     assert_eq!(
-        original.definition.operation,
-        EffectOperation::AddArmourClass { points: 1 }
+        original.definition.operations,
+        [EffectOperation::AddArmourClass { points: 1 }]
     );
 
     let catalog = Catalog::discover(fixture.0.join("mods")).unwrap();
@@ -465,20 +469,44 @@ path = "resources"
     );
     assert_eq!(replacement.definition.id, original.definition.id);
     assert_eq!(
-        replacement.definition.operation,
-        EffectOperation::AddArmourClass { points: 3 }
+        replacement.definition.operations,
+        [EffectOperation::AddArmourClass { points: 3 }]
     );
     assert_eq!(replacement.record, "ac +3");
     assert_eq!(replacement.source.mod_id.unwrap().as_str(), "patch");
     assert_eq!(replacement.source.virtual_path, "rules/effect.mes");
+
+    let composite = load_effect(&mut vfs, LegacyEffectId(54)).unwrap();
+    assert_eq!(
+        composite.definition.id,
+        EffectId("arcanum:effect/54".into())
+    );
+    assert_eq!(composite.source.mod_id.unwrap().as_str(), "patch");
+    assert_eq!(composite.record, "resistelectrical -2, resistpoison min 0");
+    assert_eq!(
+        composite.definition.operations,
+        [
+            EffectOperation::AddResistance {
+                channel: ResistanceKind::Electrical,
+                percentage_points: -2
+            },
+            EffectOperation::ResistanceFloor {
+                channel: ResistanceKind::Poison,
+                minimum_percent: 0
+            },
+        ]
+    );
 }
 
 #[test]
 fn effect_import_distinguishes_missing_malformed_and_unsupported_records() {
-    use super::effects::{DecodeError, LegacyEffectId, LoadEffectError, load_effect};
+    use super::effects::{ClauseError, DecodeError, LegacyEffectId, LoadEffectError, load_effect};
 
     let fixture = Fixture::new();
-    fixture.write("rules/effect.mes", b"{53}{resistfire min}\n{128}{ac +1%}");
+    fixture.write(
+        "rules/effect.mes",
+        b"{53}{resistfire min}\n{128}{ac +1%}\n{54}{resistfire min 95, speed +2}",
+    );
     let mut vfs = Vfs::new(Policy::Ordered);
     let mount = vfs.mount_directory(&fixture.0).unwrap();
     assert!(matches!(
@@ -488,12 +516,13 @@ fn effect_import_distinguishes_missing_malformed_and_unsupported_records() {
     assert!(
         matches!(load_effect(&mut vfs, LegacyEffectId(0)), Err(LoadEffectError::Missing { id: LegacyEffectId(0), source }) if source.mount_id == mount)
     );
-    for (id, kind) in [
-        (53, DecodeError::MissingValue),
-        (128, DecodeError::UnsupportedOperation),
+    for (id, index, kind) in [
+        (53, 1, ClauseError::MissingValue),
+        (128, 1, ClauseError::UnsupportedOperation),
+        (54, 2, ClauseError::UnsupportedTarget),
     ] {
         assert!(
-            matches!(load_effect(&mut vfs, LegacyEffectId(id)), Err(LoadEffectError::Decode { id: LegacyEffectId(key), source, error }) if key == id && source.mount_id == mount && error == kind)
+            matches!(load_effect(&mut vfs, LegacyEffectId(id)), Err(LoadEffectError::Decode { id: LegacyEffectId(key), source, error }) if key == id && source.mount_id == mount && error == DecodeError::Clause { index, kind })
         );
     }
 
