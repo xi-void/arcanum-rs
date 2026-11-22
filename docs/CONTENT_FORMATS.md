@@ -174,6 +174,27 @@ Each sampled record uses version 119, a 16-byte bitmap at byte 56 and a signed d
 
 Other prototype bodies, bitmap semantics, optional payloads, default generation when a prototype file is absent, and recipes with independent variation in both input slots remain outside the verified slice. The import preserves variant order for future use. Runtime matching, expertise, and the cause of Fortifier's reported inventory-recognition problem remain open.
 
+## Milestone 7 schematic coverage audit
+
+**Installed data.** The CE-policy VFS selected `data/rules/schematic.mes` above three archive copies. The audit considers a ten-key block in `2000–5999` a candidate when any of its seven expected cells is present. Empty blocks and cells at offsets 7–9 are excluded. The winning table has **119 complete groups** in scope, with **56 learned** and **63 found**. All **119** pass the unchanged `LegacyGroup::decode`. There are zero unsupported mappings, malformed or incomplete groups, and duplicate recipe keys. The 56 title-page cells in the 6000 range and 637 cells under the 7000-range “Factory Schematics” section are outside this audit.
+
+Every group has two required ingredients. There are 114 groups with one ID in each input and one output ID, three groups with widths `3 / 3 / 3`, and two with widths `1 / 3 / 3`. All multi-ID groups have three distinct second inputs and three positionally aligned outputs. The only within-slot repeats are the fixed first ingredient in the three `3 / 3 / 3` groups. Shared output quantities are 1 in 94 groups, 2 in 3, 3 in 15, 4 in 2, and 5 in 5.
+
+| Group | Title | First input as stored | Ordered second input → output, basic IDs | Quantity |
+| --- | --- | --- | --- | ---: |
+| 2450 | Healing Jacket | 15108 × 3 identical IDs | 8091 → 8148, 8099 → 8149, 8107 → 8150 | 1 |
+| 3250 | Feather-Weight Chainmail | 15123 × 3 identical IDs | 8091 → 8130, 8099 → 8131, 8107 → 8292 | 1 |
+| 3260 | Elite Platemail | 15155 × 3 identical IDs | 8130 → 8115, 8131 → 8123, 8292 → 8128 | 1 |
+| 4220 | Fortifier | 10093 | 10067 → 10119 | 1 |
+| 4450 | Electro-Armor | 15108 | 8075 → 8229, 8083 → 8230, 8088 → 8231 | 1 |
+| 5090 | Machined Platemail | 15177 | 8115 → 8073, 8123 → 8081, 8128 → 8291 | 1 |
+
+**CE interpretation.** `schematic_ui_parse_items` pads all three lists in each single-variant group and the fixed first slot in 4450 and 5090. Padding repeats the last listed ID, so it creates no additional meaningful combination. `schematic_ui_process` selects the first matching index in each input list. The fixed first input always matches at index zero or fails. The nonzero first-index output branch therefore has no case in the audited recipes. For all five armour recipes, the selected second input controls which size of result is produced, and repeated first-input IDs still occupy just one required slot.
+
+**Rust coverage and references.** The audit reports stored widths, repeats, alignment, and quantity per complete numeric group, then distinguishes decoder support from invalid or incomplete cells. A structurally supported group can still fail reference validation. Optional validation uses the same inspection resolver and a shared prototype path search across the selected groups. All six groups above produced native definitions against the tested tree. For 3250, basic ID 15123 resolves to serialized ID 15143 and the stored description key supplies “Spool of Heavy Wire” from `Arcanum5.dat`. Large Feather-Weight Chain maps from basic ID 8292 to serialized ID 8312. The drawing key 553 resolves to `art/interface/ultralite_chain_mail_scheme.art` in `Arcanum1.dat`.
+
+The existing two-input `RecipeVariant` represents all groups in scope. Only six underwent detailed reference validation. This audit does not establish reference coverage for the remaining recipes, factory-section semantics, or the cause of the reported Fortifier inventory issue.
+
 ### Primary reference locations
 
 - CE `src/game/proto.c` (`proto_init`, `sub_468660`, `sub_468860`, and the four `BP_*` initializers), `descriptions.h`, `obj_id.h`, `obj_id.c`.

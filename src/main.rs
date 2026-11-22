@@ -1,4 +1,5 @@
 use arcanum_rs::content;
+use arcanum_rs::content::schematics::audit::{GroupStatus, audit_schematics};
 use arcanum_rs::content::{items, schematics};
 use arcanum_rs::dat::{Archive, Format};
 use arcanum_rs::mes::EntryId;
@@ -26,7 +27,8 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] mes inspect <game-directory> <resource-path> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] mes get <game-directory> <resource-path> <entry-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] prototype inspect <game-directory> <resource-path> [--mods <mods-directory> <mod-id> ...]
-  arcanum-rs [--ordered] schematic inspect <game-directory> <recipe-id> [--mods <mods-directory> <mod-id> ...]";
+  arcanum-rs [--ordered] schematic inspect <game-directory> <recipe-id> [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs [--ordered] schematic audit <game-directory> [<recipe-id> ...] [--mods <mods-directory> <mod-id> ...]";
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -58,6 +60,9 @@ fn main() -> ExitCode {
         }
         (Some("schematic"), [_, action, game, id, options @ ..]) if action == "inspect" => {
             inspect_schematic(Path::new(game), id, options, policy)
+        }
+        (Some("schematic"), [_, action, game, options @ ..]) if action == "audit" => {
+            audit_schematic_command(Path::new(game), options, policy)
         }
         (Some("mods"), [_, subcommand, directory])
             if policy == Policy::Ce && subcommand == "list" =>
@@ -298,17 +303,129 @@ fn inspect_prototype(
     Ok(())
 }
 
+fn recipe_id(id: &OsStr) -> Result<schematics::LegacyRecipeId, Box<dyn Error>> {
+    id.to_str()
+        .and_then(|id| id.parse().ok())
+        .map(schematics::LegacyRecipeId)
+        .ok_or_else(|| format!("invalid schematic ID {id:?}; expected a decimal integer").into())
+}
+
+fn audit_schematic_command(
+    game: &Path,
+    options: &[OsString],
+    policy: Policy,
+) -> Result<(), Box<dyn Error>> {
+    let split = options
+        .iter()
+        .position(|arg| arg == "--mods")
+        .unwrap_or(options.len());
+    let (ids, options) = options.split_at(split);
+    let ids = ids
+        .iter()
+        .map(|id| recipe_id(id))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut vfs = inspection_vfs(game, options, policy)?;
+    let audit = audit_schematics(&mut vfs, &ids)?;
+    let mut supported = 0;
+    let mut variants = 0;
+    let mut unsupported = 0;
+    let mut invalid = 0;
+    let mut issues = Vec::new();
+    for group in &audit.groups {
+        match &group.status {
+            GroupStatus::Supported(group) => {
+                supported += 1;
+                variants += usize::from(group.variants.len() > 1);
+            }
+            GroupStatus::Unsupported(error) => {
+                unsupported += 1;
+                issues.push((group.id, error));
+            }
+            GroupStatus::MalformedOrIncomplete(error) => {
+                invalid += 1;
+                issues.push((group.id, error));
+            }
+        }
+    }
+
+    let mut out = io::stdout().lock();
+    write!(out, "Rules: ")?;
+    write_source(&mut out, &audit.rules_source)?;
+    writeln!(
+        out,
+        "Discovered learned/found groups: {}",
+        audit.groups.len()
+    )?;
+    writeln!(
+        out,
+        "Structurally supported: {supported} ({variants} with variants)"
+    )?;
+    writeln!(out, "Unsupported mappings: {unsupported}")?;
+    writeln!(out, "Malformed or incomplete: {invalid}")?;
+    writeln!(
+        out,
+        "Duplicate recipe keys (last value used): {}",
+        audit.duplicate_keys.len()
+    )?;
+    const MAX_ISSUES: usize = 12;
+    for (id, error) in issues.iter().take(MAX_ISSUES) {
+        writeln!(out, "  Recipe {}: {error}", id.0)?;
+    }
+    if issues.len() > MAX_ISSUES {
+        writeln!(
+            out,
+            "  {} further structural issues",
+            issues.len() - MAX_ISSUES
+        )?;
+    }
+    for key in audit.duplicate_keys.iter().take(MAX_ISSUES) {
+        writeln!(out, "  Duplicate entry {key}")?;
+    }
+
+    let complete = audit
+        .references
+        .iter()
+        .filter(|(_, report)| {
+            report
+                .as_ref()
+                .is_ok_and(|report| report.definition.is_some())
+        })
+        .count();
+    writeln!(
+        out,
+        "Reference validation: {complete} complete / {} selected",
+        audit.references.len()
+    )?;
+    for (id, result) in &audit.references {
+        match result {
+            Ok(report) => {
+                let title = report
+                    .title
+                    .as_ref()
+                    .map_or("unresolved title", |title| &title.text);
+                let status = if report.definition.is_some() {
+                    "complete"
+                } else {
+                    "incomplete"
+                };
+                writeln!(out, "  {} {title}: {status}", id.0)?;
+                for warning in &report.diagnostics {
+                    writeln!(out, "    {}: {}", warning.field, warning.message)?;
+                }
+            }
+            Err(error) => writeln!(out, "  {}: {error}", id.0)?,
+        }
+    }
+    Ok(())
+}
+
 fn inspect_schematic(
     game: &Path,
     id: &OsStr,
     options: &[OsString],
     policy: Policy,
 ) -> Result<(), Box<dyn Error>> {
-    let id = id
-        .to_str()
-        .and_then(|id| id.parse().ok())
-        .map(schematics::LegacyRecipeId)
-        .ok_or_else(|| format!("invalid schematic ID {id:?}; expected a decimal integer"))?;
+    let id = recipe_id(id)?;
     let mut vfs = inspection_vfs(game, options, policy)?;
     let report = schematics::load_schematic(&mut vfs, id)?;
     let mut out = io::stdout().lock();
