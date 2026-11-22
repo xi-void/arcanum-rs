@@ -86,8 +86,9 @@ grants or applied count across aptitude changes so it can retire the
 previous contribution before any refresh.
 
 [The headless runtime](../src/runtime.rs) implements this contract for
-explicit equipment grants, additive AC and Fire resistance floors.
-`Runtime` owns actor base AC and underlying Fire resistance, item
+explicit equipment grants, additive AC, Fire resistance floors and
+Electrical resistance additions.
+`Runtime` owns actor base AC and underlying Fire and Electrical resistance, item
 associations and active records. Its typed actor, item instance
 and activation IDs are allocated deterministically and never reused
 within a runtime. Callers keep these handles with their issuing runtime.
@@ -105,17 +106,31 @@ operations and changes that would leave a total outside the signed
 32-bit range fail before state changes. This includes a removal if
 cancelling adjustments had kept the total in range.
 
-AC points are captured at activation. A Fire floor stores the minimum
-as an active constraint. Each read after effects takes the maximum of
-the actor's current underlying value and the retained floors for that
-actor. Removing a grant drops its bound, so changes to the underlying
-value take effect immediately without reapplying anything. The
-ordinary Fire query clamps this result to 0–95% as a separate step.
-This follows CE's ordinary resistance query and omits its monstrous
-NPC exception. The runtime evaluates no resistance additions or
-ceilings. A definition with any unsupported operation fails before an
-activation is created, including when earlier operations are supported.
+AC and Electrical points are captured at activation. A Fire floor
+stores the minimum as an active constraint. The Electrical intermediate
+value is the actor's current signed underlying value plus its active
+additions. The Fire intermediate value is the maximum of its current
+underlying value and its active floors. CE evaluates additions before
+bounds. This slice supports one of those stages per channel, with no
+channel combining both.
+
+The ordinary queries clamp the intermediate values to 0–95% without
+modifying the inputs or active grants. This follows CE's ordinary
+resistance query and omits its monstrous NPC exception. Electrical
+overflow checks cover new grants, changes to the underlying value and
+removals that could expose a previously cancelled overflow. The runtime
+checks AC and Electrical totals before revoking grants or changing
+equipment ownership. An unsupported operation rejects the entire
+activation.
+
+The demo's +8 Electrical adjustment is the verified operation stored
+in effect 54. The demo constructs a single-operation native effect under
+its own ID and equips synthetic items. Body of Fire remains unsupported
+as a complete definition because its Poison floor has no runtime
+implementation. Other resistance additions, floors, and ceilings
+remain outside this slice.
 [Resist Fire evidence](CONTENT_FORMATS.md#milestone-13-bounded-effect-definitions)
+· [Body of Fire evidence](CONTENT_FORMATS.md#milestone-14-composite-effect-definitions)
 
 The equipment demo supplies two item instances and counts of one and fifteen.
 Effect 128's +1 AC and these counts come from the Sword of Defense
