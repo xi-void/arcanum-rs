@@ -86,8 +86,9 @@ grants or applied count across aptitude changes so it can retire the
 previous contribution before any refresh.
 
 [The headless runtime](../src/runtime.rs) implements this contract for
-explicit equipment grants and additive AC. `Runtime` owns actor base AC,
-item associations and active records. Its typed actor, item instance
+explicit equipment grants, additive AC and Fire resistance floors.
+`Runtime` owns actor base AC and underlying Fire resistance, item
+associations and active records. Its typed actor, item instance
 and activation IDs are allocated deterministically and never reused
 within a runtime. Callers keep these handles with their issuing runtime.
 Definitions remain immutable references supplied by the caller, and
@@ -95,7 +96,7 @@ their namespaced IDs are independent of runtime handles.
 
 An item can have one wearer and grant effects only to that wearer.
 Equipping associates the item, and each explicit grant creates an
-activation with its source, target, definition and captured AC points.
+activation with its source, target, definition and granted adjustments.
 Removing an activation by ID leaves other activations intact. Unequipping
 removes all activations from that source in one transition. Repeated
 equip, unequip and removal return explicit errors. Effective AC is
@@ -104,7 +105,19 @@ operations and changes that would leave a total outside the signed
 32-bit range fail before state changes. This includes a removal if
 cancelling adjustments had kept the total in range.
 
-The demo supplies two item instances and counts of one and fifteen.
+AC points are captured at activation. A Fire floor stores the minimum
+as an active constraint. Each read after effects takes the maximum of
+the actor's current underlying value and the retained floors for that
+actor. Removing a grant drops its bound, so changes to the underlying
+value take effect immediately without reapplying anything. The
+ordinary Fire query clamps this result to 0–95% as a separate step.
+This follows CE's ordinary resistance query and omits its monstrous
+NPC exception. The runtime evaluates no resistance additions or
+ceilings. A definition with any unsupported operation fails before an
+activation is created, including when earlier operations are supported.
+[Resist Fire evidence](CONTENT_FORMATS.md#milestone-13-bounded-effect-definitions)
+
+The equipment demo supplies two item instances and counts of one and fifteen.
 Effect 128's +1 AC and these counts come from the Sword of Defense
 trace. The fixture items, base stat and simultaneous sources are
 demonstration choices. The runtime receives explicit grants and has no
