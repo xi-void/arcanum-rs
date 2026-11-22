@@ -232,3 +232,131 @@ path = "resources"
     );
     assert_eq!(weapon.ammunition.unwrap().kind, AmmoKind::Bullets);
 }
+
+#[test]
+fn armour_inspection_preserves_identity_fit_and_mod_provenance() {
+    use crate::content::items::{
+        ArmourCoverage, ArmourSize, ItemId, ResistanceAdjustment, ResistanceKind, inspect_prototype,
+    };
+    use crate::prototype::tests::armour_bytes;
+
+    let fixture = Fixture::new();
+    let path = "proto/008111 - armour.pro";
+    fixture.write(
+        &format!("base/{path}"),
+        &armour_bytes(8111, 400, 2, 0x6000_0080),
+    );
+    fixture.write("base/mes/description.mes", b"{400}{Original Armour}");
+    let mut vfs = Vfs::new(Policy::Ordered);
+    vfs.mount_directory(fixture.0.join("base")).unwrap();
+    let stock = inspect_prototype(&mut vfs, path).unwrap();
+    let stock = stock.resolve_armour(&mut vfs).unwrap().unwrap();
+    assert_eq!(stock.definition.sizes, [ArmourSize::Medium]);
+    assert_eq!(stock.definition.coverage, ArmourCoverage::Torso);
+    assert!(stock.name_source.mod_id.is_none());
+
+    fixture.write(
+        "mods/patch/arcanum-mod.toml",
+        br#"
+manifest_version = 1
+id = "patch"
+name = "Synthetic armour patch"
+version = "1.0.0"
+description = "Temporary test fixture."
+[[mounts]]
+kind = "directory"
+path = "resources"
+"#,
+    );
+    let mut replacement = armour_bytes(8111, 30025, 5, 0x6000_0080);
+    // Replace the sparse base array with all five ordered channels.
+    replacement.splice(
+        283..319,
+        [4i32, 5, 0, 16, 4, -20, 6, 0, 2, 0b11111, 0]
+            .into_iter()
+            .flat_map(i32::to_le_bytes),
+    );
+    fixture.write(&format!("mods/patch/resources/{path}"), &replacement);
+    fixture.write(
+        "mods/patch/resources/mes/gamedesc.mes",
+        b"{30025}{Modified Armour}",
+    );
+    let catalog = Catalog::discover(fixture.0.join("mods")).unwrap();
+    let mut vfs = catalog.load_order(&["patch"]).unwrap().apply(vfs).unwrap();
+    let inspection = inspect_prototype(&mut vfs, path).unwrap();
+    let resolved = inspection.resolve_armour(&mut vfs).unwrap().unwrap();
+    assert_eq!(
+        inspection.prototype.source.mod_id.unwrap().as_str(),
+        "patch"
+    );
+    assert_eq!(resolved.name_source.mod_id.unwrap().as_str(), "patch");
+    let armour = resolved.definition;
+    assert_eq!(armour.id, stock.definition.id);
+    assert_eq!(armour.id, ItemId("arcanum:item/prototype-8111".into()));
+    assert_eq!(armour.display_name, "Modified Armour");
+    assert_eq!(armour.sizes, [ArmourSize::Small, ArmourSize::Large]);
+    assert_eq!(armour.coverage, stock.definition.coverage);
+    assert_eq!(
+        armour.resistances,
+        [
+            ResistanceAdjustment {
+                kind: ResistanceKind::Physical,
+                percentage_points: 16
+            },
+            ResistanceAdjustment {
+                kind: ResistanceKind::Fire,
+                percentage_points: 4,
+            },
+            ResistanceAdjustment {
+                kind: ResistanceKind::Electrical,
+                percentage_points: -20
+            },
+            ResistanceAdjustment {
+                kind: ResistanceKind::Poison,
+                percentage_points: 6,
+            },
+            ResistanceAdjustment {
+                kind: ResistanceKind::Magic,
+                percentage_points: 0
+            },
+        ]
+    );
+}
+
+#[test]
+fn armour_coverage_comes_from_item_art_and_rejects_unknown_encodings() {
+    use crate::content::items::{ArmourCoverage, ItemDefinitionError, inspect_prototype};
+    use crate::prototype::tests::armour_bytes;
+
+    let fixture = Fixture::new();
+    fixture.write("mes/description.mes", b"{400}{Armour}");
+    for (path, art_id) in [
+        ("proto/helmet.pro", 0x6000_8000),
+        ("proto/non-item.pro", 0x5000_0000),
+        ("proto/reserved.pro", 0x6001_c000),
+    ] {
+        fixture.write(path, &armour_bytes(8111, 400, 2, art_id));
+    }
+    let mut vfs = Vfs::new(Policy::Ordered);
+    vfs.mount_directory(&fixture.0).unwrap();
+    let helmet = inspect_prototype(&mut vfs, "proto/helmet.pro").unwrap();
+    assert_eq!(
+        helmet
+            .resolve_armour(&mut vfs)
+            .unwrap()
+            .unwrap()
+            .definition
+            .coverage,
+        ArmourCoverage::Helmet
+    );
+
+    for (path, art_id) in [
+        ("proto/non-item.pro", 0x5000_0000),
+        ("proto/reserved.pro", 0x6001_c000),
+    ] {
+        let unknown = inspect_prototype(&mut vfs, path).unwrap();
+        assert!(
+            matches!(unknown.resolve_armour(&mut vfs), Err(ItemDefinitionError::UnsupportedArmourArt(id)) if id == art_id)
+        );
+    }
+}

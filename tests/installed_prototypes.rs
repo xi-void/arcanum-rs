@@ -423,3 +423,125 @@ fn installed_weapon_and_ammo_match_serialized_and_native_fields() {
     assert_eq!(raw.ammo_type, 1);
     assert_eq!(ammo.kind, AmmoKind::Bullets);
 }
+
+#[test]
+#[ignore = "requires the installed Arcanum data"]
+fn installed_armour_definitions_preserve_fit_and_signed_base_protection() {
+    use arcanum_rs::content::items::{
+        ArmourCoverage, ArmourSize, ResistanceAdjustment, ResistanceKind, inspect_prototype,
+    };
+
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    let loose = game.join("data").canonicalize().unwrap();
+    for (basic, serial, name, flags, size, ac, weight, worth, physical, fire, electrical) in [
+        (
+            8091,
+            8111,
+            "Leather Armour",
+            2,
+            ArmourSize::Medium,
+            9,
+            150,
+            470,
+            16,
+            5,
+            None,
+        ),
+        (
+            8099,
+            8119,
+            "Small Leather Armour",
+            1,
+            ArmourSize::Small,
+            9,
+            140,
+            470,
+            14,
+            5,
+            None,
+        ),
+        (
+            8107,
+            8127,
+            "Large Leather Armour",
+            4,
+            ArmourSize::Large,
+            9,
+            160,
+            470,
+            17,
+            5,
+            None,
+        ),
+        (
+            8075,
+            8095,
+            "Basic Platemail",
+            2,
+            ArmourSize::Medium,
+            15,
+            1000,
+            900,
+            36,
+            10,
+            Some(-20),
+        ),
+    ] {
+        let path = format!("proto/{serial:06} - armor.pro");
+        let item = inspect_prototype(&mut vfs, &path).unwrap();
+        assert_eq!(item.prototype.header.id, SerializedPrototypeId(serial));
+        assert_eq!(item.prototype.header.object_type, 7);
+        assert_eq!(
+            Some(item.prototype.header.id),
+            BasicPrototypeId(basic).serialized()
+        );
+        assert_eq!(
+            item.prototype.description,
+            Some(DescriptionId(basic as i32))
+        );
+        assert_eq!(item.prototype.source.virtual_path, path);
+        assert_eq!(item.prototype.source.storage, Storage::Loose);
+        assert_eq!(item.prototype.source.mount_path, loose);
+        let raw = item.armour.unwrap();
+        assert_eq!(raw.flags, flags);
+        assert_eq!(
+            raw.resistance_adjustments,
+            [Some(physical), Some(fire), electrical, None, None]
+        );
+
+        let resolved = item.resolve_armour(&mut vfs).unwrap().unwrap();
+        assert_eq!(
+            resolved.name_source.mount_path.file_name().unwrap(),
+            "Arcanum5.dat"
+        );
+        let armour = resolved.definition;
+        assert_eq!(armour.id.0, format!("arcanum:item/prototype-{serial}"));
+        assert_eq!(armour.display_name, name);
+        assert_eq!(armour.coverage, ArmourCoverage::Torso);
+        assert_eq!(armour.sizes, [size]);
+        assert_eq!(
+            (
+                armour.armour_class_adjustment,
+                armour.base_weight,
+                armour.base_worth
+            ),
+            (ac, weight, worth)
+        );
+        let resistances: Vec<_> = [
+            ResistanceKind::Physical,
+            ResistanceKind::Fire,
+            ResistanceKind::Electrical,
+        ]
+        .into_iter()
+        .zip([Some(physical), Some(fire), electrical])
+        .filter_map(|(kind, value)| {
+            value.map(|percentage_points| ResistanceAdjustment {
+                kind,
+                percentage_points,
+            })
+        })
+        .collect();
+        assert_eq!(armour.resistances, resistances);
+    }
+}

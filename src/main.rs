@@ -316,6 +316,12 @@ fn inspect_prototype(
             }
         }
     }
+    if let Some(fields) = &inspection.armour {
+        write_armour_fields(&mut out, fields)?;
+        if let Some(armour) = inspection.resolve_armour(&mut vfs)? {
+            write_armour(&mut out, armour)?;
+        }
+    }
     Ok(())
 }
 
@@ -645,12 +651,7 @@ fn write_weapon_ammo(
     fields: &WeaponAmmoFields,
     resolved: Option<items::ResolvedWeaponAmmo>,
 ) -> io::Result<()> {
-    let common = fields.item();
-    writeln!(
-        out,
-        "Base weight: {} stone | base worth: {} | legacy discipline: {} | signed complexity: {}",
-        common.weight, common.worth, common.discipline, common.magic_tech_complexity
-    )?;
+    write_common_item_fields(out, fields.item())?;
     match fields {
         WeaponAmmoFields::Weapon(weapon) => {
             writeln!(
@@ -706,6 +707,59 @@ fn write_weapon_ammo(
         write_source(out, &resolved.name_source)?;
     }
     Ok(())
+}
+
+fn write_common_item_fields(
+    out: &mut impl Write,
+    common: &arcanum_rs::prototype::CommonItemFields,
+) -> io::Result<()> {
+    writeln!(
+        out,
+        "Base weight: {} stone | base worth: {} | legacy discipline: {} | signed complexity: {}",
+        common.weight, common.worth, common.discipline, common.magic_tech_complexity
+    )
+}
+
+fn write_armour_fields(
+    out: &mut impl Write,
+    fields: &arcanum_rs::prototype::ArmourFields,
+) -> io::Result<()> {
+    write_common_item_fields(out, &fields.item)?;
+    writeln!(
+        out,
+        "Base armour class adjustment (points): {:+}",
+        fields.armour_class_adjustment
+    )?;
+    writeln!(
+        out,
+        "Legacy armour flags: 0x{:08x} | inventory art ID: 0x{:08x}",
+        fields.flags, fields.inventory_art_id
+    )
+}
+
+fn write_armour(out: &mut impl Write, resolved: items::ResolvedArmour) -> io::Result<()> {
+    let armour = resolved.definition;
+    writeln!(out, "Armour: {} ({})", armour.display_name, armour.id.0)?;
+    writeln!(out, "Coverage: {:?}", armour.coverage)?;
+    if armour.sizes.is_empty() {
+        writeln!(out, "Stored fit sizes: none recorded")?;
+    } else {
+        let sizes: Vec<_> = armour
+            .sizes
+            .iter()
+            .map(|size| format!("{size:?}"))
+            .collect();
+        writeln!(out, "Stored fit sizes: {}", sizes.join(", "))?;
+    }
+    for resistance in armour.resistances {
+        writeln!(
+            out,
+            "  {:?} resistance: {:+} percentage points",
+            resistance.kind, resistance.percentage_points
+        )?;
+    }
+    write!(out, "Name: ")?;
+    write_source(out, &resolved.name_source)
 }
 
 fn write_source(out: &mut impl Write, source: &content::Source) -> io::Result<()> {

@@ -254,3 +254,101 @@ fn validates_weapon_masks_and_weapon_ammo_record_boundaries() {
         );
     }
 }
+
+pub(crate) fn armour_bytes(id: u32, description: i32, flags: u32, art_id: u32) -> Vec<u8> {
+    let mut bytes = food_bytes(id, description, 30);
+    bytes.truncate(266);
+    bytes[52..56].copy_from_slice(&ARMOR_TYPE.to_le_bytes());
+    bytes[204..208].copy_from_slice(&art_id.to_le_bytes());
+    bytes.extend(flags.to_le_bytes());
+    for value in [0i32, 9, 20] {
+        bytes.extend(value.to_le_bytes());
+    }
+    bytes.push(1);
+    for value in [4i32, 3, 0, 16, -20, 0, 2, 0b10101, 0] {
+        bytes.extend(value.to_le_bytes());
+    }
+    bytes.extend([0; 19]); // Absent magic array, four scalars and two absent tail arrays.
+    bytes
+}
+
+#[test]
+fn decodes_armour_sparse_resistance_and_skips_optional_fields() {
+    let mut bytes = armour_bytes(8111, 99, 2, 0x6000_0000);
+    bytes[319] = 1;
+    bytes.splice(
+        320..320,
+        [4u32, 1, 5, 999, 1, 2]
+            .into_iter()
+            .flat_map(u32::to_le_bytes),
+    );
+    bytes[76] = 1;
+    bytes.splice(77..77, [0; 8]);
+    let (header, fields) = decode_armour(&bytes).unwrap();
+    assert_eq!(header.object_type, ARMOR_TYPE);
+    assert_eq!(header.id, SerializedPrototypeId(8111));
+    assert_eq!(fields.item.description, DescriptionId(99));
+    assert_eq!(fields.inventory_art_id, 0x6000_0000);
+    assert_eq!(fields.flags, 2);
+    assert_eq!(fields.armour_class_adjustment, 9);
+    assert_eq!(
+        fields.resistance_adjustments,
+        [Some(16), None, Some(-20), None, Some(0)]
+    );
+
+    let mut bytes = armour_bytes(8111, 99, 2, 0x6000_0000);
+    bytes.splice(282..319, [0]);
+    assert_eq!(
+        decode_armour(&bytes).unwrap().1.resistance_adjustments,
+        [None; 5]
+    );
+}
+
+#[test]
+fn rejects_malformed_armour_arrays_and_record_boundaries() {
+    let original = armour_bytes(8111, 99, 2, 0x6000_0000);
+    for (offset, value, expected) in [
+        (
+            283,
+            8u32,
+            at(
+                283,
+                ErrorKind::InvalidArrayWidth {
+                    expected: 4,
+                    actual: 8,
+                },
+            ),
+        ),
+        (287, u32::MAX, at(295, ErrorKind::ArrayTooLarge)),
+        (307, u32::MAX, at(311, ErrorKind::ArrayTooLarge)),
+        (311, 1, at(311, ErrorKind::ResistanceMaskCountMismatch)),
+        (
+            311,
+            0b11111,
+            at(311, ErrorKind::ResistanceMaskCountMismatch),
+        ),
+        (311, 0b100001, at(311, ErrorKind::ResistanceIndexOutOfRange)),
+        (315, 1, at(315, ErrorKind::ResistanceIndexOutOfRange)),
+    ] {
+        let mut bytes = original.clone();
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        assert_eq!(decode_armour(&bytes), Err(expected));
+    }
+    for len in 0..original.len() {
+        assert_eq!(
+            decode_armour(&original[..len]).unwrap_err().kind,
+            ErrorKind::Truncated,
+            "length {len}"
+        );
+    }
+    let mut bytes = original;
+    bytes.push(0);
+    assert_eq!(
+        decode_armour(&bytes),
+        Err(at(bytes.len() - 1, ErrorKind::TrailingData))
+    );
+    assert_eq!(
+        decode_armour(&food_bytes(8111, 99, 12)),
+        Err(at(52, ErrorKind::UnsupportedArmourType(9)))
+    );
+}
