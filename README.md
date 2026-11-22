@@ -159,6 +159,21 @@ target/debug/arcanum-rs mes get "$game" 'MES\GAMEDESC.MES' 40000 --mods "$mods" 
 - Within one table, the last occurrence of an ID wins and each replacement is reported. Invalid IDs, unmatched or nested delimiters, empty tables, and truncated records produce errors with one-based lines and zero-based byte offsets into the original input. Literal braces and block-comment syntax are unsupported.
 - CE revision `fb721982` in `src/game/mes.c` searches for braces in the raw text, including in comments. It uses `atoi` for IDs, retains duplicate records after sorting, and logs several malformed cases while continuing or returning the parsed prefix. CE leaves character encoding to callers and applies platform- or source-dependent text-mode newline handling. The Rust parser uses strict validation, deterministic duplicate handling, and explicit decoding and newline rules.
 
+## Prototype and schematic inspection
+
+```sh
+game="$HOME/Work/arcanum-ce-test"
+target/debug/arcanum-rs prototype inspect "$game" 'proto/010087 - Food.pro'
+target/debug/arcanum-rs schematic inspect "$game" 4220
+```
+
+Both commands accept the MES command's `--mods <mods-directory> <mod-id> ...` argument. The prototype reader covers the version 119 fixed header and selected Food fields. Schematic inspection resolves one two-input, single-output group and reports its source and unresolved references. See [Content formats](docs/CONTENT_FORMATS.md#milestone-5-reader-boundary) for the supported fields, boundaries and evidence.
+
+```sh
+ARCANUM_GAME_DIR="$HOME/Work/arcanum-ce-test" \
+  cargo test --test installed_prototypes -- --ignored
+```
+
 ## Implementation and verification
 
 `dat` owns the index and keeps a seekable input for bounded payload reads. `resource_path` handles virtual path normalization independently of host paths. `vfs` owns mount ordering, discovery, and provenance. `mods` discovers packages, validates manifests, and plans the order before mounting resources. The CLI uses these library modules and owns output-file handling. `flate2` provides the Rust zlib backend. `cap-std` and `cap-fs-ext` confine filesystem access to mount roots and open manifest paths without following symlinks.

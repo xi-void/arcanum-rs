@@ -1,5 +1,8 @@
 //! Bounded loading of resolved content from a caller-owned virtual filesystem.
 
+pub mod items;
+pub mod schematics;
+
 use crate::mes::{self, Encoding, Mes};
 use crate::mod_id::ModId;
 use crate::vfs::{self, MountId, Storage, Vfs};
@@ -29,6 +32,34 @@ impl fmt::Display for Source {
     }
 }
 
+impl Source {
+    fn resolve(vfs: &Vfs, path: &str) -> Result<(Self, u64), Error> {
+        let resolution = vfs.resolve(path).map_err(|error| Error::Resource {
+            path: path.into(),
+            error,
+        })?;
+        let winner = resolution.winner().ok_or_else(|| Error::Resource {
+            path: resolution.path.clone(),
+            error: vfs::Error::NotFound(resolution.path.clone()),
+        })?;
+        if winner.storage == Storage::Archive(crate::dat::EntryKind::Directory) {
+            return Err(Error::Resource {
+                path: resolution.path.clone(),
+                error: vfs::Error::NotAFile(resolution.path),
+            });
+        }
+        let source = Self {
+            virtual_path: resolution.path,
+            mount_id: winner.mount.id,
+            mount_path: winner.mount.path.clone(),
+            loose_path: winner.loose_path.map(PathBuf::from),
+            storage: winner.storage,
+            mod_id: winner.mount.mod_id.clone(),
+        };
+        Ok((source, winner.size))
+    }
+}
+
 #[derive(Debug)]
 pub struct LoadedMes {
     pub source: Source,
@@ -51,6 +82,10 @@ pub enum Error {
         provenance: Box<Source>,
         error: mes::Error,
     },
+    Prototype {
+        provenance: Box<Source>,
+        error: crate::prototype::Error,
+    },
 }
 
 impl fmt::Display for Error {
@@ -59,7 +94,7 @@ impl fmt::Display for Error {
             Self::Resource { path, error } => write!(f, "loading {path:?}: {error}"),
             Self::TooLarge { provenance, limit } => write!(
                 f,
-                "{} from {provenance} exceeds the {limit}-byte MES limit",
+                "{} from {provenance} exceeds the {limit}-byte input limit",
                 provenance.virtual_path
             ),
             Self::Mes { provenance, error } => {
@@ -68,6 +103,9 @@ impl fmt::Display for Error {
                     write!(f, " [mod {id}]")?;
                 }
                 write!(f, ": {error}")
+            }
+            Self::Prototype { provenance, error } => {
+                write!(f, "{} from {provenance}: {error}", provenance.virtual_path)
             }
         }
     }
@@ -78,6 +116,7 @@ impl std::error::Error for Error {
         match self {
             Self::Resource { error, .. } => Some(error),
             Self::Mes { error, .. } => Some(error),
+            Self::Prototype { error, .. } => Some(error),
             Self::TooLarge { .. } => None,
         }
     }
@@ -98,43 +137,8 @@ pub fn load_mes_with_encoding(
 }
 
 fn load(vfs: &mut Vfs, path: &str, encoding: Option<Encoding>) -> Result<LoadedMes, Error> {
-    let resolution = vfs.resolve(path).map_err(|error| Error::Resource {
-        path: path.into(),
-        error,
-    })?;
-    let winner = resolution.winner().ok_or_else(|| Error::Resource {
-        path: resolution.path.clone(),
-        error: vfs::Error::NotFound(resolution.path.clone()),
-    })?;
-    let source = Source {
-        virtual_path: resolution.path,
-        mount_id: winner.mount.id,
-        mount_path: winner.mount.path.clone(),
-        loose_path: winner.loose_path.map(PathBuf::from),
-        storage: winner.storage,
-        mod_id: winner.mount.mod_id.clone(),
-    };
-    let too_large = |source| Error::TooLarge {
-        provenance: Box::new(source),
-        limit: mes::MAX_INPUT_BYTES,
-    };
-    if winner.size > mes::MAX_INPUT_BYTES as u64 {
-        return Err(too_large(source));
-    }
-
-    let mut input = BoundedBytes::default();
-    // The mounted indexes remain fixed while copying. VFS performs the same
-    // lookup and opens only the selected resource, including across mod mounts.
-    if let Err(error) = vfs.copy(&source.virtual_path, &mut input) {
-        if input.exceeded {
-            return Err(too_large(source));
-        }
-        return Err(Error::Resource {
-            path: source.virtual_path,
-            error,
-        });
-    }
-    match mes::parse_source_with_encoding(&input.bytes, encoding) {
+    let (source, bytes) = read_bounded(vfs, path, mes::MAX_INPUT_BYTES)?;
+    match mes::parse_source_with_encoding(&bytes, encoding) {
         Ok(parsed) => Ok(LoadedMes {
             source,
             mes: parsed.mes,
@@ -148,19 +152,48 @@ fn load(vfs: &mut Vfs, path: &str, encoding: Option<Encoding>) -> Result<LoadedM
     }
 }
 
-#[derive(Default)]
+fn read_bounded(vfs: &mut Vfs, path: &str, limit: usize) -> Result<(Source, Vec<u8>), Error> {
+    let (source, size) = Source::resolve(vfs, path)?;
+    let too_large = |source| Error::TooLarge {
+        provenance: Box::new(source),
+        limit,
+    };
+    if size > limit as u64 {
+        return Err(too_large(source));
+    }
+
+    let mut input = BoundedBytes {
+        bytes: Vec::new(),
+        limit,
+        exceeded: false,
+    };
+    // The mounted indexes remain fixed while copying. VFS performs the same
+    // lookup and opens only the selected resource, including across mod mounts.
+    if let Err(error) = vfs.copy(&source.virtual_path, &mut input) {
+        if input.exceeded {
+            return Err(too_large(source));
+        }
+        return Err(Error::Resource {
+            path: source.virtual_path,
+            error,
+        });
+    }
+    Ok((source, input.bytes))
+}
+
 struct BoundedBytes {
     bytes: Vec<u8>,
+    limit: usize,
     exceeded: bool,
 }
 
 impl Write for BoundedBytes {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() > mes::MAX_INPUT_BYTES - self.bytes.len() {
+        if bytes.len() > self.limit - self.bytes.len() {
             self.exceeded = true;
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "MES input limit exceeded",
+                "resource input limit exceeded",
             ));
         }
         self.bytes.extend_from_slice(bytes);

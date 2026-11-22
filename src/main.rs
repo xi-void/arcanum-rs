@@ -1,4 +1,5 @@
 use arcanum_rs::content;
+use arcanum_rs::content::{items, schematics};
 use arcanum_rs::dat::{Archive, Format};
 use arcanum_rs::mes::EntryId;
 use arcanum_rs::mods::{Catalog, Package};
@@ -23,7 +24,9 @@ const USAGE: &str = "Usage:
   arcanum-rs mods order <mods-directory> [<mod-id> ...]
   arcanum-rs mods resolve <game-directory> <mods-directory> <resource-path> <mod-id> ...
   arcanum-rs [--ordered] mes inspect <game-directory> <resource-path> [--mods <mods-directory> <mod-id> ...]
-  arcanum-rs [--ordered] mes get <game-directory> <resource-path> <entry-id> [--mods <mods-directory> <mod-id> ...]";
+  arcanum-rs [--ordered] mes get <game-directory> <resource-path> <entry-id> [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs [--ordered] prototype inspect <game-directory> <resource-path> [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs [--ordered] schematic inspect <game-directory> <recipe-id> [--mods <mods-directory> <mod-id> ...]";
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -49,6 +52,12 @@ fn main() -> ExitCode {
         }
         (Some("mes"), [_, action, game, resource, entry, options @ ..]) if action == "get" => {
             inspect_mes(Path::new(game), resource, Some(entry), options, policy)
+        }
+        (Some("prototype"), [_, action, game, resource, options @ ..]) if action == "inspect" => {
+            inspect_prototype(Path::new(game), resource, options, policy)
+        }
+        (Some("schematic"), [_, action, game, id, options @ ..]) if action == "inspect" => {
+            inspect_schematic(Path::new(game), id, options, policy)
         }
         (Some("mods"), [_, subcommand, directory])
             if policy == Policy::Ce && subcommand == "list" =>
@@ -212,6 +221,20 @@ fn modded_vfs(game: &Path, directory: &Path, selected: &[OsString]) -> Result<Vf
     Ok(plan.apply(base)?)
 }
 
+fn inspection_vfs(
+    game: &Path,
+    options: &[OsString],
+    policy: Policy,
+) -> Result<Vfs, Box<dyn Error>> {
+    match options {
+        [] => Ok(Vfs::from_game(game, policy)?),
+        [flag, directory, selected @ ..] if flag == "--mods" && !selected.is_empty() => {
+            modded_vfs(game, Path::new(directory), selected)
+        }
+        _ => Err("expected --mods <mods-directory> <mod-id> ...".into()),
+    }
+}
+
 fn inspect_mes(
     game: &Path,
     resource: &OsStr,
@@ -232,13 +255,7 @@ fn inspect_mes(
                 })
         })
         .transpose()?;
-    let mut vfs = match options {
-        [] => Vfs::from_game(game, policy)?,
-        [flag, directory, selected @ ..] if flag == "--mods" && !selected.is_empty() => {
-            modded_vfs(game, Path::new(directory), selected)?
-        }
-        _ => return Err("expected --mods <mods-directory> <mod-id> ...".into()),
-    };
+    let mut vfs = inspection_vfs(game, options, policy)?;
     let loaded = content::load_mes(&mut vfs, resource)?;
     let mut out = io::stdout().lock();
     writeln!(out, "Path: {}", loaded.source.virtual_path)?;
@@ -266,6 +283,136 @@ fn inspect_mes(
         writeln!(out, "Value: {value}")?;
     }
     Ok(())
+}
+
+fn inspect_prototype(
+    game: &Path,
+    resource: &OsStr,
+    options: &[OsString],
+    policy: Policy,
+) -> Result<(), Box<dyn Error>> {
+    let resource = resource_name(resource)?;
+    let mut vfs = inspection_vfs(game, options, policy)?;
+    let prototype = items::load_prototype(&mut vfs, resource)?;
+    write_prototype(&mut io::stdout().lock(), &prototype)?;
+    Ok(())
+}
+
+fn inspect_schematic(
+    game: &Path,
+    id: &OsStr,
+    options: &[OsString],
+    policy: Policy,
+) -> Result<(), Box<dyn Error>> {
+    let id = id
+        .to_str()
+        .and_then(|id| id.parse().ok())
+        .map(schematics::LegacyRecipeId)
+        .ok_or_else(|| format!("invalid schematic ID {id:?}; expected a decimal integer"))?;
+    let mut vfs = inspection_vfs(game, options, policy)?;
+    let report = schematics::load_schematic(&mut vfs, id)?;
+    let mut out = io::stdout().lock();
+    writeln!(out, "Recipe ID: {}", id.0)?;
+    write!(out, "Rules: ")?;
+    write_source(&mut out, &report.rules_source)?;
+    for (label, key, entry) in [
+        ("Title", report.legacy.title.0, &report.title),
+        (
+            "Description",
+            report.legacy.description.0,
+            &report.description,
+        ),
+    ] {
+        write!(out, "{label} (MES key {key}): ")?;
+        if let Some(entry) = entry {
+            writeln!(out, "{}", entry.text)?;
+            write_source(&mut out, &entry.source)?;
+        } else {
+            writeln!(out, "unresolved")?;
+        }
+    }
+    write!(
+        out,
+        "Illustration (interface ID {}): ",
+        report.legacy.illustration.0
+    )?;
+    if let Some(art) = &report.illustration {
+        write_source(&mut out, &art.asset_source)?;
+        write!(out, "Illustration table: ")?;
+        write_source(&mut out, &art.table_source)?;
+    } else {
+        writeln!(out, "unresolved")?;
+    }
+    for (label, id, item) in [
+        (
+            "Ingredient 1",
+            report.legacy.ingredients[0],
+            &report.ingredients[0],
+        ),
+        (
+            "Ingredient 2",
+            report.legacy.ingredients[1],
+            &report.ingredients[1],
+        ),
+        ("Product", report.legacy.product, &report.product),
+    ] {
+        write!(out, "{label} (basic ID {}): ", id.0)?;
+        if let Some(name) = &item.name {
+            writeln!(out, "{}", name.text)?;
+            write_source(&mut out, &name.source)?;
+        } else {
+            writeln!(out, "unresolved")?;
+        }
+        if let Some(prototype) = &item.prototype {
+            write_prototype(&mut out, prototype)?;
+        }
+    }
+    writeln!(out, "Quantity: {}", report.legacy.quantity)?;
+    if let Some(definition) = &report.definition {
+        writeln!(out, "Native recipe: {}", definition.id.0)?;
+    } else {
+        writeln!(out, "Native recipe: unresolved")?;
+    }
+    for diagnostic in &report.diagnostics {
+        writeln!(
+            out,
+            "Warning ({}): {}",
+            diagnostic.field, diagnostic.message
+        )?;
+    }
+    Ok(())
+}
+
+fn write_prototype(out: &mut impl Write, prototype: &items::LoadedPrototype) -> io::Result<()> {
+    write!(out, "Prototype: ")?;
+    write_source(out, &prototype.source)?;
+    let header = prototype.header;
+    writeln!(
+        out,
+        "Version: {} | serialized ID: {} | object type: {}",
+        header.version, header.id.0, header.object_type
+    )?;
+    if let Some(food) = prototype.food {
+        writeln!(
+            out,
+            "Food fields: description ID {}, weight {}, worth {}, discipline {}, signed complexity {}",
+            food.description.0,
+            food.weight,
+            food.worth,
+            food.discipline,
+            food.magic_tech_complexity
+        )
+    } else {
+        writeln!(out, "Supported fields: header only")
+    }
+}
+
+fn write_source(out: &mut impl Write, source: &content::Source) -> io::Result<()> {
+    write!(out, "{} from {source}", source.virtual_path)?;
+    if let Some(id) = &source.mod_id {
+        write!(out, " [mod {id}]")?;
+    }
+    writeln!(out)
 }
 
 fn write_package(mut out: impl Write, package: &Package) -> io::Result<()> {
