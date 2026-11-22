@@ -213,6 +213,26 @@ Of these groups, 89 specify Rag (15208) plus Bread (10057) for Star Sapphire (15
 
 None of the Factory inputs matches an output in either sampled section. Crafted components are verified in the learned and found rows. For example, the three outputs of Feather-Weight Chainmail (3250) are inputs to Elite Platemail (3260), whose three outputs are inputs to Machined Platemail (5090). These are ordinary item references. Factory runtime registration was unverified and the 7000 range remains outside the importer. Fortifier's reported CE inventory issue also remains unresolved.
 
+## Milestone 9 Factory schematic runtime trace
+
+The CE-policy VFS selects loose `data/rules/schematic.mes` and `data/mes/schematic_text.mes`. Both are byte-for-byte matches for their `Factory/Conf/` counterparts. The shadowed rules in `Arcanum3.dat`, `Arcanum4.dat`, and `Arcanum5.dat` lack these groups. The shadowed text tables in `Arcanum3.dat` and `Arcanum5.dat` lack the sampled text keys. The installation's Arcanum Factory 1.4.1 `ReadMe.txt` identifies the package as a modding tool that creates schematics and overrides these loose directories.
+
+| Sample ID | Title and description keys | Drawing | Two basic input IDs | Basic output ID and count |
+| --- | --- | --- | --- | --- |
+| 7000 | 1204, 1205 | 562 | 15208, 15208 | 15205 × 1 |
+| 7450 | 1294, 1295 | 562 | 15208, 10057 | 15205 × 1 |
+| 7900 | 1384, 1385 | 562 | 8126, 8126 | 15205 × 1 |
+
+The six text keys resolve to the placeholders “Title” and “Description.” Drawing 562 names `Blank_scheme.ART` in the winning loose interface table. The tool-side `Factory/Template/Generic Schematic.pro` is a concrete authoring reference to 7000. Its version 119 record has serialized ID 14150, Written subtype 5 (schematic), and text-start 7000. The VFS-selected `proto/014150 - written.pro` comes from `data` and has subtype 0 (book) and text-start 0.
+
+**CE runtime path.** Using a Written schematic routes through `written_ui_start_obj` to `tech_learn_schematic`. Learning deduplicates the item's text-start ID in the player's found list without a range or recipe-table check. `schematic_ui_init` enumerates only 2000–3999 as learned recipes. The Found view reads the player's stored IDs, and `tech_from_schematic` classifies any ID at or above 4000 by the first product's discipline. A supplied 7000-range ID could therefore use the ordinary display and combine paths, subject to their usual lookups and readiness checks. The script action that opens the schematic UI takes an actor and grants no recipe.
+
+**Acquisition evidence.** A read-only probe checked 869 VFS-selected Written prototypes. Of the 58 schematic-subtype records, zero reference the 7000 range. Fortifier's Written prototype points to 4220 as a control. CE's built-in Written defaults also contain zero 7000-range text-start assignments. The probe found three written-start setter actions across 2,426 VFS-selected scripts. Two set 1120 or 1130, and the Panarii pamphlet script computes a value from 1090 through 1130. The investigation established a toolkit template and a potential CE code path. Normal gameplay acquisition remains unverified. The scope was the stock campaign VFS and CE source, with map-instance overrides and executable behavior outside that scope.
+
+**Native model.** The sample fits `RecipeVariant` directly, including identical item IDs in both slots. Multi-stage crafting uses the same item ID as one recipe's output and another's input, as in the 3250 → 3260 → 5090 chain. Keep the 7000 range outside the importer and reopen the investigation if a gameplay acquisition source is identified.
+
+**Next item-definition slice.** Validate a small Weapon and Ammo sample for base damage by type, range, speed, ammunition kind, and units consumed per attack. Keep current stack quantity in the item instance. Follow with Armour's equipment coverage, base armour class and resistances, and common values for technological components such as base weight and worth plus discipline and complexity where verified.
+
 ### Primary reference locations
 
 - CE `src/game/proto.c` (`proto_init`, `sub_468660`, `sub_468860`, and the four `BP_*` initializers), `descriptions.h`, `obj_id.h`, `obj_id.c`.
