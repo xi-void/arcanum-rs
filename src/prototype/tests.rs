@@ -122,3 +122,22 @@ fn food_follows_variable_field_framing() {
         ErrorKind::TooLarge
     );
 }
+
+#[test]
+fn armor_and_generic_decode_only_the_verified_description_prefix() {
+    for object_type in [ARMOR_TYPE, GENERIC_TYPE] {
+        let mut bytes = food_bytes(9019, 42, 8);
+        bytes[52..56].copy_from_slice(&object_type.to_le_bytes());
+        bytes.truncate(143);
+        let header = decode_header(&bytes).unwrap();
+        assert_eq!(
+            decode_item_description(&bytes, header),
+            Ok(Some(DescriptionId(42)))
+        );
+        bytes.pop();
+        assert_eq!(
+            decode_item_description(&bytes, header),
+            Err(at(139, ErrorKind::Truncated))
+        );
+    }
+}

@@ -343,28 +343,34 @@ fn inspect_schematic(
     } else {
         writeln!(out, "unresolved")?;
     }
-    for (label, id, item) in [
-        (
-            "Ingredient 1",
-            report.legacy.ingredients[0],
-            &report.ingredients[0],
-        ),
-        (
-            "Ingredient 2",
-            report.legacy.ingredients[1],
-            &report.ingredients[1],
-        ),
-        ("Product", report.legacy.product, &report.product),
-    ] {
-        write!(out, "{label} (basic ID {}): ", id.0)?;
-        if let Some(name) = &item.name {
-            writeln!(out, "{}", name.text)?;
-            write_source(&mut out, &name.source)?;
-        } else {
-            writeln!(out, "unresolved")?;
+    if let [variant] = report.legacy.variants.as_slice() {
+        for (label, id) in [
+            ("Ingredient 1", variant.ingredients[0]),
+            ("Ingredient 2", variant.ingredients[1]),
+            ("Product", variant.product),
+        ] {
+            write_recipe_item(&mut out, label, id, &report.items[&id])?;
         }
-        if let Some(prototype) = &item.prototype {
-            write_prototype(&mut out, prototype)?;
+    } else {
+        writeln!(out, "Variants in source preference order:")?;
+        let name = |id| recipe_item_name(&report.items[&id]);
+        for (index, variant) in report.legacy.variants.iter().enumerate() {
+            let [first, second] = variant.ingredients;
+            let product = variant.product;
+            writeln!(
+                out,
+                "  {}. {} ({}) + {} ({}) -> {} ({})",
+                index + 1,
+                name(first),
+                first.0,
+                name(second),
+                second.0,
+                name(product),
+                product.0
+            )?;
+        }
+        for (&id, item) in &report.items {
+            write_recipe_item(&mut out, "Item", id, item)?;
         }
     }
     writeln!(out, "Quantity: {}", report.legacy.quantity)?;
@@ -379,6 +385,31 @@ fn inspect_schematic(
             "Warning ({}): {}",
             diagnostic.field, diagnostic.message
         )?;
+    }
+    Ok(())
+}
+
+fn recipe_item_name(item: &schematics::ItemResolution) -> &str {
+    item.name.as_ref().map_or("unresolved", |name| &name.text)
+}
+
+fn write_recipe_item(
+    out: &mut impl Write,
+    label: &str,
+    id: schematics::BasicPrototypeId,
+    item: &schematics::ItemResolution,
+) -> io::Result<()> {
+    writeln!(
+        out,
+        "{label} (basic ID {}): {}",
+        id.0,
+        recipe_item_name(item)
+    )?;
+    if let Some(name) = &item.name {
+        write_source(out, &name.source)?;
+    }
+    if let Some(prototype) = &item.prototype {
+        write_prototype(out, prototype)?;
     }
     Ok(())
 }
@@ -401,6 +432,12 @@ fn write_prototype(out: &mut impl Write, prototype: &items::LoadedPrototype) -> 
             food.worth,
             food.discipline,
             food.magic_tech_complexity
+        )
+    } else if let Some(description) = prototype.description {
+        writeln!(
+            out,
+            "Supported body field: description ID {}",
+            description.0
         )
     } else {
         writeln!(out, "Supported fields: header only")

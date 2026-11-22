@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const GROUP: LegacyRecipeId = LegacyRecipeId(4200);
+const VARIANT_DATA: &str = "{4200}{31}{4201}{32}{4202}{33}{4203}{10100 10100 10100}{4204}{10101 10103 10105}{4205}{10102 10104 10106}{4206}{2}";
 const RULE_DATA: &str =
     "{4200}{31}\n{4201}{32}\n{4202}{33}\n{4203}{10100}\n{4204}{10101}\n{4205}{10102}\n{4206}{2}\n";
 
@@ -17,18 +18,75 @@ fn decodes_one_group_and_maps_each_id_domain_explicitly() {
     assert_eq!(group.title, SchematicTextId(31));
     assert_eq!(group.description, SchematicTextId(32));
     assert_eq!(group.illustration, InterfaceArtId(33));
+    let [variant] = group.variants.as_slice() else {
+        panic!("expected one variant")
+    };
     assert_eq!(
-        group.ingredients,
+        variant.ingredients,
         [BasicPrototypeId(10100), BasicPrototypeId(10101)]
     );
     assert_eq!(
-        group.ingredients[0].serialized(),
+        variant.ingredients[0].serialized(),
         Some(SerializedPrototypeId(10120))
     );
-    assert_eq!(group.product, BasicPrototypeId(10102));
+    assert_eq!(variant.product, BasicPrototypeId(10102));
     assert_eq!(group.quantity.get(), 2);
     assert!(BasicPrototypeId(i32::MAX as u32).serialized().is_none());
     assert!(BasicPrototypeId(0).serialized().is_none());
+}
+
+#[test]
+fn decodes_ordered_variants_for_one_fixed_ingredient() {
+    let expected = [(10101, 10102), (10103, 10104), (10105, 10106)].map(|(ingredient, product)| {
+        RecipeVariant {
+            ingredients: [BasicPrototypeId(10100), BasicPrototypeId(ingredient)],
+            product: BasicPrototypeId(product),
+        }
+    });
+    for data in [
+        VARIANT_DATA.to_owned(),
+        VARIANT_DATA.replace("10100 10100 10100", "10100"),
+    ] {
+        let group = LegacyGroup::decode(GROUP, &Mes::parse_text(&data).unwrap()).unwrap();
+        assert_eq!(group.variants, expected);
+        assert_eq!(group.quantity.get(), 2);
+    }
+}
+
+#[test]
+fn rejects_unverified_or_ambiguous_variant_mappings() {
+    for (old, new, key, reason) in [
+        (
+            "10100 10100 10100",
+            "10100 10100 10107",
+            4203,
+            "first ingredient must be fixed",
+        ),
+        (
+            "10100 10100 10100",
+            "10100 10100",
+            4203,
+            "fixed ingredient repetitions must align with variants",
+        ),
+        (
+            "10101 10103 10105",
+            "10101 10101 10105",
+            4204,
+            "duplicate second-ingredient alternative",
+        ),
+        (
+            "10102 10104 10106",
+            "10102 10104 10106 10108",
+            4205,
+            "more than three items",
+        ),
+    ] {
+        let data = VARIANT_DATA.replace(old, new);
+        assert_eq!(
+            LegacyGroup::decode(GROUP, &Mes::parse_text(&data).unwrap()),
+            Err(GroupError::UnsupportedMapping { key, reason }),
+        );
+    }
 }
 
 #[test]
@@ -44,7 +102,10 @@ fn rejects_incomplete_malformed_and_unsupported_groups() {
         ),
         (
             RULE_DATA.replace("{4204}{10101}", "{4204}{10101 10103}"),
-            GroupError::Alternatives(4204),
+            GroupError::UnsupportedMapping {
+                key: 4205,
+                reason: "each second-ingredient alternative needs one output",
+            },
         ),
         (
             RULE_DATA.replace("{4204}{10101}", "{4204}{10101 invalid}"),
@@ -122,16 +183,27 @@ impl Drop for Fixture {
 fn resolves_descriptions_by_field_and_tracks_mod_overrides() {
     let fixture = Fixture::new();
     fixture.populate();
-    let mut vfs = fixture.vfs();
-    let original = load_schematic(&mut vfs, GROUP).unwrap();
+    let original = load_schematic(&mut fixture.vfs(), GROUP).unwrap();
     assert!(
         original.diagnostics.is_empty(),
         "{:?}",
         original.diagnostics
     );
-    assert_eq!(original.ingredients[0].name.as_ref().unwrap().text, "First");
     assert_eq!(
-        original.product.name.as_ref().unwrap().source.virtual_path,
+        original.items[&BasicPrototypeId(10100)]
+            .name
+            .as_ref()
+            .unwrap()
+            .text,
+        "First"
+    );
+    assert_eq!(
+        original.items[&BasicPrototypeId(10102)]
+            .name
+            .as_ref()
+            .unwrap()
+            .source
+            .virtual_path,
         "mes/gamedesc.mes"
     );
     assert!(original.rules_source.mod_id.is_none());
@@ -151,12 +223,19 @@ path = "resources"
     );
     fixture.write(
         "mods/override/resources/rules/schematic.mes",
-        RULE_DATA.replace("{4206}{2}", "{4206}{3}"),
+        VARIANT_DATA.replace("{4206}{2}", "{4206}{3}"),
     );
     fixture.write(
         "mods/override/resources/proto/010120 - food.pro",
         food_bytes(10120, 401, 10),
     );
+    for (id, description) in [(10123, 401), (10124, 400), (10125, 401), (10126, 401)] {
+        fixture.write(
+            &format!("base/proto/{id:06} - food.pro"),
+            food_bytes(id, description, 5),
+        );
+    }
+    let vfs = fixture.vfs();
     let catalog = Catalog::discover(fixture.0.join("mods")).unwrap();
     let mut vfs = catalog
         .load_order(&["override"])
@@ -166,7 +245,7 @@ path = "resources"
     let report = load_schematic(&mut vfs, GROUP).unwrap();
     assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
     assert_eq!(report.rules_source.mod_id.unwrap().as_str(), "override");
-    let ingredient = &report.ingredients[0];
+    let ingredient = &report.items[&BasicPrototypeId(10100)];
     let prototype = ingredient.prototype.as_ref().unwrap();
     assert_eq!(prototype.header.id, SerializedPrototypeId(10120));
     assert_eq!(prototype.food.unwrap().description, DescriptionId(401));
@@ -179,8 +258,26 @@ path = "resources"
     assert_eq!(ingredient.name.as_ref().unwrap().text, "Second");
     let definition = report.definition.unwrap();
     assert_eq!(definition.quantity.get(), 3);
+    assert_eq!(definition.variants.len(), 3);
     assert_eq!(
-        definition.ingredients[0],
+        definition.variants[1].ingredients[1],
+        ItemId("arcanum:item/prototype-10123".into())
+    );
+    assert_eq!(
+        definition.variants[1].product,
+        ItemId("arcanum:item/prototype-10124".into())
+    );
+    assert!(
+        report.items[&BasicPrototypeId(10104)]
+            .prototype
+            .as_ref()
+            .unwrap()
+            .source
+            .mod_id
+            .is_none()
+    );
+    assert_eq!(
+        definition.variants[0].ingredients[0],
         ItemId("arcanum:item/prototype-10120".into())
     );
     assert_eq!(
@@ -193,6 +290,7 @@ path = "resources"
 fn preserves_unresolved_ids_and_rejects_ambiguous_or_mismatched_prototypes() {
     let fixture = Fixture::new();
     fixture.populate();
+    fixture.write("base/rules/schematic.mes", VARIANT_DATA);
     fixture.write(
         "base/proto/010120 - other food.pro",
         food_bytes(10120, 400, 8),
@@ -205,22 +303,24 @@ fn preserves_unresolved_ids_and_rejects_ambiguous_or_mismatched_prototypes() {
     fs::remove_file(fixture.0.join("base/art/interface/drawing.art")).unwrap();
     fixture.write("base/mes/schematic_text.mes", "{31}{A recipe}");
     let report = load_schematic(&mut fixture.vfs(), GROUP).unwrap();
-    assert_eq!(report.legacy.product, BasicPrototypeId(10102));
+    assert_eq!(report.legacy.variants[0].product, BasicPrototypeId(10102));
+    assert_eq!(
+        report.legacy.variants[2].ingredients[1],
+        BasicPrototypeId(10105)
+    );
+    assert_eq!(report.legacy.variants[2].product, BasicPrototypeId(10106));
     assert_eq!(report.legacy.illustration, InterfaceArtId(33));
     assert!(report.definition.is_none());
     assert!(report.illustration.is_none());
-    assert!(
-        report
-            .ingredients
-            .iter()
-            .all(|item| item.definition.is_none())
-    );
+    assert!(report.items.values().all(|item| item.definition.is_none()));
     for (field, message) in [
         ("description", "key 32"),
         ("illustration", "drawing.art"),
         ("ingredient 1", "ambiguous"),
         ("ingredient 2", "declares ID 10199"),
         ("product", "serialized 10122"),
+        ("ingredient 2", "serialized 10125"),
+        ("product", "serialized 10126"),
     ] {
         assert!(
             report
