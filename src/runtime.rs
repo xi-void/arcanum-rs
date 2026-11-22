@@ -1,9 +1,9 @@
-//! Standalone equipment associations and additive armour-class effects.
+//! Standalone equipment associations, additive AC and Fire resistance floors.
 
 use crate::content::effects::{EffectDefinition, EffectOperation};
 use crate::content::items::{
     AmmoDefinition, ArmourDefinition, FoodDefinition, GenericDefinition, ItemId, KeyDefinition,
-    WeaponDefinition,
+    ResistanceKind, WeaponDefinition,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -55,6 +55,8 @@ pub struct EffectActivation<'content> {
     pub definition: &'content EffectDefinition,
     /// The signed contribution captured when this activation was granted.
     pub armour_class_points: i32,
+    /// The strongest Fire minimum granted by this activation, if any.
+    pub fire_resistance_floor: Option<i32>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -98,12 +100,17 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+struct ActorState {
+    base_ac: i32,
+    underlying_fire_resistance: i32,
+}
+
 /// Owns mutable state. IDs are local to the issuing runtime and never reused
 /// within it. Definitions stay borrowed and immutable.
 #[derive(Default)]
 pub struct Runtime<'content> {
     last_id: u64,
-    actor_base_ac: BTreeMap<ActorId, i32>,
+    actors: BTreeMap<ActorId, ActorState>,
     items: BTreeMap<ItemInstanceId, ItemInstance<'content>>,
     activations: BTreeMap<ActivationId, EffectActivation<'content>>,
 }
@@ -111,7 +118,13 @@ pub struct Runtime<'content> {
 impl<'content> Runtime<'content> {
     pub fn create_actor(&mut self, base_ac: i32) -> Result<ActorId, Error> {
         let id = ActorId(self.allocate_id()?);
-        self.actor_base_ac.insert(id, base_ac);
+        self.actors.insert(
+            id,
+            ActorState {
+                base_ac,
+                underlying_fire_resistance: 0,
+            },
+        );
         Ok(id)
     }
 
@@ -131,10 +144,7 @@ impl<'content> Runtime<'content> {
     }
 
     pub fn base_armour_class(&self, actor: ActorId) -> Result<i32, Error> {
-        self.actor_base_ac
-            .get(&actor)
-            .copied()
-            .ok_or(Error::UnknownActor(actor))
+        Ok(self.actor(actor)?.base_ac)
     }
 
     pub fn armour_class(&self, actor: ActorId) -> Result<i32, Error> {
@@ -145,8 +155,45 @@ impl<'content> Runtime<'content> {
     pub fn set_base_armour_class(&mut self, actor: ActorId, base_ac: i32) -> Result<(), Error> {
         self.base_armour_class(actor)?;
         checked_ac(self.total_ac(actor, base_ac, |_| true))?;
-        self.actor_base_ac.insert(actor, base_ac);
+        self.actors
+            .get_mut(&actor)
+            .expect("validated actor")
+            .base_ac = base_ac;
         Ok(())
+    }
+
+    /// Stored Fire resistance in signed percentage points, before active floors.
+    pub fn underlying_fire_resistance(&self, actor: ActorId) -> Result<i32, Error> {
+        Ok(self.actor(actor)?.underlying_fire_resistance)
+    }
+
+    pub fn set_underlying_fire_resistance(
+        &mut self,
+        actor: ActorId,
+        value: i32,
+    ) -> Result<(), Error> {
+        let state = self
+            .actors
+            .get_mut(&actor)
+            .ok_or(Error::UnknownActor(actor))?;
+        state.underlying_fire_resistance = value;
+        Ok(())
+    }
+
+    /// Evaluate the active lower bounds, before any final query clamp.
+    pub fn fire_resistance_after_effects(&self, actor: ActorId) -> Result<i32, Error> {
+        let underlying = self.underlying_fire_resistance(actor)?;
+        Ok(self
+            .activations
+            .values()
+            .filter(|grant| grant.target == actor)
+            .filter_map(|grant| grant.fire_resistance_floor)
+            .fold(underlying, i32::max))
+    }
+
+    /// Ordinary Fire resistance query, clamped after evaluating active floors.
+    pub fn fire_resistance(&self, actor: ActorId) -> Result<i32, Error> {
+        Ok(self.fire_resistance_after_effects(actor)?.clamp(0, 95))
     }
 
     pub fn item(&self, item: ItemInstanceId) -> Result<&ItemInstance<'content>, Error> {
@@ -192,13 +239,22 @@ impl<'content> Runtime<'content> {
     ) -> Result<ActivationId, Error> {
         let base = self.base_armour_class(target)?;
         self.require_wearer(source, target)?;
-        let points = definition
-            .operations
-            .iter()
-            .try_fold(0i128, |total, &operation| match operation {
-                EffectOperation::AddArmourClass { points } => Ok(total + i128::from(points)),
-                _ => Err(Error::UnsupportedOperation(operation)),
-            })?;
+        let mut points = 0i128;
+        let mut fire_resistance_floor: Option<i32> = None;
+        for &operation in &definition.operations {
+            match operation {
+                EffectOperation::AddArmourClass { points: adjustment } => {
+                    points += i128::from(adjustment)
+                }
+                EffectOperation::ResistanceFloor {
+                    channel: ResistanceKind::Fire,
+                    minimum_percent,
+                } => {
+                    fire_resistance_floor = fire_resistance_floor.max(Some(minimum_percent));
+                }
+                _ => return Err(Error::UnsupportedOperation(operation)),
+            }
+        }
         let armour_class_points = checked_ac(points)?;
         checked_ac(self.total_ac(target, base, |_| true) + points)?;
         let id = ActivationId(self.allocate_id()?);
@@ -210,6 +266,7 @@ impl<'content> Runtime<'content> {
                 target,
                 definition,
                 armour_class_points,
+                fire_resistance_floor,
             },
         );
         Ok(id)
@@ -230,6 +287,10 @@ impl<'content> Runtime<'content> {
         } else {
             Err(Error::NotEquippedBy { item, actor })
         }
+    }
+
+    fn actor(&self, actor: ActorId) -> Result<&ActorState, Error> {
+        self.actors.get(&actor).ok_or(Error::UnknownActor(actor))
     }
 
     fn total_ac(

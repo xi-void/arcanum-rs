@@ -19,6 +19,16 @@ fn additive(id: &str, points: i32) -> EffectDefinition {
     }
 }
 
+fn fire_floor(id: &str, minimum_percent: i32) -> EffectDefinition {
+    EffectDefinition {
+        id: EffectId(id.into()),
+        operations: vec![EffectOperation::ResistanceFloor {
+            channel: ResistanceKind::Fire,
+            minimum_percent,
+        }],
+    }
+}
+
 fn equip<'a>(
     runtime: &mut Runtime<'a>,
     actor: ActorId,
@@ -168,20 +178,182 @@ fn equipment_is_exclusive_and_invalid_identities_fail() {
 fn unsupported_composite_reports_error_without_partial_application() {
     let item = item();
     let mut effect = additive("smithing:effect/ward", 1);
-    let floor = EffectOperation::ResistanceFloor {
-        channel: ResistanceKind::Fire,
-        minimum_percent: 50,
+    let unsupported = EffectOperation::AddResistance {
+        channel: ResistanceKind::Electrical,
+        percentage_points: 8,
     };
-    effect.operations.push(floor);
+    effect
+        .operations
+        .extend(fire_floor("arcanum:effect/53", 50).operations);
+    effect.operations.push(unsupported);
+    let existing = fire_floor("smithing:effect/existing", 30);
     let mut runtime = Runtime::default();
     let actor = runtime.create_actor(10).unwrap();
     let source = equip(&mut runtime, actor, &item);
+    runtime.set_underlying_fire_resistance(actor, 20).unwrap();
+    let id = runtime.activate_effect(source, actor, &existing).unwrap();
     assert_eq!(
         runtime.activate_effect(source, actor, &effect),
-        Err(Error::UnsupportedOperation(floor))
+        Err(Error::UnsupportedOperation(unsupported))
     );
     assert_eq!(runtime.armour_class(actor), Ok(10));
+    assert_eq!(runtime.fire_resistance(actor), Ok(30));
+    assert_eq!(runtime.activation(id).unwrap().source, source);
+    assert_eq!(runtime.activations.len(), 1);
+    assert_eq!(runtime.item(source).unwrap().equipped_by, Some(actor));
+}
+
+#[test]
+fn fire_floor_uses_current_underlying_resistance() {
+    let item = item();
+    let effect = fire_floor("arcanum:effect/53", 50);
+    let mut runtime = Runtime::default();
+    let actor = runtime.create_actor(10).unwrap();
+    let source = equip(&mut runtime, actor, &item);
+    runtime.set_underlying_fire_resistance(actor, 20).unwrap();
+    assert_eq!(runtime.fire_resistance(actor), Ok(20));
+    let id = runtime.activate_effect(source, actor, &effect).unwrap();
+    for (underlying, expected) in [(20, 50), (40, 50), (50, 50), (70, 70)] {
+        runtime
+            .set_underlying_fire_resistance(actor, underlying)
+            .unwrap();
+        assert_eq!(runtime.underlying_fire_resistance(actor), Ok(underlying));
+        assert_eq!(runtime.fire_resistance_after_effects(actor), Ok(expected));
+        assert_eq!(runtime.fire_resistance(actor), Ok(expected));
+        assert_eq!(
+            runtime.activation(id).unwrap().fire_resistance_floor,
+            Some(50)
+        );
+    }
+    runtime.unequip(source, actor).unwrap();
+    assert_eq!(runtime.fire_resistance(actor), Ok(70));
+}
+
+#[test]
+fn independent_fire_floors_survive_removal_in_either_order() {
+    let item = item();
+    let effect = fire_floor("arcanum:effect/53", 50);
+    for (removed, kept) in [(0, 1), (1, 0)] {
+        let mut runtime = Runtime::default();
+        let actor = runtime.create_actor(10).unwrap();
+        let other = runtime.create_actor(10).unwrap();
+        runtime.set_underlying_fire_resistance(actor, 20).unwrap();
+        runtime.set_underlying_fire_resistance(other, 15).unwrap();
+        let sources = [
+            equip(&mut runtime, actor, &item),
+            equip(&mut runtime, actor, &item),
+        ];
+        let grants = sources.map(|source| runtime.activate_effect(source, actor, &effect).unwrap());
+        assert_ne!(grants[0], grants[1]);
+        assert_eq!(runtime.fire_resistance(actor), Ok(50));
+        runtime.unequip(sources[removed], actor).unwrap();
+        assert!(matches!(
+            runtime.activation(grants[removed]),
+            Err(Error::UnknownActivation(_))
+        ));
+        let remaining = runtime.activation(grants[kept]).unwrap();
+        assert_eq!(remaining.source, sources[kept]);
+        assert_eq!(remaining.target, actor);
+        assert_eq!(runtime.fire_resistance(actor), Ok(50));
+        assert_eq!(runtime.fire_resistance(other), Ok(15));
+        runtime.unequip(sources[kept], actor).unwrap();
+        assert_eq!(runtime.fire_resistance(actor), Ok(20));
+    }
+}
+
+#[test]
+fn signed_underlying_resistance_and_native_floors_stay_unclamped_until_query() {
+    let item = item();
+    let zero = fire_floor("smithing:effect/zero", 0);
+    let high = fire_floor("smithing:effect/fire-ward", 120);
+    let mut runtime = Runtime::default();
+    let actor = runtime.create_actor(10).unwrap();
+    runtime.set_underlying_fire_resistance(actor, -20).unwrap();
+    let source = equip(&mut runtime, actor, &item);
+    assert_eq!(runtime.fire_resistance_after_effects(actor), Ok(-20));
+    assert_eq!(runtime.fire_resistance(actor), Ok(0));
+    let zero_id = runtime.activate_effect(source, actor, &zero).unwrap();
+    assert_eq!(runtime.fire_resistance_after_effects(actor), Ok(0));
+    let high_id = runtime.activate_effect(source, actor, &high).unwrap();
+    assert_eq!(runtime.activation(high_id).unwrap().definition.id, high.id);
+    assert_eq!(runtime.underlying_fire_resistance(actor), Ok(-20));
+    assert_eq!(runtime.fire_resistance_after_effects(actor), Ok(120));
+    assert_eq!(runtime.fire_resistance(actor), Ok(95));
+    runtime.remove_activation(high_id).unwrap();
+    assert_eq!(runtime.fire_resistance_after_effects(actor), Ok(0));
+    runtime.remove_activation(zero_id).unwrap();
+    assert_eq!(runtime.fire_resistance_after_effects(actor), Ok(-20));
+    runtime.set_underlying_fire_resistance(actor, 100).unwrap();
+    assert_eq!(runtime.fire_resistance_after_effects(actor), Ok(100));
+    assert_eq!(runtime.fire_resistance(actor), Ok(95));
+}
+
+#[test]
+fn fire_floor_rejects_invalid_handles_and_other_channels() {
+    let item = item();
+    let effect = fire_floor("arcanum:effect/53", 50);
+    let poison = EffectOperation::ResistanceFloor {
+        channel: ResistanceKind::Poison,
+        minimum_percent: 97,
+    };
+    let mut composite = fire_floor("smithing:effect/unsupported", 95);
+    composite.operations.push(poison);
+    let mut runtime = Runtime::default();
+    let actor = runtime.create_actor(10).unwrap();
+    let source = equip(&mut runtime, actor, &item);
+    let unknown_actor = ActorId(u64::MAX);
+    let unknown_item = ItemInstanceId(u64::MAX);
+    assert_eq!(
+        runtime.fire_resistance(unknown_actor),
+        Err(Error::UnknownActor(unknown_actor))
+    );
+    assert_eq!(
+        runtime.set_underlying_fire_resistance(unknown_actor, 20),
+        Err(Error::UnknownActor(unknown_actor))
+    );
+    assert_eq!(
+        runtime.activate_effect(unknown_item, actor, &effect),
+        Err(Error::UnknownItem(unknown_item))
+    );
+    assert_eq!(
+        runtime.activate_effect(source, unknown_actor, &effect),
+        Err(Error::UnknownActor(unknown_actor))
+    );
+    assert_eq!(
+        runtime.activate_effect(source, actor, &composite),
+        Err(Error::UnsupportedOperation(poison))
+    );
+    assert_eq!(runtime.fire_resistance(actor), Ok(0));
     assert!(runtime.activations.is_empty());
+}
+
+#[test]
+fn supported_ac_and_fire_operations_share_one_atomic_activation() {
+    let item = item();
+    let mut mixed = additive("smithing:effect/mixed", 1);
+    mixed
+        .operations
+        .extend(fire_floor("arcanum:effect/53", 50).operations);
+    mixed
+        .operations
+        .extend(fire_floor("smithing:effect/weaker", 40).operations);
+    let mut runtime = Runtime::default();
+    let actor = runtime.create_actor(i32::MAX).unwrap();
+    let source = equip(&mut runtime, actor, &item);
+    runtime.set_underlying_fire_resistance(actor, 20).unwrap();
+    assert_eq!(
+        runtime.activate_effect(source, actor, &mixed),
+        Err(Error::ArmourClassOverflow)
+    );
+    assert_eq!(runtime.fire_resistance(actor), Ok(20));
+    assert_eq!(runtime.item(source).unwrap().equipped_by, Some(actor));
+    runtime.set_base_armour_class(actor, 10).unwrap();
+    let id = runtime.activate_effect(source, actor, &mixed).unwrap();
+    assert_eq!(runtime.armour_class(actor), Ok(11));
+    assert_eq!(runtime.fire_resistance(actor), Ok(50));
+    runtime.remove_activation(id).unwrap();
+    assert_eq!(runtime.armour_class(actor), Ok(10));
+    assert_eq!(runtime.fire_resistance(actor), Ok(20));
 }
 
 #[test]

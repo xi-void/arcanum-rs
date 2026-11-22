@@ -40,7 +40,8 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] effect inspect <game-directory> <effect-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] schematic inspect <game-directory> <recipe-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] schematic audit <game-directory> [--all-references | [--readiness] [<recipe-id> ...]] [--mods <mods-directory> <mod-id> ...]
-  arcanum-rs simulate equipment-demo";
+  arcanum-rs simulate equipment-demo
+  arcanum-rs simulate resistance-demo";
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -63,6 +64,9 @@ fn main() -> ExitCode {
         (Some("conflicts"), [_, game]) => conflicts(Path::new(game), policy),
         (Some("simulate"), [_, demo]) if policy == Policy::Ce && demo == "equipment-demo" => {
             equipment_demo(&mut io::stdout().lock())
+        }
+        (Some("simulate"), [_, demo]) if policy == Policy::Ce && demo == "resistance-demo" => {
+            resistance_demo(&mut io::stdout().lock())
         }
         (Some("mes"), [_, action, game, resource, options @ ..]) if action == "inspect" => {
             inspect_mes(Path::new(game), resource, None, options, policy)
@@ -174,6 +178,62 @@ fn equipment_demo(out: &mut impl Write) -> Result<(), Box<dyn Error>> {
         out,
         "Unequipped {first:?}, AC {}",
         runtime.armour_class(actor)?
+    )?;
+    Ok(())
+}
+
+fn resistance_demo(out: &mut impl Write) -> Result<(), Box<dyn Error>> {
+    let item = items::GenericDefinition {
+        id: items::ItemId("demo:item/fire-charm".into()),
+        display_name: "Fire charm".into(),
+        base_weight: 1,
+        base_worth: 0,
+        magic_tech_complexity: 0,
+    };
+    let effect = EffectDefinition {
+        id: EffectId("arcanum:effect/53".into()),
+        operations: vec![EffectOperation::ResistanceFloor {
+            channel: items::ResistanceKind::Fire,
+            minimum_percent: 50,
+        }],
+    };
+    let mut runtime = Runtime::default();
+    let actor = runtime.create_actor(10)?;
+    runtime.set_underlying_fire_resistance(actor, 20)?;
+    writeln!(
+        out,
+        "{actor:?} starts with underlying Fire resistance {}%",
+        runtime.underlying_fire_resistance(actor)?
+    )?;
+    let first = runtime.instantiate_item(ItemDefinitionRef::Generic(&item))?;
+    let second = runtime.instantiate_item(ItemDefinitionRef::Generic(&item))?;
+    let mut grant = |source| -> Result<_, Box<dyn Error>> {
+        runtime.equip(source, actor)?;
+        let id = runtime.activate_effect(source, actor, &effect)?;
+        writeln!(
+            out,
+            "Equipped {source:?}, granted {} as {id:?}, Fire resistance {}%",
+            effect.id.0,
+            runtime.fire_resistance(actor)?
+        )?;
+        Ok(id)
+    };
+    grant(first)?;
+    let remaining = grant(second)?;
+    runtime.unequip(first, actor)?;
+    let surviving = runtime.activation(remaining)?;
+    writeln!(
+        out,
+        "Unequipped {first:?}, {:?} from {:?} remains, Fire resistance {}%",
+        surviving.id,
+        surviving.source,
+        runtime.fire_resistance(actor)?
+    )?;
+    runtime.unequip(second, actor)?;
+    writeln!(
+        out,
+        "Unequipped {second:?}, Fire resistance {}%",
+        runtime.fire_resistance(actor)?
     )?;
     Ok(())
 }
