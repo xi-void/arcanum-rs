@@ -360,3 +360,63 @@ fn armour_coverage_comes_from_item_art_and_rejects_unknown_encodings() {
         );
     }
 }
+
+#[test]
+fn wield_reference_resolution_preserves_provenance_and_reports_ambiguity() {
+    use crate::content::items::{ScriptReferenceError, WieldAttachment, inspect_prototype};
+    use crate::prototype::{LegacyScriptId, tests::weapon_with_wield_scripts};
+
+    let fixture = Fixture::new();
+    fixture.write(
+        "base/proto/sword.pro",
+        &weapon_with_wield_scripts(28001, 28002),
+    );
+    fixture.write("base/scr/28001sword.scr", b"base script");
+    fixture.write(
+        "base/scr/subdir/28002sword.scr",
+        b"not a direct script candidate",
+    );
+    fixture.write(
+        "mods/patch/arcanum-mod.toml",
+        br#"
+manifest_version = 1
+id = "patch"
+name = "Wield scripts"
+version = "1.0.0"
+description = "Temporary test fixture."
+[[mounts]]
+kind = "directory"
+path = "resources"
+"#,
+    );
+    fixture.write("mods/patch/resources/scr/28001sword.scr", b"replacement");
+    fixture.write("mods/patch/resources/scr/28002first.scr", b"first");
+    fixture.write("mods/patch/resources/scr/28002second.scr", b"second");
+
+    let mut vfs = Vfs::new(Policy::Ordered);
+    let base = vfs.mount_directory(fixture.0.join("base")).unwrap();
+    let inspection = inspect_prototype(&mut vfs, "proto/sword.pro").unwrap();
+    let old = inspection.resolve_wield_scripts(&vfs);
+    assert_eq!(old[0].resolution.as_ref().unwrap().source.mount_id, base);
+    assert_eq!(
+        old[1].resolution.as_ref().unwrap_err(),
+        &ScriptReferenceError::Missing
+    );
+
+    let catalog = Catalog::discover(fixture.0.join("mods")).unwrap();
+    let vfs = catalog.load_order(&["patch"]).unwrap().apply(vfs).unwrap();
+    let reports = inspection.resolve_wield_scripts(&vfs);
+    assert_eq!(reports[0].attachment, WieldAttachment::On);
+    assert_eq!(reports[0].legacy_id, LegacyScriptId(28001));
+    let on = reports[0].resolution.as_ref().unwrap();
+    assert_eq!(on.reference.resource_path, "scr/28001sword.scr");
+    assert_eq!(on.source.mod_id.as_ref().unwrap().as_str(), "patch");
+    assert_eq!(reports[1].attachment, WieldAttachment::Off);
+    assert_eq!(
+        reports[1].resolution.as_ref().unwrap_err(),
+        &ScriptReferenceError::Ambiguous(vec![
+            "scr/28002first.scr".into(),
+            "scr/28002second.scr".into()
+        ])
+    );
+}

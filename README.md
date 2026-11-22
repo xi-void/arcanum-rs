@@ -167,6 +167,8 @@ target/debug/arcanum-rs prototype inspect "$game" 'proto/010087 - Food.pro'
 target/debug/arcanum-rs prototype inspect "$game" 'proto/006136 - Weapon.pro'
 target/debug/arcanum-rs prototype inspect "$game" 'proto/007059 - Ammo.pro'
 target/debug/arcanum-rs prototype inspect "$game" 'proto/008095 - Armor.pro'
+target/debug/arcanum-rs prototype inspect "$game" 'proto/008184 - Armor.pro'
+target/debug/arcanum-rs prototype inspect "$game" 'proto/006084 - Weapon.pro'
 target/debug/arcanum-rs schematic inspect "$game" 4220
 target/debug/arcanum-rs schematic inspect "$game" 2450
 target/debug/arcanum-rs schematic audit "$game" 2450 3250 4220
@@ -174,6 +176,8 @@ target/debug/arcanum-rs schematic audit "$game" --all-references
 ```
 
 These commands accept the MES command's `--mods <mods-directory> <mod-id> ...` argument. Prototype inspection shows selected Food fields, Weapon damage channels, base speed and range, and ammunition compatibility. For Ammo it reports the stored prototype quantity separately. Armour inspection reports its base AC and resistance adjustments, coverage and fit sizes. Key and Generic inspection includes the description key. [Weapon and Ammo fields](docs/CONTENT_FORMATS.md#milestone-10-native-weapon-and-ammo-definitions) · [Armour fields](docs/CONTENT_FORMATS.md#milestone-11-native-armour-definitions)
+
+Prototype inspection also shows stored magical Armour adjustments separately and reports the source or resolution error for each Weapon wield script. [Equipment effect references](docs/CONTENT_FORMATS.md#milestone-12-equipment-effects-and-references)
 
 Schematic inspection reports the selected group’s resource sources, unresolved references and any ordered input-to-output variants. [Content formats](docs/CONTENT_FORMATS.md#milestone-6-healing-jacket-variants)
 

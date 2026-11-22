@@ -545,3 +545,93 @@ fn installed_armour_definitions_preserve_fit_and_signed_base_protection() {
         assert_eq!(armour.resistances, resistances);
     }
 }
+
+#[test]
+#[ignore = "requires the installed Arcanum data"]
+fn verifies_direct_armour_adjustments_and_sword_script_references() {
+    use arcanum_rs::content::items::{
+        ResistanceAdjustment, ResistanceKind, WeaponAmmoDefinition, WieldAttachment,
+        inspect_prototype,
+    };
+    use arcanum_rs::prototype::{LegacyScriptId, WeaponAmmoFields};
+
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    let ring = inspect_prototype(&mut vfs, "proto/008184 - armor.pro").unwrap();
+    assert_eq!(ring.prototype.header.id, SerializedPrototypeId(8184));
+    assert_eq!(ring.prototype.description, Some(DescriptionId(8164)));
+    assert_eq!(
+        ring.prototype.source.mount_path.file_name().unwrap(),
+        "Arcanum5.dat"
+    );
+    let fields = ring.armour.unwrap();
+    assert_eq!(fields.item.magic_tech_complexity, 40);
+    assert_eq!(fields.armour_class_adjustment, 0);
+    assert_eq!(fields.magical_armour_class_adjustment, 10);
+    assert_eq!(fields.resistance_adjustments, [None; 5]);
+    assert_eq!(
+        fields.magical_resistance_adjustments,
+        [Some(10), None, None, None, None]
+    );
+    let resolved = ring.resolve_armour(&mut vfs).unwrap().unwrap();
+    assert_eq!(resolved.definition.display_name, "Ring of Protection");
+    assert_eq!(resolved.definition.magical_armour_class_adjustment, 10);
+    assert!(resolved.definition.resistances.is_empty());
+    assert_eq!(
+        resolved.definition.magical_resistances,
+        [ResistanceAdjustment {
+            kind: ResistanceKind::Physical,
+            percentage_points: 10,
+        }]
+    );
+
+    let platemail = inspect_prototype(&mut vfs, "proto/008065 - armor.pro").unwrap();
+    let fields = platemail.armour.unwrap();
+    assert_eq!(fields.item.magic_tech_complexity, -30);
+    assert_eq!(fields.magical_armour_class_adjustment, -10);
+    assert_eq!(
+        fields.magical_resistance_adjustments,
+        [Some(-5), Some(-10), Some(-20), Some(-20), Some(0)]
+    );
+
+    let sword = inspect_prototype(&mut vfs, "proto/006084 - weapon.pro").unwrap();
+    assert_eq!(sword.prototype.header.id, SerializedPrototypeId(6084));
+    assert_eq!(sword.prototype.description, Some(DescriptionId(6064)));
+    assert_eq!(sword.prototype.source.storage, Storage::Loose);
+    let Some(WeaponAmmoFields::Weapon(fields)) = sword.weapon_ammo else {
+        panic!("Sword of Defense should be a Weapon");
+    };
+    assert_eq!(fields.item.magic_tech_complexity, 15);
+    let WeaponAmmoDefinition::Weapon(definition) = sword
+        .resolve_weapon_ammo(&mut vfs)
+        .unwrap()
+        .unwrap()
+        .definition
+    else {
+        panic!("expected a native Weapon");
+    };
+    assert_eq!(definition.display_name, "Sword of Defense");
+    let scripts = sword.resolve_wield_scripts(&vfs);
+    assert_eq!(scripts.len(), 2);
+    for (report, (attachment, id, path)) in scripts.into_iter().zip([
+        (
+            WieldAttachment::On,
+            28001,
+            "scr/28001magic_sword_defense_wield_on.scr",
+        ),
+        (
+            WieldAttachment::Off,
+            28002,
+            "scr/28002magic_sword_defense_wield_off.scr",
+        ),
+    ]) {
+        assert_eq!(report.attachment, attachment);
+        assert_eq!(report.legacy_id, LegacyScriptId(id));
+        let resolved = report.resolution.unwrap();
+        assert_eq!(resolved.reference.resource_path, path);
+        assert_eq!(
+            resolved.source.mount_path.file_name().unwrap(),
+            "Arcanum2.dat"
+        );
+    }
+}

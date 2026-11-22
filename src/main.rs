@@ -316,6 +316,17 @@ fn inspect_prototype(
             }
         }
     }
+    for script in inspection.resolve_wield_scripts(&vfs) {
+        let label = match script.attachment {
+            items::WieldAttachment::On => "Wield-on",
+            items::WieldAttachment::Off => "Wield-off",
+        };
+        write!(out, "{label} script (legacy ID {}): ", script.legacy_id.0)?;
+        match script.resolution {
+            Ok(resolved) => write_source(&mut out, &resolved.source)?,
+            Err(error) => writeln!(out, "unresolved ({error})")?,
+        }
+    }
     if let Some(fields) = &inspection.armour {
         write_armour_fields(&mut out, fields)?;
         if let Some(armour) = inspection.resolve_armour(&mut vfs)? {
@@ -732,6 +743,11 @@ fn write_armour_fields(
     )?;
     writeln!(
         out,
+        "Stored magical armour class adjustment (points): {:+}",
+        fields.magical_armour_class_adjustment
+    )?;
+    writeln!(
+        out,
         "Legacy armour flags: 0x{:08x} | inventory art ID: 0x{:08x}",
         fields.flags, fields.inventory_art_id
     )
@@ -755,6 +771,13 @@ fn write_armour(out: &mut impl Write, resolved: items::ResolvedArmour) -> io::Re
         writeln!(
             out,
             "  {:?} resistance: {:+} percentage points",
+            resistance.kind, resistance.percentage_points
+        )?;
+    }
+    for resistance in armour.magical_resistances {
+        writeln!(
+            out,
+            "  Stored magical {:?} resistance: {:+} percentage points",
             resistance.kind, resistance.percentage_points
         )?;
     }

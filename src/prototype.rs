@@ -60,6 +60,16 @@ pub struct CommonItemFields {
     pub magic_tech_complexity: i32,
 }
 
+/// Numeric lookup key in the legacy script namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegacyScriptId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LegacyWieldScripts {
+    pub on: Option<LegacyScriptId>,
+    pub off: Option<LegacyScriptId>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WeaponFields {
     pub item: CommonItemFields,
@@ -70,6 +80,7 @@ pub struct WeaponFields {
     pub range: i32,
     pub ammo_type: i32,
     pub ammo_consumption: i32,
+    pub wield_scripts: LegacyWieldScripts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,8 +112,10 @@ pub struct ArmourFields {
     pub inventory_art_id: u32,
     pub flags: u32,
     pub armour_class_adjustment: i32,
+    pub magical_armour_class_adjustment: i32,
     /// Legacy resistance indices in order, with absent entries preserved.
     pub resistance_adjustments: [Option<i32>; RESISTANCE_TYPES],
+    pub magical_resistance_adjustments: [Option<i32>; RESISTANCE_TYPES],
 }
 
 impl ArmourFields {
@@ -134,6 +147,8 @@ pub enum ErrorKind {
     DamageMaskCountMismatch,
     ResistanceIndexOutOfRange,
     ResistanceMaskCountMismatch,
+    ScriptMaskCountMismatch,
+    InvalidScriptId(i32),
     InvalidPresence(u8),
     InvalidArrayWidth { expected: u32, actual: u32 },
     ArrayTooLarge,
@@ -181,6 +196,12 @@ impl fmt::Display for Error {
             }
             ErrorKind::DamageMaskCountMismatch => {
                 f.write_str("damage bitmap count does not match the payload")
+            }
+            ErrorKind::ScriptMaskCountMismatch => {
+                f.write_str("script attachment bitmap count does not match the payload")
+            }
+            ErrorKind::InvalidScriptId(id) => {
+                write!(f, "negative wield script ID {id}")
             }
             ErrorKind::InvalidPresence(flag) => write!(f, "invalid optional-field flag {flag}"),
             ErrorKind::InvalidArrayWidth { expected, actual } => {
@@ -244,7 +265,7 @@ pub fn decode_food(bytes: &[u8]) -> Result<(Header, FoodFields), Error> {
         bytes,
         offset: HEADER_SIZE,
     };
-    let (item, _) = read_item(&mut input)?;
+    let item = read_item(&mut input, false)?.common;
     input.skip(3 * 4)?; // Food flags and padding.
     input.array(4)?;
     input.array(8)?;
@@ -278,7 +299,8 @@ pub fn decode_weapon_ammo(bytes: &[u8]) -> Result<(Header, WeaponAmmoFields), Er
         bytes,
         offset: HEADER_SIZE,
     };
-    let (item, _) = read_item(&mut input)?;
+    let prefix = read_item(&mut input, header.object_type == WEAPON_TYPE)?;
+    let item = prefix.common;
     let fields = if header.object_type == WEAPON_TYPE {
         input.skip(4 * 4)?; // Flags, paper-doll art and hit modifiers.
         let damage_lower = input.damage()?;
@@ -299,6 +321,7 @@ pub fn decode_weapon_ammo(bytes: &[u8]) -> Result<(Header, WeaponAmmoFields), Er
             range,
             ammo_type,
             ammo_consumption,
+            wield_scripts: prefix.wield_scripts,
         })
     } else {
         input.skip(4)?; // Flags.
@@ -330,16 +353,19 @@ pub fn decode_armour(bytes: &[u8]) -> Result<(Header, ArmourFields), Error> {
         bytes,
         offset: HEADER_SIZE,
     };
-    let (item, inventory_art_id) = read_item(&mut input)?;
+    let prefix = read_item(&mut input, false)?;
     let flags = input.u32()?;
     input.skip(4)?; // Paper doll art.
     let armour_class_adjustment = input.i32()?;
-    input.skip(4)?; // Magical armour class adjustment.
+    let magical_armour_class_adjustment = input.i32()?;
     let resistance_adjustments = input.sparse_i32(
         ErrorKind::ResistanceIndexOutOfRange,
         ErrorKind::ResistanceMaskCountMismatch,
     )?;
-    input.array(4)?; // Magical resistance adjustments.
+    let magical_resistance_adjustments = input.sparse_i32(
+        ErrorKind::ResistanceIndexOutOfRange,
+        ErrorKind::ResistanceMaskCountMismatch,
+    )?;
     input.skip(4 * 4)?; // Stealth, unarmed damage, and padding.
     input.array(4)?;
     input.array(8)?;
@@ -347,20 +373,33 @@ pub fn decode_armour(bytes: &[u8]) -> Result<(Header, ArmourFields), Error> {
     Ok((
         header,
         ArmourFields {
-            item,
-            inventory_art_id,
+            item: prefix.common,
+            inventory_art_id: prefix.inventory_art_id,
             flags,
             armour_class_adjustment,
+            magical_armour_class_adjustment,
             resistance_adjustments,
+            magical_resistance_adjustments,
         },
     ))
 }
 
-fn read_item(input: &mut Reader<'_>) -> Result<(CommonItemFields, u32), Error> {
+struct ItemPrefix {
+    common: CommonItemFields,
+    inventory_art_id: u32,
+    wield_scripts: LegacyWieldScripts,
+}
+
+fn read_item(input: &mut Reader<'_>, decode_wield_scripts: bool) -> Result<ItemPrefix, Error> {
     let description = read_description(input)?;
     input.skip(7 * 4)?; // Art, armor class, HP, material and damage.
     input.array(4)?; // Resistances.
-    input.array(12)?; // Script records.
+    let wield_scripts = if decode_wield_scripts {
+        input.wield_scripts()?
+    } else {
+        input.array(12)?;
+        LegacyWieldScripts::default()
+    };
     input.skip(2 * 4)?; // Sound and category.
     input.array(4)?;
     input.array(8)?;
@@ -378,8 +417,8 @@ fn read_item(input: &mut Reader<'_>) -> Result<(CommonItemFields, u32), Error> {
     input.skip(10 * 4)?; // Description keys, spell fields, AI action and padding.
     input.array(4)?;
     input.array(8)?;
-    Ok((
-        CommonItemFields {
+    Ok(ItemPrefix {
+        common: CommonItemFields {
             description,
             weight,
             worth,
@@ -387,7 +426,8 @@ fn read_item(input: &mut Reader<'_>) -> Result<(CommonItemFields, u32), Error> {
             discipline,
         },
         inventory_art_id,
-    ))
+        wield_scripts,
+    })
 }
 
 /// Read only the common description prefix for verified non-Food types.
@@ -521,6 +561,43 @@ impl<'a> Reader<'a> {
         Ok(result)
     }
 
+    fn wield_scripts(&mut self) -> Result<LegacyWieldScripts, Error> {
+        let Some(array) = self.array_data(12)? else {
+            return Ok(LegacyWieldScripts::default());
+        };
+        let records = array.values.as_chunks::<12>().0;
+        let mask = array.mask.as_chunks::<4>().0;
+        let count: usize = mask
+            .iter()
+            .map(|word| u32::from_le_bytes(*word).count_ones() as usize)
+            .sum();
+        if count != records.len() {
+            return Err(at(array.mask_offset, ErrorKind::ScriptMaskCountMismatch));
+        }
+        let first_word = mask.first().copied().map_or(0, u32::from_le_bytes);
+        let at_index = |index: u32| {
+            let bit = 1u32 << index;
+            if first_word & bit == 0 {
+                return Ok(None);
+            }
+            let rank = (first_word & (bit - 1)).count_ones() as usize;
+            // The first eight bytes store flags and counters. The ID follows.
+            let record = records[rank];
+            let id = i32::from_le_bytes([record[8], record[9], record[10], record[11]]);
+            if id < 0 {
+                return Err(at(
+                    array.values_offset + rank * 12 + 8,
+                    ErrorKind::InvalidScriptId(id),
+                ));
+            }
+            Ok((id != 0).then_some(LegacyScriptId(id as u32)))
+        };
+        Ok(LegacyWieldScripts {
+            on: at_index(24)?,
+            off: at_index(25)?,
+        })
+    }
+
     fn array(&mut self, width: u32) -> Result<(), Error> {
         self.array_data(width)?;
         Ok(())
@@ -551,6 +628,7 @@ impl<'a> Reader<'a> {
         self.skip_array(bitmap_words, 4)?;
         Ok(Some(ArrayData {
             values,
+            values_offset: start_values,
             mask: &self.bytes[mask_offset..self.offset],
             mask_offset,
         }))
@@ -567,6 +645,7 @@ impl<'a> Reader<'a> {
 
 struct ArrayData<'a> {
     values: &'a [u8],
+    values_offset: usize,
     mask: &'a [u8],
     mask_offset: usize,
 }
