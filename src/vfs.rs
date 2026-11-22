@@ -4,7 +4,7 @@ mod game;
 mod ignore;
 mod loose;
 
-use crate::{dat, resource_path};
+use crate::{dat, mod_id::ModId, resource_path};
 use cap_std::{ambient_authority, fs::Dir};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -43,7 +43,8 @@ impl fmt::Display for MountId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum MountKind {
     Archive,
     Directory,
@@ -63,6 +64,7 @@ pub struct MountInfo {
     pub id: MountId,
     pub kind: MountKind,
     pub path: PathBuf,
+    pub mod_id: Option<ModId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,6 +181,11 @@ enum Contents {
     Directory(LooseDirectory),
 }
 
+pub(crate) enum PackageSource {
+    Archive(File),
+    Directory(Dir),
+}
+
 pub struct Vfs {
     policy: Policy,
     // The newest mount is last. Re-registering preserves its identifier.
@@ -222,6 +229,29 @@ impl Vfs {
         let path = canonicalize(path.as_ref())?;
         let dir = ambient_dir(&path)?;
         self.add_directory(dir, path)
+    }
+
+    pub(crate) fn mount_package_source(
+        &mut self,
+        mod_id: &ModId,
+        path: PathBuf,
+        source: PackageSource,
+    ) -> Result<(), Error> {
+        debug_assert_eq!(self.policy, Policy::Ordered);
+        let (kind, contents) = match source {
+            PackageSource::Archive(file) => (
+                MountKind::Archive,
+                Contents::Archive {
+                    archive: read_archive(&path, file)?,
+                    ignore: IgnoreRules::default(),
+                },
+            ),
+            PackageSource::Directory(root) => {
+                (MountKind::Directory, self.read_directory(&path, root)?)
+            }
+        };
+        self.push(path, kind, contents, Some(mod_id.clone()));
+        Ok(())
     }
 
     /// Inspect a virtual path, including entries suppressed by the active policy.
@@ -351,8 +381,7 @@ impl Vfs {
         let file = root
             .open(relative)
             .map_err(|source| io_error(&path, source))?;
-        let archive =
-            Archive::new(file.into_std()).map_err(|source| archive_error(&path, source))?;
+        let archive = read_archive(&path, file.into_std())?;
         let ignore = if self.policy == Policy::Ce {
             IgnoreRules::load(root, relative)
                 .map_err(|source| io_error(&base.join(ignore::sidecar(relative)), source))?
@@ -363,6 +392,7 @@ impl Vfs {
             path,
             MountKind::Archive,
             Contents::Archive { archive, ignore },
+            None,
         ))
     }
 
@@ -370,20 +400,26 @@ impl Vfs {
         if let Some(id) = self.promote(&path) {
             return Ok(id);
         }
-        let directory = LooseDirectory::new(root, self.policy == Policy::Ce)
-            .map_err(|source| io_error(&path, source))?;
-        Ok(self.push(path, MountKind::Directory, Contents::Directory(directory)))
+        let contents = self.read_directory(&path, root)?;
+        Ok(self.push(path, MountKind::Directory, contents, None))
+    }
+
+    fn read_directory(&self, path: &Path, root: Dir) -> Result<Contents, Error> {
+        LooseDirectory::new(root, self.policy == Policy::Ce)
+            .map(Contents::Directory)
+            .map_err(|source| io_error(path, source))
     }
 
     fn promote(&mut self, path: &Path) -> Option<MountId> {
         let index = self.mounts.iter().position(|mount| {
-            mount.info.path == path
-                || (self.policy == Policy::Ce
-                    && mount
-                        .info
-                        .path
-                        .as_os_str()
-                        .eq_ignore_ascii_case(path.as_os_str()))
+            mount.info.mod_id.is_none()
+                && (mount.info.path == path
+                    || (self.policy == Policy::Ce
+                        && mount
+                            .info
+                            .path
+                            .as_os_str()
+                            .eq_ignore_ascii_case(path.as_os_str())))
         })?;
         let mount = self.mounts.remove(index);
         let id = mount.info.id;
@@ -391,15 +427,30 @@ impl Vfs {
         Some(id)
     }
 
-    fn push(&mut self, path: PathBuf, kind: MountKind, contents: Contents) -> MountId {
+    fn push(
+        &mut self,
+        path: PathBuf,
+        kind: MountKind,
+        contents: Contents,
+        mod_id: Option<ModId>,
+    ) -> MountId {
         let id = MountId(self.next_id);
         self.next_id += 1;
         self.mounts.push(Mount {
-            info: MountInfo { id, kind, path },
+            info: MountInfo {
+                id,
+                kind,
+                path,
+                mod_id,
+            },
             contents,
         });
         id
     }
+}
+
+fn read_archive(path: &Path, file: File) -> Result<Archive<File>, Error> {
+    Archive::new(file).map_err(|source| archive_error(path, source))
 }
 
 fn canonicalize(path: &Path) -> Result<PathBuf, Error> {

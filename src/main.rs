@@ -1,4 +1,5 @@
 use arcanum_rs::dat::{Archive, Format};
+use arcanum_rs::mods::{Catalog, Package};
 use arcanum_rs::vfs::{self, Policy, Resolution, Vfs};
 use std::error::Error;
 use std::ffi::OsStr;
@@ -13,7 +14,12 @@ const USAGE: &str = "Usage:
   arcanum-rs extract <archive> <resource-path> <output-file>
   arcanum-rs [--ordered] mounts <game-directory>
   arcanum-rs [--ordered] resolve <game-directory> <resource-path>
-  arcanum-rs [--ordered] conflicts <game-directory>";
+  arcanum-rs [--ordered] conflicts <game-directory>
+  arcanum-rs mods list <mods-directory>
+  arcanum-rs mods info <package-directory>
+  arcanum-rs mods validate <mods-directory> [<mod-id> ...]
+  arcanum-rs mods order <mods-directory> [<mod-id> ...]
+  arcanum-rs mods resolve <game-directory> <mods-directory> <resource-path> <mod-id> ...";
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -34,6 +40,26 @@ fn main() -> ExitCode {
         (Some("mounts"), [_, game]) => mounts(Path::new(game), policy),
         (Some("resolve"), [_, game, resource]) => resolve(Path::new(game), policy, resource),
         (Some("conflicts"), [_, game]) => conflicts(Path::new(game), policy),
+        (Some("mods"), [_, subcommand, directory])
+            if policy == Policy::Ce && subcommand == "list" =>
+        {
+            list_mods(Path::new(directory))
+        }
+        (Some("mods"), [_, subcommand, directory])
+            if policy == Policy::Ce && subcommand == "info" =>
+        {
+            mod_info(Path::new(directory))
+        }
+        (Some("mods"), [_, subcommand, directory, selected @ ..])
+            if policy == Policy::Ce && (subcommand == "validate" || subcommand == "order") =>
+        {
+            mod_order(Path::new(directory), selected, subcommand == "order")
+        }
+        (Some("mods"), [_, subcommand, game, directory, resource, selected @ ..])
+            if policy == Policy::Ce && subcommand == "resolve" && !selected.is_empty() =>
+        {
+            mod_resolve(Path::new(game), Path::new(directory), resource, selected)
+        }
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
@@ -87,12 +113,101 @@ fn mounts(game: &Path, policy: Policy) -> Result<(), Box<dyn Error>> {
 fn resolve(game: &Path, policy: Policy, resource: &OsStr) -> Result<(), Box<dyn Error>> {
     let resource = resource_name(resource)?;
     let vfs = Vfs::from_game(game, policy)?;
+    print_resolution(&vfs, resource)
+}
+
+fn print_resolution(vfs: &Vfs, resource: &str) -> Result<(), Box<dyn Error>> {
     let resolution = vfs.resolve(resource)?;
     write_resolution(&mut io::stdout().lock(), &resolution)?;
     if resolution.winner().is_none() {
         return Err(vfs::Error::NotFound(resolution.path).into());
     }
     Ok(())
+}
+
+fn list_mods(directory: &Path) -> Result<(), Box<dyn Error>> {
+    let catalog = Catalog::discover(directory)?;
+    let mut out = io::stdout().lock();
+    for package in catalog.packages() {
+        write_package(&mut out, package)?;
+    }
+    Ok(())
+}
+
+fn mod_info(directory: &Path) -> Result<(), Box<dyn Error>> {
+    let package = Package::open(directory)?;
+    let manifest = package.manifest();
+    let mut out = io::stdout().lock();
+    writeln!(out, "Package: {}", package.path().display())?;
+    writeln!(out, "Manifest version: {}", manifest.manifest_version)?;
+    writeln!(out, "ID: {}", manifest.id)?;
+    writeln!(out, "Name: {}", manifest.name)?;
+    writeln!(out, "Version: {}", manifest.version)?;
+    writeln!(out, "Description: {}", manifest.description)?;
+    for (id, requirement) in &manifest.dependencies {
+        writeln!(out, "Requires: {id} {requirement}")?;
+    }
+    for id in &manifest.load_after {
+        writeln!(out, "Load after: {id}")?;
+    }
+    for id in &manifest.load_before {
+        writeln!(out, "Load before: {id}")?;
+    }
+    for mount in &manifest.mounts {
+        writeln!(out, "Mount: {} {}", mount.kind, mount.path.display())?;
+    }
+    Ok(())
+}
+
+fn selected_mods(ids: &[std::ffi::OsString]) -> Result<Vec<&str>, Box<dyn Error>> {
+    ids.iter()
+        .map(|id| id.to_str().ok_or_else(|| "mod ID must be UTF-8".into()))
+        .collect()
+}
+
+fn mod_order(
+    directory: &Path,
+    selected: &[std::ffi::OsString],
+    print_order: bool,
+) -> Result<(), Box<dyn Error>> {
+    let catalog = Catalog::discover(directory)?;
+    let plan = catalog.load_order(&selected_mods(selected)?)?;
+    plan.validate_mounts()?;
+    let mut out = io::stdout().lock();
+    if print_order {
+        for (index, package) in plan.packages().iter().enumerate() {
+            write!(out, "{}\t", index + 1)?;
+            write_package(&mut out, package)?;
+        }
+    } else {
+        writeln!(out, "Validated {} mod packages", plan.packages().len())?;
+    }
+    Ok(())
+}
+
+fn mod_resolve(
+    game: &Path,
+    directory: &Path,
+    resource: &OsStr,
+    selected: &[std::ffi::OsString],
+) -> Result<(), Box<dyn Error>> {
+    let resource = resource_name(resource)?;
+    let catalog = Catalog::discover(directory)?;
+    let plan = catalog.load_order(&selected_mods(selected)?)?;
+    let base = Vfs::from_game(game, Policy::Ordered)?;
+    print_resolution(&plan.apply(base)?, resource)
+}
+
+fn write_package(mut out: impl Write, package: &Package) -> io::Result<()> {
+    let manifest = package.manifest();
+    writeln!(
+        out,
+        "{}\t{}\t{}\t{}",
+        manifest.id,
+        manifest.version,
+        manifest.name,
+        package.path().display()
+    )
 }
 
 fn conflicts(game: &Path, policy: Policy) -> Result<(), Box<dyn Error>> {
@@ -126,7 +241,11 @@ fn write_resolution(mut out: impl Write, resolution: &Resolution<'_>) -> io::Res
         if let Some(relative) = candidate.loose_path {
             write!(out, " / {}", relative.display())?;
         }
-        writeln!(out, "\t{}\t{} bytes", candidate.storage, candidate.size)?;
+        write!(out, "\t{}\t{} bytes", candidate.storage, candidate.size)?;
+        if let Some(id) = &candidate.mount.mod_id {
+            write!(out, "\tmod {id}")?;
+        }
+        writeln!(out)?;
     }
     Ok(())
 }

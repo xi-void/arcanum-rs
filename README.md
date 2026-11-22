@@ -1,6 +1,6 @@
 # Arcanum-RS
 
-Arcanum-RS is a read-only resource explorer for Arcanum DAT archives and loose game files. It runs independently of Arcanum and Arcanum CE.
+Arcanum-RS is a read-only resource explorer for Arcanum DAT archives, loose game files, and local mods. It runs independently of Arcanum and Arcanum CE.
 
 ## Usage
 
@@ -57,9 +57,61 @@ The format reference is Arcanum CE revision `fb721982`, particularly `first_part
 
 Unsupported features include other footer signatures, legacy code-page filenames, extraction of directory or ignored records, and unrecognized storage flags. Individual patch archives can be opened directly. The single-archive CLI commands inspect raw entries. Sidecar policies apply when resolving through the VFS.
 
+## Local mod packages
+
+Install a mod by placing its directory under a local mods directory, such as `~/Work/arcanum-mods`. Put `arcanum-mod.toml` at the package root, alongside the directories and archives it mounts. Discovery scans immediate child directories and uses manifest IDs independently of directory names. Explicitly selected package mounts are read-only.
+
+### Manifest version 1
+
+Manifests are UTF-8 TOML files up to 1 MiB.
+
+```toml
+manifest_version = 1
+id = "interface-patch"
+name = "Interface Patch"
+version = "1.0.0"
+description = "Updates interface resources."
+# Optional ordering rules go here, above any tables.
+# load_after = ["another-patch"]
+# load_before = ["final-patch"]
+
+[dependencies]
+base-interface = "^1.2"
+
+[[mounts]]
+kind = "archive"
+path = "archives/interface.patch9"
+
+[[mounts]]
+kind = "directory"
+path = "resources"
+```
+
+- `manifest_version`, `id`, `name`, `version`, and `description` are required. The ID starts with a lowercase ASCII letter or digit and uses only lowercase ASCII letters, digits, `.`, `_`, and `-`. The version is a SemVer string.
+- `[dependencies]` maps required mod IDs to SemVer requirements such as `^1.2`, `>=1.2, <2`, or `=1.2.3`. Use `"*"` when any stable version is acceptable. Prerelease matching follows SemVer requirement rules. Omit the table when the package has no dependencies.
+- `load_after` and `load_before` are optional arrays of installed mod IDs. They apply when both packages are enabled and do not enable a package on their own.
+- Each `[[mounts]]` entry takes `kind = "directory"` or `kind = "archive"` and a package-relative `path`. Paths preserve host case, accept either slash style, and reject absolute paths, parent traversal, and symlink components. A directory contributes files at its root and below. An archive contributes its DAT/PATCH resource names. All mounts contribute at the VFS root. Omit mounts for a package that only declares dependencies or ordering rules.
+- Unknown fields, invalid manifests, duplicate IDs, missing required mods, version mismatches, and order cycles are errors. A cycle error identifies the participating IDs and fields. The validator checks that declared mounts exist, are of the correct kind, and have readable directory or archive indexes.
+
+### Selection and precedence
+
+Mod resolution mounts the base game in ordered mode, then adds the selected mods and their transitive dependencies. Dependencies load before their dependents. Among packages ready to load at the same step, the lexically smallest ID loads first. A later package wins resource conflicts, and later mount entries win within a package. The CLI lists the source package on both winning and shadowed mod records. Ordinary `resolve` continues to use CE mode by default. Library callers can apply a load order to any ordered VFS without an Arcanum or CE installation.
+
+```sh
+game="$HOME/Work/arcanum-ce-test"
+mods="$HOME/Work/arcanum-mods"
+target/debug/arcanum-rs mods list "$mods"
+target/debug/arcanum-rs mods info "$mods/Interface Patch"
+target/debug/arcanum-rs mods validate "$mods"
+target/debug/arcanum-rs mods order "$mods" interface-patch
+target/debug/arcanum-rs mods resolve "$game" "$mods" 'art/interface/interface.mes' interface-patch
+```
+
+`list` and `info` read manifest metadata. `validate` and `order` check all installed mods when IDs are omitted. `mods resolve` takes at least one ID. Discovery permits one installed version per ID. Selection is per invocation, and packages are supplied as local directories. Mount validation checks metadata. Compressed payloads are checked when read.
+
 ## Implementation and verification
 
-`dat` owns the index and keeps a seekable input for bounded payload reads. `resource_path` handles virtual path normalization independently of host paths. `vfs` owns mount ordering, discovery, and provenance. The CLI uses these library modules and owns output-file handling. `flate2` provides the Rust zlib backend and `cap-std` confines loose filesystem access to mount roots.
+`dat` owns the index and keeps a seekable input for bounded payload reads. `resource_path` handles virtual path normalization independently of host paths. `vfs` owns mount ordering, discovery, and provenance. `mods` discovers packages, validates manifests, and plans the order before mounting resources. The CLI uses these library modules and owns output-file handling. `flate2` provides the Rust zlib backend. `cap-std` and `cap-fs-ext` confine filesystem access to mount roots and open manifest paths without following symlinks.
 
 ```sh
 cargo fmt --check
@@ -68,8 +120,6 @@ cargo test
 cargo build
 ```
 
-Synthetic tests cover archive parsing and decompression, mount precedence and re-registration, mixed sources, sidecars, directory and ignored records, missing paths, case collisions, traversal and symlink confinement. The legacy DAT footer was verified with synthetic fixtures.
+Synthetic tests cover archive parsing and decompression, mount precedence and re-registration, mixed sources, sidecars, directory and ignored records, missing paths, case collisions, traversal and symlink confinement. Mod tests cover manifest validation, dependency graphs, ordering conflicts, selected overrides, and mount provenance. The legacy DAT footer was verified with synthetic fixtures.
 
 A standalone differential test linked the prebuilt CE TIG library and exercised `tig_file_repository_add` and `tig_file_fopen` in binary mode. The test pointed TIG at original archives and scratch copies of selected loose resources, since registering a directory in TIG can clear its cache. Ten synthetic and twelve installed resolution cases matched TIG, including missing results and archive directory winners. Twelve direct extractions matched byte for byte, including resources from `Arcanum.PATCH0`, `Arcanum.PATCH1`, `Arcanum.PATCH6`, and `Arcanum.PATCH9`. Verification used CE and the game files as read-only inputs and ran without launching the game.
-
-The next milestone is mod manifests and load-order validation. Use the existing mount API to apply a resolved order and the conflict report to explain which mod supplied a resource.

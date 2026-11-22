@@ -6,7 +6,7 @@ The long-term objective is to create a modern, extensible engine with original-g
 
 ## Current Status
 
-**Milestone 0: Resource Explorer**
+**Milestone 2: Mod Manifests and Dependency Resolution**
 
 - DAT1 and legacy DAT archive reading
 - Archive metadata and entry enumeration
@@ -14,12 +14,16 @@ The long-term objective is to create a modern, extensible engine with original-g
 - Normalized resource paths
 - Read-only resource inspection CLI
 - Differential validation against Arcanum CE's TIG resource reader
+- Ordered DAT and loose-directory mounts with resource provenance
+- Local TOML mod manifests, dependency validation, and deterministic load order
+
+See the [manifest specification and CLI guide](README.md#local-mod-packages).
 
 ## Roadmap
 
 - [x] DAT resource explorer
-- [ ] Virtual filesystem and resource precedence
-- [ ] Mod manifests and load ordering
+- [x] Virtual filesystem and resource precedence
+- [x] Mod manifests and load ordering
 - [ ] Extensible content and scripting systems
 - [ ] Engine subsystem modernization
 - [ ] Standalone playable engine
