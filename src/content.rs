@@ -1,5 +1,6 @@
 //! Bounded loading of resolved content from a caller-owned virtual filesystem.
 
+pub mod art;
 pub mod effects;
 pub mod items;
 pub mod schematics;
@@ -83,6 +84,10 @@ pub enum Error {
         provenance: Box<Source>,
         error: mes::Error,
     },
+    Art {
+        provenance: Box<Source>,
+        error: crate::art::Error,
+    },
     Prototype {
         provenance: Box<Source>,
         error: crate::prototype::Error,
@@ -105,6 +110,13 @@ impl fmt::Display for Error {
                 }
                 write!(f, ": {error}")
             }
+            Self::Art { provenance, error } => {
+                write!(f, "{} from {provenance}", provenance.virtual_path)?;
+                if let Some(id) = &provenance.mod_id {
+                    write!(f, " [mod {id}]")?;
+                }
+                write!(f, ": {error}")
+            }
             Self::Prototype { provenance, error } => {
                 write!(f, "{} from {provenance}: {error}", provenance.virtual_path)
             }
@@ -118,6 +130,7 @@ impl std::error::Error for Error {
             Self::Resource { error, .. } => Some(error),
             Self::Mes { error, .. } => Some(error),
             Self::Prototype { error, .. } => Some(error),
+            Self::Art { error, .. } => Some(error),
             Self::TooLarge { .. } => None,
         }
     }

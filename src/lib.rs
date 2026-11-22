@@ -1,5 +1,6 @@
 //! Arcanum resource access, native content and headless gameplay.
 
+pub mod art;
 pub mod content;
 pub mod dat;
 pub mod mes;

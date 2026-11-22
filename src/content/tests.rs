@@ -580,3 +580,64 @@ fn effect_import_distinguishes_missing_malformed_and_unsupported_records() {
         );
     }
 }
+
+#[test]
+fn art_load_uses_mod_precedence_and_reports_the_invalid_winner() {
+    fn one_pixel(red: u8) -> Vec<u8> {
+        let mut bytes = vec![0; 1185];
+        for (offset, value) in [
+            (0, 1u32),
+            (4, 8),
+            (8, 8),
+            (12, 1),
+            (32, 1),
+            (1156, 1),
+            (1160, 1),
+            (1164, 1),
+        ] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes[138] = red;
+        bytes[1184] = 1;
+        bytes
+    }
+
+    let fixture = Fixture::new();
+    fixture.write("base/art/marker.art", &one_pixel(50));
+    let mut vfs = Vfs::new(Policy::Ordered);
+    let base_id = vfs.mount_directory(fixture.0.join("base")).unwrap();
+    let base = art::load_frame(&mut vfs, "art/marker.art", 0).unwrap();
+    assert_eq!(base.source.mount_id, base_id);
+    assert_eq!(base.decoded.frame.pixels, [[50, 0, 0, 255]]);
+
+    fixture.write(
+        "mods/patch/arcanum-mod.toml",
+        br#"
+manifest_version = 1
+id = "patch"
+name = "Synthetic ART patch"
+version = "1.0.0"
+description = "Temporary test fixture."
+[[mounts]]
+kind = "directory"
+path = "resources"
+"#,
+    );
+    let path = fixture.write("mods/patch/resources/Art/Marker.art", &one_pixel(120));
+    let catalog = Catalog::discover(fixture.0.join("mods")).unwrap();
+    let mut vfs = catalog.load_order(&["patch"]).unwrap().apply(vfs).unwrap();
+    let loaded = art::load_frame(&mut vfs, r"Art\MARKER.ART", 0).unwrap();
+    assert_eq!(loaded.decoded.frame.pixels, [[120, 0, 0, 255]]);
+    assert_eq!(loaded.source.virtual_path, "art/marker.art");
+    assert_eq!(loaded.source.mod_id.as_ref().unwrap().as_str(), "patch");
+    assert_eq!(
+        loaded.source.loose_path.as_deref(),
+        Some(Path::new("Art/Marker.art"))
+    );
+
+    fs::write(path, b"bad").unwrap();
+    assert!(matches!(
+        art::load_frame(&mut vfs, "art/marker.art", 0),
+        Err(Error::Art { provenance, error: crate::art::Error::Truncated { section: "header", .. } }) if *provenance == loaded.source
+    ));
+}
