@@ -60,6 +60,7 @@ fn original_art_frames_match_independent_rgba_fingerprints() {
         assert_eq!(loaded.decoded.frame_count, count);
         assert_eq!(loaded.decoded.frames_per_second, 8);
         assert_eq!(loaded.decoded.action_frame, (count - 1) as i32);
+        assert_eq!(loaded.decoded.ignored_trailing_bytes, 0);
         let frame = loaded.decoded.frame;
         assert_eq!((frame.width, frame.height), size);
         assert_eq!(frame.hotspot, hotspot);
@@ -85,6 +86,28 @@ fn original_art_frames_match_independent_rgba_fingerprints() {
         fingerprint(raw.decoded.frame.pixels.as_flattened()),
         0x21338a70ced1d4e1
     );
+}
+
+#[test]
+#[ignore = "requires installed Arcanum data"]
+fn acid_schematic_decodes_declared_frame_and_reports_rle_residue() {
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    let loaded = load_frame(&mut vfs, "art/interface/acid_scheme.art", 0).unwrap();
+    assert_eq!(loaded.source.storage, Storage::Archive(EntryKind::Zlib));
+    assert_eq!(
+        loaded.source.mount_path,
+        game.join("Arcanum1.dat").canonicalize().unwrap()
+    );
+    assert_eq!(loaded.input_bytes, 70_968);
+    assert_eq!(loaded.decoded.ignored_trailing_bytes, 3_409);
+    assert_eq!(loaded.decoded.frame_count, 1);
+    let frame = loaded.decoded.frame;
+    assert_eq!((frame.width, frame.height), (295, 225));
+    assert_eq!(frame.hotspot, (147, 224));
+    assert_eq!(frame.pixels[0], [207, 181, 135, 255]);
+    assert!(frame.pixels.iter().all(|pixel| pixel[3] == 255));
+    assert_eq!(fingerprint(frame.pixels.as_flattened()), 0xa525c396aaf50abe);
 }
 
 fn fingerprint(bytes: &[u8]) -> u64 {

@@ -105,12 +105,40 @@ fn validates_framing_and_rejects_unsupported_layouts() {
             Err(Error::Unsupported(_))
         ));
     }
-    let mut trailing = original;
-    trailing.push(0);
+}
+
+#[test]
+fn reports_extra_bytes_past_all_frame_payloads_without_decoding_them() {
+    let exact = fixture(&[(1, 1, &[1]), (2, 2, &[4, 2])]);
+    let mut padded = exact.clone();
+    padded.extend([0, 0x83, 42]); // Invalid RLE if consumed.
+    for index in 0..2 {
+        let reference = decode_frame(&exact, index).unwrap();
+        assert_eq!(reference.ignored_trailing_bytes, 0);
+        let decoded = decode_frame(&padded, index).unwrap();
+        assert_eq!(decoded.ignored_trailing_bytes, 3);
+        assert_eq!(decoded.frame, reference.frame);
+    }
+}
+
+#[test]
+fn trailing_bytes_cannot_complete_a_declared_rle_packet() {
+    let mut input = fixture(&[(3, 3, &[0x83, 1])]);
+    input.extend([2, 0, 6, 2]); // Would complete the frame if the payload were enlarged.
     assert!(matches!(
-        decode_frame(&trailing, 0),
-        Err(Error::Unsupported(_))
+        decode_frame(&input, 0),
+        Err(Error::Truncated {
+            section: "RLE literal indices",
+            ..
+        })
     ));
+}
+
+#[test]
+fn trailing_bytes_count_toward_the_overall_input_limit() {
+    let mut input = fixture(&[(1, 1, &[1])]);
+    input.resize(MAX_INPUT_BYTES + 1, 0);
+    assert_eq!(decode_frame(&input, 0), Err(Error::InputTooLarge));
 }
 
 #[test]
