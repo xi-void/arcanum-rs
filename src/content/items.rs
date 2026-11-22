@@ -41,6 +41,30 @@ pub struct ResolvedGeneric {
     pub name_source: Source,
 }
 
+/// A namespaced key code, such as `arcanum:key-code/62`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyCode(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyDefinition {
+    pub id: ItemId,
+    pub display_name: String,
+    /// Base weight in game stone units.
+    pub base_weight: u32,
+    /// Base worth in game currency units.
+    pub base_worth: u32,
+    /// Signed base magic/technology complexity.
+    pub magic_tech_complexity: i32,
+    /// Definition code, if assigned. The legacy importer maps explicit zero to absence.
+    pub code: Option<KeyCode>,
+}
+
+#[derive(Debug)]
+pub struct ResolvedKey {
+    pub definition: KeyDefinition,
+    pub name_source: Source,
+}
+
 /// Damage points by channel. Channels can affect different character pools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DamageKind {
@@ -283,6 +307,7 @@ pub struct PrototypeInspection {
     pub weapon_ammo: Option<prototype::WeaponAmmoFields>,
     pub armour: Option<prototype::ArmourFields>,
     pub generic: Option<prototype::GenericFields>,
+    pub key: Option<prototype::KeyFields>,
 }
 
 impl PrototypeInspection {
@@ -312,6 +337,34 @@ impl PrototypeInspection {
             base_weight: unsigned("base weight", fields.item.weight)?,
             base_worth: unsigned("base worth", fields.item.worth)?,
             magic_tech_complexity: fields.item.magic_tech_complexity,
+        })
+    }
+
+    /// Resolve the stored item name and import the Key base properties.
+    pub fn resolve_key(&self, vfs: &mut Vfs) -> Result<Option<ResolvedKey>, ItemDefinitionError> {
+        let Some(fields) = self.key else {
+            return Ok(None);
+        };
+        let (display_name, name_source) = resolve_item_name(vfs, fields.item.description)?;
+        Ok(Some(ResolvedKey {
+            definition: self.key_definition(fields, display_name)?,
+            name_source,
+        }))
+    }
+
+    pub(super) fn key_definition(
+        &self,
+        fields: prototype::KeyFields,
+        display_name: String,
+    ) -> Result<KeyDefinition, ItemDefinitionError> {
+        Ok(KeyDefinition {
+            id: ItemId::from_prototype(self.prototype.header.id),
+            display_name,
+            base_weight: unsigned("base weight", fields.item.weight)?,
+            base_worth: unsigned("base worth", fields.item.worth)?,
+            magic_tech_complexity: fields.item.magic_tech_complexity,
+            code: (fields.key_id != 0)
+                .then(|| KeyCode(format!("arcanum:key-code/{}", fields.key_id))),
         })
     }
 
@@ -626,6 +679,11 @@ fn load(vfs: &mut Vfs, path: &str, detailed: bool) -> Result<PrototypeInspection
         } else {
             None
         };
+        let key = if detailed && header.is_key() {
+            Some(prototype::decode_key(&bytes)?.1)
+        } else {
+            None
+        };
         let description = if let Some(fields) = food {
             Some(fields.description)
         } else if let Some(fields) = &weapon_ammo {
@@ -634,23 +692,28 @@ fn load(vfs: &mut Vfs, path: &str, detailed: bool) -> Result<PrototypeInspection
             Some(fields.item.description)
         } else if let Some(fields) = generic {
             Some(fields.item.description)
+        } else if let Some(fields) = key {
+            Some(fields.item.description)
         } else {
             prototype::decode_item_description(&bytes, header)?
         };
-        Ok((header, description, food, weapon_ammo, armour, generic))
+        Ok((header, description, food, weapon_ammo, armour, generic, key))
     });
     match result {
-        Ok((header, description, food, weapon_ammo, armour, generic)) => Ok(PrototypeInspection {
-            prototype: LoadedPrototype {
-                source,
-                header,
-                description,
-                food,
-            },
-            weapon_ammo,
-            armour,
-            generic,
-        }),
+        Ok((header, description, food, weapon_ammo, armour, generic, key)) => {
+            Ok(PrototypeInspection {
+                prototype: LoadedPrototype {
+                    source,
+                    header,
+                    description,
+                    food,
+                },
+                weapon_ammo,
+                armour,
+                generic,
+                key,
+            })
+        }
         Err(error) => Err(Error::Prototype {
             provenance: Box::new(source),
             error,

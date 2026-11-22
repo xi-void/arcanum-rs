@@ -319,16 +319,14 @@ fn validates_references_for_all_learned_and_found_groups() {
 #[test]
 #[ignore = "requires the installed Arcanum data"]
 fn readiness_checks_all_supported_schematic_item_and_artwork_resources() {
-    use arcanum_rs::content::schematics::readiness::{IssueKind, Status, audit_readiness};
-    use std::collections::BTreeMap;
+    use arcanum_rs::content::schematics::readiness::{Status, audit_readiness};
 
     let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
     let mut vfs = Vfs::from_game(game, Policy::Ce).unwrap();
     let audit = audit_readiness(&mut vfs, &[]).unwrap();
     assert_eq!(audit.statuses.len(), 119);
-    let mut passed = 0;
-    let mut counts = BTreeMap::new();
-    let mut newly_passed = Vec::new();
+    assert_eq!(audit.references.references.len(), 119);
+    let mut generic_recipes = Vec::new();
     for ((id, status), (reference_id, report)) in
         audit.statuses.into_iter().zip(audit.references.references)
     {
@@ -336,36 +334,86 @@ fn readiness_checks_all_supported_schematic_item_and_artwork_resources() {
         let Status::Checked(issues) = status else {
             panic!("recipe {} failed reference resolution", id.0);
         };
-        if issues.is_empty() {
-            passed += 1;
-            if report
-                .unwrap()
-                .items
-                .values()
-                .any(|item| item.prototype.as_ref().unwrap().header.is_generic())
-            {
-                newly_passed.push(id.0);
-            }
-        } else {
-            assert_eq!(id, LegacyRecipeId(5280));
-        }
-        for issue in issues {
-            assert!(
-                issue.kind == IssueKind::UnsupportedItemType(11),
-                "recipe {}: {issue:?}",
-                id.0
-            );
-            *counts.entry(issue.kind).or_insert(0) += 1;
+        assert!(issues.is_empty(), "recipe {}: {issues:?}", id.0);
+        if report
+            .unwrap()
+            .items
+            .values()
+            .any(|item| item.prototype.as_ref().unwrap().header.is_generic())
+        {
+            generic_recipes.push(id.0);
         }
     }
-    assert_eq!(passed, 118);
+    assert_eq!(generic_recipes.len(), 81);
+    for id in [2210, 2400, 2450, 5280] {
+        assert!(generic_recipes.contains(&id));
+    }
+}
+
+#[test]
+#[ignore = "requires the installed Arcanum data"]
+fn installed_key_definitions_preserve_zero_and_iron_clan_code() {
+    use arcanum_rs::content::items::{ItemId, KeyCode, KeyDefinition, inspect_prototype};
+    use arcanum_rs::content::schematics::readiness::{Status, audit_readiness};
+
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    let id = LegacyRecipeId(5280);
+    let audit = audit_readiness(&mut vfs, &[id]).unwrap();
+    assert_eq!(audit.statuses, [(id, Status::Checked(Vec::new()))]);
+    let recipe = audit.references.references[0].1.as_ref().unwrap();
+    assert_eq!(recipe.title.as_ref().unwrap().text, "Iron Key");
+    let definition = recipe.definition.as_ref().unwrap();
     assert_eq!(
-        counts,
-        BTreeMap::from([(IssueKind::UnsupportedItemType(11), 1)])
+        definition.variants[0].product,
+        ItemId("arcanum:item/prototype-12081".into())
     );
-    assert_eq!(newly_passed.len(), 80);
-    for id in [2210, 2400, 2450] {
-        assert!(newly_passed.contains(&id));
+    assert_eq!(recipe.legacy.variants[0].product, BasicPrototypeId(12061));
+
+    for (basic, name, complexity, discipline, key_id, code) in [
+        (12060, "Key", 0, 0, 0, None),
+        (
+            12061,
+            "Iron Clan Key",
+            -10,
+            6,
+            62,
+            Some("arcanum:key-code/62"),
+        ),
+    ] {
+        let serial = BasicPrototypeId(basic).serialized().unwrap();
+        let path = format!("proto/{:06} - key.pro", serial.0);
+        let inspection = inspect_prototype(&mut vfs, &path).unwrap();
+        let prototype = &inspection.prototype;
+        assert_eq!(prototype.header.version, 119);
+        assert_eq!(prototype.header.object_type, 11);
+        assert_eq!(prototype.header.id, serial);
+        assert_eq!(prototype.source.storage, Storage::Loose);
+        assert_eq!(prototype.source.virtual_path, path);
+        assert_eq!(
+            prototype.source.mount_path,
+            game.join("data").canonicalize().unwrap()
+        );
+        let fields = inspection.key.unwrap();
+        assert_eq!(fields.item.description, DescriptionId(basic as i32));
+        assert_eq!(fields.item.discipline, discipline);
+        assert_eq!(fields.key_id, key_id);
+        let resolved = inspection.resolve_key(&mut vfs).unwrap().unwrap();
+        assert_eq!(
+            resolved.name_source.mount_path.file_name().unwrap(),
+            "Arcanum5.dat"
+        );
+        assert_eq!(
+            resolved.definition,
+            KeyDefinition {
+                id: ItemId(format!("arcanum:item/prototype-{}", serial.0)),
+                display_name: name.into(),
+                base_weight: 1,
+                base_worth: 0,
+                magic_tech_complexity: complexity,
+                code: code.map(|code| KeyCode(code.into())),
+            }
+        );
     }
 }
 
