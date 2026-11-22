@@ -29,6 +29,16 @@ fn fire_floor(id: &str, minimum_percent: i32) -> EffectDefinition {
     }
 }
 
+fn electrical(id: &str, percentage_points: i32) -> EffectDefinition {
+    EffectDefinition {
+        id: EffectId(id.into()),
+        operations: vec![EffectOperation::AddResistance {
+            channel: ResistanceKind::Electrical,
+            percentage_points,
+        }],
+    }
+}
+
 fn equip<'a>(
     runtime: &mut Runtime<'a>,
     actor: ActorId,
@@ -179,7 +189,7 @@ fn unsupported_composite_reports_error_without_partial_application() {
     let item = item();
     let mut effect = additive("smithing:effect/ward", 1);
     let unsupported = EffectOperation::AddResistance {
-        channel: ResistanceKind::Electrical,
+        channel: ResistanceKind::Fire,
         percentage_points: 8,
     };
     effect
@@ -201,6 +211,200 @@ fn unsupported_composite_reports_error_without_partial_application() {
     assert_eq!(runtime.activation(id).unwrap().source, source);
     assert_eq!(runtime.activations.len(), 1);
     assert_eq!(runtime.item(source).unwrap().equipped_by, Some(actor));
+}
+
+#[test]
+fn electrical_sources_can_be_removed_independently_without_cross_actor_leakage() {
+    let item = item();
+    let effect = electrical("smithing:effect/conductor", 8);
+    let mut runtime = Runtime::default();
+    let actor = runtime.create_actor(10).unwrap();
+    let other = runtime.create_actor(20).unwrap();
+    runtime
+        .set_underlying_electrical_resistance(actor, 30)
+        .unwrap();
+    runtime
+        .set_underlying_electrical_resistance(other, 12)
+        .unwrap();
+    let first = equip(&mut runtime, actor, &item);
+    let second = equip(&mut runtime, actor, &item);
+    let first_grant = runtime.activate_effect(first, actor, &effect).unwrap();
+    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(38));
+    assert_eq!(
+        runtime.activation(first_grant).unwrap().definition.id,
+        effect.id
+    );
+    let second_grant = runtime.activate_effect(second, actor, &effect).unwrap();
+    assert_ne!(first_grant, second_grant);
+    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(46));
+    assert_eq!(runtime.electrical_resistance(other), Ok(12));
+    assert_eq!(
+        runtime.activate_effect(first, other, &effect),
+        Err(Error::NotEquippedBy {
+            item: first,
+            actor: other
+        })
+    );
+
+    runtime.remove_activation(second_grant).unwrap();
+    assert_eq!(
+        runtime.remove_activation(second_grant),
+        Err(Error::UnknownActivation(second_grant))
+    );
+    assert_eq!(runtime.item(second).unwrap().equipped_by, Some(actor));
+    let surviving = runtime.activation(first_grant).unwrap();
+    assert_eq!(
+        (
+            surviving.source,
+            surviving.target,
+            surviving.electrical_resistance_points
+        ),
+        (first, actor, 8)
+    );
+    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(38));
+    runtime.unequip(first, actor).unwrap();
+    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(30));
+    assert_eq!(runtime.electrical_resistance(other), Ok(12));
+}
+
+#[test]
+fn electrical_adjustments_follow_underlying_values_with_separate_query_clamping() {
+    let item = item();
+    let plus = electrical("smithing:effect/conductor", 8);
+    let minus = electrical("smithing:effect/drain", -10);
+    let mut runtime = Runtime::default();
+    let actor = runtime.create_actor(10).unwrap();
+    let first = equip(&mut runtime, actor, &item);
+    let second = equip(&mut runtime, actor, &item);
+    runtime
+        .set_underlying_electrical_resistance(actor, 30)
+        .unwrap();
+    runtime.activate_effect(first, actor, &plus).unwrap();
+    runtime.activate_effect(second, actor, &plus).unwrap();
+    runtime.unequip(first, actor).unwrap();
+    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(38));
+    runtime
+        .set_underlying_electrical_resistance(actor, 92)
+        .unwrap();
+    assert_eq!(runtime.underlying_electrical_resistance(actor), Ok(92));
+    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(100));
+    assert_eq!(runtime.electrical_resistance(actor), Ok(95));
+    runtime.unequip(second, actor).unwrap();
+    assert_eq!(runtime.electrical_resistance(actor), Ok(92));
+
+    runtime.equip(second, actor).unwrap();
+    runtime
+        .set_underlying_electrical_resistance(actor, 3)
+        .unwrap();
+    runtime.activate_effect(second, actor, &minus).unwrap();
+    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(-7));
+    assert_eq!(runtime.electrical_resistance(actor), Ok(0));
+    runtime.unequip(second, actor).unwrap();
+    assert_eq!(runtime.electrical_resistance(actor), Ok(3));
+}
+
+#[test]
+fn entire_body_of_fire_activation_is_rejected() {
+    let item = item();
+    let mut composite = fire_floor("arcanum:effect/54", 95);
+    composite
+        .operations
+        .extend(electrical("demo:effect/electrical", 8).operations);
+    let poison = EffectOperation::ResistanceFloor {
+        channel: ResistanceKind::Poison,
+        minimum_percent: 97,
+    };
+    composite.operations.push(poison);
+    let existing = fire_floor("arcanum:effect/53", 50);
+    let mut runtime = Runtime::default();
+    let actor = runtime.create_actor(10).unwrap();
+    runtime
+        .set_underlying_electrical_resistance(actor, 30)
+        .unwrap();
+    let first = equip(&mut runtime, actor, &item);
+    let second = equip(&mut runtime, actor, &item);
+    let floor = runtime.activate_effect(first, actor, &existing).unwrap();
+    assert_eq!(
+        runtime.activate_effect(second, actor, &composite),
+        Err(Error::UnsupportedOperation(poison))
+    );
+    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(30));
+    assert_eq!(runtime.fire_resistance(actor), Ok(50));
+    assert_eq!(runtime.armour_class(actor), Ok(10));
+    assert_eq!(runtime.activation(floor).unwrap().source, first);
+    assert_eq!(runtime.activations.len(), 1);
+    assert_eq!(runtime.item(second).unwrap().equipped_by, Some(actor));
+    let unknown_actor = ActorId(u64::MAX);
+    let unknown_item = ItemInstanceId(u64::MAX);
+    assert_eq!(
+        runtime.activate_effect(second, unknown_actor, &composite),
+        Err(Error::UnknownActor(unknown_actor))
+    );
+    assert_eq!(
+        runtime.activate_effect(unknown_item, actor, &composite),
+        Err(Error::UnknownItem(unknown_item))
+    );
+}
+
+#[test]
+fn electrical_overflow_preserves_actively_cancelled_grants_and_actor_state() {
+    let item = item();
+    let plus = electrical("smithing:effect/conductor", 1);
+    let minus = electrical("smithing:effect/drain", -1);
+    let mut mixed = electrical("smithing:effect/mixed", 1);
+    mixed
+        .operations
+        .push(EffectOperation::AddArmourClass { points: 3 });
+    let mut oversized = electrical("smithing:effect/oversized", i32::MAX);
+    oversized.operations.extend(plus.operations.iter().copied());
+    let mut runtime = Runtime::default();
+    let actor = runtime.create_actor(10).unwrap();
+    let first = equip(&mut runtime, actor, &item);
+    let second = equip(&mut runtime, actor, &item);
+    runtime
+        .set_underlying_electrical_resistance(actor, i32::MAX)
+        .unwrap();
+    assert_eq!(
+        runtime.activate_effect(first, actor, &mixed),
+        Err(Error::ElectricalResistanceOverflow)
+    );
+    assert_eq!(runtime.armour_class(actor), Ok(10));
+    assert!(runtime.activations.is_empty());
+    assert_eq!(runtime.item(first).unwrap().equipped_by, Some(actor));
+    let negative = runtime.activate_effect(first, actor, &minus).unwrap();
+    assert_eq!(
+        runtime.activate_effect(second, actor, &oversized),
+        Err(Error::ElectricalResistanceOverflow)
+    );
+    let positive = runtime.activate_effect(second, actor, &plus).unwrap();
+    assert_eq!(
+        runtime.electrical_resistance_after_effects(actor),
+        Ok(i32::MAX)
+    );
+    assert_eq!(
+        runtime.remove_activation(negative),
+        Err(Error::ElectricalResistanceOverflow)
+    );
+    assert_eq!(
+        runtime.unequip(first, actor),
+        Err(Error::ElectricalResistanceOverflow)
+    );
+    assert_eq!(runtime.activation(negative).unwrap().source, first);
+    assert_eq!(runtime.item(first).unwrap().equipped_by, Some(actor));
+    runtime.remove_activation(positive).unwrap();
+    assert_eq!(
+        runtime.set_underlying_electrical_resistance(actor, i32::MIN),
+        Err(Error::ElectricalResistanceOverflow)
+    );
+    assert_eq!(
+        runtime.underlying_electrical_resistance(actor),
+        Ok(i32::MAX)
+    );
+    runtime.unequip(first, actor).unwrap();
+    assert_eq!(
+        runtime.electrical_resistance_after_effects(actor),
+        Ok(i32::MAX)
+    );
 }
 
 #[test]
@@ -328,7 +532,7 @@ fn fire_floor_rejects_invalid_handles_and_other_channels() {
 }
 
 #[test]
-fn supported_ac_and_fire_operations_share_one_atomic_activation() {
+fn supported_operations_share_one_atomic_activation() {
     let item = item();
     let mut mixed = additive("smithing:effect/mixed", 1);
     mixed
@@ -337,23 +541,32 @@ fn supported_ac_and_fire_operations_share_one_atomic_activation() {
     mixed
         .operations
         .extend(fire_floor("smithing:effect/weaker", 40).operations);
+    mixed
+        .operations
+        .extend(electrical("demo:effect/electrical", 8).operations);
     let mut runtime = Runtime::default();
     let actor = runtime.create_actor(i32::MAX).unwrap();
     let source = equip(&mut runtime, actor, &item);
     runtime.set_underlying_fire_resistance(actor, 20).unwrap();
+    runtime
+        .set_underlying_electrical_resistance(actor, 30)
+        .unwrap();
     assert_eq!(
         runtime.activate_effect(source, actor, &mixed),
         Err(Error::ArmourClassOverflow)
     );
     assert_eq!(runtime.fire_resistance(actor), Ok(20));
+    assert_eq!(runtime.electrical_resistance(actor), Ok(30));
     assert_eq!(runtime.item(source).unwrap().equipped_by, Some(actor));
     runtime.set_base_armour_class(actor, 10).unwrap();
     let id = runtime.activate_effect(source, actor, &mixed).unwrap();
     assert_eq!(runtime.armour_class(actor), Ok(11));
     assert_eq!(runtime.fire_resistance(actor), Ok(50));
+    assert_eq!(runtime.electrical_resistance(actor), Ok(38));
     runtime.remove_activation(id).unwrap();
     assert_eq!(runtime.armour_class(actor), Ok(10));
     assert_eq!(runtime.fire_resistance(actor), Ok(20));
+    assert_eq!(runtime.electrical_resistance(actor), Ok(30));
 }
 
 #[test]

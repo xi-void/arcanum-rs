@@ -41,7 +41,8 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] schematic inspect <game-directory> <recipe-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] schematic audit <game-directory> [--all-references | [--readiness] [<recipe-id> ...]] [--mods <mods-directory> <mod-id> ...]
   arcanum-rs simulate equipment-demo
-  arcanum-rs simulate resistance-demo";
+  arcanum-rs simulate resistance-demo
+  arcanum-rs simulate electrical-demo";
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -67,6 +68,9 @@ fn main() -> ExitCode {
         }
         (Some("simulate"), [_, demo]) if policy == Policy::Ce && demo == "resistance-demo" => {
             resistance_demo(&mut io::stdout().lock())
+        }
+        (Some("simulate"), [_, demo]) if policy == Policy::Ce && demo == "electrical-demo" => {
+            electrical_demo(&mut io::stdout().lock())
         }
         (Some("mes"), [_, action, game, resource, options @ ..]) if action == "inspect" => {
             inspect_mes(Path::new(game), resource, None, options, policy)
@@ -234,6 +238,70 @@ fn resistance_demo(out: &mut impl Write) -> Result<(), Box<dyn Error>> {
         out,
         "Unequipped {second:?}, Fire resistance {}%",
         runtime.fire_resistance(actor)?
+    )?;
+    Ok(())
+}
+
+fn electrical_demo(out: &mut impl Write) -> Result<(), Box<dyn Error>> {
+    let item = items::GenericDefinition {
+        id: items::ItemId("demo:item/electrical-charm".into()),
+        display_name: "Electrical charm".into(),
+        base_weight: 1,
+        base_worth: 0,
+        magic_tech_complexity: 0,
+    };
+    let effect = EffectDefinition {
+        id: EffectId("demo:effect/electrical-adjustment".into()),
+        operations: vec![EffectOperation::AddResistance {
+            channel: items::ResistanceKind::Electrical,
+            percentage_points: 8,
+        }],
+    };
+    let mut runtime = Runtime::default();
+    let actor = runtime.create_actor(10)?;
+    runtime.set_underlying_electrical_resistance(actor, 30)?;
+    writeln!(
+        out,
+        "{actor:?} starts with underlying Electrical resistance {}%",
+        runtime.underlying_electrical_resistance(actor)?
+    )?;
+    let first = runtime.instantiate_item(ItemDefinitionRef::Generic(&item))?;
+    let second = runtime.instantiate_item(ItemDefinitionRef::Generic(&item))?;
+    let mut grant = |source| -> Result<_, Box<dyn Error>> {
+        runtime.equip(source, actor)?;
+        let id = runtime.activate_effect(source, actor, &effect)?;
+        writeln!(
+            out,
+            "Equipped {source:?}, granted {id:?} ({:+} points), intermediate {}%",
+            runtime.activation(id)?.electrical_resistance_points,
+            runtime.electrical_resistance_after_effects(actor)?
+        )?;
+        Ok(id)
+    };
+    grant(first)?;
+    let remaining = grant(second)?;
+    runtime.unequip(first, actor)?;
+    let surviving = runtime.activation(remaining)?;
+    writeln!(
+        out,
+        "Unequipped {first:?}, {:?} remains, intermediate {}%",
+        surviving.id,
+        runtime.electrical_resistance_after_effects(actor)?
+    )?;
+    runtime.set_underlying_electrical_resistance(actor, 92)?;
+    writeln!(
+        out,
+        "Underlying changed to {}%, intermediate {}%, ordinary query {}%",
+        runtime.underlying_electrical_resistance(actor)?,
+        runtime.electrical_resistance_after_effects(actor)?,
+        runtime.electrical_resistance(actor)?
+    )?;
+    runtime.unequip(second, actor)?;
+    writeln!(
+        out,
+        "Unequipped {second:?}, intermediate {}%, ordinary query {}%",
+        runtime.electrical_resistance_after_effects(actor)?,
+        runtime.electrical_resistance(actor)?
     )?;
     Ok(())
 }

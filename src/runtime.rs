@@ -1,4 +1,4 @@
-//! Standalone equipment associations, additive AC and Fire resistance floors.
+//! Standalone equipment associations, additive AC and bounded resistance effects.
 
 use crate::content::effects::{EffectDefinition, EffectOperation};
 use crate::content::items::{
@@ -57,6 +57,8 @@ pub struct EffectActivation<'content> {
     pub armour_class_points: i32,
     /// The strongest Fire minimum granted by this activation, if any.
     pub fire_resistance_floor: Option<i32>,
+    /// The signed Electrical adjustment in percentage points granted at activation.
+    pub electrical_resistance_points: i32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -74,6 +76,7 @@ pub enum Error {
     },
     UnsupportedOperation(EffectOperation),
     ArmourClassOverflow,
+    ElectricalResistanceOverflow,
     IdentityExhausted,
 }
 
@@ -93,6 +96,9 @@ impl fmt::Display for Error {
                 write!(f, "unsupported runtime effect operation {operation:?}")
             }
             Self::ArmourClassOverflow => f.write_str("armour class exceeds signed 32-bit range"),
+            Self::ElectricalResistanceOverflow => {
+                f.write_str("Electrical resistance exceeds signed 32-bit range")
+            }
             Self::IdentityExhausted => f.write_str("runtime identity space exhausted"),
         }
     }
@@ -103,6 +109,7 @@ impl std::error::Error for Error {}
 struct ActorState {
     base_ac: i32,
     underlying_fire_resistance: i32,
+    underlying_electrical_resistance: i32,
 }
 
 /// Owns mutable state. IDs are local to the issuing runtime and never reused
@@ -123,6 +130,7 @@ impl<'content> Runtime<'content> {
             ActorState {
                 base_ac,
                 underlying_fire_resistance: 0,
+                underlying_electrical_resistance: 0,
             },
         );
         Ok(id)
@@ -196,6 +204,38 @@ impl<'content> Runtime<'content> {
         Ok(self.fire_resistance_after_effects(actor)?.clamp(0, 95))
     }
 
+    /// Stored Electrical resistance in signed percentage points, before adjustments.
+    pub fn underlying_electrical_resistance(&self, actor: ActorId) -> Result<i32, Error> {
+        Ok(self.actor(actor)?.underlying_electrical_resistance)
+    }
+
+    pub fn set_underlying_electrical_resistance(
+        &mut self,
+        actor: ActorId,
+        value: i32,
+    ) -> Result<(), Error> {
+        self.actor(actor)?;
+        checked_electrical(self.total_electrical(actor, value, |_| true))?;
+        self.actors
+            .get_mut(&actor)
+            .expect("validated actor")
+            .underlying_electrical_resistance = value;
+        Ok(())
+    }
+
+    /// Apply the active additions before the bounds stage. Electrical currently has no bounds.
+    pub fn electrical_resistance_after_effects(&self, actor: ActorId) -> Result<i32, Error> {
+        let underlying = self.underlying_electrical_resistance(actor)?;
+        checked_electrical(self.total_electrical(actor, underlying, |_| true))
+    }
+
+    /// Ordinary Electrical resistance query, clamped after evaluating active effects.
+    pub fn electrical_resistance(&self, actor: ActorId) -> Result<i32, Error> {
+        Ok(self
+            .electrical_resistance_after_effects(actor)?
+            .clamp(0, 95))
+    }
+
     pub fn item(&self, item: ItemInstanceId) -> Result<&ItemInstance<'content>, Error> {
         self.items.get(&item).ok_or(Error::UnknownItem(item))
     }
@@ -219,9 +259,9 @@ impl<'content> Runtime<'content> {
 
     /// End the association and remove every activation granted by this instance.
     pub fn unequip(&mut self, item: ItemInstanceId, actor: ActorId) -> Result<(), Error> {
-        let base = self.base_armour_class(actor)?;
+        self.actor(actor)?;
         self.require_wearer(item, actor)?;
-        checked_ac(self.total_ac(actor, base, |grant| grant.source != item))?;
+        self.validate_remaining_totals(actor, |grant| grant.source != item)?;
         self.activations.retain(|_, grant| grant.source != item);
         self.items
             .get_mut(&item)
@@ -237,10 +277,11 @@ impl<'content> Runtime<'content> {
         target: ActorId,
         definition: &'content EffectDefinition,
     ) -> Result<ActivationId, Error> {
-        let base = self.base_armour_class(target)?;
+        let actor = self.actor(target)?;
         self.require_wearer(source, target)?;
         let mut points = 0i128;
         let mut fire_resistance_floor: Option<i32> = None;
+        let mut electrical_points = 0i128;
         for &operation in &definition.operations {
             match operation {
                 EffectOperation::AddArmourClass { points: adjustment } => {
@@ -252,11 +293,20 @@ impl<'content> Runtime<'content> {
                 } => {
                     fire_resistance_floor = fire_resistance_floor.max(Some(minimum_percent));
                 }
+                EffectOperation::AddResistance {
+                    channel: ResistanceKind::Electrical,
+                    percentage_points,
+                } => electrical_points += i128::from(percentage_points),
                 _ => return Err(Error::UnsupportedOperation(operation)),
             }
         }
         let armour_class_points = checked_ac(points)?;
-        checked_ac(self.total_ac(target, base, |_| true) + points)?;
+        let electrical_resistance_points = checked_electrical(electrical_points)?;
+        checked_ac(self.total_ac(target, actor.base_ac, |_| true) + points)?;
+        checked_electrical(
+            self.total_electrical(target, actor.underlying_electrical_resistance, |_| true)
+                + electrical_points,
+        )?;
         let id = ActivationId(self.allocate_id()?);
         self.activations.insert(
             id,
@@ -267,6 +317,7 @@ impl<'content> Runtime<'content> {
                 definition,
                 armour_class_points,
                 fire_resistance_floor,
+                electrical_resistance_points,
             },
         );
         Ok(id)
@@ -275,8 +326,7 @@ impl<'content> Runtime<'content> {
     /// Remove exactly one recorded application, leaving its source equipped.
     pub fn remove_activation(&mut self, id: ActivationId) -> Result<(), Error> {
         let target = self.activation(id)?.target;
-        let base = self.base_armour_class(target)?;
-        checked_ac(self.total_ac(target, base, |grant| grant.id != id))?;
+        self.validate_remaining_totals(target, |grant| grant.id != id)?;
         self.activations.remove(&id);
         Ok(())
     }
@@ -300,13 +350,45 @@ impl<'content> Runtime<'content> {
         keep: impl Fn(&EffectActivation<'content>) -> bool,
     ) -> i128 {
         // A wide accumulator makes signed contributions independent of order.
-        i128::from(base_ac)
-            + self
-                .activations
-                .values()
-                .filter(|grant| grant.target == actor && keep(grant))
-                .map(|grant| i128::from(grant.armour_class_points))
-                .sum::<i128>()
+        i128::from(base_ac) + self.sum_adjustments(actor, keep, |grant| grant.armour_class_points)
+    }
+
+    fn total_electrical(
+        &self,
+        actor: ActorId,
+        underlying: i32,
+        keep: impl Fn(&EffectActivation<'content>) -> bool,
+    ) -> i128 {
+        i128::from(underlying)
+            + self.sum_adjustments(actor, keep, |grant| grant.electrical_resistance_points)
+    }
+
+    fn sum_adjustments(
+        &self,
+        actor: ActorId,
+        keep: impl Fn(&EffectActivation<'content>) -> bool,
+        points: impl Fn(&EffectActivation<'content>) -> i32,
+    ) -> i128 {
+        self.activations
+            .values()
+            .filter(|grant| grant.target == actor && keep(grant))
+            .map(|grant| i128::from(points(grant)))
+            .sum()
+    }
+
+    fn validate_remaining_totals(
+        &self,
+        target: ActorId,
+        keep: impl Fn(&EffectActivation<'content>) -> bool,
+    ) -> Result<(), Error> {
+        let actor = self.actor(target)?;
+        checked_ac(self.total_ac(target, actor.base_ac, &keep))?;
+        checked_electrical(self.total_electrical(
+            target,
+            actor.underlying_electrical_resistance,
+            keep,
+        ))?;
+        Ok(())
     }
 
     fn allocate_id(&mut self) -> Result<u64, Error> {
@@ -320,6 +402,10 @@ impl<'content> Runtime<'content> {
 
 fn checked_ac(value: i128) -> Result<i32, Error> {
     i32::try_from(value).map_err(|_| Error::ArmourClassOverflow)
+}
+
+fn checked_electrical(value: i128) -> Result<i32, Error> {
+    i32::try_from(value).map_err(|_| Error::ElectricalResistanceOverflow)
 }
 
 #[cfg(test)]

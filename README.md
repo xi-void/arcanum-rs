@@ -7,7 +7,8 @@ The long-term objective is a standalone, extensible engine with
 original-game compatibility and OpenMW-style modding capabilities.
 
 **Current status:** Resource and content inspection, mod-aware loading,
-and a headless runtime for additive AC and Fire resistance floors.
+and a headless runtime for additive AC, Fire resistance floors, and
+Electrical resistance additions.
 
 ## Roadmap
 
@@ -38,6 +39,7 @@ Build with `cargo build`, then run these commands from the project directory.
 ```sh
 target/debug/arcanum-rs simulate equipment-demo
 target/debug/arcanum-rs simulate resistance-demo
+target/debug/arcanum-rs simulate electrical-demo
 ```
 
 The asset-free equipment demo applies effect 128 to one actor from two item
@@ -47,6 +49,12 @@ source leaves AC at 11, and removing the first restores AC to 10.
 The resistance demo grants effect 53 from two independent item
 instances. Fire resistance rises from 20% to 50%, stays at 50% after
 removing one source, and returns to 20% when the last source is removed.
+
+The Electrical demo applies the +8 percentage-point operation found in
+Body of Fire using a synthetic one-operation definition. It shows two
+independent grants, then changes the underlying value while one grant
+is still active. At that point the intermediate result is 100% and the
+ordinary query returns 95%.
 [Effect activation ownership](docs/ARCHITECTURE.md#headless-effect-activation-ownership)
 
 ```sh
