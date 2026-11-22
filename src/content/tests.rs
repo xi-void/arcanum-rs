@@ -1,0 +1,168 @@
+use super::*;
+use crate::dat::EntryKind;
+use crate::mods::Catalog;
+use crate::vfs::Policy;
+use flate2::{Compression, write::ZlibEncoder};
+use std::fs;
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+struct Fixture(PathBuf);
+
+impl Fixture {
+    fn new() -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        loop {
+            let path = std::env::temp_dir().join(format!(
+                "arcanum-content-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return Self(path),
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(err) => panic!("{err}"),
+            }
+        }
+    }
+
+    fn write(&self, path: &str, data: &[u8]) -> PathBuf {
+        let path = self.0.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, data).unwrap();
+        path
+    }
+
+    fn archive(&self) -> PathBuf {
+        let name = b"mes\\test.mes\0";
+        let text = b"{8}{Archive value.}\r\n{9}{Only in the archive}";
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(text).unwrap();
+        let mut archive = encoder.finish().unwrap();
+        let compressed = archive.len() as u32;
+        let name_length = name.len() as u32;
+        for value in [compressed + 4, 1, name_length] {
+            archive.extend(value.to_le_bytes());
+        }
+        archive.extend(name);
+        for value in [0, 2, text.len() as u32, compressed, 0] {
+            archive.extend(value.to_le_bytes());
+        }
+        archive.extend(b" TAD");
+        archive.extend(name_length.to_le_bytes());
+        archive.extend((24 + name_length + 16).to_le_bytes());
+        self.write("original.patch", &archive)
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn loads_archive_then_mod_replacement_and_preserves_provenance() {
+    let fixture = Fixture::new();
+    let archive = fixture.archive().canonicalize().unwrap();
+    let mut vfs = Vfs::new(Policy::Ordered);
+    let base_id = vfs.mount_archive(&archive).unwrap();
+    let base = load_mes(&mut vfs, r".\MES\TEST.MES").unwrap();
+    assert_eq!(base.mes.get(8), Some("Archive value."));
+    assert_eq!(base.source.virtual_path, "mes/test.mes");
+    assert_eq!(base.source.mount_id, base_id);
+    assert_eq!(base.source.mount_path, archive);
+    assert_eq!(base.source.storage, Storage::Archive(EntryKind::Zlib));
+    assert!(base.source.mod_id.is_none());
+
+    fixture.write(
+        "mods/patch/arcanum-mod.toml",
+        br#"
+manifest_version = 1
+id = "patch"
+name = "Synthetic MES patch"
+version = "1.0.0"
+description = "Temporary test fixture."
+[[mounts]]
+kind = "directory"
+path = "resources"
+"#,
+    );
+    fixture.write("mods/patch/resources/Mes/Test.mes", b"{8}{Mod override.}");
+    let catalog = Catalog::discover(fixture.0.join("mods")).unwrap();
+    let mut vfs = catalog.load_order(&["patch"]).unwrap().apply(vfs).unwrap();
+    let replacement = load_mes(&mut vfs, "mes/test.mes").unwrap();
+    assert_eq!(replacement.mes.get(8), Some("Mod override."));
+    assert_eq!(replacement.mes.get(9), None);
+    assert_eq!(replacement.source.virtual_path, base.source.virtual_path);
+    assert_ne!(replacement.source.mount_id, base.source.mount_id);
+    assert_eq!(replacement.source.mod_id.unwrap().as_str(), "patch");
+    assert_eq!(replacement.source.storage, Storage::Loose);
+    assert_eq!(
+        replacement.source.loose_path.as_deref(),
+        Some(Path::new("Mes/Test.mes"))
+    );
+}
+
+#[test]
+fn distinguishes_resolution_and_parse_errors_and_keeps_the_source() {
+    let fixture = Fixture::new();
+    fixture.write("mes/truncated.mes", b"{5}{unfinished");
+    fixture.write("mes/encoded.mes", b"{5}{caf\xe9}");
+    let mut vfs = Vfs::new(Policy::Ce);
+    let id = vfs.mount_directory(&fixture.0).unwrap();
+    assert!(matches!(
+        load_mes(&mut vfs, "mes/absent.mes"),
+        Err(Error::Resource {
+            error: vfs::Error::NotFound(_),
+            ..
+        })
+    ));
+    assert!(matches!(
+        load_mes(&mut vfs, "../escape"),
+        Err(Error::Resource {
+            error: vfs::Error::InvalidPath { .. },
+            ..
+        })
+    ));
+    assert!(matches!(
+        load_mes(&mut vfs, "MES/TRUNCATED.MES"),
+        Err(Error::Mes { provenance, error }) if provenance.mount_id == id && error.kind == mes::ErrorKind::UnterminatedField
+    ));
+    assert_eq!(
+        load_mes_with_encoding(&mut vfs, "mes/encoded.mes", Encoding::Windows1252)
+            .unwrap()
+            .mes
+            .get(5),
+        Some("café")
+    );
+    assert!(matches!(
+        load_mes_with_encoding(&mut vfs, "mes/encoded.mes", Encoding::Utf8),
+        Err(Error::Mes { error, .. }) if error.kind == mes::ErrorKind::InvalidUtf8
+    ));
+}
+
+#[test]
+fn enforces_limits_on_indexed_size_and_on_actual_stream() {
+    let fixture = Fixture::new();
+    let path = fixture.write("large.mes", b"{1}{}");
+    let mut vfs = Vfs::new(Policy::Ordered);
+    vfs.mount_directory(&fixture.0).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(mes::MAX_INPUT_BYTES as u64 + 1)
+        .unwrap();
+    assert!(matches!(
+        load_mes(&mut vfs, "large.mes"),
+        Err(Error::TooLarge { .. })
+    ));
+
+    let mut grown = Vfs::new(Policy::Ordered);
+    grown.mount_directory(&fixture.0).unwrap();
+    assert!(matches!(
+        load_mes(&mut grown, "large.mes"),
+        Err(Error::TooLarge { .. })
+    ));
+}
