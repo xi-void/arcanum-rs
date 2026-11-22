@@ -6,7 +6,7 @@ mod loose;
 
 use crate::{dat, mod_id::ModId, resource_path};
 use cap_std::{ambient_authority, fs::Dir};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -258,6 +258,30 @@ impl Vfs {
     pub fn resolve(&self, path: &str) -> Result<Resolution<'_>, Error> {
         let path = resource_path::normalize(path).map_err(|_| Error::InvalidPath(path.into()))?;
         Ok(self.resolve_normalized(path))
+    }
+
+    /// Indexed names under a normalized prefix. Call `resolve` to select a source.
+    pub(crate) fn paths_with_prefix(&self, prefix: &str) -> BTreeSet<&str> {
+        let mut paths = BTreeSet::new();
+        for mount in &self.mounts {
+            match &mount.contents {
+                Contents::Archive { archive, .. } => paths.extend(
+                    archive
+                        .entries()
+                        .iter()
+                        .map(|entry| entry.path.as_str())
+                        .filter(|path| path.starts_with(prefix)),
+                ),
+                Contents::Directory(directory) => paths.extend(
+                    directory
+                        .files
+                        .range(prefix.to_owned()..)
+                        .map(|(path, _)| path.as_str())
+                        .take_while(|path| path.starts_with(prefix)),
+                ),
+            }
+        }
+        paths
     }
 
     /// Inspect paths with multiple entries in normalized lexical order.

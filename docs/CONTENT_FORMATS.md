@@ -105,13 +105,47 @@ Reserve an `arcanum` namespace for imported definitions, with reviewed stable al
 - Use package dependency declarations for cross-package references. Adding an item creates a new namespaced definition. An explicit override can target an existing definition by ID and retain that ID for dependents. Preserve provenance of the winner and superseded definitions. Prefer whole-definition replacement initially, with an explicit conflict diagnostic and deterministic ordering. VFS overrides continue to replace bytes at a path, including binary prototype or MES files.
 - The minimum useful invention package needs an item with text and art (or references to existing assets), an output recipe with explicit inputs, a requirement in an existing discipline, and a grant or unlock path. A new discipline additionally needs progression and presentation definitions. A genuinely new behavior needs an engine-supported effect; a new label, art asset or recipe alone does not define gameplay behavior.
 
-## Implementation boundary and verification
+## Milestone 5 reader boundary
 
-Milestone 4 is documentation only. The bounded prototype probe validated sampled fields but did not establish every subtype, version, default-generation path or recipe alternative. A runtime matcher would also require evidence that distinguishes instance eligibility from expertise.
+Milestone 4 established the format evidence. Milestone 5 implements the fixed header, a Food subset and one explicitly selected schematic group. Other object types expose their fixed header only.
 
-The next milestone should decode **version 119 headers and one Food prototype subset** and **one explicitly selected schematic group** from a caller-supplied VFS. Validate recipe text, art, ingredient and result references, and emit structured diagnostics and provenance. Use synthetic fixtures for malformed headers, unknown IDs, truncated fields and alternative handling. Fortifier serves as an optional read-only integration sample. Leave crafting execution, inferred repairs, a final authoring schema, general object decoding and save loading outside the slice.
+### Header and Food fields
 
-The existing Rust formatting, lint, build and 37 unit tests passed. The installed-data `vfs-smoke` integration test also passed. Representative VFS checks used the installed loose and archive sources without launching the game.
+All offsets here are zero-based. Numeric fields are little-endian. The two serialized identity records are each 24 bytes. The reader skips their opaque bytes, including padding observed to vary among installed files.
+
+| Offset | Width | Meaning | Reader check |
+| ---: | ---: | --- | --- |
+| 0 | 4 | Format version | Must equal 119. |
+| 4 | 2 | Kind in the first identity record | Must equal signed −1, the prototype marker. |
+| 28 | 2 | Kind in the prototype's own identity record | Must equal 1, the numeric kind. |
+| 36 | 4 | Serialized numeric prototype ID | Must be positive and fit a signed 32-bit integer. |
+| 52 | 4 | Serialized object type | Must be nonnegative. Food uses 9. |
+
+The fixed header ends at byte 56. For Food, the sampled four-word bitmap occupies bytes 56–71. The reader walks the version 119 common, item and Food slots from byte 72, accounting for presence bytes, optional values and array framing. It checks presence flags, expected array element widths, declared lengths and complete Food record consumption. File loading and Food decoding are capped at 64 KiB. Bitmap meaning, array payloads, index masks and other skipped fields remain opaque.
+
+| Decoded Food field | Offset in all three Fortifier-related Food files | Interpretation |
+| --- | ---: | --- |
+| Description ID | 323 | The numeric key used for display text. |
+| Base weight | 372 | Raw signed value. CE displays weight in stone. |
+| Base worth | 380 | Raw signed value before runtime adjustments. |
+| Signed magic/technology complexity | 400 | Raw signed value. |
+| Discipline | 404 | Raw legacy discipline index. |
+
+The three Food records consume 464 bytes each. The offsets after byte 72 describe those samples. The decoder derives field locations from framing, and synthetic fixtures exercise different optional field lengths. The native `FoodDefinition` carries a namespaced ID, a resolved display name, and nonnegative base weight and worth. Legacy discipline and complexity stay in the decode result. No expertise calculation is part of the native type.
+
+### Recipe resolution and diagnostics
+
+`LegacyGroup::decode` takes one explicit recipe ID in the learned or found ranges, aligned to a multiple of ten (`2000` through `5990`). It decodes the title, description, illustration, two inputs, output and positive output count. A slot containing an alternatives list is unsupported. Missing group cells or malformed values return an error that names the MES key.
+
+The VFS loader reads the winning MES tables and uses **basic lookup ID + 20** to derive each expected serialized ID. It searches visible, direct `proto/*.pro` paths for that numeric filename prefix, then checks the selected file's header against the expected ID. Different visible paths for the same prefix are reported as ambiguous. Overrides of the same virtual path follow normal VFS precedence. Description text comes from the prototype's actual description key, with keys below 30000 going to `mes/description.mes` and the rest to `mes/gamedesc.mes`. The illustration follows the interface MES key to a VFS asset path. The reader checks asset presence, without decoding the ART payload.
+
+`SchematicReport` keeps the original group IDs, source information and field-specific diagnostics even when a reference is missing. A complete report exposes a `SchematicDefinition` with native item IDs and resource paths. Invalid or unresolved references leave the native definition absent. The temporary stable aliases are `arcanum:item/prototype-<serialized-id>` and `arcanum:recipe/<recipe-id>`. A future importer can supply reviewed aliases independently of both binary layout and legacy numbering.
+
+Fortifier `4220` resolves all seven fields and its references. The supported Food decodes match the three sampled loose definitions above. The rules, prototype bytes, description text and illustration retain separate VFS provenance. Synthetic tests cover a mod overriding both the recipe table and a prototype at the same virtual path. The installed-data test also checks a Written header. This read-only path supplies no evidence about the reported runtime crafting failure.
+
+### Remaining format questions
+
+Other object bodies, bitmap semantics, optional payload interpretation, default generation when `.pro` files are absent, and the intended result for arbitrary alternate-ingredient combinations remain outside the verified slice. A bounded follow-up could inspect **one alternate-ingredient recipe** and normalize only the observed input-to-result mapping, with malformed and ambiguous cases reported separately. Leave runtime matching, crafting execution and mod authoring format decisions out of that slice.
 
 ### Primary reference locations
 
