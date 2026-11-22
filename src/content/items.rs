@@ -132,11 +132,15 @@ pub struct ArmourDefinition {
     pub base_worth: u32,
     /// Signed contribution in armour class points.
     pub armour_class_adjustment: i32,
+    /// Stored magical adjustment in AC points, before aptitude or identification rules.
+    pub magical_armour_class_adjustment: i32,
     pub coverage: ArmourCoverage,
     /// Sizes named by the fit flags, possibly empty. CE checks these for torso armour.
     pub sizes: Vec<ArmourSize>,
     /// Only explicitly stored channels are listed, including explicit zeroes.
     pub resistances: Vec<ResistanceAdjustment>,
+    /// Stored magical adjustments in percentage points, before any runtime scaling.
+    pub magical_resistances: Vec<ResistanceAdjustment>,
 }
 
 #[derive(Debug)]
@@ -150,6 +154,50 @@ pub struct ResolvedWeaponAmmo {
     pub definition: WeaponAmmoDefinition,
     pub name_source: Source,
 }
+
+/// A resolved script resource path, independent of a legacy numeric lookup key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EquipmentScriptRef {
+    pub resource_path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WieldAttachment {
+    On,
+    Off,
+}
+
+#[derive(Debug)]
+pub struct WieldScriptReport {
+    pub attachment: WieldAttachment,
+    pub legacy_id: prototype::LegacyScriptId,
+    pub resolution: Result<ResolvedEquipmentScript, ScriptReferenceError>,
+}
+
+#[derive(Debug)]
+pub struct ResolvedEquipmentScript {
+    pub reference: EquipmentScriptRef,
+    pub source: Source,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ScriptReferenceError {
+    Missing,
+    Ambiguous(Vec<String>),
+}
+
+impl std::fmt::Display for ScriptReferenceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => f.write_str("no visible script file"),
+            Self::Ambiguous(paths) => {
+                write!(f, "multiple visible script files ({})", paths.join(", "))
+            }
+        }
+    }
+}
+
+impl std::error::Error for ScriptReferenceError {}
 
 #[derive(Debug)]
 pub enum ItemDefinitionError {
@@ -292,6 +340,29 @@ impl PrototypeInspection {
         }))
     }
 
+    /// Find direct wield attachments on a decoded Weapon. Each reference
+    /// reports its own result so a missing script does not hide the other.
+    pub fn resolve_wield_scripts(&self, vfs: &Vfs) -> Vec<WieldScriptReport> {
+        let Some(prototype::WeaponAmmoFields::Weapon(weapon)) = self.weapon_ammo else {
+            return Vec::new();
+        };
+        let scripts = weapon.wield_scripts;
+        [
+            (WieldAttachment::On, scripts.on),
+            (WieldAttachment::Off, scripts.off),
+        ]
+        .into_iter()
+        .filter_map(|(attachment, id)| {
+            let legacy_id = id?;
+            Some(WieldScriptReport {
+                attachment,
+                legacy_id,
+                resolution: resolve_equipment_script(vfs, legacy_id),
+            })
+        })
+        .collect()
+    }
+
     /// Resolve the stored name and import the verified base armour properties.
     pub fn resolve_armour(
         &self,
@@ -307,22 +378,6 @@ impl PrototypeInspection {
             .enumerate()
             .filter_map(|(index, size)| (fields.flags & (1 << index) != 0).then_some(size))
             .collect();
-        let resistances = [
-            ResistanceKind::Physical,
-            ResistanceKind::Fire,
-            ResistanceKind::Electrical,
-            ResistanceKind::Poison,
-            ResistanceKind::Magic,
-        ]
-        .into_iter()
-        .zip(fields.resistance_adjustments)
-        .filter_map(|(kind, value)| {
-            value.map(|percentage_points| ResistanceAdjustment {
-                kind,
-                percentage_points,
-            })
-        })
-        .collect();
         Ok(Some(ResolvedArmour {
             definition: ArmourDefinition {
                 id: ItemId::from_prototype(self.prototype.header.id),
@@ -330,12 +385,70 @@ impl PrototypeInspection {
                 base_weight: unsigned("base weight", fields.item.weight)?,
                 base_worth: unsigned("base worth", fields.item.worth)?,
                 armour_class_adjustment: fields.armour_class_adjustment,
+                magical_armour_class_adjustment: fields.magical_armour_class_adjustment,
                 coverage,
                 sizes,
-                resistances,
+                resistances: resistance_adjustments(fields.resistance_adjustments),
+                magical_resistances: resistance_adjustments(fields.magical_resistance_adjustments),
             },
             name_source,
         }))
+    }
+}
+
+fn resistance_adjustments(values: [Option<i32>; 5]) -> Vec<ResistanceAdjustment> {
+    [
+        ResistanceKind::Physical,
+        ResistanceKind::Fire,
+        ResistanceKind::Electrical,
+        ResistanceKind::Poison,
+        ResistanceKind::Magic,
+    ]
+    .into_iter()
+    .zip(values)
+    .filter_map(|(kind, value)| {
+        value.map(|percentage_points| ResistanceAdjustment {
+            kind,
+            percentage_points,
+        })
+    })
+    .collect()
+}
+
+fn resolve_equipment_script(
+    vfs: &Vfs,
+    id: prototype::LegacyScriptId,
+) -> Result<ResolvedEquipmentScript, ScriptReferenceError> {
+    let mut sources: Vec<_> = vfs
+        .paths_with_prefix("scr/")
+        .into_iter()
+        .filter(|path| {
+            let Some(name) = path.strip_prefix("scr/") else {
+                return false;
+            };
+            if name.contains('/') || !name.ends_with(".scr") {
+                return false;
+            }
+            let digits = name.trim_start_matches(|ch: char| ch.is_ascii_digit());
+            name[..name.len() - digits.len()].parse::<u32>() == Ok(id.0)
+        })
+        .filter_map(|path| Source::resolve(vfs, path).ok().map(|(source, _)| source))
+        .collect();
+    match sources.len() {
+        0 => Err(ScriptReferenceError::Missing),
+        1 => {
+            let source = sources.remove(0);
+            let reference = EquipmentScriptRef {
+                resource_path: source.virtual_path.clone(),
+            };
+            Ok(ResolvedEquipmentScript { source, reference })
+        }
+        _ => Err(ScriptReferenceError::Ambiguous(
+            sources
+                .into_iter()
+                .map(|source| source.virtual_path)
+                .collect(),
+        )),
     }
 }
 

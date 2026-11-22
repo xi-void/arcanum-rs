@@ -278,9 +278,9 @@ fn decodes_armour_sparse_resistance_and_skips_optional_fields() {
     bytes[319] = 1;
     bytes.splice(
         320..320,
-        [4u32, 1, 5, 999, 1, 2]
+        [4i32, 1, 5, -12, 1, 2]
             .into_iter()
-            .flat_map(u32::to_le_bytes),
+            .flat_map(i32::to_le_bytes),
     );
     bytes[76] = 1;
     bytes.splice(77..77, [0; 8]);
@@ -296,10 +296,23 @@ fn decodes_armour_sparse_resistance_and_skips_optional_fields() {
         [Some(16), None, Some(-20), None, Some(0)]
     );
 
+    assert_eq!(fields.magical_armour_class_adjustment, 20);
+    assert_eq!(
+        fields.magical_resistance_adjustments,
+        [None, Some(-12), None, None, None]
+    );
+
     let mut bytes = armour_bytes(8111, 99, 2, 0x6000_0000);
     bytes.splice(282..319, [0]);
     assert_eq!(
         decode_armour(&bytes).unwrap().1.resistance_adjustments,
+        [None; 5]
+    );
+    assert_eq!(
+        decode_armour(&bytes)
+            .unwrap()
+            .1
+            .magical_resistance_adjustments,
         [None; 5]
     );
 }
@@ -334,6 +347,20 @@ fn rejects_malformed_armour_arrays_and_record_boundaries() {
         bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         assert_eq!(decode_armour(&bytes), Err(expected));
     }
+    let mut malformed_magic = original.clone();
+    malformed_magic.splice(
+        319..320,
+        [1u8].into_iter().chain(
+            [4u32, 1, 0, 12, 1, 0]
+                .into_iter()
+                .flat_map(u32::to_le_bytes),
+        ),
+    );
+    assert_eq!(
+        decode_armour(&malformed_magic),
+        Err(at(340, ErrorKind::ResistanceMaskCountMismatch))
+    );
+
     for len in 0..original.len() {
         assert_eq!(
             decode_armour(&original[..len]).unwrap_err().kind,
@@ -350,5 +377,77 @@ fn rejects_malformed_armour_arrays_and_record_boundaries() {
     assert_eq!(
         decode_armour(&food_bytes(8111, 99, 12)),
         Err(at(52, ErrorKind::UnsupportedArmourType(9)))
+    );
+}
+
+pub(crate) fn weapon_with_wield_scripts(on: i32, off: i32) -> Vec<u8> {
+    let mut bytes = weapon_bytes(6084, 99);
+    bytes[172] = 1;
+    // Include an earlier attachment and one in the next bitmap word.
+    bytes.splice(
+        173..173,
+        [
+            12,
+            4,
+            0, // Array framing.
+            0,
+            0,
+            50, // Index 1.
+            7,
+            42,
+            on, // Index 24.
+            0,
+            0,
+            off, // Index 25.
+            0,
+            0,
+            80, // Index 33.
+            2,
+            (1 << 1) | (1 << 24) | (1 << 25),
+            2,
+        ]
+        .into_iter()
+        .flat_map(i32::to_le_bytes),
+    );
+    bytes
+}
+
+#[test]
+fn decodes_wield_script_numbers_by_sparse_index() {
+    for (bytes, expected) in [
+        (
+            weapon_with_wield_scripts(28001, 28002),
+            LegacyWieldScripts {
+                on: Some(LegacyScriptId(28001)),
+                off: Some(LegacyScriptId(28002)),
+            },
+        ),
+        (
+            weapon_with_wield_scripts(28001, 0),
+            LegacyWieldScripts {
+                on: Some(LegacyScriptId(28001)),
+                off: None,
+            },
+        ),
+        (weapon_bytes(6084, 99), LegacyWieldScripts::default()),
+    ] {
+        let WeaponAmmoFields::Weapon(fields) = decode_weapon_ammo(&bytes).unwrap().1 else {
+            panic!("expected weapon");
+        };
+        assert_eq!(fields.wield_scripts, expected);
+    }
+}
+
+#[test]
+fn rejects_invalid_wield_script_representation() {
+    assert_eq!(
+        decode_weapon_ammo(&weapon_with_wield_scripts(-1, 0)),
+        Err(at(205, ErrorKind::InvalidScriptId(-1)))
+    );
+    let mut bytes = weapon_with_wield_scripts(28001, 28002);
+    bytes[241..245].copy_from_slice(&0u32.to_le_bytes());
+    assert_eq!(
+        decode_weapon_ammo(&bytes),
+        Err(at(237, ErrorKind::ScriptMaskCountMismatch))
     );
 }
