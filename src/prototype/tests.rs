@@ -28,6 +28,58 @@ pub(crate) fn generic_bytes(id: u32, description: i32, weight: i32, flags: u32) 
     bytes
 }
 
+pub(crate) fn key_bytes(id: u32, description: i32, key_id: i32) -> Vec<u8> {
+    let mut bytes = food_bytes(id, description, 1);
+    bytes[52..56].copy_from_slice(&KEY_TYPE.to_le_bytes());
+    bytes[266..270].copy_from_slice(&key_id.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn key_decoder_requires_the_code_and_validates_the_tail() {
+    let bytes = key_bytes(12081, 917, 0);
+    let (header, fields) = decode_key(&bytes).unwrap();
+    assert_eq!(header.id, SerializedPrototypeId(12081));
+    assert!(header.is_key());
+    assert_eq!(fields.item.description, DescriptionId(917));
+    assert_eq!(fields.item.weight, 1);
+    assert_eq!(fields.key_id, 0);
+    assert_eq!(decode_key(&key_bytes(12081, 917, 62)).unwrap().1.key_id, 62);
+    assert_eq!(
+        decode_key(&bytes[..266]),
+        Err(at(266, ErrorKind::Truncated))
+    );
+    assert_eq!(
+        decode_key(&bytes[..279]),
+        Err(at(279, ErrorKind::Truncated))
+    );
+    assert_eq!(
+        decode_key(&food_bytes(12081, 917, 1)),
+        Err(at(52, ErrorKind::UnsupportedKeyType(FOOD_TYPE)))
+    );
+
+    let mut malformed = bytes.clone();
+    malformed[278] = 2;
+    assert_eq!(
+        decode_key(&malformed),
+        Err(at(278, ErrorKind::InvalidPresence(2)))
+    );
+    let mut optional = bytes;
+    optional[278] = 1;
+    optional.splice(
+        279..279,
+        [4u32, 1, 0, 123, 1, 1]
+            .into_iter()
+            .flat_map(u32::to_le_bytes),
+    );
+    assert_eq!(decode_key(&optional).unwrap().1, fields);
+    optional.push(0);
+    assert_eq!(
+        decode_key(&optional).unwrap_err().kind,
+        ErrorKind::TrailingData
+    );
+}
+
 #[test]
 fn decodes_generic_base_fields_and_checks_tail_framing() {
     let mut bytes = generic_bytes(15128, 917, 30, 0x8000_0001);

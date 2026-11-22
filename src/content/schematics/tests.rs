@@ -1,6 +1,6 @@
 use super::*;
 use crate::mods::Catalog;
-use crate::prototype::tests::{food_bytes, generic_bytes, weapon_bytes};
+use crate::prototype::tests::{food_bytes, generic_bytes, key_bytes, weapon_bytes};
 use crate::vfs::Policy;
 use std::fs;
 use std::io;
@@ -605,6 +605,115 @@ fn item_name_validation_rejects_blanks_and_preserves_significant_spacing() {
             assert_eq!(audit.statuses, [(GROUP, Status::ReferencesIncomplete)]);
         }
     }
+}
+
+#[test]
+fn key_readiness_checks_the_winning_body_and_name() {
+    use super::readiness::{IssueKind, Status, audit_readiness};
+    use crate::content::items::{ItemDefinitionError, KeyCode, inspect_prototype};
+
+    let fixture = Fixture::new();
+    fixture.populate();
+    fs::remove_file(fixture.0.join("base/proto/010122 - food.pro")).unwrap();
+    let path = "proto/010122 - key.pro";
+    fixture.write(&format!("base/{path}"), key_bytes(10122, 30011, 0));
+    let mut base = fixture.vfs();
+    let inspection = inspect_prototype(&mut base, path).unwrap();
+    assert_eq!(inspection.key.unwrap().key_id, 0);
+    assert_eq!(
+        inspection
+            .resolve_key(&mut base)
+            .unwrap()
+            .unwrap()
+            .definition
+            .code,
+        None
+    );
+    assert_eq!(
+        audit_readiness(&mut base, &[GROUP]).unwrap().statuses,
+        [(GROUP, Status::Checked(Vec::new()))]
+    );
+
+    fixture.write(
+        "mods/key-test/arcanum-mod.toml",
+        r#"
+manifest_version = 1
+id = "key-test"
+name = "Key test"
+version = "1.0.0"
+description = "Fixture"
+[[mounts]]
+kind = "directory"
+path = "resources"
+"#,
+    );
+    let body = format!("mods/key-test/resources/{path}");
+    let names = "mods/key-test/resources/mes/gamedesc.mes";
+    let replacement = key_bytes(10122, 30012, 62);
+    fixture.write(&body, &replacement);
+    fixture.write(names, "{30012}{  Replacement key!  }");
+    let modded_vfs = || {
+        let catalog = Catalog::discover(fixture.0.join("mods")).unwrap();
+        catalog
+            .load_order(&["key-test"])
+            .unwrap()
+            .apply(fixture.vfs())
+            .unwrap()
+    };
+    let mut vfs = modded_vfs();
+    let inspection = inspect_prototype(&mut vfs, path).unwrap();
+    let resolved = inspection.resolve_key(&mut vfs).unwrap().unwrap();
+    assert_eq!(
+        resolved.definition.id,
+        ItemId("arcanum:item/prototype-10122".into())
+    );
+    assert_eq!(resolved.definition.display_name, "  Replacement key!  ");
+    assert_eq!(
+        resolved.definition.code,
+        Some(KeyCode("arcanum:key-code/62".into()))
+    );
+    for source in [inspection.prototype.source, resolved.name_source] {
+        assert_eq!(source.mod_id.unwrap().as_str(), "key-test");
+    }
+    assert_eq!(
+        audit_readiness(&mut vfs, &[GROUP]).unwrap().statuses,
+        [(GROUP, Status::Checked(Vec::new()))]
+    );
+
+    fixture.write(&body, &replacement[..266]);
+    let audit = audit_readiness(&mut modded_vfs(), &[GROUP]).unwrap();
+    let report = audit.references.references[0].1.as_ref().unwrap();
+    assert!(report.definition.is_some());
+    let [(_, Status::Checked(issues))] = audit.statuses.as_slice() else {
+        panic!("expected readiness results");
+    };
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].kind, IssueKind::ItemDefinition);
+    assert!(
+        issues[0]
+            .detail
+            .contains("prototype byte 266: truncated field")
+    );
+    assert_eq!(
+        issues[0].source.mod_id.as_ref().unwrap().as_str(),
+        "key-test"
+    );
+
+    fixture.write(&body, replacement);
+    fixture.write(names, "{30012}{ \t }");
+    let mut vfs = modded_vfs();
+    let inspection = inspect_prototype(&mut vfs, path).unwrap();
+    assert!(matches!(
+        inspection.resolve_key(&mut vfs),
+        Err(ItemDefinitionError::MissingName {
+            id: DescriptionId(30012),
+            ..
+        })
+    ));
+    assert_eq!(
+        audit_readiness(&mut vfs, &[GROUP]).unwrap().statuses,
+        [(GROUP, Status::ReferencesIncomplete)]
+    );
 }
 
 #[test]

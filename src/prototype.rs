@@ -41,6 +41,10 @@ impl Header {
         self.object_type == GENERIC_TYPE
     }
 
+    pub fn is_key(self) -> bool {
+        self.object_type == KEY_TYPE
+    }
+
     pub fn is_weapon_or_ammo(self) -> bool {
         matches!(self.object_type, WEAPON_TYPE | AMMO_TYPE)
     }
@@ -69,6 +73,13 @@ pub struct GenericFields {
     pub item: CommonItemFields,
     /// Legacy capability bits, retained for inspection.
     pub flags: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyFields {
+    pub item: CommonItemFields,
+    /// Signed code in the legacy key namespace, including an explicit zero.
+    pub key_id: i32,
 }
 
 /// Numeric lookup key in the legacy script namespace.
@@ -155,6 +166,7 @@ pub enum ErrorKind {
     UnsupportedWeaponAmmoType(u32),
     UnsupportedArmourType(u32),
     UnsupportedGenericType(u32),
+    UnsupportedKeyType(u32),
     DamageIndexOutOfRange,
     DamageMaskCountMismatch,
     ResistanceIndexOutOfRange,
@@ -199,6 +211,9 @@ impl fmt::Display for Error {
             }
             ErrorKind::UnsupportedGenericType(kind) => {
                 write!(f, "object type {kind} is outside the Generic decoder")
+            }
+            ErrorKind::UnsupportedKeyType(kind) => {
+                write!(f, "object type {kind} is outside the Key decoder")
             }
             ErrorKind::ResistanceIndexOutOfRange => {
                 f.write_str("resistance bitmap contains an unsupported index")
@@ -422,6 +437,28 @@ pub fn decode_generic(bytes: &[u8]) -> Result<(Header, GenericFields), Error> {
     input.array(8)?;
     input.finish()?;
     Ok((header, GenericFields { item, flags }))
+}
+
+/// Decode the stored Key code and common properties, checking the full record.
+pub fn decode_key(bytes: &[u8]) -> Result<(Header, KeyFields), Error> {
+    if bytes.len() > MAX_PROTOTYPE_BYTES {
+        return Err(at(MAX_PROTOTYPE_BYTES, ErrorKind::TooLarge));
+    }
+    let header = decode_header(bytes)?;
+    if !header.is_key() {
+        return Err(at(52, ErrorKind::UnsupportedKeyType(header.object_type)));
+    }
+    let mut input = Reader {
+        bytes,
+        offset: HEADER_SIZE,
+    };
+    let item = read_item(&mut input, false)?.common;
+    let key_id = input.i32()?;
+    input.skip(2 * 4)?; // Key padding scalars.
+    input.array(4)?;
+    input.array(8)?;
+    input.finish()?;
+    Ok((header, KeyFields { item, key_id }))
 }
 
 struct ItemPrefix {

@@ -1,6 +1,22 @@
 use super::*;
 
 #[test]
+fn native_key_definition_accepts_namespaced_identity_and_code() {
+    use items::{ItemId, KeyCode, KeyDefinition};
+
+    let key = KeyDefinition {
+        id: ItemId("clockwork:item/brass-key".into()),
+        display_name: "Brass key".into(),
+        base_weight: 1,
+        base_worth: 0,
+        magic_tech_complexity: 0,
+        code: Some(KeyCode("clockwork:key-code/workshop".into())),
+    };
+    assert_eq!(key.id.0, "clockwork:item/brass-key");
+    assert_eq!(key.code.unwrap().0, "clockwork:key-code/workshop");
+}
+
+#[test]
 fn native_generic_definition_accepts_a_namespaced_item_without_legacy_data() {
     use items::{GenericDefinition, ItemId};
 

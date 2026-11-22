@@ -479,6 +479,61 @@ The 80 newly passing recipe IDs are:
 4900 5000 5010 5020 5040 5050 5060 5070 5090 5200 5230 5250 5260 5270 5430 5440
 ```
 
+## Milestone 18 native Key definitions
+
+Iron Key (5280) combines Heartstone (basic ID 15182) and Mithril Ore
+(15094). Its single output is Iron Clan Key (basic ID 12061, serialized
+ID 12081). The winning rules are loose `data/rules/schematic.mes` and
+the illustration is `art/interface/iron_clan_key_schematic.art` in
+`Arcanum1.dat`. The compared Key records both resolve to loose
+`data/proto/` files. Their display names resolve by the stored
+description keys in `mes/description.mes` from `Arcanum5.dat`.
+
+| Display name | Basic / serialized ID | Virtual prototype path | Description key | Weight (stone) / worth (game currency) | Signed complexity / legacy discipline | Stored key code |
+| --- | --- | --- | ---: | --- | --- | ---: |
+| Key | 12060 / 12080 | `proto/012080 - key.pro` | 12060 | 1 / 0 | 0 / 0 | 0 |
+| Iron Clan Key | 12061 / 12081 | `proto/012081 - key.pro` | 12061 | 1 / 0 | −10 / 6 (Smithy) | 62 |
+
+Both records are version 119, type 11, and 464 bytes long. In these
+samples the description key, base weight, worth, complexity, and
+discipline are signed little-endian 32-bit fields at bytes 323, 372,
+380, 400, and 404. CE's `object_proto_enumerate_fields` in `obj.c`
+enumerates common item fields before the Key section. That section
+starts at byte 450 in both samples. It contains the signed, unitless
+`OBJ_F_KEY_KEY_ID`, two 32-bit padding scalars at 454 and 458, and
+optional width-4 and width-8 pad arrays. Both arrays are absent in the
+samples with presence bytes at 462 and 463. The Rust reader walks the
+fields and checks the complete record, including optional framing.
+The code field is required. A missing code is truncated data.
+
+The key code is a separate domain from prototype identity and the
+display-name key. CE reads it from inventory objects and compares it
+with the code on a portal or container. In `item.c`, `sub_463340`
+rejects zero on either side, treats 1 on either side as special, and
+otherwise tests equality. The opening paths in `ai.c` also consult
+world state such as whether a lock is held, jammed, or locked. In
+`object_examine`, CE uses the code for a separate `mes/gamekey.mes`
+lookup. The winning table in `Arcanum.PATCH1` identifies entry 62 as
+the key to the Iron Clan Chest. That examination text is independent
+of the item display name. These are source and data observations.
+No particular chest instance or future access rule is inferred.
+
+`KeyDefinition` contains the namespaced item ID, validated display
+name, base weight and worth, signed complexity, and an optional
+namespaced `KeyCode`. The importer maps nonzero codes to
+`arcanum:key-code/<signed value>` and explicit zero to no assigned
+code. Inspection retains the raw scalar and both VFS sources. Native
+keys can use their own namespaced codes, with no original prototype
+file or numeric ID. Padding contents, examination text, Key Ring
+records, instance ownership and access behavior remain outside this
+slice.
+
+The installed audit reports **119/119 reference-complete** and
+**119/119 passing supported-content readiness**, with no unsupported
+or invalid recipes and no unreadable illustrations. Readiness covers
+the supported item definitions and illustration readability. Gameplay
+behavior and ART structure remain separate.
+
 ### Primary reference locations
 
 - CE `src/game/proto.c` (`proto_init`, `sub_468660`, `sub_468860`, and the four `BP_*` initializers), `descriptions.h`, `obj_id.h`, `obj_id.c`.

@@ -395,6 +395,18 @@ fn inspect_prototype(
             write_source(&mut out, &resolved.name_source)?;
         }
     }
+    if let Some(fields) = &inspection.key {
+        write_common_item_fields(&mut out, &fields.item)?;
+        writeln!(out, "Legacy key code: {}", fields.key_id)?;
+        if let Some(resolved) = inspection.resolve_key(&mut vfs)? {
+            let item = resolved.definition;
+            writeln!(out, "Key: {} ({})", item.display_name, item.id.0)?;
+            let code = item.code.as_ref().map_or("none", |code| code.0.as_str());
+            writeln!(out, "Native key code: {code}")?;
+            write!(out, "Name: ")?;
+            write_source(&mut out, &resolved.name_source)?;
+        }
+    }
     Ok(())
 }
 
