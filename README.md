@@ -203,6 +203,16 @@ Frame indices are zero-based. Both commands support `--mods <mods-directory> <mo
 Export writes transparent RGBA to a new PAM file. See the supported layout,
 validation boundaries and original sample provenance. [ART format](docs/ART_FORMAT.md)
 
+To open a native sprite window on Linux, enable the optional frontend:
+
+```sh
+cargo run --features windowed -- art demo
+cargo run --features windowed -- art view "$game" art/item/bread.art 0
+```
+
+The demo uses a synthetic sprite and requires only a display session.
+[Native sprite viewer](docs/SPRITE_VIEWER.md)
+
 ## Prototype and schematic inspection
 
 ```sh

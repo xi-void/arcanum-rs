@@ -28,6 +28,8 @@ pub struct DecodedFrame {
     pub frames_per_second: i32,
     /// Stored animation action-frame marker.
     pub action_frame: i32,
+    /// Bytes past the last declared frame payload. They do not enter pixel decoding.
+    pub ignored_trailing_bytes: usize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -71,6 +73,7 @@ impl std::error::Error for Error {}
 
 /// Decode one zero-based frame. Check all frame dimensions and payload spans.
 /// Only the selected frame's RLE packets are decoded and checked.
+/// Bytes after all declared frames count toward the input limit and are reported.
 pub fn decode_frame(input: &[u8], index: usize) -> Result<DecodedFrame, Error> {
     if input.len() > MAX_INPUT_BYTES {
         return Err(Error::InputTooLarge);
@@ -135,10 +138,6 @@ pub fn decode_frame(input: &[u8], index: usize) -> Result<DecodedFrame, Error> {
         // The verified slice proves the end is representable and within input.
         payload_offset += payload.len();
     }
-    if payload_offset != input.len() {
-        return Err(Error::Unsupported("data after the final frame payload"));
-    }
-
     let (record, width, height, pixel_count, offset, payload) =
         selected.expect("index lies in the checked frame table");
     let mut colors = [[0; 4]; 256];
@@ -164,6 +163,7 @@ pub fn decode_frame(input: &[u8], index: usize) -> Result<DecodedFrame, Error> {
         frame_count: count,
         frames_per_second: word(header, 4),
         action_frame: word(header, 28),
+        ignored_trailing_bytes: input.len() - payload_offset,
     })
 }
 

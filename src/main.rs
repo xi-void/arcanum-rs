@@ -22,6 +22,9 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
+#[cfg(feature = "windowed")]
+mod viewer;
+
 const USAGE: &str = "Usage:
   arcanum-rs list <archive>
   arcanum-rs info <archive> <resource-path>
@@ -38,6 +41,8 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] mes get <game-directory> <resource-path> <entry-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art inspect <game-directory> <resource-path> <frame> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art export <game-directory> <resource-path> <frame> <output.pam> [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs art demo                          (requires --features windowed)
+  arcanum-rs [--ordered] art view <game-directory> <resource-path> <frame> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] prototype inspect <game-directory> <resource-path> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] effect inspect <game-directory> <effect-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] schematic inspect <game-directory> <recipe-id> [--mods <mods-directory> <mod-id> ...]
@@ -88,8 +93,32 @@ fn main() -> ExitCode {
         (Some("mes"), [_, action, game, resource, entry, options @ ..]) if action == "get" => {
             inspect_mes(Path::new(game), resource, Some(entry), options, policy)
         }
+        #[cfg(feature = "windowed")]
+        (Some("art"), [_, action]) if action == "demo" && policy == Policy::Ce => sprite_demo(),
+        #[cfg(feature = "windowed")]
+        (Some("art"), [_, action, game, resource, frame, options @ ..]) if action == "view" => {
+            inspect_art(
+                Path::new(game),
+                resource,
+                frame,
+                ArtAction::View,
+                options,
+                policy,
+            )
+        }
+        #[cfg(not(feature = "windowed"))]
+        (Some("art"), [_, action, ..]) if action == "view" || action == "demo" => {
+            Err("sprite presentation requires a build with --features windowed".into())
+        }
         (Some("art"), [_, action, game, resource, frame, options @ ..]) if action == "inspect" => {
-            inspect_art(Path::new(game), resource, frame, None, options, policy)
+            inspect_art(
+                Path::new(game),
+                resource,
+                frame,
+                ArtAction::Inspect,
+                options,
+                policy,
+            )
         }
         (Some("art"), [_, action, game, resource, frame, output, options @ ..])
             if action == "export" =>
@@ -98,7 +127,7 @@ fn main() -> ExitCode {
                 Path::new(game),
                 resource,
                 frame,
-                Some(Path::new(output)),
+                ArtAction::Export(Path::new(output)),
                 options,
                 policy,
             )
@@ -675,11 +704,32 @@ fn inspect_mes(
     Ok(())
 }
 
+#[cfg(feature = "windowed")]
+fn sprite_demo() -> Result<(), Box<dyn Error>> {
+    let frame = viewer::synthetic_frame();
+    writeln!(
+        io::stdout(),
+        "Synthetic sprite {} × {}, hotspot {:?}, frame offset {:?}",
+        frame.width,
+        frame.height,
+        frame.hotspot,
+        frame.offset
+    )?;
+    Ok(viewer::show("Arcanum-RS | Synthetic sprite".into(), frame)?)
+}
+
+enum ArtAction<'a> {
+    Inspect,
+    Export(&'a Path),
+    #[cfg(feature = "windowed")]
+    View,
+}
+
 fn inspect_art(
     game: &Path,
     resource: &OsStr,
     frame: &OsStr,
-    destination: Option<&Path>,
+    action: ArtAction<'_>,
     options: &[OsString],
     policy: Policy,
 ) -> Result<(), Box<dyn Error>> {
@@ -688,8 +738,8 @@ fn inspect_art(
         .to_str()
         .and_then(|frame| frame.parse::<usize>().ok())
         .ok_or_else(|| format!("invalid ART frame {frame:?}; expected a zero-based index"))?;
-    let mut vfs = inspection_vfs(game, options, policy)?;
-    let loaded = content::art::load_frame(&mut vfs, resource, index)?;
+    let loaded =
+        content::art::load_frame(&mut inspection_vfs(game, options, policy)?, resource, index)?;
     let mut out = io::stdout().lock();
     let frame = &loaded.decoded.frame;
     writeln!(out, "Path: {}", loaded.source.virtual_path)?;
@@ -716,9 +766,27 @@ fn inspect_art(
         loaded.input_bytes,
         frame.pixels.as_flattened().len()
     )?;
-    if let Some(destination) = destination {
-        export_pam(destination, frame)?;
-        writeln!(out, "Exported: {}", destination.display())?;
+    if loaded.decoded.ignored_trailing_bytes != 0 {
+        writeln!(
+            out,
+            "Ignored trailing ART bytes: {}",
+            loaded.decoded.ignored_trailing_bytes
+        )?;
+    }
+    match action {
+        ArtAction::Inspect => {}
+        ArtAction::Export(destination) => {
+            export_pam(destination, frame)?;
+            writeln!(out, "Exported: {}", destination.display())?;
+        }
+        #[cfg(feature = "windowed")]
+        ArtAction::View => {
+            drop(out);
+            viewer::show(
+                format!("Arcanum-RS | {} frame {index}", loaded.source.virtual_path),
+                loaded.decoded.frame,
+            )?;
+        }
     }
     Ok(())
 }

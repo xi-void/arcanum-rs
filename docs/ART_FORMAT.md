@@ -80,14 +80,92 @@ and archive or mod precedence, including a malformed winning override.
   span, and validates the selected frame's RLE packet boundaries and
   exact decoded pixel count. Unselected packet streams are left unread by
   the decoder. Zero-length RLE packets are rejected.
-- The decoder rejects data after the last frame. An inspected
-  `art/interface/acid_scheme.art` in `Arcanum1.dat` has a 295 × 225 raw
-  frame and 3,409 trailing bytes. Their purpose remains unverified. The
-  schematic audit still checks illustration readability and does not
-  certify ART decoding.
+- Bytes after the last declared frame are ignored for pixel decoding
+  and counted in `DecodedFrame::ignored_trailing_bytes`. The whole file
+  still counts toward the input limit. Inspection and export print the
+  count when nonzero. The schematic audit checks illustration readability.
+  [Trailing-data evidence](#trailing-data-in-schematic-art)
 - No terrain-specific sampling, rotation mirroring, palette transformations,
   legacy art-ID resolution, blend modes or animation scheduling is provided.
   The stored FPS and action marker are exposed as metadata.
+
+## Trailing data in schematic ART
+
+A read-only probe extracted the VFS winner for `art/interface/acid_scheme.art`
+with `Vfs::copy` under CE precedence. The entry is a 70,968-byte ART resource
+after DAT zlib inflation, from `Arcanum1.dat`. Its single frame declares
+295 × 225 pixels and a stored length of 66,375. That equals the pixel count,
+so this frame uses raw indices. The eight legacy data-size words also
+contain 66,375.
+
+| Section | Byte range (end exclusive) | Bytes |
+|---|---:|---:|
+| Header | 0–132 | 132 |
+| Palette slot zero | 132–1,156 | 1,024 |
+| Frame table | 1,156–1,184 | 28 |
+| Declared raw pixels | 1,184–67,559 | 66,375 |
+| Trailing region | 67,559–70,968 | 3,409 |
+
+The trailing region is the exact end of an RLE encoding of the **same**
+frame. An independent Python probe regenerated the stream using repeat
+packets for runs of two or more equal indices and literal packets for the
+intervening indices, with at most 127 indices per packet. The regenerated
+stream is 69,784 bytes. Its slice starting at compressed byte 66,375
+matches all 3,409 trailing bytes. The cut falls between the control and
+color bytes of the repeat packet `03 09`. Starting at the next complete
+packet, tail byte one, expansion gives the last 3,171 raw pixel indices
+exactly. The tail has 75 distinct byte values and no zeros. Checks for
+common image and archive signatures and complete zlib streams returned
+no matches. The packet and pixel matches explain the data directly.
+
+This also reproduced for seven other VFS-winning schematics. Their frame
+tables all report the same dimensions and raw payload length. Each
+nonempty tail matched the suffix of its **own** regenerated RLE stream
+from compressed byte 66,375 through its end.
+
+| Original interface resource | Winning archive | Total bytes | Trailing bytes |
+|---|---|---:|---:|
+| `acid_scheme.art` | `Arcanum1.dat` | 70,968 | 3,409 |
+| `animal_lure_scheme.art` | `Arcanum1.dat` | 70,663 | 3,104 |
+| `animal_scent_scheme.art` | `Arcanum1.dat` | 70,236 | 2,677 |
+| `automaton_schem.art` | `Arcanum1.dat` | 71,310 | 3,751 |
+| `blank_scheme.art` | `Arcanum1.dat` | 71,484 | 3,925 |
+| `crude_flintlock_schem.art` | `Arcanum1.dat` | 70,861 | 3,302 |
+| `heal_lite_scheme.art` | `Arcanum1.dat` | 70,423 | 2,864 |
+| `iron_clan_key_schematic.art` | `Arcanum1.dat` | 70,899 | 3,340 |
+| `inv_mag_hat_scheme.art` | `Arcanum1.dat` | 66,369 | 0 |
+| `align.art` | `Arcanum1.dat` | 6,833 | 0 |
+| `ap_green.art` | `ArcanumXBetaUI.dat` | 1,311 | 0 |
+| `blockedshot.art` | `Arcanum5.dat` | 1,858 | 0 |
+
+The same encoder regenerated the complete 65,185-byte declared RLE payload
+of `inv_mag_hat_scheme.art` byte for byte. The evidence is consistent
+with an original tool writing a longer compressed stream, then overwriting
+its beginning with a shorter raw frame without truncating the file. The
+exact tool and write sequence remain unverified.
+
+**CE behavior.** In `sub_51B710`, the raw branch reads exactly the frame's
+declared length. After loading the declared frames, CE sets up rotation
+aliases and closes the stream without an EOF check or an ART read of the
+tail. TIG's DAT close path releases the stream and zlib state. It has
+no ART tail parser. This follows the reviewed code path for these valid
+raw frames. The Rust VFS still validates the full compressed DAT entry
+before decoding the ART resource.
+
+**Independent pixels and compatibility.** Expanding only the declared raw
+indices with the stored RGB palette produced a 295 × 225 image with hotspot
+(147, 224) and movement offset (0, 0). Palette slot zero has 256 entries with
+a zero unused byte throughout. The frame uses 128 distinct indices and
+never selects transparency key zero, so all 66,375 pixels are opaque.
+The straight RGBA8 SHA-256 is
+`e138b5a36fe1a8dc66d9d39601b9e981a0f737e9dc09c14a94fb0731e86a5eef`.
+
+Accept extra bytes only beyond all checked frame spans for a supported
+layout. RLE packets must fit within the selected frame's declared span and
+produce its exact pixel count. The 32 MiB input limit includes extra bytes.
+The decoder reports their count without trying to identify or render them.
+The RLE comparison explains these samples and is unnecessary at runtime.
+[Decoder](../src/art.rs) · [Installed regression](../tests/installed_art.rs)
 
 ## Visual inspection
 
@@ -155,14 +233,7 @@ passed 119/119 under their existing checks.
 
 ## First windowed renderer
 
-Use one optional frontend with a window/event-loop crate and a single
-presentation backend. For an initial CPU sprite blit, `winit` and
-`softbuffer` can supply those two roles. Keep composition, clipping,
-hotspot placement and nearest-neighbor scaling in engine-owned Rust.
-The decoder already provides the pixel format and placement metadata the
-frontend needs. Verify a synthetic transparent sprite first, then present
-one VFS-loaded original frame with the same path. Resize and close handling
-are enough for that slice. Defer GPU selection until measurement or a
-rendering requirement justifies it.
-[Winit](https://docs.rs/winit/latest/winit/)
-· [Softbuffer](https://github.com/rust-windowing/softbuffer)
+The optional sprite viewer consumes the same decoded frames as inspection
+and export. Its Rust compositor uses the signed hotspot for placement,
+and the desktop frontend presents the composed buffer. See the launch
+commands, pixel contract and window lifecycle. [Native sprite viewer](SPRITE_VIEWER.md)
