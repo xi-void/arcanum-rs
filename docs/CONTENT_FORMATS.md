@@ -107,7 +107,7 @@ Reserve an `arcanum` namespace for imported definitions, with reviewed stable al
 
 ## Milestone 5 reader boundary
 
-Milestone 4 established the format evidence. Milestone 5 implements the fixed header, a Food subset and one explicitly selected schematic group. Other object types expose their fixed header only.
+Milestone 4 established the format evidence. Milestone 5 implemented the fixed header, a Food subset and inspection of one explicitly selected group at a time. Milestone 6 extends that reader as described below.
 
 ### Header and Food fields
 
@@ -135,7 +135,7 @@ The three Food records consume 464 bytes each. The offsets after byte 72 describ
 
 ### Recipe resolution and diagnostics
 
-`LegacyGroup::decode` takes one explicit recipe ID in the learned or found ranges, aligned to a multiple of ten (`2000` through `5990`). It decodes the title, description, illustration, two inputs, output and positive output count. A slot containing an alternatives list is unsupported. Missing group cells or malformed values return an error that names the MES key.
+`LegacyGroup::decode` takes one explicit recipe ID in the learned or found ranges, aligned to a multiple of ten (`2000` through `5990`). It decodes the title, description, illustration, two inputs, output and positive output count. The Milestone 5 decoder accepted one ID per slot. Missing group cells or malformed values return an error that names the MES key.
 
 The VFS loader reads the winning MES tables and uses **basic lookup ID + 20** to derive each expected serialized ID. It searches visible, direct `proto/*.pro` paths for that numeric filename prefix, then checks the selected file's header against the expected ID. Different visible paths for the same prefix are reported as ambiguous. Overrides of the same virtual path follow normal VFS precedence. Description text comes from the prototype's actual description key, with keys below 30000 going to `mes/description.mes` and the rest to `mes/gamedesc.mes`. The illustration follows the interface MES key to a VFS asset path. The reader checks asset presence, without decoding the ART payload.
 
@@ -143,9 +143,36 @@ The VFS loader reads the winning MES tables and uses **basic lookup ID + 20** to
 
 Fortifier `4220` resolves all seven fields and its references. The supported Food decodes match the three sampled loose definitions above. The rules, prototype bytes, description text and illustration retain separate VFS provenance. Synthetic tests cover a mod overriding both the recipe table and a prototype at the same virtual path. The installed-data test also checks a Written header. This read-only path supplies no evidence about the reported runtime crafting failure.
 
+## Milestone 6: Healing Jacket variants
+
+**Installed data.** Healing Jacket (`2450`) was selected because one fixed input and three size-dependent inputs give three distinct outputs. The winning loose `data/rules/schematic.mes` and the separately mounted copies in `Arcanum3.dat`, `Arcanum4.dat` and `Arcanum5.dat` agree on all seven records. The sampled tables also contain multi-ID cells in groups 3250, 3260, 4450 and 5090. Only group 2450 was traced through its item and artwork references here.
+
+| Record | Meaning | Value |
+| --- | --- | --- |
+| 2450, 2451 | Title and description in `mes/schematic_text.mes` | 48, 49 |
+| 2452 | Drawing key in `art/interface/interface.mes` | 533, resolving to `art/interface/healing_jacket_scheme.art` in `Arcanum1.dat` |
+| 2453 | First input basic IDs | `15108 15108 15108` (Electrical Harness) |
+| 2454 | Second input basic IDs | `8091 8099 8107` |
+| 2455 | Product basic IDs | `8148 8149 8150` |
+| 2456 | Output count for the selected product | 1 |
+
+All variants require an Electrical Harness (basic ID **15108**, serialized ID **15128**, Generic type **14**). The other input and the output are Armor (type **7**). The winning prototypes are loose `data/proto/` files with the six-digit serialized ID as their filename prefix. The stored description IDs happen to equal the basic IDs in these seven files. The reader obtains display text independently using those stored keys and the winning `mes/description.mes` in `Arcanum5.dat`.
+
+| Ordered second input | Basic → serialized | Selected product | Basic → serialized |
+| --- | --- | --- | --- |
+| Leather Armour | 8091 → 8111 | Regenerative Jacket | 8148 → 8168 |
+| Small Leather Armour | 8099 → 8119 | Small Regenerative Jacket | 8149 → 8169 |
+| Large Leather Armour | 8107 → 8127 | Large Regenerative Jacket | 8150 → 8170 |
+
+Each sampled record uses version 119, a 16-byte bitmap at byte 56 and a signed description key at byte 323. CE's `object_proto_enumerate_fields` enumerates the common section ahead of the subtype fields. The Rust reader follows that section's framing through the description key for Armor and Generic. The offset reflects the optional fields present in these samples. The reader leaves the rest of each body opaque.
+
+**CE behavior.** In revision `fb721982`, `schematic_ui_info_get` reads the same seven cells for learned Healing Jacket and found Fortifier. `tech_from_schematic` derives a learned recipe's discipline from its ID block and reads a found recipe's discipline from the first product prototype. `schematic_ui_process` searches each input list in order. A matching Electrical Harness selects index zero, so the second input's first matching index determines the output. Each recipe requires one unit from each input slot in this code path. The output count is stored once for the entire group. The data and CE path examined here establish two required input slots and one selected output. They provide no evidence of optional inputs, additional slots, per-variant quantities or simultaneous multiple outputs.
+
+**Rust mapping.** `LegacyGroup` produces ordered `RecipeVariant<BasicPrototypeId>` values. The decoder accepts a fixed first input (one ID or aligned identical repetitions), one to three distinct second-input IDs, and an equally long ordered output list. It reports malformed or unsupported shapes at the relevant MES key. CE pads short lists by repeating the last ID, and can prioritize a nonzero first-input match index. Those cases are outside this import slice. A `SchematicReport` resolves each referenced ID once, retaining variant relationships, warnings and VFS provenance when a reference is missing or ambiguous. A complete `SchematicDefinition` uses the same ordered tuples with native `ItemId` references and a shared positive output count. Fortifier produces one tuple.
+
 ### Remaining format questions
 
-Other object bodies, bitmap semantics, optional payload interpretation, default generation when `.pro` files are absent, and the intended result for arbitrary alternate-ingredient combinations remain outside the verified slice. A bounded follow-up could inspect **one alternate-ingredient recipe** and normalize only the observed input-to-result mapping, with malformed and ambiguous cases reported separately. Leave runtime matching, crafting execution and mod authoring format decisions out of that slice.
+Other prototype bodies, bitmap semantics, optional payloads, default generation when a prototype file is absent, and recipes with independent variation in both input slots remain outside the verified slice. The import preserves variant order for future use. Runtime matching, expertise, and the cause of Fortifier's reported inventory-recognition problem remain open.
 
 ### Primary reference locations
 

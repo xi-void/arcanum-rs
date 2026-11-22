@@ -21,10 +21,13 @@ pub struct FoodDefinition {
 pub struct LoadedPrototype {
     pub source: Source,
     pub header: prototype::Header,
+    pub description: Option<prototype::DescriptionId>,
     pub food: Option<prototype::FoodFields>,
 }
 
-/// Load the selected resource. Other object types expose their header only.
+/// Load a prototype through the VFS. Armor and Generic expose the common
+/// description prefix, Food exposes its selected fields, and other types
+/// expose their header.
 pub fn load_prototype(vfs: &mut Vfs, path: &str) -> Result<LoadedPrototype, Error> {
     let (source, bytes) = read_bounded(vfs, path, prototype::MAX_PROTOTYPE_BYTES)?;
     let result = prototype::decode_header(&bytes).and_then(|header| {
@@ -33,12 +36,17 @@ pub fn load_prototype(vfs: &mut Vfs, path: &str) -> Result<LoadedPrototype, Erro
         } else {
             None
         };
-        Ok((header, food))
+        let description = match food {
+            Some(fields) => Some(fields.description),
+            None => prototype::decode_item_description(&bytes, header)?,
+        };
+        Ok((header, description, food))
     });
     match result {
-        Ok((header, food)) => Ok(LoadedPrototype {
+        Ok((header, description, food)) => Ok(LoadedPrototype {
             source,
             header,
+            description,
             food,
         }),
         Err(error) => Err(Error::Prototype {

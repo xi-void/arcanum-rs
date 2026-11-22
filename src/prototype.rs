@@ -6,7 +6,9 @@ pub const HEADER_SIZE: usize = 56;
 pub const MAX_PROTOTYPE_BYTES: usize = 64 * 1024;
 const VERSION: u32 = 119;
 const FOOD_TYPE: u32 = 9;
-const FOOD_BITMAP_BYTES: usize = 16;
+const ARMOR_TYPE: u32 = 7;
+const GENERIC_TYPE: u32 = 14;
+const ITEM_BITMAP_BYTES: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SerializedPrototypeId(pub u32);
@@ -140,20 +142,7 @@ pub fn decode_food(bytes: &[u8]) -> Result<(Header, FoodFields), Error> {
         bytes,
         offset: HEADER_SIZE,
     };
-    input.skip(FOOD_BITMAP_BYTES)?;
-    // Common fields in serialized order. The bitmap does not suppress slots.
-    input.skip(4)?; // Current art.
-    input.optional(8)?; // Location.
-    input.skip(3 * 4)?; // X/Y offsets and shadow.
-    for _ in 0..3 {
-        input.array(4)?;
-    } // Overlay and underlay lists.
-    input.skip(7 * 4)?; // Blit and lighting scalars.
-    for _ in 0..3 {
-        input.array(4)?;
-    } // Overlay lighting lists.
-    input.skip(4 * 4)?; // Flags, blocking mask and internal name.
-    let description = DescriptionId(input.i32()?);
+    let description = read_description(&mut input)?;
     input.skip(7 * 4)?; // Art, armor class, HP, material and damage.
     input.array(4)?; // Resistances.
     input.array(12)?; // Script records.
@@ -189,6 +178,38 @@ pub fn decode_food(bytes: &[u8]) -> Result<(Header, FoodFields), Error> {
             magic_tech_complexity,
         },
     ))
+}
+
+/// Read only the common description prefix for verified non-Food types.
+pub(crate) fn decode_item_description(
+    bytes: &[u8],
+    header: Header,
+) -> Result<Option<DescriptionId>, Error> {
+    if !matches!(header.object_type, ARMOR_TYPE | GENERIC_TYPE) {
+        return Ok(None);
+    }
+    read_description(&mut Reader {
+        bytes,
+        offset: HEADER_SIZE,
+    })
+    .map(Some)
+}
+
+fn read_description(input: &mut Reader<'_>) -> Result<DescriptionId, Error> {
+    input.skip(ITEM_BITMAP_BYTES)?;
+    // Common fields in serialized order. The bitmap does not suppress slots.
+    input.skip(4)?; // Current art.
+    input.optional(8)?; // Location.
+    input.skip(3 * 4)?; // X/Y offsets and shadow.
+    for _ in 0..3 {
+        input.array(4)?;
+    } // Overlay and underlay lists.
+    input.skip(7 * 4)?; // Blit and lighting scalars.
+    for _ in 0..3 {
+        input.array(4)?;
+    } // Overlay lighting lists.
+    input.skip(4 * 4)?; // Flags, blocking mask and internal name.
+    Ok(DescriptionId(input.i32()?))
 }
 
 fn at(offset: usize, kind: ErrorKind) -> Error {

@@ -12,6 +12,13 @@ use std::num::NonZeroU32;
 const RULES: &str = "rules/schematic.mes";
 const TEXT: &str = "mes/schematic_text.mes";
 const INTERFACE: &str = "art/interface/interface.mes";
+const MAX_VARIANTS: usize = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecipeVariant<I> {
+    pub ingredients: [I; 2],
+    pub product: I,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LegacyRecipeId(pub i32);
@@ -33,14 +40,13 @@ pub struct SchematicTextId(pub EntryId);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InterfaceArtId(pub EntryId);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LegacyGroup {
     pub id: LegacyRecipeId,
     pub title: SchematicTextId,
     pub description: SchematicTextId,
     pub illustration: InterfaceArtId,
-    pub ingredients: [BasicPrototypeId; 2],
-    pub product: BasicPrototypeId,
+    pub variants: Vec<RecipeVariant<BasicPrototypeId>>,
     pub quantity: NonZeroU32,
 }
 
@@ -49,7 +55,7 @@ pub enum GroupError {
     UnsupportedGroup(LegacyRecipeId),
     Missing(EntryId),
     InvalidNumber(EntryId),
-    Alternatives(EntryId),
+    UnsupportedMapping { key: EntryId, reason: &'static str },
 }
 
 impl fmt::Display for GroupError {
@@ -62,10 +68,9 @@ impl fmt::Display for GroupError {
             ),
             Self::Missing(key) => write!(f, "missing schematic entry {key}"),
             Self::InvalidNumber(key) => write!(f, "invalid numeric value at schematic entry {key}"),
-            Self::Alternatives(key) => write!(
-                f,
-                "schematic entry {key} has alternatives; only one item per slot is supported"
-            ),
+            Self::UnsupportedMapping { key, reason } => {
+                write!(f, "unsupported schematic mapping at entry {key}: {reason}")
+            }
         }
     }
 }
@@ -79,41 +84,83 @@ impl LegacyGroup {
         if !(2000..6000).contains(&base) || base % 10 != 0 {
             return Err(GroupError::UnsupportedGroup(id));
         }
-        let number = |offset, item: bool| -> Result<i32, GroupError> {
+        let value = |offset| {
             let key = base + offset;
-            let value = rules.get(key).ok_or(GroupError::Missing(key))?.trim_ascii();
-            if item && value.split_ascii_whitespace().count() > 1 {
-                let valid = value
-                    .split_ascii_whitespace()
-                    .all(|token| token.parse::<i32>().is_ok_and(|number| number > 0));
-                return Err(if valid {
-                    GroupError::Alternatives(key)
-                } else {
-                    GroupError::InvalidNumber(key)
-                });
-            }
-            value
+            rules.get(key).ok_or(GroupError::Missing(key))
+        };
+        let number = |offset| -> Result<i32, GroupError> {
+            value(offset)?
+                .trim_ascii()
                 .parse::<i32>()
                 .ok()
-                .filter(|value| {
-                    if item || offset == 6 {
-                        *value > 0
-                    } else {
-                        *value >= 0
-                    }
-                })
-                .ok_or(GroupError::InvalidNumber(key))
+                .filter(|number| *number >= 0)
+                .ok_or(GroupError::InvalidNumber(base + offset))
         };
-        let item = |offset| number(offset, true).map(|value| BasicPrototypeId(value as u32));
+        let title = SchematicTextId(number(0)?);
+        let description = SchematicTextId(number(1)?);
+        let illustration = InterfaceArtId(number(2)?);
+        let item_list = |offset| -> Result<Vec<BasicPrototypeId>, GroupError> {
+            let mut items = Vec::new();
+            for token in value(offset)?.split_ascii_whitespace() {
+                if items.len() == MAX_VARIANTS {
+                    return Err(GroupError::UnsupportedMapping {
+                        key: base + offset,
+                        reason: "more than three items",
+                    });
+                }
+                let id = token
+                    .parse::<i32>()
+                    .ok()
+                    .filter(|number| *number > 0)
+                    .ok_or(GroupError::InvalidNumber(base + offset))?;
+                items.push(BasicPrototypeId(id as u32));
+            }
+            if items.is_empty() {
+                return Err(GroupError::InvalidNumber(base + offset));
+            }
+            Ok(items)
+        };
+        let first = item_list(3)?;
+        let second = item_list(4)?;
+        let products = item_list(5)?;
+        let unsupported = |offset, reason| GroupError::UnsupportedMapping {
+            key: base + offset,
+            reason,
+        };
+        if first.iter().any(|id| *id != first[0]) {
+            return Err(unsupported(3, "first ingredient must be fixed"));
+        }
+        if first.len() != 1 && first.len() != second.len() {
+            return Err(unsupported(
+                3,
+                "fixed ingredient repetitions must align with variants",
+            ));
+        }
+        if second.iter().collect::<BTreeSet<_>>().len() != second.len() {
+            return Err(unsupported(4, "duplicate second-ingredient alternative"));
+        }
+        if second.len() != products.len() {
+            return Err(unsupported(
+                5,
+                "each second-ingredient alternative needs one output",
+            ));
+        }
+        let variants = second
+            .into_iter()
+            .zip(products)
+            .map(|(second, product)| RecipeVariant {
+                ingredients: [first[0], second],
+                product,
+            })
+            .collect();
         Ok(Self {
             id,
-            title: SchematicTextId(number(0, false)?),
-            description: SchematicTextId(number(1, false)?),
-            illustration: InterfaceArtId(number(2, false)?),
-            ingredients: [item(3)?, item(4)?],
-            product: item(5)?,
-            quantity: NonZeroU32::new(number(6, false)? as u32)
-                .expect("positive quantity validated"),
+            title,
+            description,
+            illustration,
+            variants,
+            quantity: NonZeroU32::new(number(6)? as u32)
+                .ok_or(GroupError::InvalidNumber(base + 6))?,
         })
     }
 }
@@ -127,8 +174,8 @@ pub struct SchematicDefinition {
     pub title: String,
     pub description: String,
     pub illustration: String,
-    pub ingredients: [ItemId; 2],
-    pub product: ItemId,
+    /// In legacy recipes, order preserves the original preference.
+    pub variants: Vec<RecipeVariant<ItemId>>,
     pub quantity: NonZeroU32,
 }
 
@@ -149,6 +196,8 @@ pub struct ItemResolution {
     /// Set only after the file's serialized ID matches the expected ID.
     pub prototype: Option<LoadedPrototype>,
     pub name: Option<ResolvedText>,
+    /// Native identity backed by a validated prototype and description reference.
+    pub id: Option<ItemId>,
     pub definition: Option<FoodDefinition>,
 }
 
@@ -165,8 +214,7 @@ pub struct SchematicReport {
     pub title: Option<ResolvedText>,
     pub description: Option<ResolvedText>,
     pub illustration: Option<Illustration>,
-    pub ingredients: [ItemResolution; 2],
-    pub product: ItemResolution,
+    pub items: BTreeMap<BasicPrototypeId, ItemResolution>,
     pub definition: Option<SchematicDefinition>,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -228,34 +276,39 @@ pub fn load_schematic(vfs: &mut Vfs, id: LegacyRecipeId) -> Result<SchematicRepo
         &mut diagnostics,
     );
     let illustration = resolve_illustration(vfs, legacy.illustration, &mut diagnostics);
-    let candidates = prototype_candidates(
-        vfs,
-        [legacy.ingredients[0], legacy.ingredients[1], legacy.product],
-    );
+    let mut references = BTreeMap::new();
+    for variant in &legacy.variants {
+        for (field, id) in [
+            ("ingredient 1", variant.ingredients[0]),
+            ("ingredient 2", variant.ingredients[1]),
+            ("product", variant.product),
+        ] {
+            references.entry(id).or_insert(field);
+        }
+    }
+    let candidates = prototype_candidates(vfs, references.keys().copied());
     let mut description_tables = BTreeMap::new();
-    let [first, second, product] = [
-        ("ingredient 1", legacy.ingredients[0]),
-        ("ingredient 2", legacy.ingredients[1]),
-        ("product", legacy.product),
-    ]
-    .map(|(field, id)| {
-        resolve_item(
-            vfs,
-            &candidates,
-            &mut description_tables,
-            field,
-            id,
-            &mut diagnostics,
-        )
-    });
+    let items = references
+        .into_iter()
+        .map(|(id, field)| {
+            let item = resolve_item(
+                vfs,
+                &candidates,
+                &mut description_tables,
+                field,
+                id,
+                &mut diagnostics,
+            );
+            (id, item)
+        })
+        .collect();
     let mut report = SchematicReport {
         rules_source: rules.source,
         legacy,
         title,
         description,
         illustration,
-        ingredients: [first, second],
-        product,
+        items,
         definition: None,
         diagnostics,
     };
@@ -264,6 +317,18 @@ pub fn load_schematic(vfs: &mut Vfs, id: LegacyRecipeId) -> Result<SchematicRepo
 }
 
 fn native_definition(report: &SchematicReport) -> Option<SchematicDefinition> {
+    let item = |id| report.items.get(&id)?.id.clone();
+    let variants = report
+        .legacy
+        .variants
+        .iter()
+        .map(|variant| {
+            Some(RecipeVariant {
+                ingredients: [item(variant.ingredients[0])?, item(variant.ingredients[1])?],
+                product: item(variant.product)?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
     Some(SchematicDefinition {
         id: RecipeId(format!("arcanum:recipe/{}", report.legacy.id.0)),
         title: report.title.as_ref()?.text.clone(),
@@ -274,11 +339,7 @@ fn native_definition(report: &SchematicReport) -> Option<SchematicDefinition> {
             .asset_source
             .virtual_path
             .clone(),
-        ingredients: [
-            report.ingredients[0].definition.as_ref()?.id.clone(),
-            report.ingredients[1].definition.as_ref()?.id.clone(),
-        ],
-        product: report.product.definition.as_ref()?.id.clone(),
+        variants,
         quantity: report.legacy.quantity,
     })
 }
@@ -368,7 +429,7 @@ fn resolve_illustration(
 // The filename prefix is a discovery hint; file identity comes from the header.
 fn prototype_candidates(
     vfs: &Vfs,
-    ids: [BasicPrototypeId; 3],
+    ids: impl IntoIterator<Item = BasicPrototypeId>,
 ) -> BTreeMap<SerializedPrototypeId, Vec<String>> {
     let wanted: BTreeSet<_> = ids
         .into_iter()
@@ -433,7 +494,8 @@ fn resolve_item(
                 diagnostics,
                 field,
                 format!(
-                    "ambiguous serialized prototype {}: {}",
+                    "basic prototype {} has ambiguous serialized prototype {}: {}",
+                    id.0,
                     serialized.0,
                     paths.join(", ")
                 ),
@@ -459,7 +521,7 @@ fn resolve_item(
             return empty();
         }
     };
-    let Some(food) = prototype.food else {
+    let Some(DescriptionId(key)) = prototype.description else {
         warn(
             diagnostics,
             field,
@@ -474,7 +536,6 @@ fn resolve_item(
         };
     };
 
-    let DescriptionId(key) = food.description;
     let text_path = if key < 30000 {
         "mes/description.mes"
     } else {
@@ -484,25 +545,36 @@ fn resolve_item(
         .entry(text_path)
         .or_insert_with(|| load_mes(vfs, text_path));
     let name = resolve_text(table, text_path, key, field, diagnostics);
-    let definition = match (u32::try_from(food.weight), u32::try_from(food.worth)) {
-        (Ok(base_weight), Ok(base_worth)) => name.as_ref().map(|name| FoodDefinition {
-            id: ItemId(format!("arcanum:item/prototype-{}", serialized.0)),
-            display_name: name.text.clone(),
-            base_weight,
-            base_worth,
-        }),
-        _ => {
-            warn(
-                diagnostics,
-                field,
-                format!("{path} has a negative base weight or worth"),
-            );
-            None
+    let mut native_id = name
+        .as_ref()
+        .map(|_| ItemId(format!("arcanum:item/prototype-{}", serialized.0)));
+    let definition = prototype.food.and_then(|food| {
+        match (u32::try_from(food.weight), u32::try_from(food.worth)) {
+            (Ok(base_weight), Ok(base_worth)) => {
+                name.as_ref()
+                    .zip(native_id.as_ref())
+                    .map(|(name, id)| FoodDefinition {
+                        id: id.clone(),
+                        display_name: name.text.clone(),
+                        base_weight,
+                        base_worth,
+                    })
+            }
+            _ => {
+                warn(
+                    diagnostics,
+                    field,
+                    format!("{path} has a negative base weight or worth"),
+                );
+                native_id = None;
+                None
+            }
         }
-    };
+    });
     ItemResolution {
         prototype: Some(prototype),
         name,
+        id: native_id,
         definition,
     }
 }

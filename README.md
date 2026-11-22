@@ -165,9 +165,10 @@ target/debug/arcanum-rs mes get "$game" 'MES\GAMEDESC.MES' 40000 --mods "$mods" 
 game="$HOME/Work/arcanum-ce-test"
 target/debug/arcanum-rs prototype inspect "$game" 'proto/010087 - Food.pro'
 target/debug/arcanum-rs schematic inspect "$game" 4220
+target/debug/arcanum-rs schematic inspect "$game" 2450
 ```
 
-Both commands accept the MES command's `--mods <mods-directory> <mod-id> ...` argument. The prototype reader covers the version 119 fixed header and selected Food fields. Schematic inspection resolves one two-input, single-output group and reports its source and unresolved references. See [Content formats](docs/CONTENT_FORMATS.md#milestone-5-reader-boundary) for the supported fields, boundaries and evidence.
+Both commands accept the MES command's `--mods <mods-directory> <mod-id> ...` argument. The version 119 prototype reader covers the fixed header, selected Food fields and the description key for Armor and Generic. Schematic inspection reports the selected group’s resource sources, unresolved references and any ordered input-to-output variants. [Content formats](docs/CONTENT_FORMATS.md#milestone-6-healing-jacket-variants)
 
 ```sh
 ARCANUM_GAME_DIR="$HOME/Work/arcanum-ce-test" \
