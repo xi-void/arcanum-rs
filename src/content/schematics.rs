@@ -4,10 +4,11 @@ use super::items::{FoodDefinition, ItemId, LoadedPrototype, load_prototype};
 use super::{LoadedMes, Source, load_mes};
 use crate::mes::{EntryId, Mes};
 use crate::prototype::{DescriptionId, SerializedPrototypeId};
-use crate::{resource_path, vfs::Vfs};
+use crate::{resource_path, vfs};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::num::NonZeroU32;
+use vfs::Vfs;
 
 pub mod audit;
 
@@ -203,8 +204,39 @@ pub struct ItemResolution {
     pub definition: Option<FoodDefinition>,
 }
 
+/// Categories of independent issues found while validating a schematic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DiagnosticKind {
+    MissingPrototype,
+    AmbiguousPrototype,
+    PrototypeIdentityMismatch,
+    InvalidPrototype,
+    MissingDescription,
+    MissingIllustration,
+    MalformedMapping,
+    DuplicateKey,
+    Other,
+}
+
+impl fmt::Display for DiagnosticKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::MissingPrototype => "Missing prototype resource",
+            Self::AmbiguousPrototype => "Ambiguous prototype candidate",
+            Self::PrototypeIdentityMismatch => "Prototype identity mismatch",
+            Self::InvalidPrototype => "Unsupported or invalid prototype",
+            Self::MissingDescription => "Missing name or description reference",
+            Self::MissingIllustration => "Missing illustration reference",
+            Self::MalformedMapping => "Malformed or unsupported schematic mapping",
+            Self::DuplicateKey => "Duplicate MES key",
+            Self::Other => "Other validation error",
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct Diagnostic {
+    pub kind: DiagnosticKind,
     pub field: &'static str,
     pub message: String,
 }
@@ -259,7 +291,13 @@ pub fn load_schematic(vfs: &mut Vfs, id: LegacyRecipeId) -> Result<SchematicRepo
         error,
     })?;
     let candidates = prototype_candidates(vfs, item_references(&legacy).map(|(_, id)| id));
-    Ok(resolve_schematic(vfs, &rules, legacy, &candidates))
+    Ok(resolve_schematic(
+        vfs,
+        &rules,
+        legacy,
+        &candidates,
+        &mut MesTables::new(),
+    ))
 }
 
 fn item_references(legacy: &LegacyGroup) -> impl Iterator<Item = (&'static str, BasicPrototypeId)> {
@@ -272,11 +310,22 @@ fn item_references(legacy: &LegacyGroup) -> impl Iterator<Item = (&'static str, 
     })
 }
 
+type MesTables = BTreeMap<&'static str, Result<LoadedMes, super::Error>>;
+
+fn mes_table<'a>(
+    vfs: &mut Vfs,
+    tables: &'a mut MesTables,
+    path: &'static str,
+) -> &'a Result<LoadedMes, super::Error> {
+    tables.entry(path).or_insert_with(|| load_mes(vfs, path))
+}
+
 fn resolve_schematic(
     vfs: &mut Vfs,
     rules: &LoadedMes,
     legacy: LegacyGroup,
     candidates: &BTreeMap<SerializedPrototypeId, Vec<String>>,
+    tables: &mut MesTables,
 ) -> SchematicReport {
     let id = legacy.id;
     let mut diagnostics = Vec::new();
@@ -284,37 +333,38 @@ fn resolve_schematic(
         if rules.duplicates.iter().any(|duplicate| duplicate.id == key) {
             warn(
                 &mut diagnostics,
+                DiagnosticKind::DuplicateKey,
                 "rules",
                 format!("duplicate entry {key}; using the final value"),
             );
         }
     }
-    let text = load_mes(vfs, TEXT);
-    let title = resolve_text(&text, TEXT, legacy.title.0, "title", &mut diagnostics);
+    let text = mes_table(vfs, tables, TEXT);
+    let title = resolve_text(
+        text,
+        TEXT,
+        legacy.title.0,
+        "title",
+        DiagnosticKind::MissingDescription,
+        &mut diagnostics,
+    );
     let description = resolve_text(
-        &text,
+        text,
         TEXT,
         legacy.description.0,
         "description",
+        DiagnosticKind::MissingDescription,
         &mut diagnostics,
     );
-    let illustration = resolve_illustration(vfs, legacy.illustration, &mut diagnostics);
+    let illustration = resolve_illustration(vfs, tables, legacy.illustration, &mut diagnostics);
     let mut references = BTreeMap::new();
     for (field, id) in item_references(&legacy) {
         references.entry(id).or_insert(field);
     }
-    let mut description_tables = BTreeMap::new();
     let items = references
         .into_iter()
         .map(|(id, field)| {
-            let item = resolve_item(
-                vfs,
-                candidates,
-                &mut description_tables,
-                field,
-                id,
-                &mut diagnostics,
-            );
+            let item = resolve_item(vfs, candidates, tables, field, id, &mut diagnostics);
             (id, item)
         })
         .collect();
@@ -365,6 +415,7 @@ fn resolve_text(
     path: &str,
     key: EntryId,
     field: &'static str,
+    missing_kind: DiagnosticKind,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<ResolvedText> {
     match table {
@@ -373,6 +424,7 @@ fn resolve_text(
                 if table.duplicates.iter().any(|duplicate| duplicate.id == key) {
                     warn(
                         diagnostics,
+                        DiagnosticKind::DuplicateKey,
                         field,
                         format!("duplicate text key {key} in {path}; using the final value"),
                     );
@@ -385,6 +437,7 @@ fn resolve_text(
             None => {
                 warn(
                     diagnostics,
+                    missing_kind,
                     field,
                     format!("missing key {key} in {path} from {}", table.source),
                 );
@@ -394,6 +447,11 @@ fn resolve_text(
         Err(error) => {
             warn(
                 diagnostics,
+                if resource_is_missing(error) {
+                    missing_kind
+                } else {
+                    DiagnosticKind::Other
+                },
                 field,
                 format!("cannot read key {key} from {path}: {error}"),
             );
@@ -404,14 +462,16 @@ fn resolve_text(
 
 fn resolve_illustration(
     vfs: &mut Vfs,
+    tables: &mut MesTables,
     art: InterfaceArtId,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Illustration> {
     let entry = resolve_text(
-        &load_mes(vfs, INTERFACE),
+        mes_table(vfs, tables, INTERFACE),
         INTERFACE,
         art.0,
         "illustration",
+        DiagnosticKind::MissingIllustration,
         diagnostics,
     )?;
     let relative = match resource_path::normalize(&entry.text) {
@@ -419,6 +479,7 @@ fn resolve_illustration(
         Err(error) => {
             warn(
                 diagnostics,
+                DiagnosticKind::Other,
                 "illustration",
                 format!("invalid resource path for artwork key {}: {error}", art.0),
             );
@@ -434,6 +495,11 @@ fn resolve_illustration(
         Err(error) => {
             warn(
                 diagnostics,
+                if resource_is_missing(&error) {
+                    DiagnosticKind::MissingIllustration
+                } else {
+                    DiagnosticKind::Other
+                },
                 "illustration",
                 format!("artwork key {}: {error}", art.0),
             );
@@ -477,7 +543,7 @@ fn prototype_candidates(
 fn resolve_item(
     vfs: &mut Vfs,
     candidates: &BTreeMap<SerializedPrototypeId, Vec<String>>,
-    tables: &mut BTreeMap<&'static str, Result<LoadedMes, super::Error>>,
+    tables: &mut MesTables,
     field: &'static str,
     id: BasicPrototypeId,
     diagnostics: &mut Vec<Diagnostic>,
@@ -486,6 +552,7 @@ fn resolve_item(
     let Some(serialized) = id.serialized() else {
         warn(
             diagnostics,
+            DiagnosticKind::InvalidPrototype,
             field,
             format!("basic prototype {} has no supported serialized ID", id.0),
         );
@@ -500,6 +567,7 @@ fn resolve_item(
         [] => {
             warn(
                 diagnostics,
+                DiagnosticKind::MissingPrototype,
                 field,
                 format!(
                     "basic prototype {} (serialized {}) has no visible prototype path",
@@ -511,6 +579,7 @@ fn resolve_item(
         paths => {
             warn(
                 diagnostics,
+                DiagnosticKind::AmbiguousPrototype,
                 field,
                 format!(
                     "basic prototype {} has ambiguous serialized prototype {}: {}",
@@ -527,6 +596,7 @@ fn resolve_item(
         Ok(prototype) => {
             warn(
                 diagnostics,
+                DiagnosticKind::PrototypeIdentityMismatch,
                 field,
                 format!(
                     "{path} from {} declares ID {}; expected {}",
@@ -536,13 +606,21 @@ fn resolve_item(
             return empty();
         }
         Err(error) => {
-            warn(diagnostics, field, error.to_string());
+            let kind = match &error {
+                super::Error::Prototype { .. } | super::Error::TooLarge { .. } => {
+                    DiagnosticKind::InvalidPrototype
+                }
+                error if resource_is_missing(error) => DiagnosticKind::MissingPrototype,
+                _ => DiagnosticKind::Other,
+            };
+            warn(diagnostics, kind, field, error.to_string());
             return empty();
         }
     };
     let Some(DescriptionId(key)) = prototype.description else {
         warn(
             diagnostics,
+            DiagnosticKind::InvalidPrototype,
             field,
             format!(
                 "{path} from {} has unsupported object type {}",
@@ -560,10 +638,14 @@ fn resolve_item(
     } else {
         "mes/gamedesc.mes"
     };
-    let table = tables
-        .entry(text_path)
-        .or_insert_with(|| load_mes(vfs, text_path));
-    let name = resolve_text(table, text_path, key, field, diagnostics);
+    let name = resolve_text(
+        mes_table(vfs, tables, text_path),
+        text_path,
+        key,
+        field,
+        DiagnosticKind::MissingDescription,
+        diagnostics,
+    );
     let mut native_id = name
         .as_ref()
         .map(|_| ItemId(format!("arcanum:item/prototype-{}", serialized.0)));
@@ -582,6 +664,7 @@ fn resolve_item(
             _ => {
                 warn(
                     diagnostics,
+                    DiagnosticKind::InvalidPrototype,
                     field,
                     format!("{path} has a negative base weight or worth"),
                 );
@@ -598,8 +681,31 @@ fn resolve_item(
     }
 }
 
-fn warn(diagnostics: &mut Vec<Diagnostic>, field: &'static str, message: String) {
-    diagnostics.push(Diagnostic { field, message });
+fn resource_is_missing(error: &super::Error) -> bool {
+    match error {
+        super::Error::Resource {
+            error: vfs::Error::NotFound(_),
+            ..
+        } => true,
+        super::Error::Resource {
+            error: vfs::Error::Io { source, .. },
+            ..
+        } => source.kind() == std::io::ErrorKind::NotFound,
+        _ => false,
+    }
+}
+
+fn warn(
+    diagnostics: &mut Vec<Diagnostic>,
+    kind: DiagnosticKind,
+    field: &'static str,
+    message: String,
+) {
+    diagnostics.push(Diagnostic {
+        kind,
+        field,
+        message,
+    });
 }
 
 #[cfg(test)]

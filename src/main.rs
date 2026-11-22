@@ -1,10 +1,14 @@
 use arcanum_rs::content;
-use arcanum_rs::content::schematics::audit::{GroupStatus, audit_schematics};
+use arcanum_rs::content::schematics::DiagnosticKind;
+use arcanum_rs::content::schematics::audit::{
+    GroupStatus, SchematicAudit, audit_all_schematics, audit_schematics,
+};
 use arcanum_rs::content::{items, schematics};
 use arcanum_rs::dat::{Archive, Format};
 use arcanum_rs::mes::EntryId;
 use arcanum_rs::mods::{Catalog, Package};
 use arcanum_rs::vfs::{self, Policy, Resolution, Vfs};
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
@@ -28,7 +32,7 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] mes get <game-directory> <resource-path> <entry-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] prototype inspect <game-directory> <resource-path> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] schematic inspect <game-directory> <recipe-id> [--mods <mods-directory> <mod-id> ...]
-  arcanum-rs [--ordered] schematic audit <game-directory> [<recipe-id> ...] [--mods <mods-directory> <mod-id> ...]";
+  arcanum-rs [--ordered] schematic audit <game-directory> [--all-references | <recipe-id> ...] [--mods <mods-directory> <mod-id> ...]";
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -319,13 +323,28 @@ fn audit_schematic_command(
         .iter()
         .position(|arg| arg == "--mods")
         .unwrap_or(options.len());
-    let (ids, options) = options.split_at(split);
-    let ids = ids
-        .iter()
-        .map(|id| recipe_id(id))
-        .collect::<Result<Vec<_>, _>>()?;
+    let (selection, options) = options.split_at(split);
+    let all = match selection {
+        [flag] if flag == "--all-references" => true,
+        args if args.iter().any(|arg| arg == "--all-references") => {
+            return Err("--all-references cannot be combined with recipe IDs".into());
+        }
+        _ => false,
+    };
+    let ids = if all {
+        Vec::new()
+    } else {
+        selection
+            .iter()
+            .map(|id| recipe_id(id))
+            .collect::<Result<Vec<_>, _>>()?
+    };
     let mut vfs = inspection_vfs(game, options, policy)?;
-    let audit = audit_schematics(&mut vfs, &ids)?;
+    let audit = if all {
+        audit_all_schematics(&mut vfs)?
+    } else {
+        audit_schematics(&mut vfs, &ids)?
+    };
     let mut supported = 0;
     let mut variants = 0;
     let mut unsupported = 0;
@@ -382,6 +401,10 @@ fn audit_schematic_command(
         writeln!(out, "  Duplicate entry {key}")?;
     }
 
+    if all {
+        return write_full_reference_summary(&mut out, &audit).map_err(Into::into);
+    }
+
     let complete = audit
         .references
         .iter()
@@ -415,6 +438,50 @@ fn audit_schematic_command(
             }
             Err(error) => writeln!(out, "  {}: {error}", id.0)?,
         }
+    }
+    Ok(())
+}
+
+fn write_full_reference_summary(out: &mut impl Write, audit: &SchematicAudit) -> io::Result<()> {
+    let mut counts = BTreeMap::new();
+    let mut incomplete = Vec::new();
+    for (id, result) in &audit.references {
+        match result {
+            Ok(report) => {
+                if report.definition.is_none() {
+                    incomplete.push(id.0.to_string());
+                }
+                for diagnostic in &report.diagnostics {
+                    *counts.entry(diagnostic.kind).or_insert(0) += 1;
+                }
+            }
+            Err(_) => {
+                incomplete.push(id.0.to_string());
+                *counts.entry(DiagnosticKind::MalformedMapping).or_insert(0) += 1;
+            }
+        }
+    }
+    writeln!(
+        out,
+        "Reference validation: {} complete / {} audited",
+        audit.references.len() - incomplete.len(),
+        audit.references.len()
+    )?;
+    writeln!(out, "Incomplete: {}", incomplete.len())?;
+    if counts.is_empty() {
+        writeln!(out, "Diagnostics: none")?;
+    } else {
+        writeln!(out, "Diagnostics by category:")?;
+        for (kind, count) in counts {
+            writeln!(out, "  {kind}: {count}")?;
+        }
+    }
+    if !incomplete.is_empty() {
+        writeln!(out, "Incomplete recipe IDs: {}", incomplete.join(", "))?;
+        writeln!(
+            out,
+            "Pass recipe IDs in place of --all-references for details."
+        )?;
     }
     Ok(())
 }

@@ -195,6 +195,24 @@ Every group has two required ingredients. There are 114 groups with one ID in ea
 
 The existing two-input `RecipeVariant` represents all groups in scope. Only six underwent detailed reference validation. This audit does not establish reference coverage for the remaining recipes, factory-section semantics, or the cause of the reported Fortifier inventory issue.
 
+## Milestone 8 full schematic reference validation
+
+The full CE-policy VFS sweep selected the winning `data/rules/schematic.mes` and resolved **119 of 119 learned and found groups** to native definitions, with **zero incomplete groups or diagnostics**. Every ingredient and product had a visible serialized prototype with the expected header identity and a resolvable stored description key. Every schematic drawing resolved through the interface table to a visible asset. The validator checks artwork references and asset presence. It leaves ART decoding to other tools.
+
+Before the prefix extension, 75 groups resolved and 44 were blocked by unsupported object types. The first sweep found 73 Weapon, 7 Ammo, and 1 Key diagnostics across those groups, involving 46 distinct Weapon files, 3 Ammo files, and 1 Key file. Every blocked prototype was present. No missing prototype or need for CE-generated defaults was found.
+
+The added types use the version 119 common description prefix already used for Armor and Generic. The sampled Weapon (type 5), Ammo (6), and Key (11) files used the 16-byte bitmap at byte 56. Examples include serialized IDs 6057, 7059, and 12081, with stored description keys 6037, 7039, and 12061 respectively at byte 323. CE's `object_proto_enumerate_fields` visits common fields before item and subtype fields. The reader follows field framing and checks the expected header identity separately from the description lookup. Some validated Weapon files came from archives, including prototype 6166 from `ArcanumXPyroBow.dat`. Weapon, Ammo and Key subtype fields and CE prototype generation remain outside this importer.
+
+Full and selected reference validation use one VFS mount set and one prototype candidate search. Each run loads shared MES tables only on first use and caches their results, including failures. Typed diagnostics distinguish missing prototypes, ambiguous paths, identity mismatches, unsupported or invalid prototype data, missing names or descriptions, missing illustration references, malformed mappings, duplicate MES keys, and other read or parse failures. Native variants and output quantities retain source order and semantics.
+
+### Factory Schematics sample
+
+The winning loose table has 91 seven-cell groups every ten IDs from 7000 to 7900 under “Factory Schematics.” The three shadowed copies in `Arcanum3.dat`, `Arcanum4.dat`, and `Arcanum5.dat` contain no such group. All 91 loose groups have two singleton inputs, one product with quantity 1, and drawing key 562. Their text keys resolve to the literal placeholders “Title” and “Description.”
+
+Of these groups, 89 specify Rag (15208) plus Bread (10057) for Star Sapphire (15205). Group 7000 specifies Rag in both slots and 7900 specifies Rags (8126) in both. The cells hold basic item IDs in recipe positions and are compatible with the two-input data shape. The repeated values and placeholder text are evidence of template records. The generic CE schematic reader can interpret a supplied ID using the same offsets, and the written-item grant path reads a recipe ID directly. Neither source establishes that these loose template records are active gameplay recipes.
+
+None of the Factory inputs matches an output in either sampled section. Crafted components are verified in the learned and found rows. For example, the three outputs of Feather-Weight Chainmail (3250) are inputs to Elite Platemail (3260), whose three outputs are inputs to Machined Platemail (5090). These are ordinary item references. Factory runtime registration was unverified and the 7000 range remains outside the importer. Fortifier's reported CE inventory issue also remains unresolved.
+
 ### Primary reference locations
 
 - CE `src/game/proto.c` (`proto_init`, `sub_468660`, `sub_468860`, and the four `BP_*` initializers), `descriptions.h`, `obj_id.h`, `obj_id.c`.

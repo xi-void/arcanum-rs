@@ -5,8 +5,11 @@ use std::fmt;
 pub const HEADER_SIZE: usize = 56;
 pub const MAX_PROTOTYPE_BYTES: usize = 64 * 1024;
 const VERSION: u32 = 119;
-const FOOD_TYPE: u32 = 9;
+const WEAPON_TYPE: u32 = 5;
+const AMMO_TYPE: u32 = 6;
 const ARMOR_TYPE: u32 = 7;
+const FOOD_TYPE: u32 = 9;
+const KEY_TYPE: u32 = 11;
 const GENERIC_TYPE: u32 = 14;
 const ITEM_BITMAP_BYTES: usize = 16;
 
@@ -185,7 +188,10 @@ pub(crate) fn decode_item_description(
     bytes: &[u8],
     header: Header,
 ) -> Result<Option<DescriptionId>, Error> {
-    if !matches!(header.object_type, ARMOR_TYPE | GENERIC_TYPE) {
+    if !matches!(
+        header.object_type,
+        WEAPON_TYPE | AMMO_TYPE | ARMOR_TYPE | KEY_TYPE | GENERIC_TYPE
+    ) {
         return Ok(None);
     }
     read_description(&mut Reader {
