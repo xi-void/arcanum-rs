@@ -37,6 +37,10 @@ impl Header {
         self.object_type == ARMOR_TYPE
     }
 
+    pub fn is_generic(self) -> bool {
+        self.object_type == GENERIC_TYPE
+    }
+
     pub fn is_weapon_or_ammo(self) -> bool {
         matches!(self.object_type, WEAPON_TYPE | AMMO_TYPE)
     }
@@ -58,6 +62,13 @@ pub struct CommonItemFields {
     pub worth: i32,
     pub discipline: i32,
     pub magic_tech_complexity: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenericFields {
+    pub item: CommonItemFields,
+    /// Legacy capability bits, retained for inspection.
+    pub flags: u32,
 }
 
 /// Numeric lookup key in the legacy script namespace.
@@ -143,6 +154,7 @@ pub enum ErrorKind {
     UnsupportedFoodType(u32),
     UnsupportedWeaponAmmoType(u32),
     UnsupportedArmourType(u32),
+    UnsupportedGenericType(u32),
     DamageIndexOutOfRange,
     DamageMaskCountMismatch,
     ResistanceIndexOutOfRange,
@@ -184,6 +196,9 @@ impl fmt::Display for Error {
             }
             ErrorKind::UnsupportedArmourType(kind) => {
                 write!(f, "object type {kind} is outside the Armour decoder")
+            }
+            ErrorKind::UnsupportedGenericType(kind) => {
+                write!(f, "object type {kind} is outside the Generic decoder")
             }
             ErrorKind::ResistanceIndexOutOfRange => {
                 f.write_str("resistance bitmap contains an unsupported index")
@@ -382,6 +397,31 @@ pub fn decode_armour(bytes: &[u8]) -> Result<(Header, ArmourFields), Error> {
             magical_resistance_adjustments,
         },
     ))
+}
+
+/// Decode the common item properties and frame the full Generic record.
+pub fn decode_generic(bytes: &[u8]) -> Result<(Header, GenericFields), Error> {
+    if bytes.len() > MAX_PROTOTYPE_BYTES {
+        return Err(at(MAX_PROTOTYPE_BYTES, ErrorKind::TooLarge));
+    }
+    let header = decode_header(bytes)?;
+    if !header.is_generic() {
+        return Err(at(
+            52,
+            ErrorKind::UnsupportedGenericType(header.object_type),
+        ));
+    }
+    let mut input = Reader {
+        bytes,
+        offset: HEADER_SIZE,
+    };
+    let item = read_item(&mut input, false)?.common;
+    let flags = input.u32()?;
+    input.skip(2 * 4)?; // Usage bonus and remaining uses.
+    input.array(4)?;
+    input.array(8)?;
+    input.finish()?;
+    Ok((header, GenericFields { item, flags }))
 }
 
 struct ItemPrefix {

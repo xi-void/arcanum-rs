@@ -1,6 +1,6 @@
 use super::*;
 use crate::mods::Catalog;
-use crate::prototype::tests::{food_bytes, weapon_bytes};
+use crate::prototype::tests::{food_bytes, generic_bytes, weapon_bytes};
 use crate::vfs::Policy;
 use std::fs;
 use std::io;
@@ -605,6 +605,115 @@ fn item_name_validation_rejects_blanks_and_preserves_significant_spacing() {
             assert_eq!(audit.statuses, [(GROUP, Status::ReferencesIncomplete)]);
         }
     }
+}
+
+#[test]
+fn generic_mod_uses_winning_definition_and_preserves_readiness_contract() {
+    use super::readiness::{IssueKind, Status, audit_readiness};
+    use crate::content::items::{GenericDefinition, ItemDefinitionError, inspect_prototype};
+
+    let fixture = Fixture::new();
+    fixture.populate();
+    fs::remove_file(fixture.0.join("base/proto/010120 - food.pro")).unwrap();
+    let path = "proto/010120 - generic.pro";
+    fixture.write(&format!("base/{path}"), generic_bytes(10120, 400, 3, 0));
+    fixture.write(
+        "mods/generic-test/arcanum-mod.toml",
+        r#"
+manifest_version = 1
+id = "generic-test"
+name = "Generic test"
+version = "1.0.0"
+description = "Fixture"
+[[mounts]]
+kind = "directory"
+path = "resources"
+"#,
+    );
+    let mut base = fixture.vfs();
+    let base_item = inspect_prototype(&mut base, path)
+        .unwrap()
+        .resolve_generic(&mut base)
+        .unwrap()
+        .unwrap();
+    assert_eq!(base_item.definition.base_weight, 3);
+    assert!(base_item.name_source.mod_id.is_none());
+    let replacement_path = format!("mods/generic-test/resources/{path}");
+    let replacement_names = "mods/generic-test/resources/mes/description.mes";
+    let mut replacement = generic_bytes(10120, 405, 12, 1);
+    replacement[216..220].copy_from_slice(&37i32.to_le_bytes());
+    fixture.write(&replacement_path, &replacement);
+    fixture.write(replacement_names, "{405}{  Coiled wire!  }{401}{Second}");
+
+    let modded_vfs = || {
+        let catalog = Catalog::discover(fixture.0.join("mods")).unwrap();
+        catalog
+            .load_order(&["generic-test"])
+            .unwrap()
+            .apply(fixture.vfs())
+            .unwrap()
+    };
+    let mut vfs = modded_vfs();
+    let inspection = inspect_prototype(&mut vfs, path).unwrap();
+    assert_eq!(inspection.generic.unwrap().flags, 1);
+    let resolved = inspection.resolve_generic(&mut vfs).unwrap().unwrap();
+    assert_eq!(
+        resolved.definition,
+        GenericDefinition {
+            id: base_item.definition.id,
+            display_name: "  Coiled wire!  ".into(),
+            base_weight: 12,
+            base_worth: 42,
+            magic_tech_complexity: 37,
+        }
+    );
+    for source in [inspection.prototype.source, resolved.name_source] {
+        assert_eq!(source.mod_id.unwrap().as_str(), "generic-test");
+    }
+    let audit = audit_readiness(&mut vfs, &[GROUP]).unwrap();
+    assert_eq!(audit.statuses, [(GROUP, Status::Checked(Vec::new()))]);
+
+    let mut invalid_worth = replacement.clone();
+    invalid_worth[196..200].copy_from_slice(&(-1i32).to_le_bytes());
+    for (body, message) in [
+        (&replacement[..279], "truncated"),
+        (invalid_worth.as_slice(), "base worth"),
+    ] {
+        fixture.write(&replacement_path, body);
+        let audit = audit_readiness(&mut modded_vfs(), &[GROUP]).unwrap();
+        assert!(
+            audit.references.references[0]
+                .1
+                .as_ref()
+                .unwrap()
+                .definition
+                .is_some()
+        );
+        let [(_, Status::Checked(issues))] = audit.statuses.as_slice() else {
+            panic!("expected checked recipe");
+        };
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].kind, IssueKind::ItemDefinition);
+        assert!(issues[0].detail.contains(message), "{issues:?}");
+        assert_eq!(
+            issues[0].source.mod_id.as_ref().unwrap().as_str(),
+            "generic-test"
+        );
+    }
+
+    fixture.write(&replacement_path, replacement);
+    fixture.write(replacement_names, "{405}{  \t  }{401}{Second}");
+    let mut vfs = modded_vfs();
+    let inspection = inspect_prototype(&mut vfs, path).unwrap();
+    assert!(matches!(
+        inspection.resolve_generic(&mut vfs),
+        Err(ItemDefinitionError::MissingName {
+            id: DescriptionId(405),
+            ..
+        })
+    ));
+    let audit = audit_readiness(&mut vfs, &[GROUP]).unwrap();
+    assert_eq!(audit.statuses, [(GROUP, Status::ReferencesIncomplete)]);
 }
 
 #[test]

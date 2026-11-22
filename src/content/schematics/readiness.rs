@@ -106,7 +106,7 @@ fn check_item(vfs: &mut Vfs, item: &ItemResolution, source: &Source) -> Option<I
     }
     let prototype = item.prototype.as_ref().expect("resolved item");
     let header = prototype.header;
-    if !header.is_weapon_or_ammo() && !header.is_armour() {
+    if !header.is_weapon_or_ammo() && !header.is_armour() && !header.is_generic() {
         return Some(Issue {
             kind: IssueKind::UnsupportedItemType(header.object_type),
             source: source.clone(),
@@ -129,6 +129,8 @@ fn check_item(vfs: &mut Vfs, item: &ItemResolution, source: &Source) -> Option<I
                 inspection.weapon_ammo_definition(fields, name).map(drop)
             } else if let Some(fields) = inspection.armour {
                 inspection.armour_definition(fields, name).map(drop)
+            } else if let Some(fields) = inspection.generic {
+                inspection.generic_definition(fields, name).map(drop)
             } else {
                 return Err("item no longer has a supported body".into());
             }

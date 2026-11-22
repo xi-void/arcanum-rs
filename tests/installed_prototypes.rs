@@ -328,30 +328,109 @@ fn readiness_checks_all_supported_schematic_item_and_artwork_resources() {
     assert_eq!(audit.statuses.len(), 119);
     let mut passed = 0;
     let mut counts = BTreeMap::new();
-    for (id, status) in audit.statuses {
+    let mut newly_passed = Vec::new();
+    for ((id, status), (reference_id, report)) in
+        audit.statuses.into_iter().zip(audit.references.references)
+    {
+        assert_eq!(id, reference_id);
         let Status::Checked(issues) = status else {
             panic!("recipe {} failed reference resolution", id.0);
         };
         if issues.is_empty() {
             passed += 1;
+            if report
+                .unwrap()
+                .items
+                .values()
+                .any(|item| item.prototype.as_ref().unwrap().header.is_generic())
+            {
+                newly_passed.push(id.0);
+            }
+        } else {
+            assert_eq!(id, LegacyRecipeId(5280));
         }
         for issue in issues {
             assert!(
-                matches!(issue.kind, IssueKind::UnsupportedItemType(11 | 14)),
+                issue.kind == IssueKind::UnsupportedItemType(11),
                 "recipe {}: {issue:?}",
                 id.0
             );
             *counts.entry(issue.kind).or_insert(0) += 1;
         }
     }
-    assert_eq!(passed, 38);
+    assert_eq!(passed, 118);
     assert_eq!(
         counts,
-        BTreeMap::from([
-            (IssueKind::UnsupportedItemType(11), 1),
-            (IssueKind::UnsupportedItemType(14), 138),
-        ])
+        BTreeMap::from([(IssueKind::UnsupportedItemType(11), 1)])
     );
+    assert_eq!(newly_passed.len(), 80);
+    for id in [2210, 2400, 2450] {
+        assert!(newly_passed.contains(&id));
+    }
+}
+
+#[test]
+#[ignore = "requires the installed Arcanum data"]
+fn installed_generic_ingredients_and_product_match_verified_prototypes() {
+    use arcanum_rs::content::items::{GenericDefinition, ItemId, inspect_prototype};
+
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    for (recipe, basic, serialized, name, weight, worth, complexity, flags, product) in [
+        (2210, 15069, 15089, "Metal Plates", 10, 2, -5, 0, false),
+        (
+            2450,
+            15108,
+            15128,
+            "Electrical Harness",
+            30,
+            50,
+            -70,
+            0,
+            false,
+        ),
+        (2400, 15070, 15090, "Electric Light", 50, 100, -20, 1, true),
+    ] {
+        let report = load_schematic(&mut vfs, LegacyRecipeId(recipe)).unwrap();
+        assert!(report.legacy.variants.iter().all(|variant| {
+            let basic = BasicPrototypeId(basic);
+            if product {
+                variant.product == basic
+            } else {
+                variant.ingredients.contains(&basic)
+            }
+        }));
+        let path = format!("proto/{serialized:06} - generic.pro");
+        let inspection = inspect_prototype(&mut vfs, &path).unwrap();
+        assert_eq!(
+            inspection.prototype.header.id,
+            SerializedPrototypeId(serialized)
+        );
+        assert_eq!(inspection.prototype.header.object_type, 14);
+        assert_eq!(inspection.prototype.source.storage, Storage::Loose);
+        assert_eq!(
+            inspection.prototype.source.mount_path,
+            game.join("data").canonicalize().unwrap()
+        );
+        let fields = inspection.generic.unwrap();
+        assert_eq!(fields.item.description, DescriptionId(basic as i32));
+        assert_eq!(fields.flags, flags);
+        let resolved = inspection.resolve_generic(&mut vfs).unwrap().unwrap();
+        assert_eq!(
+            resolved.name_source.mount_path.file_name().unwrap(),
+            "Arcanum5.dat"
+        );
+        assert_eq!(
+            resolved.definition,
+            GenericDefinition {
+                id: ItemId(format!("arcanum:item/prototype-{serialized}")),
+                display_name: name.into(),
+                base_weight: weight,
+                base_worth: worth,
+                magic_tech_complexity: complexity,
+            }
+        );
+    }
 }
 
 #[test]

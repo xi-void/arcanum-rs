@@ -385,6 +385,16 @@ fn inspect_prototype(
             write_armour(&mut out, armour)?;
         }
     }
+    if let Some(fields) = &inspection.generic {
+        write_common_item_fields(&mut out, &fields.item)?;
+        writeln!(out, "Legacy Generic flags: {:#010x}", fields.flags)?;
+        if let Some(resolved) = inspection.resolve_generic(&mut vfs)? {
+            let item = resolved.definition;
+            writeln!(out, "Generic: {} ({})", item.display_name, item.id.0)?;
+            write!(out, "Name: ")?;
+            write_source(&mut out, &resolved.name_source)?;
+        }
+    }
     Ok(())
 }
 
