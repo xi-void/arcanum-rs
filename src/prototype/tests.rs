@@ -21,6 +21,61 @@ pub(crate) fn food_bytes(id: u32, description: i32, weight: i32) -> Vec<u8> {
     bytes
 }
 
+pub(crate) fn generic_bytes(id: u32, description: i32, weight: i32, flags: u32) -> Vec<u8> {
+    let mut bytes = food_bytes(id, description, weight);
+    bytes[52..56].copy_from_slice(&GENERIC_TYPE.to_le_bytes());
+    bytes[266..270].copy_from_slice(&flags.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn decodes_generic_base_fields_and_checks_tail_framing() {
+    let mut bytes = generic_bytes(15128, 917, 30, 0x8000_0001);
+    bytes[216..220].copy_from_slice(&(-70i32).to_le_bytes());
+    // Insert an optional width-8 pad array with one element.
+    bytes[279] = 1;
+    for word in [8u32, 1, 0, 123, 456, 1, 1] {
+        bytes.extend(word.to_le_bytes());
+    }
+    let (header, fields) = decode_generic(&bytes).unwrap();
+    assert_eq!(header.id, SerializedPrototypeId(15128));
+    assert!(header.is_generic());
+    assert_eq!(fields.item.description, DescriptionId(917));
+    assert_eq!(fields.item.weight, 30);
+    assert_eq!(fields.item.worth, 42);
+    assert_eq!(fields.item.magic_tech_complexity, -70);
+    assert_eq!(fields.flags, 0x8000_0001);
+
+    for end in 266..bytes.len() {
+        assert_eq!(
+            decode_generic(&bytes[..end]).unwrap_err().kind,
+            ErrorKind::Truncated,
+            "length {end}"
+        );
+    }
+    let mut invalid = bytes.clone();
+    invalid[280..284].copy_from_slice(&4u32.to_le_bytes());
+    assert_eq!(
+        decode_generic(&invalid),
+        Err(at(
+            280,
+            ErrorKind::InvalidArrayWidth {
+                expected: 8,
+                actual: 4
+            }
+        ))
+    );
+    bytes.push(0);
+    assert_eq!(
+        decode_generic(&bytes).unwrap_err().kind,
+        ErrorKind::TrailingData
+    );
+    assert_eq!(
+        decode_generic(&food_bytes(15128, 917, 30)),
+        Err(at(52, ErrorKind::UnsupportedGenericType(FOOD_TYPE)))
+    );
+}
+
 #[test]
 fn reads_only_the_fixed_header_for_other_types() {
     let mut bytes = food_bytes(9019, 42, 8);

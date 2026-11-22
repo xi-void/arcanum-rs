@@ -1,4 +1,19 @@
 use super::*;
+
+#[test]
+fn native_generic_definition_accepts_a_namespaced_item_without_legacy_data() {
+    use items::{GenericDefinition, ItemId};
+
+    let component = GenericDefinition {
+        id: ItemId("clockwork:item/brass-cog".into()),
+        display_name: "Brass cog".into(),
+        base_weight: 3,
+        base_worth: 5,
+        magic_tech_complexity: -12,
+    };
+    assert_eq!(component.id.0, "clockwork:item/brass-cog");
+    assert_eq!(component.magic_tech_complexity, -12);
+}
 use crate::dat::EntryKind;
 use crate::mods::Catalog;
 use crate::vfs::Policy;

@@ -418,6 +418,67 @@ adjustments. CE uses it as an input to aptitude-dependent behavior.
 The native definition carries the source value, and this milestone
 computes no effective protection.
 
+## Milestone 17 native Generic definitions
+
+The winning version 119, type 14 prototypes for these schematic samples
+come from loose `data/proto/`. The names come from the stored keys in
+the VFS-selected `mes/description.mes` in `Arcanum5.dat`.
+
+| Name | Schematic role | Basic / serialized ID | Virtual prototype path | Description key | Weight (stone) / worth (game currency) | Signed complexity / legacy discipline | Flags |
+| --- | --- | --- | --- | ---: | --- | --- | --- |
+| Metal Plates | Ingredient in Charges (2210) | 15069 / 15089 | `proto/015089 - generic.pro` | 15069 | 10 / 2 | −5 / 1 | `0x0` |
+| Electrical Harness | Ingredient in Healing Jacket (2450) | 15108 / 15128 | `proto/015128 - generic.pro` | 15108 | 30 / 50 | −70 / 2 | `0x0` |
+| Electric Light | Product of Electric Light (2400) | 15070 / 15090 | `proto/015090 - generic.pro` | 15070 | 50 / 100 | −20 / 2 | `0x1` |
+
+In these three records, description, weight, worth, complexity, and
+discipline are signed 32-bit little-endian values at offsets 323, 372,
+380, 400, and 404. The offsets describe the samples. The reader walks
+the bounded record and accounts for optional fields. CE's
+`object_proto_enumerate_fields` in `obj.c` reads the common item fields
+before the Generic fields. The Generic tail begins at byte 450 in the
+samples. It contains three 32-bit scalars for the flag bits, usage bonus,
+and remaining uses, followed by presence bytes for width-4 and width-8
+pad arrays. Both arrays are absent at offsets 462 and 463 in these
+samples. The reader validates optional framing and record length. It
+keeps usage scalars and pad array contents opaque.
+
+Electric Light's flag bit `0x1` is the shield/torch placement flag
+used by CE's `item_location_get`. This confirms that type 14 covers
+more than plain crafting components. CE reads other Generic flags for
+skill-based uses, such as lockpicking and healing. Its skill code consumes
+remaining uses on a healing item instance. Those behaviors and counts
+remain outside the native definition. The CLI displays the original
+flag word for inspection, including bits it does not interpret. Base
+weight and worth are the stored common-item values before CE's dynamic
+adjustments. Complexity stays signed and separate from any calculation.
+CE's schematic component path uses its negation alongside discipline
+when checking expertise. The importer preserves the scalar without
+computing any requirement.
+
+`GenericDefinition` holds a namespaced `ItemId`, a display name,
+nonnegative base weight and worth, and signed magic/technology complexity.
+It can be constructed in Rust without a legacy record. The existing
+shared item-name rule preserves valid names as written. The prototype
+and the winning name table retain separate VFS provenance.
+
+The installed sweep retains **119/119 reference-complete recipes**.
+**118/119 pass the supported-content readiness check**, up from 38.
+One recipe remains unsupported, Iron Key (5280), because its output
+uses `proto/012081 - key.pro`. The sweep found **zero invalid recipes**
+and zero unreadable illustrations. Readiness checks the supported Generic
+fields and drawing bytes. It cannot validate gameplay capabilities,
+opaque prototype properties or ART structure.
+
+The 80 newly passing recipe IDs are:
+
+```text
+2210 2220 2250 2260 2400 2410 2420 2430 2440 2450 2460 2600 2610 2620 2630 2640
+2650 2660 2800 2810 2820 2830 2840 3000 3010 3020 3030 3040 3050 3060 3200 3210
+3220 3230 3240 3250 3260 3400 4010 4020 4210 4410 4420 4440 4450 4460 4600 4610
+4620 4630 4640 4650 4660 4670 4680 4690 4700 4710 4800 4810 4830 4840 4870 4880
+4900 5000 5010 5020 5040 5050 5060 5070 5090 5200 5230 5250 5260 5270 5430 5440
+```
+
 ### Primary reference locations
 
 - CE `src/game/proto.c` (`proto_init`, `sub_468660`, `sub_468860`, and the four `BP_*` initializers), `descriptions.h`, `obj_id.h`, `obj_id.c`.

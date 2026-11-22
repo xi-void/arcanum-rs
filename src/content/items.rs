@@ -23,6 +23,24 @@ pub struct FoodDefinition {
     pub base_worth: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenericDefinition {
+    pub id: ItemId,
+    pub display_name: String,
+    /// Base weight in game stone units.
+    pub base_weight: u32,
+    /// Base worth in game currency units.
+    pub base_worth: u32,
+    /// Signed base magic/technology complexity.
+    pub magic_tech_complexity: i32,
+}
+
+#[derive(Debug)]
+pub struct ResolvedGeneric {
+    pub definition: GenericDefinition,
+    pub name_source: Source,
+}
+
 /// Damage points by channel. Channels can affect different character pools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DamageKind {
@@ -264,9 +282,39 @@ pub struct PrototypeInspection {
     pub prototype: LoadedPrototype,
     pub weapon_ammo: Option<prototype::WeaponAmmoFields>,
     pub armour: Option<prototype::ArmourFields>,
+    pub generic: Option<prototype::GenericFields>,
 }
 
 impl PrototypeInspection {
+    /// Resolve the stored name and import the verified Generic base properties.
+    pub fn resolve_generic(
+        &self,
+        vfs: &mut Vfs,
+    ) -> Result<Option<ResolvedGeneric>, ItemDefinitionError> {
+        let Some(fields) = self.generic else {
+            return Ok(None);
+        };
+        let (display_name, name_source) = resolve_item_name(vfs, fields.item.description)?;
+        Ok(Some(ResolvedGeneric {
+            definition: self.generic_definition(fields, display_name)?,
+            name_source,
+        }))
+    }
+
+    pub(super) fn generic_definition(
+        &self,
+        fields: prototype::GenericFields,
+        display_name: String,
+    ) -> Result<GenericDefinition, ItemDefinitionError> {
+        Ok(GenericDefinition {
+            id: ItemId::from_prototype(self.prototype.header.id),
+            display_name,
+            base_weight: unsigned("base weight", fields.item.weight)?,
+            base_worth: unsigned("base worth", fields.item.worth)?,
+            magic_tech_complexity: fields.item.magic_tech_complexity,
+        })
+    }
+
     /// Resolve the stored description key from the caller's VFS and convert
     /// the decoded fields into a native weapon or ammunition definition.
     pub fn resolve_weapon_ammo(
@@ -573,19 +621,26 @@ fn load(vfs: &mut Vfs, path: &str, detailed: bool) -> Result<PrototypeInspection
         } else {
             None
         };
+        let generic = if detailed && header.is_generic() {
+            Some(prototype::decode_generic(&bytes)?.1)
+        } else {
+            None
+        };
         let description = if let Some(fields) = food {
             Some(fields.description)
         } else if let Some(fields) = &weapon_ammo {
             Some(fields.item().description)
         } else if let Some(fields) = armour {
             Some(fields.item.description)
+        } else if let Some(fields) = generic {
+            Some(fields.item.description)
         } else {
             prototype::decode_item_description(&bytes, header)?
         };
-        Ok((header, description, food, weapon_ammo, armour))
+        Ok((header, description, food, weapon_ammo, armour, generic))
     });
     match result {
-        Ok((header, description, food, weapon_ammo, armour)) => Ok(PrototypeInspection {
+        Ok((header, description, food, weapon_ammo, armour, generic)) => Ok(PrototypeInspection {
             prototype: LoadedPrototype {
                 source,
                 header,
@@ -594,6 +649,7 @@ fn load(vfs: &mut Vfs, path: &str, detailed: bool) -> Result<PrototypeInspection
             },
             weapon_ammo,
             armour,
+            generic,
         }),
         Err(error) => Err(Error::Prototype {
             provenance: Box::new(source),
