@@ -69,7 +69,7 @@ Core systems should use:
 
 Legacy engine behavior should not dictate internal data structures.
 
-#### Future effect activation ownership
+#### Headless effect activation ownership
 
 An immutable effect definition, a source instance, a target actor, and
 an activation each have distinct identities. A source can be an equipped
@@ -83,8 +83,33 @@ Sword of Defense is the reference case. Its wield-on script derives a
 count of effect 128 grants from aptitude and saves that count. Wield-off
 uses the saved count. A native implementation must keep the outstanding
 grants or applied count across aptitude changes so it can retire the
-previous contribution before any refresh. This contract leaves storage,
-evaluation and serialization for future milestones.
+previous contribution before any refresh.
+
+[The headless runtime](../src/runtime.rs) implements this contract for
+explicit equipment grants and additive AC. `Runtime` owns actor base AC,
+item associations and active records. Its typed actor, item instance
+and activation IDs are allocated deterministically and never reused
+within a runtime. Callers keep these handles with their issuing runtime.
+Definitions remain immutable references supplied by the caller, and
+their namespaced IDs are independent of runtime handles.
+
+An item can have one wearer and grant effects only to that wearer.
+Equipping associates the item, and each explicit grant creates an
+activation with its source, target, definition and captured AC points.
+Removing an activation by ID leaves other activations intact. Unequipping
+removes all activations from that source in one transition. Repeated
+equip, unequip and removal return explicit errors. Effective AC is
+recomputed from base AC and the remaining recorded points. Unsupported
+operations and changes that would leave a total outside the signed
+32-bit range fail before state changes. This includes a removal if
+cancelling adjustments had kept the total in range.
+
+The demo supplies two item instances and counts of one and fifteen.
+Effect 128's +1 AC and these counts come from the Sword of Defense
+trace. The fixture items, base stat and simultaneous sources are
+demonstration choices. The runtime receives explicit grants and has no
+aptitude formula, script interpreter, slot rules or serialized state.
+[Sword of Defense evidence](CONTENT_FORMATS.md#sword-of-defense-wield-scripts)
 
 ### 5. Behavioral Compatibility
 

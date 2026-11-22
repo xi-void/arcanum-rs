@@ -1,5 +1,7 @@
 use arcanum_rs::content;
-use arcanum_rs::content::effects::{EffectOperation, LegacyEffectId, load_effect};
+use arcanum_rs::content::effects::{
+    EffectDefinition, EffectId, EffectOperation, LegacyEffectId, load_effect,
+};
 use arcanum_rs::content::schematics::DiagnosticKind;
 use arcanum_rs::content::schematics::audit::{
     GroupStatus, SchematicAudit, audit_all_schematics, audit_schematics,
@@ -10,6 +12,7 @@ use arcanum_rs::dat::{Archive, Format};
 use arcanum_rs::mes::EntryId;
 use arcanum_rs::mods::{Catalog, Package};
 use arcanum_rs::prototype::WeaponAmmoFields;
+use arcanum_rs::runtime::{ItemDefinitionRef, Runtime};
 use arcanum_rs::vfs::{self, Policy, Resolution, Vfs};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -36,7 +39,8 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] prototype inspect <game-directory> <resource-path> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] effect inspect <game-directory> <effect-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] schematic inspect <game-directory> <recipe-id> [--mods <mods-directory> <mod-id> ...]
-  arcanum-rs [--ordered] schematic audit <game-directory> [--all-references | [--readiness] [<recipe-id> ...]] [--mods <mods-directory> <mod-id> ...]";
+  arcanum-rs [--ordered] schematic audit <game-directory> [--all-references | [--readiness] [<recipe-id> ...]] [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs simulate equipment-demo";
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -57,6 +61,9 @@ fn main() -> ExitCode {
         (Some("mounts"), [_, game]) => mounts(Path::new(game), policy),
         (Some("resolve"), [_, game, resource]) => resolve(Path::new(game), policy, resource),
         (Some("conflicts"), [_, game]) => conflicts(Path::new(game), policy),
+        (Some("simulate"), [_, demo]) if policy == Policy::Ce && demo == "equipment-demo" => {
+            equipment_demo(&mut io::stdout().lock())
+        }
         (Some("mes"), [_, action, game, resource, options @ ..]) if action == "inspect" => {
             inspect_mes(Path::new(game), resource, None, options, policy)
         }
@@ -108,6 +115,67 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn equipment_demo(out: &mut impl Write) -> Result<(), Box<dyn Error>> {
+    let item = items::GenericDefinition {
+        id: items::ItemId("demo:item/defence-charm".into()),
+        display_name: "Defence charm".into(),
+        base_weight: 1,
+        base_worth: 0,
+        magic_tech_complexity: 0,
+    };
+    let effect = EffectDefinition {
+        id: EffectId("arcanum:effect/128".into()),
+        operations: vec![EffectOperation::AddArmourClass { points: 1 }],
+    };
+    let mut runtime = Runtime::default();
+    let actor = runtime.create_actor(10)?;
+    let first = runtime.instantiate_item(ItemDefinitionRef::Generic(&item))?;
+    let second = runtime.instantiate_item(ItemDefinitionRef::Generic(&item))?;
+    writeln!(
+        out,
+        "{actor:?} starts at AC {}",
+        runtime.armour_class(actor)?
+    )?;
+
+    runtime.equip(first, actor)?;
+    let remaining = runtime.activate_effect(first, actor, &effect)?;
+    writeln!(
+        out,
+        "Equipped {first:?}, granted {} × 1, AC {}",
+        effect.id.0,
+        runtime.armour_class(actor)?
+    )?;
+    runtime.equip(second, actor)?;
+    let copies = 15;
+    for _ in 0..copies {
+        runtime.activate_effect(second, actor, &effect)?;
+    }
+    writeln!(
+        out,
+        "Equipped {second:?}, granted {} × {copies}, AC {}",
+        effect.id.0,
+        runtime.armour_class(actor)?
+    )?;
+
+    runtime.unequip(second, actor)?;
+    let grant = runtime.activation(remaining)?;
+    writeln!(
+        out,
+        "Unequipped {second:?}, {:?} from {:?} remains ({:+} AC), AC {}",
+        grant.id,
+        grant.source,
+        grant.armour_class_points,
+        runtime.armour_class(actor)?
+    )?;
+    runtime.unequip(first, actor)?;
+    writeln!(
+        out,
+        "Unequipped {first:?}, AC {}",
+        runtime.armour_class(actor)?
+    )?;
+    Ok(())
 }
 
 fn open_archive(path: &Path) -> Result<Archive<File>, Box<dyn Error>> {

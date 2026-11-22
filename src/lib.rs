@@ -1,4 +1,4 @@
-//! Read-only access to Arcanum resources and content.
+//! Arcanum resource access, native content and headless gameplay.
 
 pub mod content;
 pub mod dat;
@@ -7,4 +7,5 @@ mod mod_id;
 pub mod mods;
 pub mod prototype;
 pub mod resource_path;
+pub mod runtime;
 pub mod vfs;
