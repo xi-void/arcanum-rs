@@ -24,6 +24,33 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// A sprite whose hotspot is placed at a signed destination anchor.
+#[derive(Clone, Copy)]
+pub struct SpriteDraw<'a> {
+    pub frame: &'a SpriteFrame,
+    pub anchor: (i32, i32),
+}
+
+/// Draw in iterator order, back to front, over the existing RGB pixels.
+/// The destination is not cleared. On error, earlier draws remain applied.
+pub fn blit_ordered<'a>(
+    destination: &mut [[u8; 3]],
+    dimensions: (u32, u32),
+    stride: usize,
+    draws: impl IntoIterator<Item = SpriteDraw<'a>>,
+) -> Result<(), Error> {
+    for SpriteDraw { frame, anchor } in draws {
+        blit(
+            destination,
+            dimensions,
+            stride,
+            frame,
+            sprite_origin(frame, anchor),
+        )?;
+    }
+    Ok(())
+}
+
 /// Align the stored hotspot with the anchor. Frame movement offsets are
 /// separate metadata for consumers that update the anchor.
 pub fn sprite_origin(frame: &SpriteFrame, anchor: (i32, i32)) -> (i64, i64) {

@@ -208,9 +208,12 @@ To open a native sprite window on Linux, enable the optional frontend:
 ```sh
 cargo run --features windowed -- art demo
 cargo run --features windowed -- art view "$game" art/item/bread.art 0
+cargo run --features windowed -- art overlap-demo
+cargo run --features windowed -- art overlap "$game"
 ```
 
-The demo uses a synthetic sprite and requires only a display session.
+The synthetic demos require only a display session. `art overlap` shows
+bread and alignment frames with explicit draw order and independent anchors.
 [Native sprite viewer](docs/SPRITE_VIEWER.md)
 
 ## Prototype and schematic inspection
