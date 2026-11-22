@@ -164,13 +164,15 @@ target/debug/arcanum-rs mes get "$game" 'MES\GAMEDESC.MES' 40000 --mods "$mods" 
 ```sh
 game="$HOME/Work/arcanum-ce-test"
 target/debug/arcanum-rs prototype inspect "$game" 'proto/010087 - Food.pro'
+target/debug/arcanum-rs prototype inspect "$game" 'proto/006136 - Weapon.pro'
+target/debug/arcanum-rs prototype inspect "$game" 'proto/007059 - Ammo.pro'
 target/debug/arcanum-rs schematic inspect "$game" 4220
 target/debug/arcanum-rs schematic inspect "$game" 2450
 target/debug/arcanum-rs schematic audit "$game" 2450 3250 4220
 target/debug/arcanum-rs schematic audit "$game" --all-references
 ```
 
-These commands accept the MES command's `--mods <mods-directory> <mod-id> ...` argument. The version 119 prototype reader covers the fixed header, selected Food fields and the description key for Weapon, Ammo, Armor, Key and Generic. Schematic inspection reports the selected group’s resource sources, unresolved references and any ordered input-to-output variants. [Content formats](docs/CONTENT_FORMATS.md#milestone-6-healing-jacket-variants)
+These commands accept the MES command's `--mods <mods-directory> <mod-id> ...` argument. Prototype inspection shows selected Food fields, Weapon damage channels, base speed and range, and ammunition compatibility. For Ammo it reports the stored prototype quantity separately. Armor, Key, and Generic inspection includes the description key. [Weapon and Ammo fields](docs/CONTENT_FORMATS.md#milestone-10-native-weapon-and-ammo-definitions) Schematic inspection reports the selected group’s resource sources, unresolved references and any ordered input-to-output variants. [Content formats](docs/CONTENT_FORMATS.md#milestone-6-healing-jacket-variants)
 
 With no selection, the audit reports structural coverage. Use `--all-references` for a full reference summary and incomplete recipe IDs. Pass individual IDs for detailed diagnostics. [Validation findings](docs/CONTENT_FORMATS.md#milestone-8-full-schematic-reference-validation)
 

@@ -315,3 +315,111 @@ fn validates_references_for_all_learned_and_found_groups() {
     }
     assert_eq!(variant_ids, [2450, 3250, 3260, 4450, 5090]);
 }
+
+#[test]
+#[ignore = "requires the installed Arcanum data"]
+fn installed_weapon_and_ammo_match_serialized_and_native_fields() {
+    use arcanum_rs::content::items::{
+        AmmoKind, AmmoRequirement, DamageComponent, DamageKind, WeaponAmmoDefinition,
+        inspect_prototype,
+    };
+    use arcanum_rs::prototype::WeaponAmmoFields;
+
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    let loose = game.join("data").canonicalize().unwrap();
+    let mut definitions = Vec::new();
+    for (path, basic, serialized, object_type, name, weight, worth) in [
+        ("proto/006049 - weapon.pro", 6029, 6049, 5, "Dagger", 20, 20),
+        (
+            "proto/006136 - weapon.pro",
+            6116,
+            6136,
+            5,
+            "Hand Crafted Flintlock",
+            80,
+            138,
+        ),
+        ("proto/007059 - ammo.pro", 7039, 7059, 6, "Bullet", 1, 3),
+    ] {
+        let inspection = inspect_prototype(&mut vfs, path).unwrap();
+        let header = inspection.prototype.header;
+        assert_eq!(header.object_type, object_type);
+        assert_eq!(header.id, SerializedPrototypeId(serialized));
+        assert_eq!(Some(header.id), BasicPrototypeId(basic).serialized());
+        assert_eq!(
+            inspection.prototype.description,
+            Some(DescriptionId(basic as i32))
+        );
+        assert_eq!(inspection.prototype.source.mount_path, loose);
+        assert_eq!(inspection.prototype.source.storage, Storage::Loose);
+        let fields = inspection.weapon_ammo.unwrap();
+        assert_eq!((fields.item().weight, fields.item().worth), (weight, worth));
+        let resolved = inspection.resolve_weapon_ammo(&mut vfs).unwrap().unwrap();
+        assert_eq!(
+            resolved.name_source.mount_path.file_name().unwrap(),
+            "Arcanum5.dat"
+        );
+        match &resolved.definition {
+            WeaponAmmoDefinition::Weapon(definition) => assert_eq!(definition.display_name, name),
+            WeaponAmmoDefinition::Ammo(definition) => assert_eq!(definition.display_name, name),
+        }
+        definitions.push((fields, resolved.definition));
+    }
+
+    for (index, (damage, speed, range, ammo_type, consumption)) in [
+        ([(1, 4), (1, 2)], 10, 1, 10000, 0),
+        ([(2, 6), (1, 4)], 5, 15, 1, 1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (WeaponAmmoFields::Weapon(raw), WeaponAmmoDefinition::Weapon(weapon)) =
+            &definitions[index]
+        else {
+            panic!("expected weapon");
+        };
+        assert_eq!(
+            (
+                raw.speed_factor,
+                raw.range,
+                raw.ammo_type,
+                raw.ammo_consumption
+            ),
+            (speed, range, ammo_type, consumption)
+        );
+        assert_eq!(
+            raw.damage_lower,
+            [Some(damage[0].0), None, None, None, Some(damage[1].0)]
+        );
+        assert_eq!(
+            raw.damage_upper,
+            [Some(damage[0].1), None, None, None, Some(damage[1].1)]
+        );
+        assert_eq!(weapon.range_tiles, range as u32);
+        assert_eq!(weapon.speed_factor, speed);
+        let expected = [DamageKind::Normal, DamageKind::Fatigue]
+            .into_iter()
+            .zip(damage)
+            .map(|(kind, (minimum, maximum))| DamageComponent {
+                kind,
+                minimum: minimum as u32,
+                maximum: maximum as u32,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(weapon.damage, expected);
+        assert_eq!(
+            weapon.ammunition,
+            (index == 1).then_some(AmmoRequirement {
+                kind: AmmoKind::Bullets,
+                units_per_attack: 1
+            })
+        );
+    }
+    let (WeaponAmmoFields::Ammo(raw), WeaponAmmoDefinition::Ammo(ammo)) = &definitions[2] else {
+        panic!("expected ammo");
+    };
+    assert_eq!(raw.quantity, 10);
+    assert_eq!(raw.ammo_type, 1);
+    assert_eq!(ammo.kind, AmmoKind::Bullets);
+}

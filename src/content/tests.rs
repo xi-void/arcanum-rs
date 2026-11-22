@@ -166,3 +166,69 @@ fn enforces_limits_on_indexed_size_and_on_actual_stream() {
         Err(Error::TooLarge { .. })
     ));
 }
+
+#[test]
+fn weapon_inspection_resolves_native_identity_and_tracks_overrides() {
+    use crate::content::items::{
+        AmmoKind, DamageKind, ItemId, WeaponAmmoDefinition, inspect_prototype,
+    };
+    use crate::prototype::{DescriptionId, SerializedPrototypeId, tests::weapon_bytes};
+
+    let fixture = Fixture::new();
+    let path = "proto/006136 - weapon.pro";
+    fixture.write(&format!("base/{path}"), &weapon_bytes(6136, 400));
+    fixture.write("base/mes/description.mes", b"{400}{Original name}");
+    let mut vfs = Vfs::new(Policy::Ordered);
+    vfs.mount_directory(fixture.0.join("base")).unwrap();
+    let stock = inspect_prototype(&mut vfs, path).unwrap();
+    let stock_name = stock.resolve_weapon_ammo(&mut vfs).unwrap().unwrap();
+    assert!(stock.prototype.source.mod_id.is_none());
+    assert!(stock_name.name_source.mod_id.is_none());
+
+    fixture.write(
+        "mods/patch/arcanum-mod.toml",
+        br#"
+manifest_version = 1
+id = "patch"
+name = "Synthetic weapon patch"
+version = "1.0.0"
+description = "Temporary test fixture."
+[[mounts]]
+kind = "directory"
+path = "resources"
+"#,
+    );
+    fixture.write(
+        &format!("mods/patch/resources/{path}"),
+        &weapon_bytes(6136, 30025),
+    );
+    fixture.write(
+        "mods/patch/resources/mes/gamedesc.mes",
+        b"{30025}{Override name}",
+    );
+    let catalog = Catalog::discover(fixture.0.join("mods")).unwrap();
+    let mut vfs = catalog.load_order(&["patch"]).unwrap().apply(vfs).unwrap();
+    let inspection = inspect_prototype(&mut vfs, path).unwrap();
+    let resolved = inspection.resolve_weapon_ammo(&mut vfs).unwrap().unwrap();
+    assert_eq!(inspection.prototype.header.id, SerializedPrototypeId(6136));
+    assert_eq!(inspection.prototype.description, Some(DescriptionId(30025)));
+    assert_eq!(
+        inspection.prototype.source.mod_id.unwrap().as_str(),
+        "patch"
+    );
+    assert_eq!(resolved.name_source.mod_id.unwrap().as_str(), "patch");
+    let WeaponAmmoDefinition::Weapon(weapon) = resolved.definition else {
+        panic!("expected Weapon");
+    };
+    assert_eq!(weapon.id, ItemId("arcanum:item/prototype-6136".into()));
+    assert_eq!(weapon.display_name, "Override name");
+    assert_eq!(
+        weapon
+            .damage
+            .iter()
+            .map(|damage| damage.kind)
+            .collect::<Vec<_>>(),
+        [DamageKind::Normal, DamageKind::Fatigue]
+    );
+    assert_eq!(weapon.ammunition.unwrap().kind, AmmoKind::Bullets);
+}

@@ -141,3 +141,116 @@ fn supported_non_food_items_decode_only_the_verified_description_prefix() {
         );
     }
 }
+
+pub(crate) fn weapon_bytes(id: u32, description: i32) -> Vec<u8> {
+    let mut bytes = food_bytes(id, description, 12);
+    bytes.truncate(266); // Common object and item slots.
+    bytes[52..56].copy_from_slice(&WEAPON_TYPE.to_le_bytes());
+    bytes.extend([0; 16]); // First four weapon scalars.
+    for (min_or_max, fatigue) in [(2i32, 1i32), (6, 4)] {
+        bytes.push(1);
+        for field in [4, 2, 99, min_or_max, fatigue, 2, 0b10001, 0] {
+            bytes.extend(field.to_le_bytes());
+        }
+    }
+    bytes.push(0); // Absent magic damage array.
+    for field in [5i32, 20, 15, 40, 7, 11, 1, 1] {
+        bytes.extend(field.to_le_bytes());
+    }
+    bytes.extend([0; 42]); // Tail scalars and two absent arrays.
+    bytes
+}
+
+fn ammo_bytes() -> Vec<u8> {
+    let mut bytes = food_bytes(7059, 0, 1);
+    bytes.truncate(266);
+    bytes[52..56].copy_from_slice(&AMMO_TYPE.to_le_bytes());
+    for field in [0i32, 10, 1, 0, 0] {
+        bytes.extend(field.to_le_bytes());
+    }
+    bytes.extend([0; 2]);
+    bytes
+}
+
+#[test]
+fn decodes_weapon_damage_by_sparse_index_and_follows_optional_fields() {
+    let mut bytes = weapon_bytes(6136, 99);
+    bytes[76] = 1; // Optional common location.
+    bytes.splice(77..77, [0; 8]);
+    let (header, decoded) = decode_weapon_ammo(&bytes).unwrap();
+    assert_eq!(header.id, SerializedPrototypeId(6136));
+    let WeaponAmmoFields::Weapon(weapon) = decoded else {
+        panic!("expected Weapon");
+    };
+    assert_eq!(weapon.item.description, DescriptionId(99));
+    assert_eq!(weapon.item.weight, 12);
+    assert_eq!(weapon.damage_lower, [Some(2), None, None, None, Some(1)]);
+    assert_eq!(weapon.damage_upper, [Some(6), None, None, None, Some(4)]);
+    assert_eq!(
+        (
+            weapon.speed_factor,
+            weapon.range,
+            weapon.ammo_type,
+            weapon.ammo_consumption
+        ),
+        (5, 15, 1, 1)
+    );
+}
+
+#[test]
+fn decodes_ammo_kind_and_prototype_quantity_separately() {
+    let (header, decoded) = decode_weapon_ammo(&ammo_bytes()).unwrap();
+    assert_eq!(header.object_type, AMMO_TYPE);
+    let WeaponAmmoFields::Ammo(ammo) = decoded else {
+        panic!("expected Ammo");
+    };
+    assert_eq!(ammo.ammo_type, 1);
+    assert_eq!(ammo.quantity, 10);
+    assert_eq!(
+        decode_weapon_ammo(&food_bytes(1, 2, 3)),
+        Err(at(52, ErrorKind::UnsupportedWeaponAmmoType(9)))
+    );
+}
+
+#[test]
+fn validates_weapon_masks_and_weapon_ammo_record_boundaries() {
+    let original = weapon_bytes(6136, 99);
+    for (offset, value, expected) in [
+        (
+            283,
+            8u32,
+            at(
+                283,
+                ErrorKind::InvalidArrayWidth {
+                    expected: 4,
+                    actual: 8,
+                },
+            ),
+        ),
+        (287, u32::MAX, at(295, ErrorKind::ArrayTooLarge)),
+        (303, u32::MAX, at(307, ErrorKind::ArrayTooLarge)),
+        (307, 1, at(307, ErrorKind::DamageMaskCountMismatch)),
+        (307, 0b10011, at(307, ErrorKind::DamageMaskCountMismatch)),
+        (307, 0b100001, at(307, ErrorKind::DamageIndexOutOfRange)),
+        (311, 1, at(311, ErrorKind::DamageIndexOutOfRange)),
+    ] {
+        let mut bytes = original.clone();
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        assert_eq!(decode_weapon_ammo(&bytes), Err(expected));
+    }
+    for mut bytes in [original, ammo_bytes()] {
+        for len in 0..bytes.len() {
+            assert_eq!(
+                decode_weapon_ammo(&bytes[..len]).unwrap_err().kind,
+                ErrorKind::Truncated,
+                "length {len}"
+            );
+        }
+        let len = bytes.len();
+        bytes.push(0);
+        assert_eq!(
+            decode_weapon_ammo(&bytes),
+            Err(at(len, ErrorKind::TrailingData))
+        );
+    }
+}

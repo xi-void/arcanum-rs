@@ -12,6 +12,7 @@ const FOOD_TYPE: u32 = 9;
 const KEY_TYPE: u32 = 11;
 const GENERIC_TYPE: u32 = 14;
 const ITEM_BITMAP_BYTES: usize = 16;
+const DAMAGE_TYPES: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SerializedPrototypeId(pub u32);
@@ -30,6 +31,10 @@ impl Header {
     pub fn is_food(self) -> bool {
         self.object_type == FOOD_TYPE
     }
+
+    pub fn is_weapon_or_ammo(self) -> bool {
+        matches!(self.object_type, WEAPON_TYPE | AMMO_TYPE)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +44,50 @@ pub struct FoodFields {
     pub worth: i32,
     pub discipline: i32,
     pub magic_tech_complexity: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommonItemFields {
+    pub description: DescriptionId,
+    pub weight: i32,
+    pub worth: i32,
+    pub discipline: i32,
+    pub magic_tech_complexity: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WeaponFields {
+    pub item: CommonItemFields,
+    /// Legacy damage indices in order. None means the sparse index is absent.
+    pub damage_lower: [Option<i32>; DAMAGE_TYPES],
+    pub damage_upper: [Option<i32>; DAMAGE_TYPES],
+    pub speed_factor: i32,
+    pub range: i32,
+    pub ammo_type: i32,
+    pub ammo_consumption: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AmmoFields {
+    pub item: CommonItemFields,
+    pub ammo_type: i32,
+    /// Quantity stored on the prototype, separate from the native definition.
+    pub quantity: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeaponAmmoFields {
+    Weapon(WeaponFields),
+    Ammo(AmmoFields),
+}
+
+impl WeaponAmmoFields {
+    pub fn item(&self) -> &CommonItemFields {
+        match self {
+            Self::Weapon(fields) => &fields.item,
+            Self::Ammo(fields) => &fields.item,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +105,9 @@ pub enum ErrorKind {
     InvalidNumericId,
     InvalidObjectType,
     UnsupportedFoodType(u32),
+    UnsupportedWeaponAmmoType(u32),
+    DamageIndexOutOfRange,
+    DamageMaskCountMismatch,
     InvalidPresence(u8),
     InvalidArrayWidth { expected: u32, actual: u32 },
     ArrayTooLarge,
@@ -83,6 +135,18 @@ impl fmt::Display for Error {
             ErrorKind::UnsupportedFoodType(kind) => {
                 write!(f, "object type {kind} is outside the Food decoder")
             }
+            ErrorKind::UnsupportedWeaponAmmoType(kind) => {
+                write!(
+                    f,
+                    "object type {kind} is outside the Weapon and Ammo decoder"
+                )
+            }
+            ErrorKind::DamageIndexOutOfRange => {
+                f.write_str("damage bitmap contains an unsupported index")
+            }
+            ErrorKind::DamageMaskCountMismatch => {
+                f.write_str("damage bitmap count does not match the payload")
+            }
             ErrorKind::InvalidPresence(flag) => write!(f, "invalid optional-field flag {flag}"),
             ErrorKind::InvalidArrayWidth { expected, actual } => {
                 write!(f, "array element width {actual}; expected {expected}")
@@ -90,7 +154,7 @@ impl fmt::Display for Error {
             ErrorKind::ArrayTooLarge => {
                 f.write_str("array length exceeds the prototype input limit")
             }
-            ErrorKind::TrailingData => f.write_str("trailing bytes after the Food record"),
+            ErrorKind::TrailingData => f.write_str("trailing bytes after the prototype record"),
             ErrorKind::TooLarge => write!(f, "input exceeds {MAX_PROTOTYPE_BYTES} bytes"),
         }
     }
@@ -145,7 +209,81 @@ pub fn decode_food(bytes: &[u8]) -> Result<(Header, FoodFields), Error> {
         bytes,
         offset: HEADER_SIZE,
     };
-    let description = read_description(&mut input)?;
+    let item = read_item(&mut input)?;
+    input.skip(3 * 4)?; // Food flags and padding.
+    input.array(4)?;
+    input.array(8)?;
+    input.finish()?;
+    Ok((
+        header,
+        FoodFields {
+            description: item.description,
+            weight: item.weight,
+            worth: item.worth,
+            discipline: item.discipline,
+            magic_tech_complexity: item.magic_tech_complexity,
+        },
+    ))
+}
+
+/// Decode selected Weapon or Ammo fields. The remaining slots are framed to
+/// validate record length, with their contents left opaque.
+pub fn decode_weapon_ammo(bytes: &[u8]) -> Result<(Header, WeaponAmmoFields), Error> {
+    if bytes.len() > MAX_PROTOTYPE_BYTES {
+        return Err(at(MAX_PROTOTYPE_BYTES, ErrorKind::TooLarge));
+    }
+    let header = decode_header(bytes)?;
+    if !header.is_weapon_or_ammo() {
+        return Err(at(
+            52,
+            ErrorKind::UnsupportedWeaponAmmoType(header.object_type),
+        ));
+    }
+    let mut input = Reader {
+        bytes,
+        offset: HEADER_SIZE,
+    };
+    let item = read_item(&mut input)?;
+    let fields = if header.object_type == WEAPON_TYPE {
+        input.skip(4 * 4)?; // Flags, paper-doll art and hit modifiers.
+        let damage_lower = input.damage()?;
+        let damage_upper = input.damage()?;
+        input.array(4)?; // Magic damage adjustments.
+        let speed_factor = input.i32()?;
+        input.skip(4)?; // Magic speed adjustment.
+        let range = input.i32()?;
+        input.skip(3 * 4)?; // Magic range adjustment and strength fields.
+        let ammo_type = input.i32()?;
+        let ammo_consumption = input.i32()?;
+        input.skip(10 * 4)?; // Art, critical hit/miss fields and padding.
+        WeaponAmmoFields::Weapon(WeaponFields {
+            item,
+            damage_lower,
+            damage_upper,
+            speed_factor,
+            range,
+            ammo_type,
+            ammo_consumption,
+        })
+    } else {
+        input.skip(4)?; // Flags.
+        let quantity = input.i32()?;
+        let ammo_type = input.i32()?;
+        input.skip(2 * 4)?; // Padding.
+        WeaponAmmoFields::Ammo(AmmoFields {
+            item,
+            ammo_type,
+            quantity,
+        })
+    };
+    input.array(4)?;
+    input.array(8)?;
+    input.finish()?;
+    Ok((header, fields))
+}
+
+fn read_item(input: &mut Reader<'_>) -> Result<CommonItemFields, Error> {
+    let description = read_description(input)?;
     input.skip(7 * 4)?; // Art, armor class, HP, material and damage.
     input.array(4)?; // Resistances.
     input.array(12)?; // Script records.
@@ -164,23 +302,13 @@ pub fn decode_food(bytes: &[u8]) -> Result<(Header, FoodFields), Error> {
     input.skip(10 * 4)?; // Description keys, spell fields, AI action and padding.
     input.array(4)?;
     input.array(8)?;
-
-    input.skip(3 * 4)?; // Food flags and padding.
-    input.array(4)?;
-    input.array(8)?;
-    if input.offset != bytes.len() {
-        return Err(at(input.offset, ErrorKind::TrailingData));
-    }
-    Ok((
-        header,
-        FoodFields {
-            description,
-            weight,
-            worth,
-            discipline,
-            magic_tech_complexity,
-        },
-    ))
+    Ok(CommonItemFields {
+        description,
+        weight,
+        worth,
+        magic_tech_complexity,
+        discipline,
+    })
 }
 
 /// Read only the common description prefix for verified non-Food types.
@@ -227,7 +355,7 @@ struct Reader<'a> {
     offset: usize,
 }
 
-impl Reader<'_> {
+impl<'a> Reader<'a> {
     fn take<const N: usize>(&mut self) -> Result<[u8; N], Error> {
         let start = self.offset;
         self.skip(N)?;
@@ -268,9 +396,51 @@ impl Reader<'_> {
         Ok(())
     }
 
+    fn finish(&self) -> Result<(), Error> {
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err(at(self.offset, ErrorKind::TrailingData))
+        }
+    }
+
+    fn damage(&mut self) -> Result<[Option<i32>; DAMAGE_TYPES], Error> {
+        let mut result = [None; DAMAGE_TYPES];
+        let Some(array) = self.array_data(4)? else {
+            return Ok(result);
+        };
+        let mut values = array.values.as_chunks::<4>().0.iter();
+        for (word, bytes) in array.mask.as_chunks::<4>().0.iter().enumerate() {
+            let bits = u32::from_le_bytes(*bytes);
+            let offset = array.mask_offset + word * 4;
+            if (word == 0 && bits >> DAMAGE_TYPES != 0) || (word > 0 && bits != 0) {
+                return Err(at(offset, ErrorKind::DamageIndexOutOfRange));
+            }
+            if word == 0 {
+                for (index, slot) in result.iter_mut().enumerate() {
+                    if bits & (1 << index) != 0 {
+                        let value = values
+                            .next()
+                            .ok_or(at(offset, ErrorKind::DamageMaskCountMismatch))?;
+                        *slot = Some(i32::from_le_bytes(*value));
+                    }
+                }
+            }
+        }
+        if values.next().is_some() {
+            return Err(at(array.mask_offset, ErrorKind::DamageMaskCountMismatch));
+        }
+        Ok(result)
+    }
+
     fn array(&mut self, width: u32) -> Result<(), Error> {
+        self.array_data(width)?;
+        Ok(())
+    }
+
+    fn array_data(&mut self, width: u32) -> Result<Option<ArrayData<'a>>, Error> {
         if !self.present()? {
-            return Ok(());
+            return Ok(None);
         }
         let start = self.offset;
         let actual = self.u32()?;
@@ -285,9 +455,17 @@ impl Reader<'_> {
         }
         let count = self.u32()?;
         self.skip(4)?; // Opaque array header word.
+        let start_values = self.offset;
         self.skip_array(count, width)?;
+        let values = &self.bytes[start_values..self.offset];
         let bitmap_words = self.u32()?;
-        self.skip_array(bitmap_words, 4)
+        let mask_offset = self.offset;
+        self.skip_array(bitmap_words, 4)?;
+        Ok(Some(ArrayData {
+            values,
+            mask: &self.bytes[mask_offset..self.offset],
+            mask_offset,
+        }))
     }
 
     fn skip_array(&mut self, count: u32, width: u32) -> Result<(), Error> {
@@ -297,6 +475,12 @@ impl Reader<'_> {
         }
         self.skip(size as usize)
     }
+}
+
+struct ArrayData<'a> {
+    values: &'a [u8],
+    mask: &'a [u8],
+    mask_offset: usize,
 }
 
 #[cfg(test)]
