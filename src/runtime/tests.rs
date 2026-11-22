@@ -494,6 +494,69 @@ fn intermediate(runtime: &Runtime<'_>, actor: ActorId) -> [i32; 3] {
     ]
 }
 
+fn assert_activation_index(runtime: &Runtime<'_>) {
+    let mut count = 0;
+    for (actor, state) in &runtime.actors {
+        let ids = &state.activation_ids;
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+        for &id in ids {
+            let grant = runtime.activation(id).unwrap();
+            assert_eq!(grant.id, id);
+            assert_eq!(grant.target, *actor);
+            assert_eq!(
+                runtime.item(grant.source).unwrap().equipped_by,
+                Some(*actor)
+            );
+        }
+        count += ids.len();
+    }
+    assert_eq!(count, runtime.activations.len());
+}
+
+#[test]
+fn activation_lists_track_single_and_source_removals_across_actors() {
+    let item = item();
+    let effect = body_of_fire();
+    let mut runtime = Runtime::default();
+    let actor = runtime.create_actor(10).unwrap();
+    let other = runtime.create_actor(20).unwrap();
+    let source = equip(&mut runtime, actor, &item);
+    let retained = equip(&mut runtime, actor, &item);
+    let unrelated = equip(&mut runtime, other, &item);
+    let other_id = runtime.activate_effect(unrelated, other, &effect).unwrap();
+    let retained_id = runtime.activate_effect(retained, actor, &effect).unwrap();
+
+    for _ in 0..2 {
+        let one = runtime.activate_effect(source, actor, &effect).unwrap();
+        let two = runtime.activate_effect(source, actor, &effect).unwrap();
+        let three = runtime.activate_effect(source, actor, &effect).unwrap();
+        assert_eq!(
+            runtime.actors[&actor].activation_ids,
+            [retained_id, one, two, three]
+        );
+        runtime.remove_activation(two).unwrap();
+        assert_eq!(
+            runtime.actors[&actor].activation_ids,
+            [retained_id, one, three]
+        );
+        assert_eq!(
+            runtime.remove_activation(two),
+            Err(Error::UnknownActivation(two))
+        );
+        runtime.unequip(source, actor).unwrap();
+        assert_eq!(runtime.actors[&actor].activation_ids, [retained_id]);
+        assert_eq!(runtime.actors[&other].activation_ids, [other_id]);
+        assert_eq!(intermediate(&runtime, actor), [95, 8, 97]);
+        assert_eq!(intermediate(&runtime, other), [95, 8, 97]);
+        assert_activation_index(&runtime);
+        runtime.equip(source, actor).unwrap();
+    }
+    runtime.unequip(retained, actor).unwrap();
+    assert_eq!(intermediate(&runtime, actor), [0, 0, 0]);
+    assert_eq!(runtime.actors[&other].activation_ids, [other_id]);
+    assert_activation_index(&runtime);
+}
+
 #[test]
 fn unsupported_operation_rejects_all_clauses_of_a_composite() {
     let item = item();
@@ -531,6 +594,8 @@ fn unsupported_operation_rejects_all_clauses_of_a_composite() {
         runtime.activate_effect(unknown_item, actor, &composite),
         Err(Error::UnknownItem(unknown_item))
     );
+    assert_eq!(runtime.actors[&actor].activation_ids, [floor]);
+    assert_activation_index(&runtime);
 }
 
 #[test]
@@ -672,6 +737,7 @@ fn electrical_overflow_blocks_composite_activation_and_removal_atomically() {
     assert_eq!(intermediate(&runtime, actor), [0, i32::MAX, 0]);
     assert!(runtime.activations.is_empty());
     assert_eq!(runtime.item(source).unwrap().equipped_by, Some(actor));
+    assert_activation_index(&runtime);
 
     runtime
         .set_underlying_electrical_resistance(actor, i32::MIN)
@@ -689,6 +755,8 @@ fn electrical_overflow_blocks_composite_activation_and_removal_atomically() {
     assert_eq!(intermediate(&runtime, actor), [95, i32::MIN, 97]);
     assert_eq!(runtime.activation(id).unwrap().source, source);
     assert_eq!(runtime.item(source).unwrap().equipped_by, Some(actor));
+    assert_eq!(runtime.actors[&actor].activation_ids, [id, drain]);
+    assert_activation_index(&runtime);
     runtime.remove_activation(drain).unwrap();
     runtime.unequip(source, actor).unwrap();
     assert_eq!(intermediate(&runtime, actor), [0, i32::MIN, 0]);
@@ -748,6 +816,8 @@ fn electrical_overflow_preserves_actively_cancelled_grants_and_actor_state() {
         runtime.underlying_electrical_resistance(actor),
         Ok(i32::MAX)
     );
+    assert_eq!(runtime.actors[&actor].activation_ids, [negative]);
+    assert_activation_index(&runtime);
     runtime.unequip(first, actor).unwrap();
     assert_eq!(
         runtime.electrical_resistance_after_effects(actor),
@@ -934,6 +1004,7 @@ fn out_of_range_changes_are_atomic_even_when_adjustments_cancel() {
         runtime.activate_effect(first, actor, &plus),
         Err(Error::ArmourClassOverflow)
     );
+    assert_activation_index(&runtime);
     let negative = runtime.activate_effect(first, actor, &minus).unwrap();
     assert_eq!(
         runtime.activate_effect(second, actor, &composite),
@@ -954,12 +1025,16 @@ fn out_of_range_changes_are_atomic_even_when_adjustments_cancel() {
         runtime.activation(negative).unwrap().armour_class_points,
         -1
     );
+    assert_eq!(runtime.actors[&actor].activation_ids, [negative, positive]);
+    assert_activation_index(&runtime);
     runtime.remove_activation(positive).unwrap();
     assert_eq!(
         runtime.set_base_armour_class(actor, i32::MIN),
         Err(Error::ArmourClassOverflow)
     );
     assert_eq!(runtime.base_armour_class(actor), Ok(i32::MAX));
+    assert_eq!(runtime.actors[&actor].activation_ids, [negative]);
+    assert_activation_index(&runtime);
     runtime.unequip(first, actor).unwrap();
     assert_eq!(runtime.armour_class(actor), Ok(i32::MAX));
 }

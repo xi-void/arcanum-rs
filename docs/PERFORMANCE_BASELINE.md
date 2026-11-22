@@ -179,3 +179,170 @@ The host-target Cargo tree listed 34 distinct dependency package versions beside
 ## Verification
 
 `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cargo build`, `cargo build --release` and `git diff --check` passed. An offline sandbox without access to CE, TIG, game assets, or external mods passed all 98 portable tests, ran all five headless demos, and ran the release benchmarks. All 12 optional installed-data tests passed, including `vfs-smoke`. Both release schematic audits reported **119/119**.
+
+## Milestone 25 actor-local activation iteration
+
+### Design and invariants
+
+Each actor now owns a `Vec<ActivationId>` in increasing ID order. The
+existing global `BTreeMap` owns the full records and serves direct ID lookup.
+AC, resistance queries, and checked totals resolve only IDs in the relevant
+actor's vector. With `k` grants on that actor and `A` grants in the runtime,
+the traversal is over `k` IDs with logarithmic global lookups. Electrical
+resistance still traverses the local list twice to calculate additions and
+then floors. There are no remaining global activation traversals in these
+runtime paths.
+
+Validation precedes mutation. Activation inserts the record and appends its
+ID. Single removal locates the sorted ID, shifts later IDs in the vector,
+and deletes the record. Unequip scans only the wearer's vector, removes that
+source's records, and retains surviving IDs in their original order. It
+clears equipment ownership after those removals. Overflow, an unsupported
+operation, or an invalid handle leaves both collections and equipment
+associations intact. The queries still use wide signed sums, check before
+applying floors, and clamp only the final ordinary resistance result.
+[Runtime implementation](../src/runtime.rs) · [Ownership invariants](ARCHITECTURE.md#headless-effect-activation-ownership)
+
+### Paired benchmark method
+
+The Milestone 24 tables above are historical. This comparison reruns the
+unmodified runtime at `b6a07a7` and the actor-local runtime using the same
+updated harness. Both executables ran consecutively on the same i5-6300U,
+pinned to logical CPU 2, using Rust 1.100.0 and the default release bench
+profile. The governor was `powersave`. Other host activity was present,
+particularly in the stress batches. Host timing results are descriptive.
+The offline sandbox run is a separate verification.
+
+The first four cases retain four grants and two items per actor. The dense
+case has four actors and 256 grants per actor. The dense case uses 2,000
+operations per timed batch and 20,000 for direct lookups. Setup occurs
+outside timing. The harness now also times each resistance channel.
+Isolated activation, removal and unequip timings bracket just that
+operation, with the inverse or setup operation outside its timed interval.
+The clock-read overhead is included in those isolated timings. The batch
+pair and equipment cycle are directly comparable to the original harness.
+
+Use a disk-backed benchmark directory with enough space for separate builds.
+The resource fixture honors `TMPDIR` through `std::env::temp_dir` and removes
+its scratch directory on normal exit. The runtime-only workloads create no
+fixture files. For example, from the Milestone 25 worktree:
+
+```sh
+root=$(mktemp -d "${ARCANUM_BENCH_TMPDIR:-$PWD/target}/arcanum-m25.XXXXXX")
+trap 'find "$root" -depth -delete' EXIT
+mkdir -p "$root/before" "$root/tmp"
+git archive b6a07a7 | tar -x -C "$root/before"
+cp benches/baseline.rs "$root/before/benches/baseline.rs"
+export TMPDIR="$root/tmp"
+taskset -c 2 cargo bench --offline --locked --bench baseline \
+  --manifest-path "$root/before/Cargo.toml" -- runtime
+taskset -c 2 cargo bench --offline --locked --bench baseline -- runtime
+```
+
+Create the chosen parent directory first. Use the same two commands with
+`-- runtime-memory 1000` in place of `-- runtime` for fresh-process memory
+observations.
+
+### Timings
+
+Each cell shows the before and after medians in µs per operation. Each
+workload used one warm-up batch and seven samples. The 1, 100, 1,000 and
+5,000 actor cases used 100,000, 10,000, 2,000 and 400 operations per sample,
+respectively, with ten times those counts for direct lookup. Query results
+are consumed with `black_box`.
+
+| Actors × grants per actor | Effective AC | AC speedup | Three resistance queries | Resistance speedup |
+|---|---:|---:|---:|---:|
+| 1 × 4 | 0.0226 → 0.0233 | 0.97× | 0.086 → 0.084 | 1.02× |
+| 100 × 4 | 1.591 → 0.126 | 12.6× | 6.738 → 0.919 | 7.3× |
+| 1,000 × 4 | 21.541 → 0.284 | 75.8× | 88.442 → 1.198 | 73.8× |
+| 5,000 × 4 | 321.244 → 0.323 | 996× | 1,456.048 → 1.187 | 1,227× |
+| 4 × 256 | 5.303 → 10.711 | 0.50× | 31.280 → 54.888 | 0.57× |
+
+| Actors × grants per actor | Fire | Electrical | Poison | Direct activation lookup |
+|---|---:|---:|---:|---:|
+| 1 × 4 | 0.023 → 0.023 | 0.042 → 0.042 | 0.023 → 0.023 | 0.010 → 0.011 |
+| 100 × 4 | 1.646 → 0.155 | 3.383 → 0.281 | 1.788 → 0.122 | 0.023 → 0.036 |
+| 1,000 × 4 | 20.451 → 0.292 | 44.697 → 0.541 | 35.217 → 0.278 | 0.077 → 0.090 |
+| 5,000 × 4 | 274.137 → 0.899 | 570.842 → 0.716 | 328.800 → 0.381 | 0.163 → 0.091 |
+| 4 × 256 | 5.312 → 11.670 | 15.272 → 26.757 | 6.810 → 10.730 | 0.038 → 0.027 |
+
+At 1,000 actors, the seven AC samples ranged from 20.41–22.21 µs before
+and 0.24–0.76 µs after. The three-query batch ranged from 85.58–94.18 µs
+before and 0.94–1.56 µs after. At 5,000 actors those ranges were
+286.40–447.93 µs and 0.31–0.42 µs for AC, and 1,398.16–1,896.08 µs and
+1.14–1.31 µs for the three queries. Direct ID lookup uses the same map
+lookup in both revisions. Its variable measurements include changes in
+cache conditions and host noise.
+
+| Actors × grants per actor | Activate | Remove activation | Unequip | Activate + remove | Equip + grant + unequip |
+|---|---:|---:|---:|---:|---:|
+| 1 × 4 | 0.114 → 0.138 | 0.105 → 0.156 | 0.133 → 0.178 | 0.168 → 0.212 | 0.210 → 0.279 |
+| 100 × 4 | 3.216 → 0.286 | 2.854 → 0.275 | 4.522 → 0.437 | 5.824 → 0.483 | 7.732 → 0.547 |
+| 1,000 × 4 | 74.657 → 0.396 | 71.230 → 0.354 | 66.161 → 0.453 | 94.021 → 0.527 | 136.257 → 0.693 |
+| 5,000 × 4 | 710.458 → 0.297 | 609.978 → 0.305 | 974.985 → 0.536 | 1,369.805 → 0.521 | 1,399.479 → 0.720 |
+| 4 × 256 | 13.614 → 19.914 | 18.809 → 19.769 | 16.476 → 34.422 | 23.420 → 39.700 | 40.814 → 51.863 |
+
+Mutation timings target the first actor in an already-populated runtime.
+Each timed unequip removes one grant from the extra source. The runtime
+tests exercise unequip with several grants from one source. The isolated
+times and batch-cycle totals come from separate measurement loops.
+
+Fixture setup took approximately 88.8 → 4.1 ms at 1,000 actors and
+9,763 → 21.2 ms at 5,000 actors. These are single observations for
+constructing the synthetic runtime and its grants, separate from the
+seven-sample query and mutation measurements.
+
+### Memory and scaling
+
+Linux `/proc/self/status` provides coarse process RSS. Each cell below
+is the median of three fresh processes. The setup increase subtracts
+each process's pre-setup RSS before taking the median. That figure
+includes the benchmark fixture, allocator and page-residency effects.
+
+| Actors × grants per actor | Retained RSS before → after, KiB | Setup increase before → after, KiB |
+|---|---:|---:|
+| 1 × 4 | 2,580 → 2,632 | 132 → 132 |
+| 100 × 4 | 2,704 → 2,720 | 208 → 216 |
+| 1,000 × 4 | 3,400 → 3,488 | 888 → 980 |
+| 5,000 × 4 | 6,380 → 6,836 | 3,868 → 4,388 |
+
+On this 64-bit host the vector header is 24 bytes per actor and each ID
+is 8 bytes. An empty vector has no heap allocation. Four IDs at capacity
+four account for 56 bytes of header and element storage per populated
+actor, about 273 KiB for 5,000 actors. The larger process-level difference
+includes allocator and tree node overhead and is subject to RSS variation.
+The runtime, item instance and activation records remained 80, 32 and
+64 bytes respectively.
+
+With *k* local activations and *A* total activations, each local pass
+does *k* ordered ID reads and *k* authoritative tree lookups, with
+`O(k log A)` lookup work after locating the actor. Electrical queries
+currently make two local passes, one for additions and one for floors.
+Validation before mutations also makes local passes. Individual removal
+uses a binary search and shifts the remaining IDs. Unequip filters only
+the owner's list and deletes matching records from the global tree.
+Production runtime queries and mutations have no full activation-map scans.
+
+The many-actor, few-grant workloads benefit enough to justify one
+actor-local vector and its update invariant. Single-actor query timings
+are roughly unchanged, while single-actor mutations take tens of additional
+nanoseconds. With 256 grants on each of only four actors, repeated tree
+lookups cost more than walking the prior global tree. Dense AC queries
+took about twice as long, and unequip took about twice as long as well.
+Treat this as a known stress-case regression. Measure grant counts from
+the next runtime consumer before tuning that shape. If repeated Electrical
+queries still dominate, measure a single local pass that accumulates the
+sum and strongest floor, preserving the overflow check before applying
+the floor. Keep both workloads in future comparisons.
+
+### Verification
+
+Formatting, Clippy with warnings denied, 99 portable tests, debug and
+release builds, and `git diff --check` passed. A network-isolated
+sandbox with the project, Rust toolchain and cached crates ran all 99
+portable tests, all five demos and the complete release benchmark.
+The sandbox had no CE, TIG, original assets or external mod directories.
+All 12 optional installed-data tests passed, including `vfs-smoke`.
+Reference validation and supported-content readiness each passed 119/119
+learned and found schematics.
