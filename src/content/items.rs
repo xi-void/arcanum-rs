@@ -87,6 +87,64 @@ pub enum WeaponAmmoDefinition {
     Ammo(AmmoDefinition),
 }
 
+/// Nominal coverage from inventory art. Placement and equip restrictions
+/// belong to a future equipment system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArmourCoverage {
+    Torso,
+    Shield,
+    Helmet,
+    Gauntlets,
+    Boots,
+    Ring,
+    Medallion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArmourSize {
+    Small,
+    Medium,
+    Large,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResistanceKind {
+    Physical,
+    Fire,
+    Electrical,
+    Poison,
+    Magic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResistanceAdjustment {
+    pub kind: ResistanceKind,
+    pub percentage_points: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArmourDefinition {
+    pub id: ItemId,
+    pub display_name: String,
+    /// Base weight in game stone units.
+    pub base_weight: u32,
+    /// Base worth in game currency units.
+    pub base_worth: u32,
+    /// Signed contribution in armour class points.
+    pub armour_class_adjustment: i32,
+    pub coverage: ArmourCoverage,
+    /// Sizes named by the fit flags, possibly empty. CE checks these for torso armour.
+    pub sizes: Vec<ArmourSize>,
+    /// Only explicitly stored channels are listed, including explicit zeroes.
+    pub resistances: Vec<ResistanceAdjustment>,
+}
+
+#[derive(Debug)]
+pub struct ResolvedArmour {
+    pub definition: ArmourDefinition,
+    pub name_source: Source,
+}
+
 #[derive(Debug)]
 pub struct ResolvedWeaponAmmo {
     pub definition: WeaponAmmoDefinition,
@@ -100,6 +158,7 @@ pub enum ItemDefinitionError {
         id: prototype::DescriptionId,
         source: Box<Source>,
     },
+    UnsupportedArmourArt(u32),
     InvalidField {
         field: &'static str,
         value: i32,
@@ -120,6 +179,12 @@ impl std::fmt::Display for ItemDefinitionError {
                     f,
                     "missing description key {} in {} from {source}",
                     id.0, source.virtual_path
+                )
+            }
+            Self::UnsupportedArmourArt(id) => {
+                write!(
+                    f,
+                    "unsupported armour coverage encoding in inventory art ID 0x{id:08x}"
                 )
             }
             Self::InvalidField { field, value } => write!(f, "unsupported {field} value {value}"),
@@ -147,6 +212,7 @@ impl std::error::Error for ItemDefinitionError {
 pub struct PrototypeInspection {
     pub prototype: LoadedPrototype,
     pub weapon_ammo: Option<prototype::WeaponAmmoFields>,
+    pub armour: Option<prototype::ArmourFields>,
 }
 
 impl PrototypeInspection {
@@ -160,20 +226,8 @@ impl PrototypeInspection {
             return Ok(None);
         };
         let common = fields.item();
-        let names = load_mes(vfs, description_path(common.description))
-            .map_err(ItemDefinitionError::Text)?;
-        let Some(name) = names
-            .mes
-            .get(common.description.0)
-            .filter(|name| !name.trim().is_empty())
-        else {
-            return Err(ItemDefinitionError::MissingName {
-                id: common.description,
-                source: Box::new(names.source),
-            });
-        };
+        let (display_name, name_source) = resolve_item_name(vfs, common.description)?;
         let id = ItemId::from_prototype(self.prototype.header.id);
-        let display_name = name.to_owned();
         let base_weight = unsigned("base weight", common.weight)?;
         let base_worth = unsigned("base worth", common.worth)?;
         let definition = match fields {
@@ -234,9 +288,87 @@ impl PrototypeInspection {
         };
         Ok(Some(ResolvedWeaponAmmo {
             definition,
-            name_source: names.source,
+            name_source,
         }))
     }
+
+    /// Resolve the stored name and import the verified base armour properties.
+    pub fn resolve_armour(
+        &self,
+        vfs: &mut Vfs,
+    ) -> Result<Option<ResolvedArmour>, ItemDefinitionError> {
+        let Some(fields) = self.armour else {
+            return Ok(None);
+        };
+        let (display_name, name_source) = resolve_item_name(vfs, fields.item.description)?;
+        let coverage = armour_coverage(fields)?;
+        let sizes = [ArmourSize::Small, ArmourSize::Medium, ArmourSize::Large]
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, size)| (fields.flags & (1 << index) != 0).then_some(size))
+            .collect();
+        let resistances = [
+            ResistanceKind::Physical,
+            ResistanceKind::Fire,
+            ResistanceKind::Electrical,
+            ResistanceKind::Poison,
+            ResistanceKind::Magic,
+        ]
+        .into_iter()
+        .zip(fields.resistance_adjustments)
+        .filter_map(|(kind, value)| {
+            value.map(|percentage_points| ResistanceAdjustment {
+                kind,
+                percentage_points,
+            })
+        })
+        .collect();
+        Ok(Some(ResolvedArmour {
+            definition: ArmourDefinition {
+                id: ItemId::from_prototype(self.prototype.header.id),
+                display_name,
+                base_weight: unsigned("base weight", fields.item.weight)?,
+                base_worth: unsigned("base worth", fields.item.worth)?,
+                armour_class_adjustment: fields.armour_class_adjustment,
+                coverage,
+                sizes,
+                resistances,
+            },
+            name_source,
+        }))
+    }
+}
+
+fn resolve_item_name(
+    vfs: &mut Vfs,
+    id: prototype::DescriptionId,
+) -> Result<(String, Source), ItemDefinitionError> {
+    let names = load_mes(vfs, description_path(id)).map_err(ItemDefinitionError::Text)?;
+    let Some(name) = names.mes.get(id.0).filter(|name| !name.trim().is_empty()) else {
+        return Err(ItemDefinitionError::MissingName {
+            id,
+            source: Box::new(names.source),
+        });
+    };
+    Ok((name.to_owned(), names.source))
+}
+
+fn armour_coverage(fields: prototype::ArmourFields) -> Result<ArmourCoverage, ItemDefinitionError> {
+    let coverage = match fields.coverage_index() {
+        Some(0) => ArmourCoverage::Torso,
+        Some(1) => ArmourCoverage::Shield,
+        Some(2) => ArmourCoverage::Helmet,
+        Some(3) => ArmourCoverage::Gauntlets,
+        Some(4) => ArmourCoverage::Boots,
+        Some(5) => ArmourCoverage::Ring,
+        Some(6) => ArmourCoverage::Medallion,
+        _ => {
+            return Err(ItemDefinitionError::UnsupportedArmourArt(
+                fields.inventory_art_id,
+            ));
+        }
+    };
+    Ok(coverage)
 }
 
 fn unsigned(field: &'static str, value: i32) -> Result<u32, ItemDefinitionError> {
@@ -298,17 +430,24 @@ fn load(vfs: &mut Vfs, path: &str, detailed: bool) -> Result<PrototypeInspection
         } else {
             None
         };
+        let armour = if detailed && header.is_armour() {
+            Some(prototype::decode_armour(&bytes)?.1)
+        } else {
+            None
+        };
         let description = if let Some(fields) = food {
             Some(fields.description)
         } else if let Some(fields) = &weapon_ammo {
             Some(fields.item().description)
+        } else if let Some(fields) = armour {
+            Some(fields.item.description)
         } else {
             prototype::decode_item_description(&bytes, header)?
         };
-        Ok((header, description, food, weapon_ammo))
+        Ok((header, description, food, weapon_ammo, armour))
     });
     match result {
-        Ok((header, description, food, weapon_ammo)) => Ok(PrototypeInspection {
+        Ok((header, description, food, weapon_ammo, armour)) => Ok(PrototypeInspection {
             prototype: LoadedPrototype {
                 source,
                 header,
@@ -316,6 +455,7 @@ fn load(vfs: &mut Vfs, path: &str, detailed: bool) -> Result<PrototypeInspection
                 food,
             },
             weapon_ammo,
+            armour,
         }),
         Err(error) => Err(Error::Prototype {
             provenance: Box::new(source),

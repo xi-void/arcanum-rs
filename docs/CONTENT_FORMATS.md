@@ -262,6 +262,46 @@ CE compares effective range with tile-coordinate distance, with adjacent melee r
 
 Detailed prototype inspection decodes Weapon and Ammo fields and resolves names and provenance through the VFS. Native `WeaponDefinition` and `AmmoDefinition` carry the existing namespaced `ItemId`, with typed damage and ammo categories. Raw discipline, signed complexity, serialized quantity, and raw enum values stay at the import boundary. Other weapon fields, including strength minimums, magical modifiers, hit and critical properties, and artwork, are framed as needed and remain opaque. Schematic resolution still uses the header and description prefix for Weapon and Ammo references.
 
+## Milestone 11 native Armour definitions
+
+The CE-policy VFS selected the four version 119, type 7 prototypes below from loose `data/proto/`. The winning name table was `mes/description.mes` from `Arcanum5.dat`. The stored description keys equal the basic lookup IDs in these samples.
+
+| Display name | Basic / serialized ID | Resource below `proto/` | Fit | Base AC | Physical / Fire / Electrical | Base weight / worth |
+| --- | --- | --- | --- | ---: | --- | --- |
+| Leather Armour | 8091 / 8111 | `008111 - armor.pro` | Medium | +9 | +16 / +5 / absent | 150 / 470 |
+| Small Leather Armour | 8099 / 8119 | `008119 - armor.pro` | Small | +9 | +14 / +5 / absent | 140 / 470 |
+| Large Leather Armour | 8107 / 8127 | `008127 - armor.pro` | Large | +9 | +17 / +5 / absent | 160 / 470 |
+| Basic Platemail | 8075 / 8095 | `008095 - armor.pro` | Medium | +15 | +36 / +10 / −20 | 1000 / 900 |
+
+The three Leather variants share torso coverage with Platemail. Fit flags, weight and physical resistance distinguish the Leather sizes. The installed Platemail worth is 900, while CE's compiled default assigns 870.
+
+For these four samples the description, weight, worth and inventory art ID are at zero-based byte offsets 323, 372, 380 and 388. The Armour section begins with flags at 450 and paper-doll art at 454. It stores the signed base AC adjustment at 458 and a separate magical AC adjustment at 462. The optional base resistance array starts at 466. It uses the existing width-4 sparse array framing, with the Leather mask `0x03, 0` and the Platemail mask `0x07, 0`. The decoder walks the fields and validates optional values, the index mask, and complete record boundaries. Magical arrays and other uninterpreted subtype fields are framed and skipped.
+
+The channel order is **Physical (CE Normal), Fire, Electrical, Poison, Magic**, as defined in CE `resistance.h`. This differs from Weapon damage order. Poison and Magic are absent in all four samples. Signed resistance adjustments are in percentage points. For a wearer, CE adds them to the common object resistance and other contributions before applying percentage-based mitigation. The decoder preserves explicit zeros and absent channels separately. AC is a signed contribution in class points. CE's `object_get_ac` combines the object's common AC, worn armour adjustments, character stats and effects. Runtime resistance can include Constitution for poison, magic and other effects, and CE ordinarily clamps the aggregate to 0–95. The native definition records base contributions. Weight is in game stone and worth in game currency.
+
+### Prototype category, placement and protection
+
+Armour type 7 selects the serialized body layout. CE derives the nominal coverage category from bits 14–16 of the inventory **item** art ID, with the item type stored in bits 28–31. Coverage is distinct from the Small, Medium and Large fit flags (bits 0–2 of Armour flags). CE's torso equip check combines those flags with a race-based size and checks separate gender flags and compatible character artwork. The Rust importer uses the stored coverage and size flags and retains the remaining flag bits as raw data. Runtime slot choices and restrictions are outside the definition.
+
+A bounded classification check of other VFS winners confirms that Armour type 7 spans several equipment pieces. The stored description IDs equal the basic IDs in this check. Names resolve from `Arcanum5.dat`.
+
+| Item | Basic / serialized ID | Selected prototype source | Type and nominal coverage |
+| --- | --- | --- | --- |
+| Helmet | 8051 / 8071 | loose `data/proto` | Armour 7, Helmet |
+| Gauntlets | 8052 / 8072 | loose `data/proto` | Armour 7, Gauntlets |
+| Boots | 8053 / 8073 | loose `data/proto` | Armour 7, Boots |
+| Kite Shield | 8193 / 8213 | loose `data/proto` | Armour 7, Shield |
+| Ring of Protection | 8164 / 8184 | `Arcanum5.dat` | Armour 7, Ring |
+| Amulet of Leadership | 8203 / 8223 | loose `data/proto` | Armour 7, Medallion |
+| Sword of Defense | 6064 / 6084 | loose `data/proto` | Weapon 5 |
+| Lantern | 15072 / 15092 | loose `data/proto` | Generic 14 |
+
+CE's `item_location_get` maps Armour coverage to placement categories, maps weapons to the weapon slot, and checks a separate Generic flag for shield-slot objects such as the Lantern. `sub_464D20` treats both ring slots as the same category for compatibility, and checks weapon handedness and the other occupied hand at runtime. The stored coverage describes the item. Neither slot count nor worn placement is encoded in that coverage field.
+
+Protection comes from multiple sources. The Kite Shield stores +20 base AC in its Armour body. The Ring of Protection stores base AC 0 and a separate +10 magical AC adjustment that CE interprets through its identification and magic rules. The Sword of Defense stores wield script references 28001 and 28002, whose selected scripts come from `Arcanum2.dat`. They conditionally add and remove effect 128, defined as `ac +1` in the winning loose `rules/effect.mes`. `object_get_ac` collects both direct Armour adjustments and actor effects. The weapon retains its Weapon identity throughout.
+
+Future equipment logic should aggregate separately modeled contributions across item categories. `ArmourDefinition` carries only type 7 base fields, nominal coverage, and serialized fit sizes. The meaning of other subtype properties and broader item-effect import remain open. This slice omits effective protection, individual slot assignment, and parsed magic or script effects.
+
 ### Primary reference locations
 
 - CE `src/game/proto.c` (`proto_init`, `sub_468660`, `sub_468860`, and the four `BP_*` initializers), `descriptions.h`, `obj_id.h`, `obj_id.c`.

@@ -13,6 +13,7 @@ const KEY_TYPE: u32 = 11;
 const GENERIC_TYPE: u32 = 14;
 const ITEM_BITMAP_BYTES: usize = 16;
 const DAMAGE_TYPES: usize = 5;
+const RESISTANCE_TYPES: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SerializedPrototypeId(pub u32);
@@ -30,6 +31,10 @@ pub struct Header {
 impl Header {
     pub fn is_food(self) -> bool {
         self.object_type == FOOD_TYPE
+    }
+
+    pub fn is_armour(self) -> bool {
+        self.object_type == ARMOR_TYPE
     }
 
     pub fn is_weapon_or_ammo(self) -> bool {
@@ -91,6 +96,24 @@ impl WeaponAmmoFields {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArmourFields {
+    pub item: CommonItemFields,
+    pub inventory_art_id: u32,
+    pub flags: u32,
+    pub armour_class_adjustment: i32,
+    /// Legacy resistance indices in order, with absent entries preserved.
+    pub resistance_adjustments: [Option<i32>; RESISTANCE_TYPES],
+}
+
+impl ArmourFields {
+    /// Only inventory art IDs of the item type carry the coverage index.
+    pub(crate) fn coverage_index(self) -> Option<u32> {
+        let art_id = self.inventory_art_id;
+        (art_id >> 28 == 6).then_some((art_id >> 14) & 7)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Error {
     pub offset: usize,
     pub kind: ErrorKind,
@@ -106,8 +129,11 @@ pub enum ErrorKind {
     InvalidObjectType,
     UnsupportedFoodType(u32),
     UnsupportedWeaponAmmoType(u32),
+    UnsupportedArmourType(u32),
     DamageIndexOutOfRange,
     DamageMaskCountMismatch,
+    ResistanceIndexOutOfRange,
+    ResistanceMaskCountMismatch,
     InvalidPresence(u8),
     InvalidArrayWidth { expected: u32, actual: u32 },
     ArrayTooLarge,
@@ -140,6 +166,15 @@ impl fmt::Display for Error {
                     f,
                     "object type {kind} is outside the Weapon and Ammo decoder"
                 )
+            }
+            ErrorKind::UnsupportedArmourType(kind) => {
+                write!(f, "object type {kind} is outside the Armour decoder")
+            }
+            ErrorKind::ResistanceIndexOutOfRange => {
+                f.write_str("resistance bitmap contains an unsupported index")
+            }
+            ErrorKind::ResistanceMaskCountMismatch => {
+                f.write_str("resistance bitmap count does not match the payload")
             }
             ErrorKind::DamageIndexOutOfRange => {
                 f.write_str("damage bitmap contains an unsupported index")
@@ -209,7 +244,7 @@ pub fn decode_food(bytes: &[u8]) -> Result<(Header, FoodFields), Error> {
         bytes,
         offset: HEADER_SIZE,
     };
-    let item = read_item(&mut input)?;
+    let (item, _) = read_item(&mut input)?;
     input.skip(3 * 4)?; // Food flags and padding.
     input.array(4)?;
     input.array(8)?;
@@ -243,7 +278,7 @@ pub fn decode_weapon_ammo(bytes: &[u8]) -> Result<(Header, WeaponAmmoFields), Er
         bytes,
         offset: HEADER_SIZE,
     };
-    let item = read_item(&mut input)?;
+    let (item, _) = read_item(&mut input)?;
     let fields = if header.object_type == WEAPON_TYPE {
         input.skip(4 * 4)?; // Flags, paper-doll art and hit modifiers.
         let damage_lower = input.damage()?;
@@ -282,7 +317,46 @@ pub fn decode_weapon_ammo(bytes: &[u8]) -> Result<(Header, WeaponAmmoFields), Er
     Ok((header, fields))
 }
 
-fn read_item(input: &mut Reader<'_>) -> Result<CommonItemFields, Error> {
+/// Decode selected Armour fields, framing the remaining slots to validate the record.
+pub fn decode_armour(bytes: &[u8]) -> Result<(Header, ArmourFields), Error> {
+    if bytes.len() > MAX_PROTOTYPE_BYTES {
+        return Err(at(MAX_PROTOTYPE_BYTES, ErrorKind::TooLarge));
+    }
+    let header = decode_header(bytes)?;
+    if !header.is_armour() {
+        return Err(at(52, ErrorKind::UnsupportedArmourType(header.object_type)));
+    }
+    let mut input = Reader {
+        bytes,
+        offset: HEADER_SIZE,
+    };
+    let (item, inventory_art_id) = read_item(&mut input)?;
+    let flags = input.u32()?;
+    input.skip(4)?; // Paper doll art.
+    let armour_class_adjustment = input.i32()?;
+    input.skip(4)?; // Magical armour class adjustment.
+    let resistance_adjustments = input.sparse_i32(
+        ErrorKind::ResistanceIndexOutOfRange,
+        ErrorKind::ResistanceMaskCountMismatch,
+    )?;
+    input.array(4)?; // Magical resistance adjustments.
+    input.skip(4 * 4)?; // Stealth, unarmed damage, and padding.
+    input.array(4)?;
+    input.array(8)?;
+    input.finish()?;
+    Ok((
+        header,
+        ArmourFields {
+            item,
+            inventory_art_id,
+            flags,
+            armour_class_adjustment,
+            resistance_adjustments,
+        },
+    ))
+}
+
+fn read_item(input: &mut Reader<'_>) -> Result<(CommonItemFields, u32), Error> {
     let description = read_description(input)?;
     input.skip(7 * 4)?; // Art, armor class, HP, material and damage.
     input.array(4)?; // Resistances.
@@ -296,19 +370,24 @@ fn read_item(input: &mut Reader<'_>) -> Result<CommonItemFields, Error> {
     let weight = input.i32()?;
     input.skip(4)?; // Magic weight adjustment.
     let worth = input.i32()?;
-    input.skip(4 * 4)?; // Mana store and inventory/use-art scalars.
+    input.skip(4)?; // Mana store.
+    let inventory_art_id = input.u32()?;
+    input.skip(2 * 4)?; // Inventory location and use-art fragment.
     let magic_tech_complexity = input.i32()?;
     let discipline = input.i32()?;
     input.skip(10 * 4)?; // Description keys, spell fields, AI action and padding.
     input.array(4)?;
     input.array(8)?;
-    Ok(CommonItemFields {
-        description,
-        weight,
-        worth,
-        magic_tech_complexity,
-        discipline,
-    })
+    Ok((
+        CommonItemFields {
+            description,
+            weight,
+            worth,
+            magic_tech_complexity,
+            discipline,
+        },
+        inventory_art_id,
+    ))
 }
 
 /// Read only the common description prefix for verified non-Food types.
@@ -405,7 +484,18 @@ impl<'a> Reader<'a> {
     }
 
     fn damage(&mut self) -> Result<[Option<i32>; DAMAGE_TYPES], Error> {
-        let mut result = [None; DAMAGE_TYPES];
+        self.sparse_i32(
+            ErrorKind::DamageIndexOutOfRange,
+            ErrorKind::DamageMaskCountMismatch,
+        )
+    }
+
+    fn sparse_i32<const N: usize>(
+        &mut self,
+        index_error: ErrorKind,
+        count_error: ErrorKind,
+    ) -> Result<[Option<i32>; N], Error> {
+        let mut result = [None; N];
         let Some(array) = self.array_data(4)? else {
             return Ok(result);
         };
@@ -413,22 +503,20 @@ impl<'a> Reader<'a> {
         for (word, bytes) in array.mask.as_chunks::<4>().0.iter().enumerate() {
             let bits = u32::from_le_bytes(*bytes);
             let offset = array.mask_offset + word * 4;
-            if (word == 0 && bits >> DAMAGE_TYPES != 0) || (word > 0 && bits != 0) {
-                return Err(at(offset, ErrorKind::DamageIndexOutOfRange));
+            if (word == 0 && bits >> N != 0) || (word > 0 && bits != 0) {
+                return Err(at(offset, index_error));
             }
             if word == 0 {
                 for (index, slot) in result.iter_mut().enumerate() {
                     if bits & (1 << index) != 0 {
-                        let value = values
-                            .next()
-                            .ok_or(at(offset, ErrorKind::DamageMaskCountMismatch))?;
+                        let value = values.next().ok_or(at(offset, count_error))?;
                         *slot = Some(i32::from_le_bytes(*value));
                     }
                 }
             }
         }
         if values.next().is_some() {
-            return Err(at(array.mask_offset, ErrorKind::DamageMaskCountMismatch));
+            return Err(at(array.mask_offset, count_error));
         }
         Ok(result)
     }
