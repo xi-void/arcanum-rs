@@ -40,6 +40,7 @@ target/debug/arcanum-rs simulate equipment-demo
 target/debug/arcanum-rs simulate resistance-demo
 target/debug/arcanum-rs simulate electrical-demo
 target/debug/arcanum-rs simulate composite-demo
+target/debug/arcanum-rs simulate same-channel-demo
 ```
 
 The asset-free equipment demo applies effect 128 to one actor from two item
@@ -60,6 +61,10 @@ The composite demo grants effect 54's three statistical operations as
 one activation per item. It shows both resistance stages, including the
 97% intermediate Poison floor and the 95% ordinary query. Body of Fire's
 spell casting and transformation remain outside the simulation.
+
+The same-channel demo combines a synthetic 50% Electrical floor with
+the verified +8 operation from a separate source. It shows addition
+before the floor, followed by the ordinary query clamp.
 [Effect activation ownership](docs/ARCHITECTURE.md#headless-effect-activation-ownership)
 
 ```sh

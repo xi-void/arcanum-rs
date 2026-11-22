@@ -87,7 +87,7 @@ previous contribution before any refresh.
 
 [The headless runtime](../src/runtime.rs) implements this contract for
 explicit equipment grants, additive AC, Fire and Poison resistance floors,
-and Electrical resistance additions.
+and Electrical resistance additions and floors.
 `Runtime` owns actor base AC and underlying resistance values, item
 associations and active records. Its typed actor, item instance
 and activation IDs are allocated deterministically and never reused
@@ -106,13 +106,14 @@ operations and changes that would leave a total outside the signed
 32-bit range fail before state changes. This includes a removal if
 cancelling adjustments had kept the total in range.
 
-AC and Electrical points are captured at activation. A Fire or Poison floor
-stores the minimum as an active constraint. The Electrical intermediate
-value is the actor's current signed underlying value plus its active
-additions. The Fire and Poison intermediate values take the maximum of
-each current underlying value and its active floors. CE evaluates additions before
-bounds. This slice supports one of those stages per channel, with no
-channel combining both.
+AC and Electrical points are captured at activation. A resistance
+floor stores the minimum as an active constraint. Electrical resistance
+starts with the actor's current signed underlying value, adds the sum of
+surviving adjustments, then takes the maximum of that result and the
+strongest surviving floor. Fire and Poison currently have only the floor
+stage. Clause order does not affect evaluation. Removing one grant
+leaves other sources in place and the next query recomputes from those
+grants and the actor's current underlying value.
 
 The ordinary queries clamp the intermediate values to 0–95% without
 modifying the inputs or active grants. A Poison floor of 97% therefore
@@ -121,9 +122,31 @@ or below 97%. This follows CE's ordinary
 resistance query and omits its monstrous NPC exception. Electrical
 overflow checks cover new grants, changes to the underlying value and
 removals that could expose a previously cancelled overflow. The runtime
-checks AC and Electrical totals before revoking grants or changing
-equipment ownership. An unsupported operation rejects the entire
-activation.
+checks AC and Electrical totals before committing changes. The Electrical
+sum is accumulated at wider precision and checked before its floor, so
+a floor cannot hide an out-of-range sum. An unsupported operation rejects
+the entire activation.
+
+In the winning loose `data/rules/effect.mes`, Body of Fire (54) stores
+`resistelectrical +8`. Body of Water (55) stores
+`resistelectrical min 90` alongside unrelated clauses. A scan of the
+winning table's 1,951 entries found 35 with resistance clauses and no
+single record that pairs a flat signed addition with a minimum on the
+same resistance channel. CE's `effect_adjust_func` in
+`src/game/effect.c` gathers additions and minima across active effects by
+channel and applies the sum before the strongest minimum.
+`object_get_resistance` in `src/game/object.c` applies the ordinary query
+clamp afterward. This confirms the evaluator order if both operations
+are active. Whether the original spells can be active simultaneously
+was outside the investigation.
+
+The same-channel demo uses a synthetic 50% Electrical floor and the
+verified +8 operation. Underlying values of 20%, 45%, and 70% become
+28%, 53%, and 78% after addition, then 50%, 53%, and 78% after the floor.
+At 92% underlying the intermediate remains 100% and the ordinary query
+returns 95%. The demo uses native fixture definitions. The MES decoder
+still supports its existing subset, and importing or executing the full
+Body of Water record remains outside this slice.
 
 Effect 54's Fire minimum of 95%, Electrical addition of eight points,
 and Poison minimum of 97% can now run as one activation. The runtime

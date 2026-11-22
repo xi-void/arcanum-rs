@@ -43,7 +43,8 @@ const USAGE: &str = "Usage:
   arcanum-rs simulate equipment-demo
   arcanum-rs simulate resistance-demo
   arcanum-rs simulate electrical-demo
-  arcanum-rs simulate composite-demo";
+  arcanum-rs simulate composite-demo
+  arcanum-rs simulate same-channel-demo";
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -75,6 +76,9 @@ fn main() -> ExitCode {
         }
         (Some("simulate"), [_, demo]) if policy == Policy::Ce && demo == "composite-demo" => {
             composite_demo(&mut io::stdout().lock())
+        }
+        (Some("simulate"), [_, demo]) if policy == Policy::Ce && demo == "same-channel-demo" => {
+            same_channel_demo(&mut io::stdout().lock())
         }
         (Some("mes"), [_, action, game, resource, options @ ..]) if action == "inspect" => {
             inspect_mes(Path::new(game), resource, None, options, policy)
@@ -402,6 +406,65 @@ fn composite_demo(out: &mut impl Write) -> Result<(), Box<dyn Error>> {
     runtime.unequip(second, actor)?;
     writeln!(out, "Unequipped {second:?}, removed {remaining:?}")?;
     show_resistance(out, &runtime)
+}
+
+fn same_channel_demo(out: &mut impl Write) -> Result<(), Box<dyn Error>> {
+    use items::ResistanceKind::Electrical;
+
+    let item = items::GenericDefinition {
+        id: items::ItemId("demo:item/grounding-charm".into()),
+        display_name: "Grounding charm".into(),
+        base_weight: 1,
+        base_worth: 0,
+        magic_tech_complexity: 0,
+    };
+    let addition = EffectDefinition {
+        id: EffectId("demo:effect/electrical-addition".into()),
+        operations: vec![EffectOperation::AddResistance {
+            channel: Electrical,
+            percentage_points: 8,
+        }],
+    };
+    let floor = EffectDefinition {
+        id: EffectId("demo:effect/electrical-floor".into()),
+        operations: vec![EffectOperation::ResistanceFloor {
+            channel: Electrical,
+            minimum_percent: 50,
+        }],
+    };
+    let mut runtime = Runtime::default();
+    let actor = runtime.create_actor(10)?;
+    let show = |out: &mut dyn Write, label, runtime: &Runtime<'_>| -> Result<(), Box<dyn Error>> {
+        writeln!(
+            out,
+            "{label}: underlying {}%, intermediate {}%, queried {}%",
+            runtime.underlying_electrical_resistance(actor)?,
+            runtime.electrical_resistance_after_effects(actor)?,
+            runtime.electrical_resistance(actor)?
+        )?;
+        Ok(())
+    };
+    writeln!(
+        out,
+        "Synthetic Electrical scenario with +8 points and a 50% floor"
+    )?;
+    runtime.set_underlying_electrical_resistance(actor, 20)?;
+    let first = runtime.instantiate_item(ItemDefinitionRef::Generic(&item))?;
+    let second = runtime.instantiate_item(ItemDefinitionRef::Generic(&item))?;
+    runtime.equip(first, actor)?;
+    runtime.activate_effect(first, actor, &addition)?;
+    show(out, "Addition source equipped", &runtime)?;
+    runtime.equip(second, actor)?;
+    runtime.activate_effect(second, actor, &floor)?;
+    show(out, "Floor source equipped", &runtime)?;
+    for value in [45, 92, 45] {
+        runtime.set_underlying_electrical_resistance(actor, value)?;
+        show(out, "Underlying changed", &runtime)?;
+    }
+    runtime.unequip(first, actor)?;
+    show(out, "Addition source removed", &runtime)?;
+    runtime.unequip(second, actor)?;
+    show(out, "Floor source removed", &runtime)
 }
 
 fn open_archive(path: &Path) -> Result<Archive<File>, Box<dyn Error>> {
