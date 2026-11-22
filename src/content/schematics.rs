@@ -1,6 +1,8 @@
 //! Inspection of one legacy recipe and resolution into independent content.
 
-use super::items::{FoodDefinition, ItemId, LoadedPrototype, description_path, load_prototype};
+use super::items::{
+    FoodDefinition, ItemId, LoadedPrototype, description_path, item_display_name, load_prototype,
+};
 use super::{LoadedMes, Source, load_mes};
 use crate::mes::{EntryId, Mes};
 use crate::prototype::{DescriptionId, SerializedPrototypeId};
@@ -11,6 +13,7 @@ use std::num::NonZeroU32;
 use vfs::Vfs;
 
 pub mod audit;
+pub mod readiness;
 
 const RULES: &str = "rules/schematic.mes";
 const TEXT: &str = "mes/schematic_text.mes";
@@ -641,7 +644,22 @@ fn resolve_item(
         field,
         DiagnosticKind::MissingDescription,
         diagnostics,
-    );
+    )
+    .and_then(|name| {
+        if item_display_name(&name.text).is_some() {
+            return Some(name);
+        }
+        warn(
+            diagnostics,
+            DiagnosticKind::MissingDescription,
+            field,
+            format!(
+                "blank item name at key {key} in {text_path} from {}",
+                name.source
+            ),
+        );
+        None
+    });
     let mut native_id = name.as_ref().map(|_| ItemId::from_prototype(serialized));
     let definition = prototype.food.and_then(|food| {
         match (u32::try_from(food.weight), u32::try_from(food.worth)) {

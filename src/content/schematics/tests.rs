@@ -1,6 +1,6 @@
 use super::*;
 use crate::mods::Catalog;
-use crate::prototype::tests::food_bytes;
+use crate::prototype::tests::{food_bytes, weapon_bytes};
 use crate::vfs::Policy;
 use std::fs;
 use std::io;
@@ -469,6 +469,142 @@ fn audit_checks_only_selected_references_and_reports_missing_groups() {
             .iter()
             .any(|diag| diag.message.contains("serialized 10120"))
     );
+}
+
+#[test]
+fn readiness_reports_truncated_weapon_and_corrupt_artwork_from_the_winning_mod() {
+    use super::readiness::{IssueKind, Status, audit_readiness};
+    use flate2::{Compression, write::ZlibEncoder};
+    use std::io::Write;
+
+    let fixture = Fixture::new();
+    fixture.populate();
+    fs::remove_file(fixture.0.join("base/proto/010120 - food.pro")).unwrap();
+    let weapon_path = "proto/010120 - weapon.pro";
+    let weapon = weapon_bytes(10120, 400);
+    fixture.write(&format!("base/{weapon_path}"), &weapon);
+    let mut vfs = fixture.vfs();
+
+    let baseline = audit_readiness(&mut vfs, &[]).unwrap();
+    assert_eq!(baseline.statuses, [(GROUP, Status::Checked(Vec::new()))]);
+    let base_report = baseline.references.references[0].1.as_ref().unwrap();
+    assert!(base_report.diagnostics.is_empty());
+    assert!(base_report.definition.is_some());
+
+    fixture.write(
+        "mods/broken/arcanum-mod.toml",
+        r#"
+manifest_version = 1
+id = "broken"
+name = "Broken schematic assets"
+version = "1.0.0"
+description = "Test VFS provenance"
+[[mounts]]
+kind = "directory"
+path = "resources"
+[[mounts]]
+kind = "archive"
+path = "art.dat"
+"#,
+    );
+    fixture.write(
+        &format!("mods/broken/resources/{weapon_path}"),
+        &weapon[..143],
+    );
+    let mut compressor = ZlibEncoder::new(Vec::new(), Compression::default());
+    compressor.write_all(b"drawing").unwrap();
+    let mut archive = compressor.finish().unwrap();
+    archive.push(b'!'); // Trailing byte inside the declared compressed span.
+    let stored_size = archive.len() as u32;
+    let index_start = archive.len();
+    let path = b"art/interface/drawing.art\0";
+    for word in [stored_size + 4, 1, path.len() as u32] {
+        archive.extend(word.to_le_bytes());
+    }
+    archive.extend(path);
+    for word in [0, 2, 7, stored_size, 0] {
+        archive.extend(word.to_le_bytes());
+    }
+    archive.extend(b" TAD");
+    archive.extend((path.len() as u32).to_le_bytes());
+    archive.extend(((archive.len() - index_start) as u32).to_le_bytes());
+    fixture.write("mods/broken/art.dat", archive);
+
+    let catalog = Catalog::discover(fixture.0.join("mods")).unwrap();
+    let mut vfs = catalog.load_order(&["broken"]).unwrap().apply(vfs).unwrap();
+    let checked = audit_readiness(&mut vfs, &[GROUP]).unwrap();
+    let report = checked.references.references[0].1.as_ref().unwrap();
+    assert_eq!(report.definition, base_report.definition);
+    assert!(report.diagnostics.is_empty());
+    let [(id, Status::Checked(issues))] = checked.statuses.as_slice() else {
+        panic!("expected a checked recipe");
+    };
+    assert_eq!(*id, GROUP);
+    assert_eq!(issues.len(), 2);
+    assert_eq!(issues[0].kind, IssueKind::ItemDefinition);
+    assert_eq!(issues[0].source.virtual_path, weapon_path);
+    assert!(issues[0].detail.contains("truncated"), "{issues:?}");
+    assert_eq!(issues[1].kind, IssueKind::Illustration);
+    assert_eq!(
+        issues[1].source.virtual_path.as_bytes(),
+        &path[..path.len() - 1]
+    );
+    assert!(
+        issues[1].detail.contains("zlib stream ends before"),
+        "{issues:?}"
+    );
+    for issue in issues {
+        assert_eq!(issue.source.mod_id.as_ref().unwrap().as_str(), "broken");
+    }
+}
+
+#[test]
+fn item_name_validation_rejects_blanks_and_preserves_significant_spacing() {
+    use super::readiness::{Status, audit_readiness};
+    use crate::content::items::{ItemDefinitionError, WeaponAmmoDefinition, inspect_prototype};
+
+    let fixture = Fixture::new();
+    fixture.populate();
+    fs::remove_file(fixture.0.join("base/proto/010120 - food.pro")).unwrap();
+    let weapon_path = "proto/010120 - weapon.pro";
+    fixture.write(&format!("base/{weapon_path}"), weapon_bytes(10120, 400));
+
+    for (name, valid) in [("  \t  ", false), ("  First, Mk. II!  ", true)] {
+        fixture.write(
+            "base/mes/description.mes",
+            format!("{{400}}{{{name}}}{{401}}{{Second}}"),
+        );
+        let mut vfs = fixture.vfs();
+        let inspection = inspect_prototype(&mut vfs, weapon_path).unwrap();
+        let standalone = inspection.resolve_weapon_ammo(&mut vfs);
+        let audit = audit_readiness(&mut vfs, &[GROUP]).unwrap();
+        let recipe = audit.references.references[0].1.as_ref().unwrap();
+        let item = &recipe.items[&BasicPrototypeId(10100)];
+        if valid {
+            let WeaponAmmoDefinition::Weapon(definition) = standalone.unwrap().unwrap().definition
+            else {
+                panic!("expected a Weapon definition");
+            };
+            assert_eq!(definition.display_name, name);
+            assert_eq!(item.name.as_ref().unwrap().text, name);
+            assert_eq!(audit.statuses, [(GROUP, Status::Checked(Vec::new()))]);
+        } else {
+            assert!(matches!(
+                standalone,
+                Err(ItemDefinitionError::MissingName {
+                    id: DescriptionId(400),
+                    ..
+                })
+            ));
+            assert!(item.name.is_none() && item.id.is_none());
+            assert!(recipe.definition.is_none());
+            assert!(recipe.diagnostics.iter().any(|diagnostic| {
+                diagnostic.kind == DiagnosticKind::MissingDescription
+                    && diagnostic.message.contains("blank item name at key 400")
+            }));
+            assert_eq!(audit.statuses, [(GROUP, Status::ReferencesIncomplete)]);
+        }
+    }
 }
 
 #[test]

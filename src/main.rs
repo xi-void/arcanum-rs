@@ -4,13 +4,14 @@ use arcanum_rs::content::schematics::DiagnosticKind;
 use arcanum_rs::content::schematics::audit::{
     GroupStatus, SchematicAudit, audit_all_schematics, audit_schematics,
 };
+use arcanum_rs::content::schematics::readiness::{Status, audit_readiness};
 use arcanum_rs::content::{items, schematics};
 use arcanum_rs::dat::{Archive, Format};
 use arcanum_rs::mes::EntryId;
 use arcanum_rs::mods::{Catalog, Package};
 use arcanum_rs::prototype::WeaponAmmoFields;
 use arcanum_rs::vfs::{self, Policy, Resolution, Vfs};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
@@ -35,7 +36,7 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] prototype inspect <game-directory> <resource-path> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] effect inspect <game-directory> <effect-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] schematic inspect <game-directory> <recipe-id> [--mods <mods-directory> <mod-id> ...]
-  arcanum-rs [--ordered] schematic audit <game-directory> [--all-references | <recipe-id> ...] [--mods <mods-directory> <mod-id> ...]";
+  arcanum-rs [--ordered] schematic audit <game-directory> [--all-references | [--readiness] [<recipe-id> ...]] [--mods <mods-directory> <mod-id> ...]";
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -404,10 +405,16 @@ fn audit_schematic_command(
         .position(|arg| arg == "--mods")
         .unwrap_or(options.len());
     let (selection, options) = options.split_at(split);
+    let (readiness, selection) = match selection {
+        [flag, rest @ ..] if flag == "--readiness" => (true, rest),
+        _ => (false, selection),
+    };
     let all = match selection {
-        [flag] if flag == "--all-references" => true,
+        [flag] if flag == "--all-references" && !readiness => true,
         args if args.iter().any(|arg| arg == "--all-references") => {
-            return Err("--all-references cannot be combined with recipe IDs".into());
+            return Err(
+                "--all-references cannot be combined with --readiness or recipe IDs".into(),
+            );
         }
         _ => false,
     };
@@ -420,10 +427,13 @@ fn audit_schematic_command(
             .collect::<Result<Vec<_>, _>>()?
     };
     let mut vfs = inspection_vfs(game, options, policy)?;
-    let audit = if all {
-        audit_all_schematics(&mut vfs)?
+    let (audit, readiness_statuses) = if readiness {
+        let result = audit_readiness(&mut vfs, &ids)?;
+        (result.references, Some(result.statuses))
+    } else if all {
+        (audit_all_schematics(&mut vfs)?, None)
     } else {
-        audit_schematics(&mut vfs, &ids)?
+        (audit_schematics(&mut vfs, &ids)?, None)
     };
     let mut supported = 0;
     let mut variants = 0;
@@ -481,10 +491,21 @@ fn audit_schematic_command(
         writeln!(out, "  Duplicate entry {key}")?;
     }
 
-    if all {
-        return write_full_reference_summary(&mut out, &audit).map_err(Into::into);
+    if all || (readiness && ids.is_empty()) {
+        write_full_reference_summary(&mut out, &audit)?;
+    } else {
+        write_selected_reference_summary(&mut out, &audit)?;
     }
+    if let Some(statuses) = readiness_statuses {
+        write_readiness_summary(&mut out, &statuses, ids.is_empty())?;
+    }
+    Ok(())
+}
 
+fn write_selected_reference_summary(
+    out: &mut impl Write,
+    audit: &SchematicAudit,
+) -> io::Result<()> {
     let complete = audit
         .references
         .iter()
@@ -518,6 +539,61 @@ fn audit_schematic_command(
             }
             Err(error) => writeln!(out, "  {}: {error}", id.0)?,
         }
+    }
+    Ok(())
+}
+
+fn write_readiness_summary(
+    out: &mut impl Write,
+    statuses: &[(schematics::LegacyRecipeId, Status)],
+    all: bool,
+) -> io::Result<()> {
+    let mut passed = 0;
+    let mut blocked = 0;
+    let mut counts = BTreeMap::new();
+    for (_, status) in statuses {
+        match status {
+            Status::ReferencesIncomplete => blocked += 1,
+            Status::Checked(issues) if issues.is_empty() => passed += 1,
+            Status::Checked(issues) => {
+                for issue in issues {
+                    *counts.entry(issue.kind).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    writeln!(
+        out,
+        "Content readiness checks: {passed} passed / {} audited ({} with issues, {blocked} blocked by references)",
+        statuses.len(),
+        statuses.len() - passed - blocked
+    )?;
+    for (kind, count) in counts {
+        writeln!(out, "  {kind}: {count} recipe/resource occurrences")?;
+    }
+    let mut shown = BTreeSet::new();
+    let mut examples = 0;
+    for (id, status) in statuses {
+        if let Status::Checked(issues) = status {
+            for issue in issues {
+                if all && !shown.insert(issue.source.virtual_path.as_str()) {
+                    continue;
+                }
+                examples += 1;
+                if !all || examples <= 12 {
+                    write!(out, "  Recipe {} ({}): ", id.0, issue.kind)?;
+                    write_source(out, &issue.source)?;
+                    writeln!(out, "    {}", issue.detail)?;
+                }
+            }
+        }
+    }
+    if all && examples > 12 {
+        writeln!(
+            out,
+            "  {} further resource issues. Pass recipe IDs after --readiness for details.",
+            examples - 12
+        )?;
     }
     Ok(())
 }

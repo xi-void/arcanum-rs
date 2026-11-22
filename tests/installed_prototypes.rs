@@ -318,6 +318,44 @@ fn validates_references_for_all_learned_and_found_groups() {
 
 #[test]
 #[ignore = "requires the installed Arcanum data"]
+fn readiness_checks_all_supported_schematic_item_and_artwork_resources() {
+    use arcanum_rs::content::schematics::readiness::{IssueKind, Status, audit_readiness};
+    use std::collections::BTreeMap;
+
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(game, Policy::Ce).unwrap();
+    let audit = audit_readiness(&mut vfs, &[]).unwrap();
+    assert_eq!(audit.statuses.len(), 119);
+    let mut passed = 0;
+    let mut counts = BTreeMap::new();
+    for (id, status) in audit.statuses {
+        let Status::Checked(issues) = status else {
+            panic!("recipe {} failed reference resolution", id.0);
+        };
+        if issues.is_empty() {
+            passed += 1;
+        }
+        for issue in issues {
+            assert!(
+                matches!(issue.kind, IssueKind::UnsupportedItemType(11 | 14)),
+                "recipe {}: {issue:?}",
+                id.0
+            );
+            *counts.entry(issue.kind).or_insert(0) += 1;
+        }
+    }
+    assert_eq!(passed, 38);
+    assert_eq!(
+        counts,
+        BTreeMap::from([
+            (IssueKind::UnsupportedItemType(11), 1),
+            (IssueKind::UnsupportedItemType(14), 138),
+        ])
+    );
+}
+
+#[test]
+#[ignore = "requires the installed Arcanum data"]
 fn installed_weapon_and_ammo_match_serialized_and_native_fields() {
     use arcanum_rs::content::items::{
         AmmoKind, AmmoRequirement, DamageComponent, DamageKind, WeaponAmmoDefinition,
@@ -575,6 +613,8 @@ fn verifies_direct_armour_adjustments_and_sword_script_references() {
     );
     let resolved = ring.resolve_armour(&mut vfs).unwrap().unwrap();
     assert_eq!(resolved.definition.display_name, "Ring of Protection");
+    assert_eq!(resolved.definition.magic_tech_complexity, 40);
+    assert_eq!(resolved.definition.armour_class_adjustment, 0);
     assert_eq!(resolved.definition.magical_armour_class_adjustment, 10);
     assert!(resolved.definition.resistances.is_empty());
     assert_eq!(
@@ -593,6 +633,18 @@ fn verifies_direct_armour_adjustments_and_sword_script_references() {
         fields.magical_resistance_adjustments,
         [Some(-5), Some(-10), Some(-20), Some(-20), Some(0)]
     );
+    let resolved = platemail.resolve_armour(&mut vfs).unwrap().unwrap();
+    assert_eq!(resolved.definition.display_name, "Machined Platemail");
+    assert_eq!(resolved.definition.magic_tech_complexity, -30);
+    assert_eq!(resolved.definition.armour_class_adjustment, 30);
+    assert_eq!(resolved.definition.magical_armour_class_adjustment, -10);
+    let adjustments: Vec<_> = resolved
+        .definition
+        .magical_resistances
+        .iter()
+        .map(|adjustment| adjustment.percentage_points)
+        .collect();
+    assert_eq!(adjustments, [-5, -10, -20, -20, 0]);
 
     let sword = inspect_prototype(&mut vfs, "proto/006084 - weapon.pro").unwrap();
     assert_eq!(sword.prototype.header.id, SerializedPrototypeId(6084));

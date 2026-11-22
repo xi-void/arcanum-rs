@@ -375,6 +375,49 @@ The base value, worn adjustments, Constitution-derived poison contribution, othe
 
 Nearby records 51 and 55 contain `damage max 0`, which was useful evidence for explicit zero and maximum syntax. The decoder rejects those records as a whole because their targets and operators extend beyond this slice. The compiled CE per-category count and the legacy file's written limit disagree, and no CE layout limit is used in the native representation. A future evaluator needs separate rules for conflicts across effects and caller clamps, along with a grant identity to distinguish multiple activations of the same definition.
 
+## Milestone 16 schematic readiness and Armour complexity
+
+Reference coverage checks the recipe mapping, expected prototype identity,
+stored item-name key, and illustration path through the VFS. The optional
+readiness pass starts with reference-complete recipes and checks every
+distinct item reference across all variants. Food definitions already
+exist at that point. Weapon, Ammo, and Armour must pass the existing
+detailed readers and native definition conversion. Types without a native
+definition reader are reported as unsupported. The artwork check reads the
+winning illustration through the VFS and requires a nonempty payload
+within 16 MiB. This exercises regular file reads and archive extraction,
+including the DAT reader's compressed payload validation. The check
+covers the drawing bytes. ART structure, item artwork, script execution,
+and gameplay behavior remain outside its scope.
+
+The installed game returned **119 reference-complete recipes** and **38
+recipes passing all implemented readiness checks**. The remaining 81 have
+at least one unsupported definition. There were 138 recipe/item
+occurrences of Generic (type 14) and one of Key (type 11), with no failed
+supported item definitions or illustration reads. A synthetic mod with a
+truncated Weapon and malformed compressed illustration retained reference
+coverage while readiness reported both winning resources. Item inspection
+and recipe resolution now share the same display-name rule. Missing or
+whitespace-only item names fail, and otherwise valid names keep their
+original punctuation and spacing.
+
+The readiness pass is specific to legacy schematic import. The shared
+item-name rule and VFS artwork check can also serve future native
+validation. Native recipes can resolve item IDs to already constructed
+native definitions. Their validation does not require fabricating a
+legacy prototype or numeric ID.
+
+`ArmourDefinition.magic_tech_complexity` now retains the signed value
+from the verified common item field. The decoder determines the location
+by walking the version 119 fields. The Ring of Protection from
+`Arcanum5.dat` stores +40 at byte 400 and the loose Machined Platemail
+stores −30 at byte 448. The sign
+distinguishes magical, technological and neutral values. The scalar
+stays separate from base and magical AC and signed resistance
+adjustments. CE uses it as an input to aptitude-dependent behavior.
+The native definition carries the source value, and this milestone
+computes no effective protection.
+
 ### Primary reference locations
 
 - CE `src/game/proto.c` (`proto_init`, `sub_468660`, `sub_468860`, and the four `BP_*` initializers), `descriptions.h`, `obj_id.h`, `obj_id.c`.

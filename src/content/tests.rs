@@ -253,6 +253,7 @@ fn armour_inspection_preserves_identity_fit_and_mod_provenance() {
     let stock = stock.resolve_armour(&mut vfs).unwrap().unwrap();
     assert_eq!(stock.definition.sizes, [ArmourSize::Medium]);
     assert_eq!(stock.definition.coverage, ArmourCoverage::Torso);
+    assert_eq!(stock.definition.magic_tech_complexity, -7);
     assert!(stock.name_source.mod_id.is_none());
 
     fixture.write(
@@ -269,6 +270,7 @@ path = "resources"
 "#,
     );
     let mut replacement = armour_bytes(8111, 30025, 5, 0x6000_0080);
+    replacement[216..220].copy_from_slice(&30i32.to_le_bytes());
     // Replace the sparse base array with all five ordered channels.
     replacement.splice(
         283..319,
@@ -294,6 +296,9 @@ path = "resources"
     assert_eq!(armour.id, stock.definition.id);
     assert_eq!(armour.id, ItemId("arcanum:item/prototype-8111".into()));
     assert_eq!(armour.display_name, "Modified Armour");
+    assert_eq!(armour.magic_tech_complexity, 30);
+    assert_eq!(armour.armour_class_adjustment, 9);
+    assert_eq!(armour.magical_armour_class_adjustment, 20);
     assert_eq!(armour.sizes, [ArmourSize::Small, ArmourSize::Large]);
     assert_eq!(armour.coverage, stock.definition.coverage);
     assert_eq!(
