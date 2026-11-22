@@ -213,11 +213,13 @@ cargo run --features windowed -- art overlap "$game"
 cargo run --features windowed -- art floor-demo
 cargo run --features windowed -- art floor "$game"
 cargo run --features windowed -- art sector "$game"
+cargo run --features windowed -- art sector-wide "$game"
+cargo run -- art sector-audit "$game"
 ```
 
 The synthetic demos require only a display session. `art overlap` shows
 bread and alignment frames with explicit draw order and independent anchors.
-[Native sprite viewer](docs/SPRITE_VIEWER.md) · [Fixed isometric floor](docs/ISOMETRIC_FLOOR.md) · [Original map sector floor](docs/SECTOR_FLOOR.md)
+[Native sprite viewer](docs/SPRITE_VIEWER.md) · [Fixed isometric floor](docs/ISOMETRIC_FLOOR.md) · [Original map sector floor](docs/SECTOR_FLOOR.md) · [Tile-ID coverage](docs/TILE_ID_COVERAGE.md)
 
 ## Prototype and schematic inspection
 

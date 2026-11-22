@@ -641,3 +641,53 @@ path = "resources"
         Err(Error::Art { provenance, error: crate::art::Error::Truncated { section: "header", .. } }) if *provenance == loaded.source
     ));
 }
+
+#[test]
+fn sector_draws_share_artwork_while_preserving_raw_ids_and_flip() {
+    use crate::sector::{Coordinates, TileArtId};
+
+    let files = Fixture::new();
+    let mut sector_bytes = vec![0; 4 + 4096 * 4];
+    for (x, raw) in [(0, 0x000131c0u32), (1, 0x000131c1)] {
+        let offset = 4 + x * 4;
+        sector_bytes[offset..offset + 4].copy_from_slice(&raw.to_le_bytes());
+    }
+    files.write("art/tile/tilename.mes", b"{0}{drt/n 0}{1}{grs/n 0}");
+    let mut artwork = vec![0; 1184 + 78 * 40];
+    for (offset, value) in [
+        (0, 1u32),
+        (4, 8),
+        (8, 8),
+        (12, 1),
+        (32, 1),
+        (1156, 78),
+        (1160, 40),
+        (1164, 3120),
+        (1168, 39),
+        (1172, 39),
+    ] {
+        artwork[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    artwork[138] = 35;
+    artwork[142] = 90;
+    artwork[1184] = 1;
+    artwork[1184 + 77] = 2;
+    files.write("art/tile/drtgrs4a.art", &artwork);
+    // Fill the second row with the same verified IDs to make this a 2 × 2 region.
+    sector_bytes.copy_within(4..12, 4 + 64 * 4);
+    files.write("maps/demo/0.sec", &sector_bytes);
+
+    let mut vfs = Vfs::new(Policy::Ordered);
+    vfs.mount_directory(&files.0).unwrap();
+    let patch = super::sector::load_region(&mut vfs, "demo", Coordinates { x: 0, y: 0 }, (0, 0), 2)
+        .unwrap();
+    assert_eq!(patch.artwork().count(), 1);
+    assert_eq!(patch.flipped_frame_count(), 1);
+    assert_eq!(patch.tiles()[0].id, TileArtId(0x000131c0));
+    assert_eq!(patch.tiles()[1].id, TileArtId(0x000131c1));
+    assert_eq!(patch.tiles()[0].artwork, patch.tiles()[1].artwork);
+    let draws: Vec<_> = patch.draws().collect();
+    assert_eq!(draws[0].frame.pixels[0], [35, 0, 0, 255]);
+    assert_eq!(draws[1].frame.pixels[0], [90, 0, 0, 255]);
+    assert_eq!(draws[1].anchor.0 - draws[0].anchor.0, -40);
+}

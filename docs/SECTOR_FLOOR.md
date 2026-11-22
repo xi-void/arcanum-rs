@@ -40,6 +40,9 @@ fits. The parser never scans for plausible IDs to infer an earlier
 boundary. It leaves post-floor records opaque and caps total input at
 8 MiB. [Native sector reader and tests](../src/sector.rs)
 
+> Milestone 31 adds transition and flip coverage, a full headless sector
+> audit, and a separate 9 × 9 preview. [Tile-ID coverage](TILE_ID_COVERAGE.md)
+
 ## Tile artwork and precedence
 
 The tile art type is zero in bits 28–31. The first and second terrain
@@ -52,8 +55,8 @@ matching group of `art/tile/tilename.mes` (groups 0, 100, 200 and 300).
 The winning table comes from `Arcanum5.dat`. The sampled base IDs use
 mask zero and equal terrain names, which produce the `bse0` suffix.
 Other verified direct base cases are mask 15 or mask zero with differing
-names. Mixed transition masks, flip flags and alternate palettes return
-explicit errors in the bounded resolver.
+names. Milestone 30 covered the direct base cases. The later resolver covers
+verified transition and flip cases described in [Tile-ID coverage](TILE_ID_COVERAGE.md).
 
 | Local tile | Map tile | Art ID | Resolved path under `art/tile/` |
 |---|---|---|---|

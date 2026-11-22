@@ -93,26 +93,22 @@ fn resolves_base_art_ids_by_terrain_bucket_and_variant() {
         (0x00c3f000, "cf1bse0a"),
     ] {
         assert_eq!(
-            TileArtId(id).base_path(&names).unwrap(),
+            TileArtId(id).resolve(&names).unwrap().path,
             format!("art/tile/{path}.art")
         );
     }
-    assert_eq!(TileArtId(0x004104c1).base_path(&names), Err(ArtError::Flip));
+    assert_eq!(TileArtId(0x01040e01).resolve(&names), Err(ArtError::Flip));
     assert_eq!(
-        TileArtId(0x104104c0).base_path(&names),
+        TileArtId(0x104104c0).resolve(&names),
         Err(ArtError::NotTile)
     );
     assert_eq!(
-        TileArtId(0x000131c0).base_path(&names),
-        Err(ArtError::Transition)
-    );
-    assert_eq!(
-        TileArtId(0x004104d0).base_path(&names),
+        TileArtId(0x004104d0).resolve(&names),
         Err(ArtError::FlagsOrPalette)
     );
     let bad = Mes::parse_text("{200}{../a}").unwrap();
     assert_eq!(
-        TileArtId(0xc0).base_path(&bad),
+        TileArtId(0xc0).resolve(&bad),
         Err(ArtError::InvalidTerrainName)
     );
 }
@@ -134,4 +130,39 @@ fn rejects_a_cut_inside_the_light_list_even_with_plausible_tile_words() {
         decode_floor(&input[..4 + LIGHT_BYTES + 20]),
         Err(Error::TruncatedLights { expected_end: 100 })
     ));
+}
+
+#[test]
+fn resolves_transition_mask_order_independently_of_horizontal_flip() {
+    let names =
+        Mes::parse_text("{0}{drt/n 0}{1}{grs/n 0}{100}{tst 0}{200}{drt 0}{201}{fl1 0}").unwrap();
+    let plain = TileArtId(0x000131c0).resolve(&names).unwrap();
+    let flipped = TileArtId(0x000131c1).resolve(&names).unwrap();
+    assert_eq!(plain.path, "art/tile/drtgrs4a.art");
+    assert_eq!(plain.path, flipped.path);
+    assert_eq!(
+        flipped.fields,
+        TileFields {
+            terrain: [0, 1],
+            flippable: [true, true],
+            outdoor: true,
+            mask: 3,
+            variant: 0,
+            flip_x: true,
+        }
+    );
+    assert_eq!(flipped.families, ["drt", "grs"]);
+    assert!(flipped.transition);
+    assert!(!plain.fields.flip_x);
+
+    // Reversing the family order complements mask 3 to 12 in the filename.
+    assert_eq!(
+        TileArtId(0x004035c0).resolve(&names).unwrap().path,
+        "art/tile/drtgrsdc.art"
+    );
+    // For distinct indoor families with no second outdoor match, use its base edge.
+    assert_eq!(
+        TileArtId(0x000130c0).resolve(&names).unwrap().path,
+        "art/tile/fl1bseda.art"
+    );
 }

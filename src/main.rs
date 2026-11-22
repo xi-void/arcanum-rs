@@ -42,6 +42,8 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] art inspect <game-directory> <resource-path> <frame> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art export <game-directory> <resource-path> <frame> <output.pam> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs art demo                          (requires --features windowed)
+  arcanum-rs [--ordered] art sector-audit <game-directory> [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs [--ordered] art sector-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs art floor-demo                    (requires --features windowed)
   arcanum-rs [--ordered] art floor <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
@@ -104,9 +106,14 @@ fn main() -> ExitCode {
         (Some("art"), [_, action]) if action == "overlap-demo" && policy == Policy::Ce => {
             viewer::show_synthetic_overlap().map_err(Into::into)
         }
+        (Some("art"), [_, action, game, options @ ..]) if action == "sector-audit" => {
+            report_sector_audit(Path::new(game), options, policy)
+        }
         #[cfg(feature = "windowed")]
-        (Some("art"), [_, action, game, options @ ..]) if action == "sector" => {
-            show_sector_floor(Path::new(game), options, policy)
+        (Some("art"), [_, action, game, options @ ..])
+            if action == "sector" || action == "sector-wide" =>
+        {
+            show_sector_floor(Path::new(game), options, policy, action == "sector-wide")
         }
         #[cfg(feature = "windowed")]
         (Some("art"), [_, action]) if action == "floor-demo" && policy == Policy::Ce => {
@@ -144,7 +151,8 @@ fn main() -> ExitCode {
                 || action == "overlap-demo"
                 || action == "floor"
                 || action == "floor-demo"
-                || action == "sector" =>
+                || action == "sector"
+                || action == "sector-wide" =>
         {
             Err("sprite presentation requires a build with --features windowed".into())
         }
@@ -863,15 +871,19 @@ fn show_sector_floor(
     game: &Path,
     options: &[OsString],
     policy: Policy,
+    wide: bool,
 ) -> Result<(), Box<dyn Error>> {
-    use content::sector::{DEMO_MAP, DEMO_ORIGIN, DEMO_SECTOR, load_patch};
+    use content::sector::{
+        DEMO_MAP, DEMO_ORIGIN, DEMO_SECTOR, WIDE_ORIGIN, WIDE_SIDE, load_patch, load_region,
+    };
 
-    let patch = load_patch(
-        &mut inspection_vfs(game, options, policy)?,
-        DEMO_MAP,
-        DEMO_SECTOR,
-        DEMO_ORIGIN,
-    )?;
+    let mut vfs = inspection_vfs(game, options, policy)?;
+    let patch = if wide {
+        load_region(&mut vfs, DEMO_MAP, DEMO_SECTOR, WIDE_ORIGIN, WIDE_SIDE)?
+    } else {
+        load_patch(&mut vfs, DEMO_MAP, DEMO_SECTOR, DEMO_ORIGIN)?
+    };
+    drop(vfs);
     let mut out = io::stdout().lock();
     writeln!(
         out,
@@ -906,7 +918,7 @@ fn show_sector_floor(
         .draws()
         .map(|draw| viewer::Layer {
             frame: draw.frame,
-            // This five-by-five patch is bounded to 160 pixels from center.
+            // The bounded sector region fits within 320 pixels of center.
             relative_anchor: (draw.anchor.0 as i16, draw.anchor.1 as i16),
         })
         .collect();
@@ -914,6 +926,75 @@ fn show_sector_floor(
         "Arcanum-RS | Bates Mansion floor".into(),
         &layers,
     )?)
+}
+
+fn report_sector_audit(
+    game: &Path,
+    options: &[OsString],
+    policy: Policy,
+) -> Result<(), Box<dyn Error>> {
+    use content::sector::{ArtworkCheck, DEMO_MAP, DEMO_SECTOR, audit_floor};
+    let audit = audit_floor(
+        &mut inspection_vfs(game, options, policy)?,
+        DEMO_MAP,
+        DEMO_SECTOR,
+    )?;
+    let mut out = io::stdout().lock();
+    writeln!(
+        out,
+        "Sector: {} from {}",
+        audit.source.virtual_path, audit.source
+    )?;
+    writeln!(out, "Terrain names: {}", audit.names_source)?;
+    let (mut ready, mut missing, mut invalid, mut unsupported) = (0, 0, 0, 0);
+    for entry in &audit.entries {
+        let id = entry.id.0;
+        let count = entry.occurrences;
+        write!(out, "{id:#010x} × {count:4}  ")?;
+        match &entry.resolution {
+            Ok(tile) => {
+                let [first, second] = &tile.families;
+                writeln!(
+                    out,
+                    "{first}/{second} mask {:2} variant {} flip={} transition={} {} [{}]",
+                    tile.fields.mask,
+                    char::from(b'a' + tile.fields.variant),
+                    tile.fields.flip_x,
+                    tile.transition,
+                    tile.path,
+                    match &audit.artwork[&tile.path] {
+                        ArtworkCheck::Ready(source) => {
+                            ready += count;
+                            source.to_string()
+                        }
+                        ArtworkCheck::Missing => {
+                            missing += count;
+                            "missing artwork".into()
+                        }
+                        ArtworkCheck::Invalid(reason) => {
+                            invalid += count;
+                            reason.clone()
+                        }
+                    }
+                )?;
+            }
+            Err(error) => {
+                unsupported += count;
+                writeln!(out, "unsupported type {:#x} ({error})", id >> 28)?;
+            }
+        }
+    }
+    writeln!(
+        out,
+        "{} distinct IDs, {} distinct artwork paths",
+        audit.entries.len(),
+        audit.artwork.len()
+    )?;
+    writeln!(
+        out,
+        "Tiles: {ready} ready, {missing} missing artwork, {invalid} invalid artwork, {unsupported} unsupported IDs"
+    )?;
+    Ok(())
 }
 
 fn report_art(

@@ -35,40 +35,97 @@ impl Coordinates {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TileArtId(pub u32);
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct TileFields {
+    pub terrain: [u8; 2],
+    pub flippable: [bool; 2],
+    pub outdoor: bool,
+    pub mask: u8,
+    pub variant: u8,
+    pub flip_x: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct TileResolution {
+    pub fields: TileFields,
+    pub families: [String; 2],
+    pub path: String,
+    pub transition: bool,
+}
+
 impl TileArtId {
-    /// Resolve the unflipped base filename cases. Mixed transition masks
-    /// require CE's terrain-pair arrangement rules and are outside this slice.
-    pub fn base_path(self, names: &Mes) -> Result<String, ArtError> {
+    pub fn decode(self) -> Result<TileFields, ArtError> {
         let id = self.0;
         if id >> 28 != 0 {
             return Err(ArtError::NotTile);
         }
-        if id & 1 != 0 {
-            return Err(ArtError::Flip);
-        }
         if id & 0x3e != 0 {
             return Err(ArtError::FlagsOrPalette);
         }
-        let outdoor = id & 0x100 != 0;
-        let first = terrain_name(names, outdoor, id & 0x80 != 0, (id >> 22) & 63)?;
-        let second = terrain_name(names, outdoor, id & 0x40 != 0, (id >> 16) & 63)?;
-        let mask = ((id >> 12) & 15) as usize;
-        let terrain = match mask {
-            15 => first,
-            _ if first.eq_ignore_ascii_case(second) => first,
-            0 => second,
-            _ => return Err(ArtError::Transition),
+        let fields = TileFields {
+            terrain: [((id >> 22) & 63) as u8, ((id >> 16) & 63) as u8],
+            flippable: [id & 0x80 != 0, id & 0x40 != 0],
+            outdoor: id & 0x100 != 0,
+            mask: ((id >> 12) & 15) as u8,
+            variant: ((id >> 9) & 7) as u8,
+            flip_x: id & 1 != 0,
         };
-        let suffix = b"06b489237ea5dc10"[mask] as char;
-        let variant = (b'a' + ((id >> 9) & 7) as u8) as char;
-        Ok(format!(
-            "art/tile/{}bse{suffix}{variant}.art",
-            terrain.to_ascii_lowercase()
-        ))
+        if fields.flip_x && fields.flippable != [true, true] {
+            return Err(ArtError::Flip);
+        }
+        Ok(fields)
     }
+
+    pub fn resolve(self, names: &Mes) -> Result<TileResolution, ArtError> {
+        let fields = self.decode()?;
+        let first = terrain_name(
+            names,
+            fields.outdoor,
+            fields.flippable[0],
+            u32::from(fields.terrain[0]),
+        )?;
+        let second = terrain_name(
+            names,
+            fields.outdoor,
+            fields.flippable[1],
+            u32::from(fields.terrain[1]),
+        )?;
+        let mask = fields.mask;
+        let transition = !first.eq_ignore_ascii_case(second) && !matches!(mask, 0 | 15);
+        // CE clears the flip flag before the filename callback interprets the mask.
+        let (left, right, file_mask) = if transition {
+            match (outdoor_rank(names, first), outdoor_rank(names, second)) {
+                (None, _) => (first, "bse", mask),
+                (_, None) => (second, "bse", 15 - mask),
+                (Some(a), Some(b)) if a < b => (first, second, mask),
+                _ => (second, first, 15 - mask),
+            }
+        } else if mask == 0 && !first.eq_ignore_ascii_case(second) {
+            (second, "bse", mask)
+        } else {
+            (first, "bse", mask)
+        };
+        let suffix = b"06b489237ea5dc10"[usize::from(file_mask)] as char;
+        let variant = (b'a' + fields.variant) as char;
+        Ok(TileResolution {
+            fields,
+            families: [first.to_ascii_lowercase(), second.to_ascii_lowercase()],
+            path: format!("art/tile/{left}{right}{suffix}{variant}.art").to_ascii_lowercase(),
+            transition,
+        })
+    }
+}
+
+fn outdoor_rank(names: &Mes, name: &str) -> Option<usize> {
+    names
+        .entries()
+        .filter(|&(key, _)| (0..200).contains(&key))
+        .position(|(_, value)| {
+            name_prefix(value).is_ok_and(|candidate| candidate.eq_ignore_ascii_case(name))
+        })
 }
 
 fn terrain_name(names: &Mes, outdoor: bool, flippable: bool, index: u32) -> Result<&str, ArtError> {
@@ -88,6 +145,10 @@ fn terrain_name(names: &Mes, outdoor: bool, flippable: bool, index: u32) -> Resu
         group: start,
         index,
     })?;
+    name_prefix(value)
+}
+
+fn name_prefix(value: &str) -> Result<&str, ArtError> {
     let prefix = value
         .split_once('/')
         .map(|(name, _)| name)
@@ -102,7 +163,6 @@ pub enum ArtError {
     NotTile,
     Flip,
     FlagsOrPalette,
-    Transition,
     TerrainName { group: i32, index: u32 },
     InvalidTerrainName,
 }
@@ -111,9 +171,8 @@ impl fmt::Display for ArtError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotTile => write!(f, "art ID is not a tile"),
-            Self::Flip => write!(f, "flipped tiles are unsupported"),
+            Self::Flip => write!(f, "flip bit requires two flippable terrain components"),
             Self::FlagsOrPalette => write!(f, "tile requires unsupported flags or palette"),
-            Self::Transition => write!(f, "mixed terrain transitions are unsupported"),
             Self::TerrainName { group, index } => {
                 write!(f, "missing terrain name {index} in MES group {group}")
             }
@@ -132,6 +191,10 @@ pub struct Floor {
 }
 
 impl Floor {
+    pub fn ids(&self) -> impl Iterator<Item = TileArtId> + '_ {
+        self.ids.iter().copied()
+    }
+
     pub fn tile(&self, x: u8, y: u8) -> Option<TileArtId> {
         tile_index(x, y).map(|index| self.ids[index])
     }
