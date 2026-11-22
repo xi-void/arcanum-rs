@@ -1,6 +1,6 @@
 //! Inspection of one legacy recipe and resolution into independent content.
 
-use super::items::{FoodDefinition, ItemId, LoadedPrototype, load_prototype};
+use super::items::{FoodDefinition, ItemId, LoadedPrototype, description_path, load_prototype};
 use super::{LoadedMes, Source, load_mes};
 use crate::mes::{EntryId, Mes};
 use crate::prototype::{DescriptionId, SerializedPrototypeId};
@@ -633,11 +633,7 @@ fn resolve_item(
         };
     };
 
-    let text_path = if key < 30000 {
-        "mes/description.mes"
-    } else {
-        "mes/gamedesc.mes"
-    };
+    let text_path = description_path(DescriptionId(key));
     let name = resolve_text(
         mes_table(vfs, tables, text_path),
         text_path,
@@ -646,9 +642,7 @@ fn resolve_item(
         DiagnosticKind::MissingDescription,
         diagnostics,
     );
-    let mut native_id = name
-        .as_ref()
-        .map(|_| ItemId(format!("arcanum:item/prototype-{}", serialized.0)));
+    let mut native_id = name.as_ref().map(|_| ItemId::from_prototype(serialized));
     let definition = prototype.food.and_then(|food| {
         match (u32::try_from(food.weight), u32::try_from(food.worth)) {
             (Ok(base_weight), Ok(base_worth)) => {

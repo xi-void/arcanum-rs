@@ -7,6 +7,7 @@ use arcanum_rs::content::{items, schematics};
 use arcanum_rs::dat::{Archive, Format};
 use arcanum_rs::mes::EntryId;
 use arcanum_rs::mods::{Catalog, Package};
+use arcanum_rs::prototype::WeaponAmmoFields;
 use arcanum_rs::vfs::{self, Policy, Resolution, Vfs};
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -302,8 +303,19 @@ fn inspect_prototype(
 ) -> Result<(), Box<dyn Error>> {
     let resource = resource_name(resource)?;
     let mut vfs = inspection_vfs(game, options, policy)?;
-    let prototype = items::load_prototype(&mut vfs, resource)?;
-    write_prototype(&mut io::stdout().lock(), &prototype)?;
+    let inspection = items::inspect_prototype(&mut vfs, resource)?;
+    let mut out = io::stdout().lock();
+    write_prototype(&mut out, &inspection.prototype)?;
+    if let Some(fields) = &inspection.weapon_ammo {
+        let resolved = inspection.resolve_weapon_ammo(&mut vfs);
+        match resolved {
+            Ok(resolved) => write_weapon_ammo(&mut out, fields, resolved)?,
+            Err(error) => {
+                write_weapon_ammo(&mut out, fields, None)?;
+                return Err(error.into());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -626,6 +638,74 @@ fn write_prototype(out: &mut impl Write, prototype: &items::LoadedPrototype) -> 
     } else {
         writeln!(out, "Supported fields: header only")
     }
+}
+
+fn write_weapon_ammo(
+    out: &mut impl Write,
+    fields: &WeaponAmmoFields,
+    resolved: Option<items::ResolvedWeaponAmmo>,
+) -> io::Result<()> {
+    let common = fields.item();
+    writeln!(
+        out,
+        "Base weight: {} stone | base worth: {} | legacy discipline: {} | signed complexity: {}",
+        common.weight, common.worth, common.discipline, common.magic_tech_complexity
+    )?;
+    match fields {
+        WeaponAmmoFields::Weapon(weapon) => {
+            writeln!(
+                out,
+                "Speed rating: {} | range (tiles): {}",
+                weapon.speed_factor, weapon.range
+            )?;
+            writeln!(
+                out,
+                "Legacy ammo type: {} | base consumption: {}",
+                weapon.ammo_type, weapon.ammo_consumption
+            )?;
+        }
+        WeaponAmmoFields::Ammo(ammo) => {
+            writeln!(
+                out,
+                "Legacy ammo type: {} | stored prototype quantity: {}",
+                ammo.ammo_type, ammo.quantity
+            )?;
+        }
+    }
+
+    if let Some(resolved) = resolved {
+        match resolved.definition {
+            items::WeaponAmmoDefinition::Weapon(weapon) => {
+                writeln!(out, "Weapon: {} ({})", weapon.display_name, weapon.id.0)?;
+                for damage in weapon.damage {
+                    writeln!(
+                        out,
+                        "  {:?} damage: {}–{} points",
+                        damage.kind, damage.minimum, damage.maximum
+                    )?;
+                }
+                if let Some(ammo) = weapon.ammunition {
+                    writeln!(
+                        out,
+                        "Ammunition: {:?} | units per attack: {}",
+                        ammo.kind, ammo.units_per_attack
+                    )?;
+                } else {
+                    writeln!(out, "Ammunition: none")?;
+                }
+            }
+            items::WeaponAmmoDefinition::Ammo(ammo) => {
+                writeln!(
+                    out,
+                    "Ammo: {} ({}) | kind: {:?}",
+                    ammo.display_name, ammo.id.0, ammo.kind
+                )?;
+            }
+        }
+        write!(out, "Name: ")?;
+        write_source(out, &resolved.name_source)?;
+    }
+    Ok(())
 }
 
 fn write_source(out: &mut impl Write, source: &content::Source) -> io::Result<()> {

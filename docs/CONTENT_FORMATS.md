@@ -201,7 +201,7 @@ The full CE-policy VFS sweep selected the winning `data/rules/schematic.mes` and
 
 Before the prefix extension, 75 groups resolved and 44 were blocked by unsupported object types. The first sweep found 73 Weapon, 7 Ammo, and 1 Key diagnostics across those groups, involving 46 distinct Weapon files, 3 Ammo files, and 1 Key file. Every blocked prototype was present. No missing prototype or need for CE-generated defaults was found.
 
-The added types use the version 119 common description prefix already used for Armor and Generic. The sampled Weapon (type 5), Ammo (6), and Key (11) files used the 16-byte bitmap at byte 56. Examples include serialized IDs 6057, 7059, and 12081, with stored description keys 6037, 7039, and 12061 respectively at byte 323. CE's `object_proto_enumerate_fields` visits common fields before item and subtype fields. The reader follows field framing and checks the expected header identity separately from the description lookup. Some validated Weapon files came from archives, including prototype 6166 from `ArcanumXPyroBow.dat`. Weapon, Ammo and Key subtype fields and CE prototype generation remain outside this importer.
+The added types use the version 119 common description prefix already used for Armor and Generic. The sampled Weapon (type 5), Ammo (6), and Key (11) files used the 16-byte bitmap at byte 56. Examples include serialized IDs 6057, 7059, and 12081, with stored description keys 6037, 7039, and 12061 respectively at byte 323. CE's `object_proto_enumerate_fields` visits common fields before item and subtype fields. The reader follows field framing and checks the expected header identity separately from the description lookup. Some validated Weapon files came from archives, including prototype 6166 from `ArcanumXPyroBow.dat`. The reference sweep only requires common fields. Milestone 10 adds a separate inspection path for selected Weapon and Ammo fields.
 
 Full and selected reference validation use one VFS mount set and one prototype candidate search. Each run loads shared MES tables only on first use and caches their results, including failures. Typed diagnostics distinguish missing prototypes, ambiguous paths, identity mismatches, unsupported or invalid prototype data, missing names or descriptions, missing illustration references, malformed mappings, duplicate MES keys, and other read or parse failures. Native variants and output quantities retain source order and semantics.
 
@@ -232,6 +232,35 @@ The six text keys resolve to the placeholders “Title” and “Description.”
 **Native model.** The sample fits `RecipeVariant` directly, including identical item IDs in both slots. Multi-stage crafting uses the same item ID as one recipe's output and another's input, as in the 3250 → 3260 → 5090 chain. Keep the 7000 range outside the importer and reopen the investigation if a gameplay acquisition source is identified.
 
 **Next item-definition slice.** Validate a small Weapon and Ammo sample for base damage by type, range, speed, ammunition kind, and units consumed per attack. Keep current stack quantity in the item instance. Follow with Armour's equipment coverage, base armour class and resistances, and common values for technological components such as base weight and worth plus discipline and complexity where verified.
+
+## Milestone 10 native Weapon and Ammo definitions
+
+The CE-policy VFS selected version 119 prototypes from the loose `data/proto/` directory. The winning `mes/description.mes` was in `Arcanum5.dat`. These three samples cover melee without ammunition, a conventional firearm, and its compatible ammunition kind.
+
+| Resource under `proto/` | Basic ID | Serialized ID | Type | Stored description key and resolved name |
+| --- | ---: | ---: | ---: | --- |
+| `006049 - weapon.pro` | 6029 | 6049 | 5 | 6029, Dagger |
+| `006136 - weapon.pro` | 6116 | 6136 | 5 | 6116, Hand Crafted Flintlock |
+| `007059 - ammo.pro` | 7039 | 7059 | 6 | 7039, Bullet |
+
+The basic IDs are corroborated by CE `descriptions.h`. Name resolution follows the stored key, which equals the basic ID in these samples. The common object and item slots match the previously verified framing. For all three samples, the description, base weight, base worth, signed complexity, and discipline occur at byte offsets 323, 372, 380, 400, and 404. The reader walks the fields dynamically. Base weight uses the game's stone units and base worth uses game currency, before runtime adjustment. The Flintlock has stored worth 138, while CE's compiled default assigns 18. The selected serialized record supplies the imported value. CE may scale the Ammo weight factor by quantity, so the stored Ammo weight is distinct from a computed stack weight.
+
+| Sample field | Zero-based offset | Dagger | Hand Crafted Flintlock | Bullet |
+| --- | ---: | --- | --- | --- |
+| Base weight / worth | 372 / 380 | 20 / 20 | 80 / 138 | 1 / 3 |
+| Lower and upper damage array presence flags | 466 / 499 | Normal 1–4, Fatigue 1–2 | Normal 2–6, Fatigue 1–4 | — |
+| Base speed factor | 533 | 10 | 5 | — |
+| Base range | 541 | 1 tile | 15 tiles | — |
+| Weapon ammo kind / units per attack | 557 / 561 | 10000 / 0 | 1 / 1 | — |
+| Ammo prototype quantity / kind | 454 / 458 | — | — | 10 / 1 |
+
+Each damage bound is an optional width-4 array of signed damage points. The payload stores values densely in ascending index order, followed by a little-endian word count and mask. In both samples the mask words are `0x11, 0`, selecting Normal (index 0) and Fatigue (index 4). CE's `sa_get` uses the bitset rank to select the packed value and reads absent indices as zero. The raw decoder preserves absence separately, validates mask indices and cardinality, and bounds each read. The five verified channel names are Normal, Poison, Electrical, Fire, and Fatigue. They remain separate in native definitions because CE can apply them to different pools, including fatigue and poison.
+
+Ammo kinds 0, 1, 2, and 3 are Arrows, Bullets, Charges, and Fuel. The Weapon sentinel 10000 means no ammunition. Compatibility uses the shared kind rather than a prototype reference. The Bullet's stored quantity 10 is visible in inspection and stays in the legacy decode result. `AmmoDefinition` contains immutable base properties, while current stack quantity belongs to a future item instance.
+
+CE compares effective range with tile-coordinate distance, with adjacent melee represented by 1 in the Dagger. The range can change through magic and attack mode. Speed is a rating, with no physical time unit of its own. CE uses the adjusted rating for timing and turn-based action-point cost, including character training and magical adjustments. CE also adjusts damage by attack skill, character stats, and magic. Its normal attack path uses the stored ammunition consumption when applicable, while exceptional paths use different counts or bypass consumption. These runtime rules remain outside the decoder.
+
+Detailed prototype inspection decodes Weapon and Ammo fields and resolves names and provenance through the VFS. Native `WeaponDefinition` and `AmmoDefinition` carry the existing namespaced `ItemId`, with typed damage and ammo categories. Raw discipline, signed complexity, serialized quantity, and raw enum values stay at the import boundary. Other weapon fields, including strength minimums, magical modifiers, hit and critical properties, and artwork, are framed as needed and remain opaque. Schematic resolution still uses the header and description prefix for Weapon and Ammo references.
 
 ### Primary reference locations
 
