@@ -1,4 +1,5 @@
 use arcanum_rs::dat::{Archive, Format};
+use arcanum_rs::vfs::{self, Policy, Resolution, Vfs};
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fs::{self, File};
@@ -9,18 +10,30 @@ use std::process::ExitCode;
 const USAGE: &str = "Usage:
   arcanum-rs list <archive>
   arcanum-rs info <archive> <resource-path>
-  arcanum-rs extract <archive> <resource-path> <output-file>";
+  arcanum-rs extract <archive> <resource-path> <output-file>
+  arcanum-rs [--ordered] mounts <game-directory>
+  arcanum-rs [--ordered] resolve <game-directory> <resource-path>
+  arcanum-rs [--ordered] conflicts <game-directory>";
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let (policy, args) = match args.as_slice() {
+        [flag, rest @ ..] if flag == "--ordered" => (Policy::Ordered, rest),
+        args => (Policy::Ce, args),
+    };
     let command = args.first().and_then(|arg| arg.to_str());
-    let result = match (command, args.as_slice()) {
+    let result = match (command, args) {
         (Some("-h" | "--help"), [_]) => writeln!(io::stdout(), "{USAGE}").map_err(Into::into),
-        (Some("list"), [_, archive]) => list(Path::new(archive)),
-        (Some("info"), [_, archive, resource]) => info(Path::new(archive), resource),
-        (Some("extract"), [_, archive, resource, output]) => {
+        (Some("list"), [_, archive]) if policy == Policy::Ce => list(Path::new(archive)),
+        (Some("info"), [_, archive, resource]) if policy == Policy::Ce => {
+            info(Path::new(archive), resource)
+        }
+        (Some("extract"), [_, archive, resource, output]) if policy == Policy::Ce => {
             extract(Path::new(archive), resource, Path::new(output))
         }
+        (Some("mounts"), [_, game]) => mounts(Path::new(game), policy),
+        (Some("resolve"), [_, game, resource]) => resolve(Path::new(game), policy, resource),
+        (Some("conflicts"), [_, game]) => conflicts(Path::new(game), policy),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::from(2);
@@ -52,6 +65,69 @@ fn list(path: &Path) -> Result<(), Box<dyn Error>> {
         writeln!(stdout, "{}\t{}\t{}", entry.kind, entry.size, entry.path)?;
     }
     stdout.flush()?;
+    Ok(())
+}
+
+fn mounts(game: &Path, policy: Policy) -> Result<(), Box<dyn Error>> {
+    let vfs = Vfs::from_game(game, policy)?;
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "Policy: {} (highest priority first)", vfs.policy())?;
+    for mount in vfs.mounts() {
+        writeln!(
+            stdout,
+            "{}\t{}\t{}",
+            mount.id,
+            mount.kind,
+            mount.path.display()
+        )?;
+    }
+    Ok(())
+}
+
+fn resolve(game: &Path, policy: Policy, resource: &OsStr) -> Result<(), Box<dyn Error>> {
+    let resource = resource_name(resource)?;
+    let vfs = Vfs::from_game(game, policy)?;
+    let resolution = vfs.resolve(resource)?;
+    write_resolution(&mut io::stdout().lock(), &resolution)?;
+    if resolution.winner().is_none() {
+        return Err(vfs::Error::NotFound(resolution.path).into());
+    }
+    Ok(())
+}
+
+fn conflicts(game: &Path, policy: Policy) -> Result<(), Box<dyn Error>> {
+    let vfs = Vfs::from_game(game, policy)?;
+    let mut stdout = io::BufWriter::new(io::stdout().lock());
+    for resolution in vfs.conflicts() {
+        write_resolution(&mut stdout, &resolution)?;
+    }
+    stdout.flush()?;
+    Ok(())
+}
+
+fn write_resolution(mut out: impl Write, resolution: &Resolution<'_>) -> io::Result<()> {
+    writeln!(out, "{}", resolution.path)?;
+    let winner = resolution.winner();
+    for &candidate in resolution.candidates() {
+        if let Some(reason) = candidate.exclusion {
+            write!(out, "  excluded ({reason})")?;
+        } else if winner == Some(candidate) {
+            write!(out, "  winner")?;
+        } else {
+            write!(out, "  shadowed")?;
+        }
+        write!(
+            out,
+            "\tmount {}\t{} {}",
+            candidate.mount.id,
+            candidate.mount.kind,
+            candidate.mount.path.display()
+        )?;
+        if let Some(relative) = candidate.loose_path {
+            write!(out, " / {}", relative.display())?;
+        }
+        writeln!(out, "\t{}\t{} bytes", candidate.storage, candidate.size)?;
+    }
     Ok(())
 }
 

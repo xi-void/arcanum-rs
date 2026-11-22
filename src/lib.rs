@@ -2,3 +2,4 @@
 
 pub mod dat;
 pub mod resource_path;
+pub mod vfs;

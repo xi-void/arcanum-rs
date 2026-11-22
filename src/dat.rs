@@ -284,6 +284,10 @@ impl<R: Read + Seek> Archive<R> {
         self.find(path).map(|index| &self.entries[index])
     }
 
+    pub(crate) fn entry_normalized(&self, key: &str) -> Option<&Entry> {
+        self.find_normalized(key).map(|index| &self.entries[index])
+    }
+
     /// Copy one resource as binary data. On error, the writer may contain a prefix.
     pub fn extract(&mut self, path: &str, mut output: impl Write) -> Result<u64, Error> {
         let entry = &self.entries[self.find(path)?];
@@ -312,13 +316,14 @@ impl<R: Read + Seek> Archive<R> {
     fn find(&self, path: &str) -> Result<usize, Error> {
         let key =
             resource_path::normalize(path).map_err(|_| Error::InvalidPath { path: path.into() })?;
-        match self
-            .by_path
-            .binary_search_by(|&index| self.entries[index].path.cmp(&key))
-        {
-            Ok(index) => Ok(self.by_path[index]),
-            Err(_) => Err(Error::EntryNotFound(key)),
-        }
+        self.find_normalized(&key).ok_or(Error::EntryNotFound(key))
+    }
+
+    fn find_normalized(&self, key: &str) -> Option<usize> {
+        self.by_path
+            .binary_search_by(|&index| self.entries[index].path.as_str().cmp(key))
+            .ok()
+            .map(|index| self.by_path[index])
     }
 }
 

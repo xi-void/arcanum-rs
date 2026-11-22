@@ -1,6 +1,6 @@
 # Arcanum-RS
 
-Milestone 0 is a read-only resource explorer for Arcanum DAT archives. It runs independently of Arcanum and Arcanum CE.
+Arcanum-RS is a read-only resource explorer for Arcanum DAT archives and loose game files. It runs independently of Arcanum and Arcanum CE.
 
 ## Usage
 
@@ -11,9 +11,40 @@ game="$HOME/Work/arcanum-ce-test"
 target/debug/arcanum-rs list "$game/Arcanum1.dat"
 target/debug/arcanum-rs info "$game/Arcanum1.dat" 'ART\BADART.ART'
 target/debug/arcanum-rs extract "$game/Arcanum1.dat" 'art/badart.art' ./badart.art
+target/debug/arcanum-rs mounts "$game"
+target/debug/arcanum-rs resolve "$game" 'MES\GAMEDESC.MES'
+target/debug/arcanum-rs conflicts "$game"
+target/debug/arcanum-rs --ordered resolve "$game" 'mes/gamedesc.mes'
 ```
 
 `list` prints the kind, logical size in bytes, and normalized virtual path in index order. `info` shows the archive format and the detected record's flags, sizes, and physical offset where available. `extract` streams a single binary resource to the exact output file supplied on the command line. The parent directory must exist. The CLI rejects existing files and symlinks at the output path and removes the incomplete file on a reported write or payload error.
+
+`mounts` shows the highest-priority mount first. `resolve` prints the normalized resource path and every corresponding record, with the winner, shadowed candidates, and exclusions marked. Each candidate shows its mount and source, storage type, and logical size. `resolve` exits with status 1 if there is no winner. `conflicts` prints the same information for paths with multiple records, including loose names that collide after case folding. It sorts results by normalized path.
+
+## Virtual filesystem and precedence
+
+The CLI defaults to CE mode and discovers the stock `Arcanum` campaign. The following is the order in which it registers sources. Missing sources are skipped.
+
+1. `tig.dat`, then the game directory as a loose mount.
+2. Top-level `arcanum*.dat` files in ascending case-insensitive filename order, then the loose `data` directory.
+3. `modules/Arcanum.dat`, followed by existing `Arcanum.patch0` through `Arcanum.patch9` in numeric order when the module DAT is present.
+4. The loose `modules/Arcanum` directory.
+
+This profile follows `tig_file_init`, `gamelib_load_data`, and `gamelib_load_module_data` in CE. The library also accepts explicitly ordered DAT/PATCH and directory mounts, with a stable `MountId` per registered source. `Vfs::resolve` returns typed provenance and `Vfs::copy` streams the winning file through the existing DAT reader or the loose mount. The VFS indexes loose names and metadata at mount time. It keeps each directory open with `cap-std` so a replaced path or symlink cannot redirect a file read outside the mount. Discovered symlinks and non-regular loose entries are skipped.
+
+### Confirmed CE behavior
+
+- `tig_file_repository_add_native` in `first_party/tig/src/file.c` prepends new repositories and promotes a re-registered path. `tig_file_open_internal_native` finds the first matching archive in that order. It probes loose directories ahead of that archive for overrides. Without a matching archive it falls back to the first loose match. For a stable set of readable files, this returns the highest-priority eligible record. `tig_file_exists_native` and `tig_file_list_create_native` use separate scans. The latter sorts names case-insensitively and retains the first occurrence of each name.
+- TIG's archive lookup in `first_party/tig/src/database.c` binary-searches records by lowercased native path. Duplicate names across mounts obey repository precedence. The reader rejects ambiguous normalized duplicates within a single archive. CE assumes a sorted index and leaves the choice among equal records to its binary search.
+- Archive records flagged `0x800` are skipped during TIG lookup. `<archive>.ignore`, including sidecars for patch archives, marks matching entries ignored within that archive only. CE lowercases the patterns, converts separators on Linux, and requires the pattern and path to have the same number of separators. A lower mount can still supply the resource. `resolve` includes these records with their exclusion reason.
+- An unignored archive directory record participates in binary open. TIG can return a zero-byte handle for that record, even with a file of the same name in a lower mount. The VFS reports the directory winner in CE mode and returns a directory error from `copy`.
+- Both source types are case-insensitive for ASCII on Linux. Archives use ASCII lowercasing and exact comparison. Loose lookup walks components using SDL's case-insensitive comparison and takes the first matching host directory entry. SDL can compare non-ASCII names differently from the archive lookup.
+
+### Deliberate differences and remaining compatibility gaps
+
+- `--ordered` gives the latest registered eligible file priority, treats directory records as metadata, and skips sidecar processing. On-disk ignored flags still suppress records. These are the rules for explicit mod ordering.
+- Both modes use Milestone 0's ASCII-folded virtual paths, and order case collisions within a loose mount by the actual relative path. CE's host-order tie breaks, Unicode loose-name comparison, and native absolute or dot-prefixed path bypasses are outside the VFS contract. Loose directories contribute regular file descendants only.
+- CE caches archive override misses on some open paths and can delete `TIGCache` on registration. The VFS uses a stable mount snapshot and skips `TIGCache` entries in CE mode. The VFS also excludes unsupported archive storage records. TIG's process-wide ignore API, runtime mount mutations from the game, and text-mode, write-mode, or cache-producing extraction behavior are outside the compatibility target. The differential tests used the Linux TIG build.
 
 ## DAT format
 
@@ -24,11 +55,11 @@ The format reference is Arcanum CE revision `fb721982`, particularly `first_part
 - Flag `0x001` denotes plain data, whose byte count comes from the logical size. Flag `0x002` denotes one zlib stream, bounded by the stored size. The reader checks the stream terminator, checksum, and exact output size, and rejects trailing bytes within the stored range. Directory records (`0x400`) and ignored records (`0x800`) are visible as metadata. Flags `0x100` and `0x200` are CE repository state bits.
 - Virtual names use UTF-8 with ASCII case folding and slash separators. Separators and case follow CE's lookup conventions. This explorer also collapses repeated separators and dot components and rejects absolute paths, parent components, colons, control characters, and duplicate normalized names.
 
-Unsupported features include other footer signatures, legacy code-page filenames, extraction of directory or ignored records, and unrecognized storage flags. CE's external `.ignore` files, text-mode transformations, and loose-file or patch precedence are outside this release. Individual patch archives can be opened directly.
+Unsupported features include other footer signatures, legacy code-page filenames, extraction of directory or ignored records, and unrecognized storage flags. Individual patch archives can be opened directly. The single-archive CLI commands inspect raw entries. Sidecar policies apply when resolving through the VFS.
 
 ## Implementation and verification
 
-`dat` owns the index and keeps a seekable input for bounded payload reads. `resource_path` handles virtual path normalization independently of host paths. The CLI uses these library modules and owns output-file handling. The only direct dependency is `flate2`, using its Rust backend.
+`dat` owns the index and keeps a seekable input for bounded payload reads. `resource_path` handles virtual path normalization independently of host paths. `vfs` owns mount ordering, discovery, and provenance. The CLI uses these library modules and owns output-file handling. `flate2` provides the Rust zlib backend and `cap-std` confines loose filesystem access to mount roots.
 
 ```sh
 cargo fmt --check
@@ -37,8 +68,8 @@ cargo test
 cargo build
 ```
 
-Synthetic tests cover both footer variants, prefixed archives, plain and compressed data, empty resources, malformed metadata, corrupt zlib streams, and virtual path handling. The legacy DAT footer was verified with synthetic fixtures.
+Synthetic tests cover archive parsing and decompression, mount precedence and re-registration, mixed sources, sidecars, directory and ignored records, missing paths, case collisions, traversal and symlink confinement. The legacy DAT footer was verified with synthetic fixtures.
 
-A standalone verification program linked the prebuilt CE TIG library and read resources in binary mode through `tig_database_fopen` and `tig_database_fread`. The explorer listed all 222,460 records across 44 installed DAT and PATCH archives. Six resources matched TIG byte for byte, including two plain entries and the 1,771,118-byte compressed `maps/arcanum1-024-fixed/terrain.tdf`. CLI checks covered existing output files, dangling destination symlinks, traversal-like resource names, directories, and cleanup after corrupt input. Verification used CE and the game files as read-only inputs and ran without launching the game.
+A standalone differential test linked the prebuilt CE TIG library and exercised `tig_file_repository_add` and `tig_file_fopen` in binary mode. The test pointed TIG at original archives and scratch copies of selected loose resources, since registering a directory in TIG can clear its cache. Ten synthetic and twelve installed resolution cases matched TIG, including missing results and archive directory winners. Twelve direct extractions matched byte for byte, including resources from `Arcanum.PATCH0`, `Arcanum.PATCH1`, `Arcanum.PATCH6`, and `Arcanum.PATCH9`. Verification used CE and the game files as read-only inputs and ran without launching the game.
 
-The next milestone is a read-only virtual filesystem with ordered DAT and loose-directory mounts, explicit precedence, and a way to report which mount supplied a resource.
+The next milestone is mod manifests and load-order validation. Use the existing mount API to apply a resolved order and the conflict report to explain which mod supplied a resource.
