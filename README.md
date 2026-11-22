@@ -188,6 +188,16 @@ ARCANUM_GAME_DIR="$HOME/Work/arcanum-ce-test" \
   cargo test --test installed_prototypes -- --ignored
 ```
 
+## Effect inspection
+
+```sh
+game="$HOME/Work/arcanum-ce-test"
+target/debug/arcanum-rs effect inspect "$game" 128
+target/debug/arcanum-rs effect inspect "$game" 53
+```
+
+The command shows the selected record, its VFS source, and its native AC addition or Fire resistance floor. It accepts `--mods <mods-directory> <mod-id> ...` like prototype inspection. [Supported effect definitions](docs/CONTENT_FORMATS.md#milestone-13-bounded-effect-definitions)
+
 ## Implementation and verification
 
 `dat` owns the index and keeps a seekable input for bounded payload reads. `resource_path` handles virtual path normalization independently of host paths. `vfs` owns mount ordering, discovery, and provenance. `mods` discovers packages, validates manifests, and plans the order before mounting resources. The CLI uses these library modules and owns output-file handling. `flate2` provides the Rust zlib backend. `cap-std` and `cap-fs-ext` confine filesystem access to mount roots and open manifest paths without following symlinks.

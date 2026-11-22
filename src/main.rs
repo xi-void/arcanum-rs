@@ -1,4 +1,5 @@
 use arcanum_rs::content;
+use arcanum_rs::content::effects::{EffectOperation, LegacyEffectId, load_effect};
 use arcanum_rs::content::schematics::DiagnosticKind;
 use arcanum_rs::content::schematics::audit::{
     GroupStatus, SchematicAudit, audit_all_schematics, audit_schematics,
@@ -32,6 +33,7 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] mes inspect <game-directory> <resource-path> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] mes get <game-directory> <resource-path> <entry-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] prototype inspect <game-directory> <resource-path> [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs [--ordered] effect inspect <game-directory> <effect-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] schematic inspect <game-directory> <recipe-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] schematic audit <game-directory> [--all-references | <recipe-id> ...] [--mods <mods-directory> <mod-id> ...]";
 
@@ -62,6 +64,9 @@ fn main() -> ExitCode {
         }
         (Some("prototype"), [_, action, game, resource, options @ ..]) if action == "inspect" => {
             inspect_prototype(Path::new(game), resource, options, policy)
+        }
+        (Some("effect"), [_, action, game, id, options @ ..]) if action == "inspect" => {
+            inspect_effect(Path::new(game), id, options, policy)
         }
         (Some("schematic"), [_, action, game, id, options @ ..]) if action == "inspect" => {
             inspect_schematic(Path::new(game), id, options, policy)
@@ -291,6 +296,40 @@ fn inspect_mes(
             .ok_or_else(|| format!("MES entry {id} not found in {}", loaded.source.virtual_path))?;
         writeln!(out, "Entry ID: {id}")?;
         writeln!(out, "Value: {value}")?;
+    }
+    Ok(())
+}
+
+fn inspect_effect(
+    game: &Path,
+    id: &OsStr,
+    options: &[OsString],
+    policy: Policy,
+) -> Result<(), Box<dyn Error>> {
+    let id = id
+        .to_str()
+        .and_then(|id| id.parse().ok())
+        .map(LegacyEffectId)
+        .ok_or_else(|| format!("invalid effect ID {id:?}; expected a decimal integer"))?;
+    let mut vfs = inspection_vfs(game, options, policy)?;
+    let effect = load_effect(&mut vfs, id)?;
+    let mut out = io::stdout().lock();
+    write!(out, "Source: ")?;
+    write_source(&mut out, &effect.source)?;
+    writeln!(out, "Encoding: {}", effect.encoding)?;
+    writeln!(out, "Legacy effect ID: {}", effect.legacy_id.0)?;
+    writeln!(out, "Native effect ID: {}", effect.definition.id.0)?;
+    writeln!(out, "Record: {}", effect.record)?;
+    match effect.definition.operation {
+        EffectOperation::AddArmourClass { points } => {
+            writeln!(out, "Armour class adjustment (points): {points:+}")?;
+        }
+        EffectOperation::ResistanceFloor {
+            channel,
+            minimum_percent,
+        } => {
+            writeln!(out, "{channel:?} resistance floor: {minimum_percent}%")?;
+        }
     }
     Ok(())
 }

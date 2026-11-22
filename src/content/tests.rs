@@ -420,3 +420,98 @@ path = "resources"
         ])
     );
 }
+
+#[test]
+fn effect_import_uses_mod_precedence_and_keeps_its_namespaced_id() {
+    use super::effects::{EffectId, EffectOperation, LegacyEffectId, load_effect};
+
+    let fixture = Fixture::new();
+    fixture.write("base/rules/effect.mes", b"{128}{ac +1}");
+    fixture.write(
+        "mods/patch/arcanum-mod.toml",
+        br#"
+manifest_version = 1
+id = "patch"
+name = "Effect adjustment"
+version = "1.0.0"
+description = "Temporary test fixture."
+[[mounts]]
+kind = "directory"
+path = "resources"
+"#,
+    );
+    fixture.write(
+        "mods/patch/resources/Rules/Effect.mes",
+        b"{128}{ac -2}\n{128}{ac +3}",
+    );
+
+    let mut vfs = Vfs::new(Policy::Ordered);
+    let base = vfs.mount_directory(fixture.0.join("base")).unwrap();
+    let legacy_id = LegacyEffectId(128);
+    let original = load_effect(&mut vfs, legacy_id).unwrap();
+    assert_eq!(original.source.mount_id, base);
+    assert_eq!(
+        original.definition.operation,
+        EffectOperation::AddArmourClass { points: 1 }
+    );
+
+    let catalog = Catalog::discover(fixture.0.join("mods")).unwrap();
+    let mut vfs = catalog.load_order(&["patch"]).unwrap().apply(vfs).unwrap();
+    let replacement = load_effect(&mut vfs, legacy_id).unwrap();
+    assert_eq!(replacement.legacy_id, legacy_id);
+    assert_eq!(
+        replacement.definition.id,
+        EffectId("arcanum:effect/128".into())
+    );
+    assert_eq!(replacement.definition.id, original.definition.id);
+    assert_eq!(
+        replacement.definition.operation,
+        EffectOperation::AddArmourClass { points: 3 }
+    );
+    assert_eq!(replacement.record, "ac +3");
+    assert_eq!(replacement.source.mod_id.unwrap().as_str(), "patch");
+    assert_eq!(replacement.source.virtual_path, "rules/effect.mes");
+}
+
+#[test]
+fn effect_import_distinguishes_missing_malformed_and_unsupported_records() {
+    use super::effects::{DecodeError, LegacyEffectId, LoadEffectError, load_effect};
+
+    let fixture = Fixture::new();
+    fixture.write("rules/effect.mes", b"{53}{resistfire min}\n{128}{ac +1%}");
+    let mut vfs = Vfs::new(Policy::Ordered);
+    let mount = vfs.mount_directory(&fixture.0).unwrap();
+    assert!(matches!(
+        load_effect(&mut vfs, LegacyEffectId(-1)),
+        Err(LoadEffectError::InvalidId(LegacyEffectId(-1)))
+    ));
+    assert!(
+        matches!(load_effect(&mut vfs, LegacyEffectId(0)), Err(LoadEffectError::Missing { id: LegacyEffectId(0), source }) if source.mount_id == mount)
+    );
+    for (id, kind) in [
+        (53, DecodeError::MissingValue),
+        (128, DecodeError::UnsupportedOperation),
+    ] {
+        assert!(
+            matches!(load_effect(&mut vfs, LegacyEffectId(id)), Err(LoadEffectError::Decode { id: LegacyEffectId(key), source, error }) if key == id && source.mount_id == mount && error == kind)
+        );
+    }
+
+    for (text, kind) in [
+        (
+            b"{53}{resistfire min 50".as_slice(),
+            mes::ErrorKind::UnterminatedField,
+        ),
+        (
+            b"{53}{resistfire min 50} // \x81".as_slice(),
+            mes::ErrorKind::UndefinedWindows1252(0x81),
+        ),
+    ] {
+        fixture.write("rules/effect.mes", text);
+        let mut vfs = Vfs::new(Policy::Ordered);
+        let mount = vfs.mount_directory(&fixture.0).unwrap();
+        assert!(
+            matches!(load_effect(&mut vfs, LegacyEffectId(53)), Err(LoadEffectError::Resource(Error::Mes { provenance, error })) if provenance.mount_id == mount && error.kind == kind)
+        );
+    }
+}
