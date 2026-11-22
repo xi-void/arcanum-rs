@@ -36,6 +36,8 @@ const USAGE: &str = "Usage:
   arcanum-rs mods resolve <game-directory> <mods-directory> <resource-path> <mod-id> ...
   arcanum-rs [--ordered] mes inspect <game-directory> <resource-path> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] mes get <game-directory> <resource-path> <entry-id> [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs [--ordered] art inspect <game-directory> <resource-path> <frame> [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs [--ordered] art export <game-directory> <resource-path> <frame> <output.pam> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] prototype inspect <game-directory> <resource-path> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] effect inspect <game-directory> <effect-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] schematic inspect <game-directory> <recipe-id> [--mods <mods-directory> <mod-id> ...]
@@ -85,6 +87,21 @@ fn main() -> ExitCode {
         }
         (Some("mes"), [_, action, game, resource, entry, options @ ..]) if action == "get" => {
             inspect_mes(Path::new(game), resource, Some(entry), options, policy)
+        }
+        (Some("art"), [_, action, game, resource, frame, options @ ..]) if action == "inspect" => {
+            inspect_art(Path::new(game), resource, frame, None, options, policy)
+        }
+        (Some("art"), [_, action, game, resource, frame, output, options @ ..])
+            if action == "export" =>
+        {
+            inspect_art(
+                Path::new(game),
+                resource,
+                frame,
+                Some(Path::new(output)),
+                options,
+                policy,
+            )
         }
         (Some("prototype"), [_, action, game, resource, options @ ..]) if action == "inspect" => {
             inspect_prototype(Path::new(game), resource, options, policy)
@@ -654,6 +671,82 @@ fn inspect_mes(
             .ok_or_else(|| format!("MES entry {id} not found in {}", loaded.source.virtual_path))?;
         writeln!(out, "Entry ID: {id}")?;
         writeln!(out, "Value: {value}")?;
+    }
+    Ok(())
+}
+
+fn inspect_art(
+    game: &Path,
+    resource: &OsStr,
+    frame: &OsStr,
+    destination: Option<&Path>,
+    options: &[OsString],
+    policy: Policy,
+) -> Result<(), Box<dyn Error>> {
+    let resource = resource_name(resource)?;
+    let index = frame
+        .to_str()
+        .and_then(|frame| frame.parse::<usize>().ok())
+        .ok_or_else(|| format!("invalid ART frame {frame:?}; expected a zero-based index"))?;
+    let mut vfs = inspection_vfs(game, options, policy)?;
+    let loaded = content::art::load_frame(&mut vfs, resource, index)?;
+    let mut out = io::stdout().lock();
+    let frame = &loaded.decoded.frame;
+    writeln!(out, "Path: {}", loaded.source.virtual_path)?;
+    writeln!(out, "Source: {}", loaded.source)?;
+    if let Some(id) = &loaded.source.mod_id {
+        writeln!(out, "Mod: {id}")?;
+    }
+    writeln!(
+        out,
+        "Frame: {index} (zero-based, {} total)",
+        loaded.decoded.frame_count
+    )?;
+    writeln!(out, "Dimensions: {} × {}", frame.width, frame.height)?;
+    writeln!(out, "Hotspot: {}, {}", frame.hotspot.0, frame.hotspot.1)?;
+    writeln!(out, "Offset: {}, {}", frame.offset.0, frame.offset.1)?;
+    writeln!(
+        out,
+        "Stored FPS: {}, action frame: {}",
+        loaded.decoded.frames_per_second, loaded.decoded.action_frame
+    )?;
+    writeln!(
+        out,
+        "ART input: {} bytes, RGBA8: {} bytes",
+        loaded.input_bytes,
+        frame.pixels.as_flattened().len()
+    )?;
+    if let Some(destination) = destination {
+        export_pam(destination, frame)?;
+        writeln!(out, "Exported: {}", destination.display())?;
+    }
+    Ok(())
+}
+
+fn export_pam(destination: &Path, frame: &arcanum_rs::art::SpriteFrame) -> io::Result<()> {
+    let mut output = File::create_new(destination).map_err(|err| {
+        io::Error::new(
+            err.kind(),
+            format!("cannot create {}: {err}", destination.display()),
+        )
+    })?;
+    let result = write!(
+        output,
+        "P7\nWIDTH {}\nHEIGHT {}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n",
+        frame.width, frame.height
+    )
+    .and_then(|()| output.write_all(frame.pixels.as_flattened()))
+    .and_then(|()| output.sync_all());
+    drop(output);
+    if let Err(err) = result {
+        let message = match fs::remove_file(destination) {
+            Ok(()) => format!("cannot export {}: {err}", destination.display()),
+            Err(cleanup) => format!(
+                "cannot export {}: {err}; cannot remove incomplete export: {cleanup}",
+                destination.display()
+            ),
+        };
+        return Err(io::Error::new(err.kind(), message));
     }
     Ok(())
 }
