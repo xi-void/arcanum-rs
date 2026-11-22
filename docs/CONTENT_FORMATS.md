@@ -330,6 +330,33 @@ The selected effect table shows that active effects can add points, impose bound
 
 A future runtime needs the effect definition identity, a unique activation or grant, the item **instance** or other source, the target actor, and the lifetime or event that ends that grant. Re-evaluation should update only that source's contributions. CE records effect number and cause category, and `effect_remove_one_typed` removes the first match by effect number. That removal path cannot distinguish identical copies from different sources. Native source identity must work when equipment, spells, blessings, and curses coexist or expire independently. Importing script bodies and effect definitions, and deciding how to preserve ordering across sources, remain separate work.
 
+## Milestone 13 bounded effect definitions
+
+### Original records and encoding
+
+The CE-policy VFS selects loose `data/rules/effect.mes` for `rules/effect.mes`. Both selected records match the payloads in `Arcanum3.dat`, `Arcanum5.dat`, and `ArcanumXRaces.dat`, inspected as separate VFS mounts.
+
+| Legacy ID | Loose table line | Stored MES value | Native interpretation |
+| --- | ---: | --- | --- |
+| 128 | 82 | `ac +1` | Add one armour-class point per application. |
+| 53 | 7 | `resistfire min 50` | Raise Fire resistance to at least 50% at the minimum step. |
+
+The MES key is the legacy effect number. The text field stores the target token, operator and integer argument. The Resist Fire name comes from a trailing source comment. The record carries no source actor, current stat, activation count or duration.
+
+The winning table loads under the existing Windows-1252 MES path. The raw tables in `Arcanum5.dat` and `ArcanumXRaces.dat` contain `0x81`, undefined in Windows-1252, in the trailing comment on record 189. The two selected records themselves are ASCII in all four copies. The standalone archive comparison in the automated test uses `Arcanum3.dat`. The normal loader continues to report unsupported encoding in a selected table and uses the existing size, record and duplicate rules.
+
+### CE interpretation
+
+CE revision `fb721982` loads engine-wide definitions from `rules/effect.mes` in `effect_init`. `effect_parse` maps `ac` to `STAT_AC_ADJUSTMENT` and `resistfire` to `RESISTANCE_TYPE_FIRE`. The leading sign on `+1` selects addition, and `min 50` selects a lower bound. In `effect_adjust_func`, CE gathers the strongest lower bound and applies it after the scaling and addition steps, before the upper bound. With the selected minimum alone, a value of 37 reaches 50 at this step and 72 stays 72. Character resistance limits and exceptions are handled by separate callers. The importer retains the operand and operation without evaluating any of those steps.
+
+A separate byte check of the loose Sword of Defense prototype (`proto/006084 - weapon.pro`, serialized ID 6084) confirms script references 28001 and 28002 in its sparse attachments. The archived on-script in `Arcanum2.dat` contains add/remove actions with literal effect 128. The off-script calls the removal branch of the on-script. This corroborates the link established in Milestone 12. Aptitude, multiplicity and the saved removal count live in that script path. Ring of Protection's magical AC and resistance values are direct serialized numbers and enter through a different equipment path.
+
+### Native boundary
+
+`LegacyEffectId` selects a MES row. The importer maps it to a distinct `EffectId` such as `arcanum:effect/128` and keeps the legacy key, source record, VFS provenance and encoding in `LoadedEffect`. `EffectOperation` represents a signed AC addition and a typed Fire resistance floor as distinct values. The decoder accepts one clause, with a signed decimal token for AC and a decimal argument to `resistfire min`. It reports extra clauses, unsupported targets and operators, missing tokens and invalid integers. The legacy minimum sentinel −1 is outside this floor subset.
+
+The inspection path resolves one selected definition from the existing table. CE's engine-wide and module-specific registration rules remain separate from the imported key. Additional targets, composite records, percentage operators and the interaction between bounds remain outside the supported subset. A future runtime needs an activation ID distinct from the effect definition ID, with the source instance and target actor, so independent grants of the same definition can end separately.
+
 ### Primary reference locations
 
 - CE `src/game/proto.c` (`proto_init`, `sub_468660`, `sub_468860`, and the four `BP_*` initializers), `descriptions.h`, `obj_id.h`, `obj_id.c`.
