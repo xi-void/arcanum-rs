@@ -95,6 +95,13 @@ within a runtime. Callers keep these handles with their issuing runtime.
 Definitions remain immutable references supplied by the caller, and
 their namespaced IDs are independent of runtime handles.
 
+The global activation map owns the records and serves direct ID lookups.
+Each actor keeps an ordered vector containing each of its active IDs
+exactly once. Queries and checked totals follow that vector to the
+authoritative records. Changes validate first, then update membership
+and the map together. Monotonic IDs and stable removal keep iteration
+deterministic.
+
 An item can have one wearer and grant effects only to that wearer.
 Equipping associates the item, and each explicit grant creates an
 activation with its source, target, definition and granted adjustments.

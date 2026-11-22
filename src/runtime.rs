@@ -115,6 +115,8 @@ struct ActorState {
     underlying_fire_resistance: i32,
     underlying_electrical_resistance: i32,
     underlying_poison_resistance: i32,
+    // IDs in insertion order. Full records are owned by Runtime::activations.
+    activation_ids: Vec<ActivationId>,
 }
 
 /// Owns mutable state. IDs are local to the issuing runtime and never reused
@@ -137,6 +139,7 @@ impl<'content> Runtime<'content> {
                 underlying_fire_resistance: 0,
                 underlying_electrical_resistance: 0,
                 underlying_poison_resistance: 0,
+                activation_ids: Vec::new(),
             },
         );
         Ok(id)
@@ -162,13 +165,13 @@ impl<'content> Runtime<'content> {
     }
 
     pub fn armour_class(&self, actor: ActorId) -> Result<i32, Error> {
-        let base = self.base_armour_class(actor)?;
-        checked_ac(self.total_ac(actor, base, |_| true))
+        let state = self.actor(actor)?;
+        checked_ac(self.total_ac(state, state.base_ac, |_| true))
     }
 
     pub fn set_base_armour_class(&mut self, actor: ActorId, base_ac: i32) -> Result<(), Error> {
-        self.base_armour_class(actor)?;
-        checked_ac(self.total_ac(actor, base_ac, |_| true))?;
+        let state = self.actor(actor)?;
+        checked_ac(self.total_ac(state, base_ac, |_| true))?;
         self.actors
             .get_mut(&actor)
             .expect("validated actor")
@@ -196,8 +199,12 @@ impl<'content> Runtime<'content> {
 
     /// Evaluate the active lower bounds, before any final query clamp.
     pub fn fire_resistance_after_effects(&self, actor: ActorId) -> Result<i32, Error> {
-        let underlying = self.underlying_fire_resistance(actor)?;
-        Ok(self.apply_resistance_floors(actor, underlying, |grant| grant.fire_resistance_floor))
+        let state = self.actor(actor)?;
+        Ok(
+            self.apply_resistance_floors(state, state.underlying_fire_resistance, |grant| {
+                grant.fire_resistance_floor
+            }),
+        )
     }
 
     /// Ordinary Fire resistance query, clamped after evaluating active floors.
@@ -215,8 +222,8 @@ impl<'content> Runtime<'content> {
         actor: ActorId,
         value: i32,
     ) -> Result<(), Error> {
-        self.actor(actor)?;
-        checked_electrical(self.total_electrical(actor, value, |_| true))?;
+        let state = self.actor(actor)?;
+        checked_electrical(self.total_electrical(state, value, |_| true))?;
         self.actors
             .get_mut(&actor)
             .expect("validated actor")
@@ -226,11 +233,14 @@ impl<'content> Runtime<'content> {
 
     /// Add surviving Electrical adjustments, then apply the strongest active minimum.
     pub fn electrical_resistance_after_effects(&self, actor: ActorId) -> Result<i32, Error> {
-        let underlying = self.underlying_electrical_resistance(actor)?;
-        let after_additions =
-            checked_electrical(self.total_electrical(actor, underlying, |_| true))?;
+        let state = self.actor(actor)?;
+        let after_additions = checked_electrical(self.total_electrical(
+            state,
+            state.underlying_electrical_resistance,
+            |_| true,
+        ))?;
         Ok(
-            self.apply_resistance_floors(actor, after_additions, |grant| {
+            self.apply_resistance_floors(state, after_additions, |grant| {
                 grant.electrical_resistance_floor
             }),
         )
@@ -263,8 +273,12 @@ impl<'content> Runtime<'content> {
 
     /// Evaluate active Poison minima before the ordinary query clamp.
     pub fn poison_resistance_after_effects(&self, actor: ActorId) -> Result<i32, Error> {
-        let underlying = self.underlying_poison_resistance(actor)?;
-        Ok(self.apply_resistance_floors(actor, underlying, |grant| grant.poison_resistance_floor))
+        let state = self.actor(actor)?;
+        Ok(
+            self.apply_resistance_floors(state, state.underlying_poison_resistance, |grant| {
+                grant.poison_resistance_floor
+            }),
+        )
     }
 
     /// Ordinary Poison resistance query, clamped after evaluating active floors.
@@ -295,10 +309,22 @@ impl<'content> Runtime<'content> {
 
     /// End the association and remove every activation granted by this instance.
     pub fn unequip(&mut self, item: ItemInstanceId, actor: ActorId) -> Result<(), Error> {
-        self.actor(actor)?;
+        let state = self.actor(actor)?;
         self.require_wearer(item, actor)?;
-        self.validate_remaining_totals(actor, |grant| grant.source != item)?;
-        self.activations.retain(|_, grant| grant.source != item);
+        self.validate_remaining_totals(state, |grant| grant.source != item)?;
+        let records = &mut self.activations;
+        self.actors
+            .get_mut(&actor)
+            .expect("validated actor")
+            .activation_ids
+            .retain(|id| {
+                if records[id].source == item {
+                    records.remove(id);
+                    false
+                } else {
+                    true
+                }
+            });
         self.items
             .get_mut(&item)
             .expect("validated item")
@@ -353,9 +379,9 @@ impl<'content> Runtime<'content> {
         }
         let armour_class_points = checked_ac(points)?;
         let electrical_resistance_points = checked_electrical(electrical_points)?;
-        checked_ac(self.total_ac(target, actor.base_ac, |_| true) + points)?;
+        checked_ac(self.total_ac(actor, actor.base_ac, |_| true) + points)?;
         checked_electrical(
-            self.total_electrical(target, actor.underlying_electrical_resistance, |_| true)
+            self.total_electrical(actor, actor.underlying_electrical_resistance, |_| true)
                 + electrical_points,
         )?;
         let id = ActivationId(self.allocate_id()?);
@@ -373,13 +399,28 @@ impl<'content> Runtime<'content> {
                 electrical_resistance_floor,
             },
         );
+        self.actors
+            .get_mut(&target)
+            .expect("validated actor")
+            .activation_ids
+            .push(id);
         Ok(id)
     }
 
     /// Remove exactly one recorded application, leaving its source equipped.
     pub fn remove_activation(&mut self, id: ActivationId) -> Result<(), Error> {
         let target = self.activation(id)?.target;
-        self.validate_remaining_totals(target, |grant| grant.id != id)?;
+        let state = self.actor(target)?;
+        self.validate_remaining_totals(state, |grant| grant.id != id)?;
+        let ids = &mut self
+            .actors
+            .get_mut(&target)
+            .expect("validated actor")
+            .activation_ids;
+        let index = ids
+            .binary_search(&id)
+            .expect("activation indexed by target");
+        ids.remove(index);
         self.activations.remove(&id);
         Ok(())
     }
@@ -396,22 +437,27 @@ impl<'content> Runtime<'content> {
         self.actors.get(&actor).ok_or(Error::UnknownActor(actor))
     }
 
+    fn actor_activations<'a>(
+        &'a self,
+        actor: &'a ActorState,
+    ) -> impl Iterator<Item = &'a EffectActivation<'content>> {
+        actor.activation_ids.iter().map(|id| &self.activations[id])
+    }
+
     fn apply_resistance_floors(
         &self,
-        actor: ActorId,
+        actor: &ActorState,
         intermediate: i32,
         floor: impl Fn(&EffectActivation<'content>) -> Option<i32>,
     ) -> i32 {
-        self.activations
-            .values()
-            .filter(|grant| grant.target == actor)
+        self.actor_activations(actor)
             .filter_map(floor)
             .fold(intermediate, i32::max)
     }
 
     fn total_ac(
         &self,
-        actor: ActorId,
+        actor: &ActorState,
         base_ac: i32,
         keep: impl Fn(&EffectActivation<'content>) -> bool,
     ) -> i128 {
@@ -421,7 +467,7 @@ impl<'content> Runtime<'content> {
 
     fn total_electrical(
         &self,
-        actor: ActorId,
+        actor: &ActorState,
         underlying: i32,
         keep: impl Fn(&EffectActivation<'content>) -> bool,
     ) -> i128 {
@@ -431,26 +477,24 @@ impl<'content> Runtime<'content> {
 
     fn sum_adjustments(
         &self,
-        actor: ActorId,
+        actor: &ActorState,
         keep: impl Fn(&EffectActivation<'content>) -> bool,
         points: impl Fn(&EffectActivation<'content>) -> i32,
     ) -> i128 {
-        self.activations
-            .values()
-            .filter(|grant| grant.target == actor && keep(grant))
+        self.actor_activations(actor)
+            .filter(|grant| keep(grant))
             .map(|grant| i128::from(points(grant)))
             .sum()
     }
 
     fn validate_remaining_totals(
         &self,
-        target: ActorId,
+        actor: &ActorState,
         keep: impl Fn(&EffectActivation<'content>) -> bool,
     ) -> Result<(), Error> {
-        let actor = self.actor(target)?;
-        checked_ac(self.total_ac(target, actor.base_ac, &keep))?;
+        checked_ac(self.total_ac(actor, actor.base_ac, &keep))?;
         checked_electrical(self.total_electrical(
-            target,
+            actor,
             actor.underlying_electrical_resistance,
             keep,
         ))?;

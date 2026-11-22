@@ -12,7 +12,7 @@ use std::hint::black_box;
 use std::io::{self, BufWriter, Write};
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const SAMPLES: usize = 7;
 const GRANTS_PER_ACTOR: usize = 4;
@@ -22,17 +22,26 @@ const ZLIB_PATH: &str = "bench/asset-00001.bin";
 const MES_PATH: &str = "bench/asset-00002.bin";
 
 fn measure(label: &str, iterations: usize, mut operation: impl FnMut()) {
-    let mut batch = || {
+    measure_batches(label, iterations, || {
+        let start = Instant::now();
         for _ in 0..iterations {
             operation();
         }
-    };
+        start.elapsed()
+    });
+}
+
+fn measure_isolated(label: &str, iterations: usize, mut operation: impl FnMut() -> Duration) {
+    measure_batches(label, iterations, || {
+        (0..iterations).map(|_| operation()).sum()
+    });
+}
+
+fn measure_batches(label: &str, iterations: usize, mut batch: impl FnMut() -> Duration) {
     batch();
     let mut samples = [0.0; SAMPLES];
     for sample in &mut samples {
-        let start = Instant::now();
-        batch();
-        *sample = start.elapsed().as_secs_f64() * 1e9 / iterations as f64;
+        *sample = batch().as_secs_f64() * 1e9 / iterations as f64;
     }
     samples.sort_by(f64::total_cmp);
     println!(
@@ -80,6 +89,7 @@ fn definitions() -> (GenericDefinition, EffectDefinition) {
 
 fn populate<'a>(
     count: usize,
+    grants_per_actor: usize,
     item: &'a GenericDefinition,
     effect: &'a EffectDefinition,
 ) -> (Runtime<'a>, Vec<(ActorId, ActivationId)>) {
@@ -96,7 +106,7 @@ fn populate<'a>(
                     .instantiate_item(ItemDefinitionRef::Generic(item))
                     .unwrap();
                 runtime.equip(source, actor).unwrap();
-                for _ in 0..GRANTS_PER_ACTOR / 2 {
+                for _ in 0..grants_per_actor / 2 {
                     last = Some(runtime.activate_effect(source, actor, effect).unwrap());
                 }
             }
@@ -108,17 +118,23 @@ fn populate<'a>(
 
 fn runtime_bench() {
     let (item, effect) = definitions();
-    for (count, samples) in [(1, 100_000), (100, 10_000), (1000, 2_000), (5000, 400)] {
+    for (count, samples, grants_per_actor) in [
+        (1, 100_000, GRANTS_PER_ACTOR),
+        (100, 10_000, GRANTS_PER_ACTOR),
+        (1000, 2_000, GRANTS_PER_ACTOR),
+        (5000, 400, GRANTS_PER_ACTOR),
+        (4, 2_000, 256),
+    ] {
         let start = Instant::now();
-        let (mut runtime, actors) = populate(count, &item, &effect);
+        let (mut runtime, actors) = populate(count, grants_per_actor, &item, &effect);
         let setup = start.elapsed();
         let (actor, _) = actors[0];
         let extra = runtime
             .instantiate_item(ItemDefinitionRef::Generic(&item))
             .unwrap();
         println!(
-            "\n{count} actors, {} activations, setup {:.3} ms",
-            count * GRANTS_PER_ACTOR,
+            "\n{count} actors, {} activations ({grants_per_actor} each), setup {:.3} ms",
+            count * grants_per_actor,
             setup.as_secs_f64() * 1000.0,
         );
         let mut cycle = actors.iter().copied().cycle();
@@ -140,6 +156,18 @@ fn runtime_bench() {
             black_box(runtime.electrical_resistance(actor).unwrap());
             black_box(runtime.poison_resistance(actor).unwrap());
         });
+        measure("Fire query", samples, || {
+            let (actor, _) = black_box(cycle.next().unwrap());
+            black_box(runtime.fire_resistance(actor).unwrap());
+        });
+        measure("Electrical query", samples, || {
+            let (actor, _) = black_box(cycle.next().unwrap());
+            black_box(runtime.electrical_resistance(actor).unwrap());
+        });
+        measure("Poison query", samples, || {
+            let (actor, _) = black_box(cycle.next().unwrap());
+            black_box(runtime.poison_resistance(actor).unwrap());
+        });
         runtime.equip(extra, actor).unwrap();
         measure("activate + remove", samples, || {
             let id = runtime
@@ -147,11 +175,33 @@ fn runtime_bench() {
                 .unwrap();
             runtime.remove_activation(black_box(id)).unwrap();
         });
+        measure_isolated("activate (timed alone)", samples, || {
+            let start = Instant::now();
+            let id = runtime
+                .activate_effect(extra, actor, black_box(&effect))
+                .unwrap();
+            let elapsed = start.elapsed();
+            runtime.remove_activation(black_box(id)).unwrap();
+            elapsed
+        });
+        measure_isolated("remove (timed alone)", samples, || {
+            let id = runtime.activate_effect(extra, actor, &effect).unwrap();
+            let start = Instant::now();
+            runtime.remove_activation(black_box(id)).unwrap();
+            start.elapsed()
+        });
         runtime.unequip(extra, actor).unwrap();
         measure("equip + grant + unequip", samples, || {
             runtime.equip(black_box(extra), actor).unwrap();
             black_box(runtime.activate_effect(extra, actor, &effect).unwrap());
             runtime.unequip(extra, actor).unwrap();
+        });
+        measure_isolated("unequip (timed alone)", samples, || {
+            runtime.equip(extra, actor).unwrap();
+            runtime.activate_effect(extra, actor, &effect).unwrap();
+            let start = Instant::now();
+            runtime.unequip(black_box(extra), actor).unwrap();
+            start.elapsed()
         });
     }
 }
@@ -289,7 +339,7 @@ fn memory_line() {
 fn runtime_memory(count: usize) {
     let (item, effect) = definitions();
     memory_line();
-    let (runtime, actors) = populate(count, &item, &effect);
+    let (runtime, actors) = populate(count, GRANTS_PER_ACTOR, &item, &effect);
     println!(
         "{count} actors, {} activations, byte sizes Runtime {} ItemInstance {} EffectActivation {} ID {}",
         count * GRANTS_PER_ACTOR,
@@ -336,7 +386,7 @@ fn main() -> io::Result<()> {
         }
         [mode] if mode == "--test" => {
             let (item, effect) = definitions();
-            let (runtime, actors) = populate(1, &item, &effect);
+            let (runtime, actors) = populate(1, GRANTS_PER_ACTOR, &item, &effect);
             assert_eq!(runtime.armour_class(actors[0].0).unwrap(), 14);
         }
         [mode] if mode == "runtime" => runtime_bench(),
