@@ -13,8 +13,8 @@ use winit::window::{Window, WindowId};
 const BACKGROUND: [u8; 3] = [32, 43, 58];
 const MAX_SURFACE_PIXELS: usize = 16 * 1024 * 1024;
 
-pub struct Layer {
-    pub frame: SpriteFrame,
+pub struct Layer<'a> {
+    pub frame: &'a SpriteFrame,
     /// Physical pixel offset from the center of the drawable area.
     pub relative_anchor: (i16, i16),
 }
@@ -23,17 +23,39 @@ pub fn synthetic_frame() -> SpriteFrame {
     synthetic_ring([255, 168, 70], (60, 62), (-8, 5))
 }
 
-pub fn synthetic_overlap() -> Vec<Layer> {
-    vec![
-        Layer {
-            frame: synthetic_frame(),
-            relative_anchor: (-25, 10),
-        },
-        Layer {
-            frame: synthetic_ring([64, 216, 245], (-5, 50), (7, -3)),
-            relative_anchor: (-44, -8),
-        },
-    ]
+pub fn show_synthetic_overlap() -> Result<(), String> {
+    let back = synthetic_frame();
+    let front = synthetic_ring([64, 216, 245], (-5, 50), (7, -3));
+    show_layers(
+        "Arcanum-RS | Synthetic overlap".into(),
+        &[
+            Layer {
+                frame: &back,
+                relative_anchor: (-25, 10),
+            },
+            Layer {
+                frame: &front,
+                relative_anchor: (-44, -8),
+            },
+        ],
+    )
+}
+
+pub fn show_floor(
+    title: String,
+    floor: &SpriteFrame,
+    foreground: &SpriteFrame,
+) -> Result<(), String> {
+    let draws = arcanum_rs::isometric::fixed_scene(floor, foreground)
+        .ok_or("floor scene requires a 78 × 40 tile with hotspot (39, 39)")?;
+    let layers: Vec<_> = draws
+        .map(|draw| Layer {
+            frame: draw.frame,
+            // The fixed 3 × 3 patch and foreground are within 80 px of center.
+            relative_anchor: (draw.anchor.0 as i16, draw.anchor.1 as i16),
+        })
+        .collect();
+    show_layers(title, &layers)
 }
 
 fn synthetic_ring([r, g, b]: [u8; 3], hotspot: (i32, i32), offset: (i32, i32)) -> SpriteFrame {
@@ -60,14 +82,14 @@ fn synthetic_ring([r, g, b]: [u8; 3], hotspot: (i32, i32), offset: (i32, i32)) -
 pub fn show(title: String, frame: SpriteFrame) -> Result<(), String> {
     show_layers(
         title,
-        vec![Layer {
-            frame,
+        &[Layer {
+            frame: &frame,
             relative_anchor: (0, 0),
         }],
     )
 }
 
-pub fn show_layers(title: String, layers: Vec<Layer>) -> Result<(), String> {
+pub fn show_layers(title: String, layers: &[Layer<'_>]) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|error| format!("cannot open display: {error}"))?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let context = Context::new(event_loop.owned_display_handle())
@@ -85,11 +107,11 @@ pub fn show_layers(title: String, layers: Vec<Layer>) -> Result<(), String> {
     app.failure.map_or(Ok(()), Err)
 }
 
-struct Viewer {
+struct Viewer<'a> {
     title: String,
     context: Context<OwnedDisplayHandle>,
     view: Option<WindowSurface>,
-    layers: Vec<Layer>,
+    layers: &'a [Layer<'a>],
     failure: Option<String>,
 }
 
@@ -99,7 +121,7 @@ struct WindowSurface {
     pixels: Vec<[u8; 3]>,
 }
 
-impl Viewer {
+impl Viewer<'_> {
     fn open(&self, event_loop: &ActiveEventLoop) -> Result<WindowSurface, String> {
         let attributes = Window::default_attributes()
             .with_title(&self.title)
@@ -124,7 +146,7 @@ impl Viewer {
     }
 }
 
-impl ApplicationHandler for Viewer {
+impl ApplicationHandler for Viewer<'_> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.view.is_none() {
             match self.open(event_loop) {
@@ -154,7 +176,7 @@ impl ApplicationHandler for Viewer {
                 view.window.request_redraw();
             }
             WindowEvent::RedrawRequested => {
-                if let Err(error) = view.redraw(&self.layers) {
+                if let Err(error) = view.redraw(self.layers) {
                     self.fail(event_loop, error);
                 }
             }
@@ -164,7 +186,7 @@ impl ApplicationHandler for Viewer {
 }
 
 impl WindowSurface {
-    fn redraw(&mut self, layers: &[Layer]) -> Result<(), String> {
+    fn redraw(&mut self, layers: &[Layer<'_>]) -> Result<(), String> {
         let size = self.window.inner_size();
         let (Some(width), Some(height)) =
             (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
@@ -190,7 +212,7 @@ impl WindowSurface {
         // The checked surface area bounds both center coordinates.
         let center = ((size.width / 2) as i32, (size.height / 2) as i32);
         let draws = layers.iter().map(|layer| SpriteDraw {
-            frame: &layer.frame,
+            frame: layer.frame,
             anchor: (
                 center.0 + i32::from(layer.relative_anchor.0),
                 center.1 + i32::from(layer.relative_anchor.1),

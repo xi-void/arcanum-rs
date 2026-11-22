@@ -115,3 +115,34 @@ fn fingerprint(bytes: &[u8]) -> u64 {
         (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
     })
 }
+
+#[test]
+#[ignore = "requires installed Arcanum data"]
+fn indoor_floor_matches_verified_art_frame_and_diamond_footprint() {
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    let loaded = load_frame(&mut vfs, "art/tile/fl1bse0a.art", 0).unwrap();
+    assert_eq!(loaded.source.storage, Storage::Archive(EntryKind::Zlib));
+    assert_eq!(
+        loaded.source.mount_path,
+        game.join("Arcanum2.dat").canonicalize().unwrap()
+    );
+    assert_eq!(loaded.input_bytes, 2942);
+    assert_eq!(loaded.decoded.ignored_trailing_bytes, 0);
+    assert_eq!(loaded.decoded.frame_count, 1);
+    assert_eq!(loaded.decoded.frames_per_second, 8);
+    assert_eq!(loaded.decoded.action_frame, 1);
+    let frame = loaded.decoded.frame;
+    assert_eq!((frame.width, frame.height), (78, 40));
+    assert_eq!(frame.hotspot, (39, 39));
+    assert_eq!(frame.offset, (0, 0));
+    assert_eq!(fingerprint(frame.pixels.as_flattened()), 0x88a99bb39596342a);
+    let fixture = arcanum_rs::isometric::synthetic_floor();
+    assert!(
+        frame
+            .pixels
+            .iter()
+            .zip(&fixture.pixels)
+            .all(|(original, synthetic)| original[3] == synthetic[3])
+    );
+}

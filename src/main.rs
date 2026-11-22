@@ -42,6 +42,8 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] art inspect <game-directory> <resource-path> <frame> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art export <game-directory> <resource-path> <frame> <output.pam> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs art demo                          (requires --features windowed)
+  arcanum-rs art floor-demo                    (requires --features windowed)
+  arcanum-rs [--ordered] art floor <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs art overlap-demo                  (requires --features windowed)
   arcanum-rs [--ordered] art overlap <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art view <game-directory> <resource-path> <frame> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
@@ -99,11 +101,20 @@ fn main() -> ExitCode {
         (Some("art"), [_, action]) if action == "demo" && policy == Policy::Ce => sprite_demo(),
         #[cfg(feature = "windowed")]
         (Some("art"), [_, action]) if action == "overlap-demo" && policy == Policy::Ce => {
-            viewer::show_layers(
-                "Arcanum-RS | Synthetic overlap".into(),
-                viewer::synthetic_overlap(),
+            viewer::show_synthetic_overlap().map_err(Into::into)
+        }
+        #[cfg(feature = "windowed")]
+        (Some("art"), [_, action]) if action == "floor-demo" && policy == Policy::Ce => {
+            viewer::show_floor(
+                "Arcanum-RS | Synthetic isometric floor".into(),
+                &arcanum_rs::isometric::synthetic_floor(),
+                &viewer::synthetic_frame(),
             )
             .map_err(Into::into)
+        }
+        #[cfg(feature = "windowed")]
+        (Some("art"), [_, action, game, options @ ..]) if action == "floor" => {
+            show_art_floor(Path::new(game), options, policy)
         }
         #[cfg(feature = "windowed")]
         (Some("art"), [_, action, game, options @ ..]) if action == "overlap" => {
@@ -125,7 +136,9 @@ fn main() -> ExitCode {
             if action == "view"
                 || action == "demo"
                 || action == "overlap"
-                || action == "overlap-demo" =>
+                || action == "overlap-demo"
+                || action == "floor"
+                || action == "floor-demo" =>
         {
             Err("sprite presentation requires a build with --features windowed".into())
         }
@@ -790,7 +803,7 @@ fn show_art_overlap(
         ("art/interface/align.art", 10, (12, 17)),
     ];
     let mut vfs = inspection_vfs(game, options, policy)?;
-    let mut layers = Vec::with_capacity(samples.len());
+    let mut frames = Vec::with_capacity(samples.len());
     let mut out = io::stdout().lock();
     for (order, (path, index, relative_anchor)) in samples.into_iter().enumerate() {
         let loaded = content::art::load_frame(&mut vfs, path, index)?;
@@ -800,16 +813,42 @@ fn show_art_overlap(
             order + 1
         )?;
         report_art(&mut out, &loaded, index)?;
-        layers.push(viewer::Layer {
-            frame: loaded.decoded.frame,
-            relative_anchor,
-        });
+        frames.push((loaded.decoded.frame, relative_anchor));
     }
     drop(out);
     drop(vfs);
+    let layers: Vec<_> = frames
+        .iter()
+        .map(|(frame, relative_anchor)| viewer::Layer {
+            frame,
+            relative_anchor: *relative_anchor,
+        })
+        .collect();
     Ok(viewer::show_layers(
         "Arcanum-RS | Original ART overlap".into(),
-        layers,
+        &layers,
+    )?)
+}
+
+#[cfg(feature = "windowed")]
+fn show_art_floor(game: &Path, options: &[OsString], policy: Policy) -> Result<(), Box<dyn Error>> {
+    let (floor, foreground) = {
+        let mut vfs = inspection_vfs(game, options, policy)?;
+        (
+            content::art::load_frame(&mut vfs, "art/tile/fl1bse0a.art", 0)?,
+            content::art::load_frame(&mut vfs, "art/item/bread.art", 0)?,
+        )
+    };
+    let mut out = io::stdout().lock();
+    writeln!(out, "Floor (3 × 3, increasing tile y then x)")?;
+    report_art(&mut out, &floor, 0)?;
+    writeln!(out, "Foreground at tile (0, 0)")?;
+    report_art(&mut out, &foreground, 0)?;
+    drop(out);
+    Ok(viewer::show_floor(
+        "Arcanum-RS | Original isometric floor".into(),
+        &floor.decoded.frame,
+        &foreground.decoded.frame,
     )?)
 }
 
