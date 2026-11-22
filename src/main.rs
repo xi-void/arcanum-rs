@@ -42,6 +42,8 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] art inspect <game-directory> <resource-path> <frame> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art export <game-directory> <resource-path> <frame> <output.pam> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs art demo                          (requires --features windowed)
+  arcanum-rs art overlap-demo                  (requires --features windowed)
+  arcanum-rs [--ordered] art overlap <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art view <game-directory> <resource-path> <frame> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] prototype inspect <game-directory> <resource-path> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] effect inspect <game-directory> <effect-id> [--mods <mods-directory> <mod-id> ...]
@@ -96,6 +98,18 @@ fn main() -> ExitCode {
         #[cfg(feature = "windowed")]
         (Some("art"), [_, action]) if action == "demo" && policy == Policy::Ce => sprite_demo(),
         #[cfg(feature = "windowed")]
+        (Some("art"), [_, action]) if action == "overlap-demo" && policy == Policy::Ce => {
+            viewer::show_layers(
+                "Arcanum-RS | Synthetic overlap".into(),
+                viewer::synthetic_overlap(),
+            )
+            .map_err(Into::into)
+        }
+        #[cfg(feature = "windowed")]
+        (Some("art"), [_, action, game, options @ ..]) if action == "overlap" => {
+            show_art_overlap(Path::new(game), options, policy)
+        }
+        #[cfg(feature = "windowed")]
         (Some("art"), [_, action, game, resource, frame, options @ ..]) if action == "view" => {
             inspect_art(
                 Path::new(game),
@@ -107,7 +121,12 @@ fn main() -> ExitCode {
             )
         }
         #[cfg(not(feature = "windowed"))]
-        (Some("art"), [_, action, ..]) if action == "view" || action == "demo" => {
+        (Some("art"), [_, action, ..])
+            if action == "view"
+                || action == "demo"
+                || action == "overlap"
+                || action == "overlap-demo" =>
+        {
             Err("sprite presentation requires a build with --features windowed".into())
         }
         (Some("art"), [_, action, game, resource, frame, options @ ..]) if action == "inspect" => {
@@ -741,6 +760,64 @@ fn inspect_art(
     let loaded =
         content::art::load_frame(&mut inspection_vfs(game, options, policy)?, resource, index)?;
     let mut out = io::stdout().lock();
+    report_art(&mut out, &loaded, index)?;
+    match action {
+        ArtAction::Inspect => {}
+        ArtAction::Export(destination) => {
+            export_pam(destination, &loaded.decoded.frame)?;
+            writeln!(out, "Exported: {}", destination.display())?;
+        }
+        #[cfg(feature = "windowed")]
+        ArtAction::View => {
+            drop(out);
+            viewer::show(
+                format!("Arcanum-RS | {} frame {index}", loaded.source.virtual_path),
+                loaded.decoded.frame,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "windowed")]
+fn show_art_overlap(
+    game: &Path,
+    options: &[OsString],
+    policy: Policy,
+) -> Result<(), Box<dyn Error>> {
+    let samples = [
+        ("art/item/bread.art", 0, (-12, 8)),
+        ("art/interface/align.art", 10, (12, 17)),
+    ];
+    let mut vfs = inspection_vfs(game, options, policy)?;
+    let mut layers = Vec::with_capacity(samples.len());
+    let mut out = io::stdout().lock();
+    for (order, (path, index, relative_anchor)) in samples.into_iter().enumerate() {
+        let loaded = content::art::load_frame(&mut vfs, path, index)?;
+        writeln!(
+            out,
+            "Draw {} (back to front), anchor offset {relative_anchor:?}",
+            order + 1
+        )?;
+        report_art(&mut out, &loaded, index)?;
+        layers.push(viewer::Layer {
+            frame: loaded.decoded.frame,
+            relative_anchor,
+        });
+    }
+    drop(out);
+    drop(vfs);
+    Ok(viewer::show_layers(
+        "Arcanum-RS | Original ART overlap".into(),
+        layers,
+    )?)
+}
+
+fn report_art(
+    out: &mut impl Write,
+    loaded: &content::art::LoadedFrame,
+    index: usize,
+) -> io::Result<()> {
     let frame = &loaded.decoded.frame;
     writeln!(out, "Path: {}", loaded.source.virtual_path)?;
     writeln!(out, "Source: {}", loaded.source)?;
@@ -772,21 +849,6 @@ fn inspect_art(
             "Ignored trailing ART bytes: {}",
             loaded.decoded.ignored_trailing_bytes
         )?;
-    }
-    match action {
-        ArtAction::Inspect => {}
-        ArtAction::Export(destination) => {
-            export_pam(destination, frame)?;
-            writeln!(out, "Exported: {}", destination.display())?;
-        }
-        #[cfg(feature = "windowed")]
-        ArtAction::View => {
-            drop(out);
-            viewer::show(
-                format!("Arcanum-RS | {} frame {index}", loaded.source.virtual_path),
-                loaded.decoded.frame,
-            )?;
-        }
     }
     Ok(())
 }

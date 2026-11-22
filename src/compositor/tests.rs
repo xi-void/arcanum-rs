@@ -128,3 +128,82 @@ fn accepts_a_padded_stride_without_requiring_padding_after_the_last_row() {
         [BACKGROUND, BACKGROUND, BACKGROUND, BACKGROUND, [1, 2, 3]]
     );
 }
+
+#[test]
+fn ordered_overlap_preserves_transparency_and_changes_with_draw_order() {
+    let [red, green, mix] = [[200, 0, 0], [0, 200, 0], [100, 100, 0]];
+    let mut back = frame(4, 1, vec![[200, 0, 0, 255]; 4]);
+    back.hotspot = (-1, 0);
+    let mut front = frame(
+        4,
+        1,
+        vec![
+            [0, 200, 0, 255],
+            [0, 200, 0, 128],
+            [1, 2, 3, 0],
+            [0, 200, 0, 255],
+        ],
+    );
+    front.hotspot = (1, 0);
+    let back = SpriteDraw {
+        frame: &back,
+        anchor: (-1, 0),
+    };
+    let front = SpriteDraw {
+        frame: &front,
+        anchor: (2, 0),
+    };
+    let mut destination = [BACKGROUND; 6];
+    blit_ordered(&mut destination, (6, 1), 6, [back, front]).unwrap();
+    assert_eq!(destination, [red, green, mix, red, green, BACKGROUND]);
+
+    destination.fill(BACKGROUND);
+    blit_ordered(&mut destination, (6, 1), 6, [front, back]).unwrap();
+    assert_eq!(destination, [red, red, red, red, green, BACKGROUND]);
+}
+
+#[test]
+fn viewport_size_changes_clipping_for_the_same_signed_anchors() {
+    let back = frame(3, 3, vec![[1, 0, 0, 255]; 9]);
+    let front = frame(3, 3, vec![[2, 0, 0, 255]; 9]);
+    let offscreen = frame(1, 1, vec![[3, 0, 0, 255]]);
+    let draws = || {
+        [
+            SpriteDraw {
+                frame: &back,
+                anchor: (-1, -1),
+            },
+            SpriteDraw {
+                frame: &front,
+                anchor: (1, 1),
+            },
+            SpriteDraw {
+                frame: &offscreen,
+                anchor: (-1, 0),
+            },
+            SpriteDraw {
+                frame: &offscreen,
+                anchor: (0, -1),
+            },
+            SpriteDraw {
+                frame: &offscreen,
+                anchor: (4, 0),
+            },
+            SpriteDraw {
+                frame: &offscreen,
+                anchor: (0, 4),
+            },
+        ]
+    };
+
+    let mut small = [BACKGROUND; 9];
+    blit_ordered(&mut small, (3, 3), 3, draws()).unwrap();
+    assert_eq!(small.map(|pixel| pixel[0]), [1, 1, 10, 1, 2, 2, 10, 2, 2]);
+
+    let mut large = [BACKGROUND; 16];
+    blit_ordered(&mut large, (4, 4), 4, draws()).unwrap();
+    assert_eq!(
+        large.map(|pixel| pixel[0]),
+        [1, 1, 10, 10, 1, 2, 2, 2, 10, 2, 2, 2, 10, 2, 2, 2]
+    );
+}
