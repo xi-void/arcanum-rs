@@ -1,6 +1,34 @@
 # Arcanum-RS
 
-Arcanum-RS is a read-only resource explorer for Arcanum DAT archives, loose game files, and local mods. It runs independently of Arcanum and Arcanum CE.
+Arcanum-RS is an experimental Rust-based replacement engine for
+*Arcanum: Of Steamworks and Magick Obscura*.
+
+The long-term objective is a standalone, extensible engine with
+original-game compatibility and OpenMW-style modding capabilities.
+
+**Current status:** Read-only resource explorer, virtual filesystem,
+and mod manifest infrastructure. The engine is not yet playable.
+
+## Roadmap
+
+- [x] DAT archive reader and resource explorer
+- [x] Virtual filesystem and resource precedence
+- [x] Mod manifests and dependency resolution
+- [ ] Extensible content definitions
+- [ ] Lua scripting and gameplay interfaces
+- [ ] World simulation and engine modernization
+- [ ] Standalone playable Rust engine
+
+See [Architecture](docs/ARCHITECTURE.md) for the project's
+architectural principles and CE compatibility boundaries.
+
+## Related Projects
+
+- [Arcanum Community Edition](https://github.com/alexbatalov/arcanum-ce)
+- [Arcanum CE Vanilla Restoration](https://github.com/xi-void/arcanum-ce)
+
+Arcanum-RS is independent of both projects. Original copyrighted
+game assets are not included.
 
 ## Usage
 
