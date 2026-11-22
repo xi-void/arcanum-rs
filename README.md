@@ -194,9 +194,10 @@ ARCANUM_GAME_DIR="$HOME/Work/arcanum-ce-test" \
 game="$HOME/Work/arcanum-ce-test"
 target/debug/arcanum-rs effect inspect "$game" 128
 target/debug/arcanum-rs effect inspect "$game" 53
+target/debug/arcanum-rs effect inspect "$game" 54
 ```
 
-The command shows the selected record, its VFS source, and its native AC addition or Fire resistance floor. It accepts `--mods <mods-directory> <mod-id> ...` like prototype inspection. [Supported effect definitions](docs/CONTENT_FORMATS.md#milestone-13-bounded-effect-definitions)
+The command shows the selected record, its VFS source, and all decoded operations in source order. It accepts `--mods <mods-directory> <mod-id> ...` like prototype inspection. [Supported effect definitions](docs/CONTENT_FORMATS.md#milestone-14-composite-effect-definitions)
 
 ## Implementation and verification
 

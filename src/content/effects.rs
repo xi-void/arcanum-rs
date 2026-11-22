@@ -1,7 +1,10 @@
-//! Bounded import of single-operation records from the legacy effect table.
+//! Bounded import of typed operations from the legacy effect table.
 
 use super::{Error, Source, items::ResistanceKind, load_mes};
-use crate::{mes::Encoding, vfs::Vfs};
+use crate::{
+    mes::{Encoding, MAX_INPUT_BYTES},
+    vfs::Vfs,
+};
 use std::fmt;
 
 const EFFECT_TABLE: &str = "rules/effect.mes";
@@ -18,6 +21,10 @@ pub enum EffectOperation {
     AddArmourClass {
         points: i32,
     },
+    AddResistance {
+        channel: ResistanceKind,
+        percentage_points: i32,
+    },
     /// Minimum resistance value on the game's percentage scale.
     ResistanceFloor {
         channel: ResistanceKind,
@@ -28,7 +35,9 @@ pub enum EffectOperation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectDefinition {
     pub id: EffectId,
-    pub operation: EffectOperation,
+    /// Source order for inspection and diagnostics. Runtime evaluation order
+    /// is independent of this sequence.
+    pub operations: Vec<EffectOperation>,
 }
 
 #[derive(Debug)]
@@ -42,71 +51,119 @@ pub struct LoadedEffect {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeError {
+    TooLarge,
+    Clause {
+        /// One-based clause index in the legacy record.
+        index: usize,
+        kind: ClauseError,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClauseError {
     MissingTarget,
     MissingOperation,
     MissingValue,
     InvalidValue,
     UnsupportedTarget,
     UnsupportedOperation,
-    MultipleOperations,
+    TrailingTokens,
 }
 
 impl fmt::Display for DecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::MissingTarget => "missing effect target",
-            Self::MissingOperation => "missing effect operation",
-            Self::MissingValue => "missing effect value",
-            Self::InvalidValue => "expected a signed 32-bit decimal value",
-            Self::UnsupportedTarget => "only ac and resistfire targets are supported",
-            Self::UnsupportedOperation => "unsupported operation for this effect target",
-            Self::MultipleOperations => "expected a single operation in the effect record",
-        })
+        let Self::Clause { index, kind } = self else {
+            return write!(
+                f,
+                "effect record exceeds the {MAX_INPUT_BYTES}-byte input limit"
+            );
+        };
+        let message = match kind {
+            ClauseError::MissingTarget => "missing effect target",
+            ClauseError::MissingOperation => "missing effect operation",
+            ClauseError::MissingValue => "missing effect value",
+            ClauseError::InvalidValue => "expected a signed 32-bit decimal value",
+            ClauseError::UnsupportedTarget => {
+                "unsupported effect target (expected ac, resistfire, resistelectrical, or resistpoison)"
+            }
+            ClauseError::UnsupportedOperation => "unsupported operation for this effect target",
+            ClauseError::TrailingTokens => {
+                "expected a comma or the end of the record after the effect value"
+            }
+        };
+        write!(f, "clause {index}: {message}")
     }
 }
 
 impl std::error::Error for DecodeError {}
 
-/// Decode either a signed AC addition or a Fire resistance minimum.
-/// The caller is responsible for the MES framing and source encoding.
-pub fn decode_effect(record: &str) -> Result<EffectOperation, DecodeError> {
-    if record.contains(',') {
-        return Err(DecodeError::MultipleOperations);
+/// Decode a comma-separated record in source order. Every clause must be
+/// supported. The caller supplies the MES framing and source encoding.
+pub fn decode_effect(record: &str) -> Result<Vec<EffectOperation>, DecodeError> {
+    if record.len() > MAX_INPUT_BYTES {
+        return Err(DecodeError::TooLarge);
     }
-    let mut tokens = record.split_ascii_whitespace();
-    let target = tokens.next().ok_or(DecodeError::MissingTarget)?;
-    if !target.eq_ignore_ascii_case("ac") && !target.eq_ignore_ascii_case("resistfire") {
-        return Err(DecodeError::UnsupportedTarget);
-    }
-    let operator = tokens.next().ok_or(DecodeError::MissingOperation)?;
+    record
+        .split(',')
+        .enumerate()
+        .map(|(index, clause)| {
+            decode_clause(clause).map_err(|kind| DecodeError::Clause {
+                index: index + 1,
+                kind,
+            })
+        })
+        .collect()
+}
+
+fn decode_clause(clause: &str) -> Result<EffectOperation, ClauseError> {
+    let mut tokens = clause.split_ascii_whitespace();
+    let target = tokens.next().ok_or(ClauseError::MissingTarget)?;
+    let operator = tokens.next().ok_or(ClauseError::MissingOperation)?;
     let operation = if target.eq_ignore_ascii_case("ac") {
-        if !operator.starts_with(['+', '-']) || operator.ends_with('%') {
-            return Err(DecodeError::UnsupportedOperation);
+        EffectOperation::AddArmourClass {
+            points: decode_addition(operator)?,
         }
-        let points = operator.parse().map_err(|_| DecodeError::InvalidValue)?;
-        EffectOperation::AddArmourClass { points }
+    } else if target.eq_ignore_ascii_case("resistelectrical") {
+        EffectOperation::AddResistance {
+            channel: ResistanceKind::Electrical,
+            percentage_points: decode_addition(operator)?,
+        }
     } else {
+        let channel = if target.eq_ignore_ascii_case("resistfire") {
+            ResistanceKind::Fire
+        } else if target.eq_ignore_ascii_case("resistpoison") {
+            ResistanceKind::Poison
+        } else {
+            return Err(ClauseError::UnsupportedTarget);
+        };
         if !operator.eq_ignore_ascii_case("min") {
-            return Err(DecodeError::UnsupportedOperation);
+            return Err(ClauseError::UnsupportedOperation);
         }
         let minimum_percent = tokens
             .next()
-            .ok_or(DecodeError::MissingValue)?
+            .ok_or(ClauseError::MissingValue)?
             .parse()
-            .map_err(|_| DecodeError::InvalidValue)?;
+            .map_err(|_| ClauseError::InvalidValue)?;
         // CE reserves -1 to mean that no lower bound applies.
         if minimum_percent == -1 {
-            return Err(DecodeError::UnsupportedOperation);
+            return Err(ClauseError::UnsupportedOperation);
         }
         EffectOperation::ResistanceFloor {
-            channel: ResistanceKind::Fire,
+            channel,
             minimum_percent,
         }
     };
     if tokens.next().is_some() {
-        return Err(DecodeError::MultipleOperations);
+        return Err(ClauseError::TrailingTokens);
     }
     Ok(operation)
+}
+
+fn decode_addition(token: &str) -> Result<i32, ClauseError> {
+    if !token.starts_with(['+', '-']) || token.ends_with('%') {
+        return Err(ClauseError::UnsupportedOperation);
+    }
+    token.parse().map_err(|_| ClauseError::InvalidValue)
 }
 
 #[derive(Debug)]
@@ -169,7 +226,7 @@ pub fn load_effect(vfs: &mut Vfs, id: LegacyEffectId) -> Result<LoadedEffect, Lo
             source: Box::new(table.source),
         });
     };
-    let operation = match decode_effect(record) {
+    let operations = match decode_effect(record) {
         Ok(operation) => operation,
         Err(error) => {
             return Err(LoadEffectError::Decode {
@@ -182,7 +239,7 @@ pub fn load_effect(vfs: &mut Vfs, id: LegacyEffectId) -> Result<LoadedEffect, Lo
     Ok(LoadedEffect {
         definition: EffectDefinition {
             id: EffectId(format!("arcanum:effect/{}", id.0)),
-            operation,
+            operations,
         },
         legacy_id: id,
         source: table.source,
@@ -199,8 +256,8 @@ mod tests {
     fn decodes_signed_armour_class_adjustments() {
         for (record, points) in [("ac +1", 1), ("AC\t-12", -12), ("ac +0", 0)] {
             assert_eq!(
-                decode_effect(record),
-                Ok(EffectOperation::AddArmourClass { points })
+                decode_effect(record).unwrap(),
+                [EffectOperation::AddArmourClass { points }]
             );
         }
     }
@@ -209,44 +266,86 @@ mod tests {
     fn decodes_fire_resistance_minimum_as_its_own_operation() {
         for (record, minimum_percent) in [("  resistfire min 50 ", 50), ("RESISTFIRE MIN -5", -5)] {
             assert_eq!(
-                decode_effect(record),
-                Ok(EffectOperation::ResistanceFloor {
+                decode_effect(record).unwrap(),
+                [EffectOperation::ResistanceFloor {
                     channel: ResistanceKind::Fire,
-                    minimum_percent,
-                })
+                    minimum_percent
+                }]
             );
         }
     }
 
     #[test]
-    fn reports_missing_and_invalid_tokens() {
-        for (record, error) in [
-            ("", DecodeError::MissingTarget),
-            ("ac", DecodeError::MissingOperation),
-            ("resistfire", DecodeError::MissingOperation),
-            ("resistfire min", DecodeError::MissingValue),
-            ("ac +", DecodeError::InvalidValue),
-            ("ac +2147483648", DecodeError::InvalidValue),
-            ("resistfire min 50x", DecodeError::InvalidValue),
-        ] {
-            assert_eq!(decode_effect(record), Err(error), "{record:?}");
-        }
+    fn composite_preserves_order_signed_values_and_explicit_zeroes() {
+        assert_eq!(
+            decode_effect("resistpoison min 0, resistelectrical -8, ac +0, resistfire min 53")
+                .unwrap(),
+            [
+                EffectOperation::ResistanceFloor {
+                    channel: ResistanceKind::Poison,
+                    minimum_percent: 0
+                },
+                EffectOperation::AddResistance {
+                    channel: ResistanceKind::Electrical,
+                    percentage_points: -8
+                },
+                EffectOperation::AddArmourClass { points: 0 },
+                EffectOperation::ResistanceFloor {
+                    channel: ResistanceKind::Fire,
+                    minimum_percent: 53
+                },
+            ]
+        );
     }
 
     #[test]
-    fn rejects_effect_language_outside_the_verified_slice() {
-        for (record, error) in [
-            ("ac +5%", DecodeError::UnsupportedOperation),
-            ("ac *2", DecodeError::UnsupportedOperation),
-            ("ac min 30", DecodeError::UnsupportedOperation),
-            ("resistfire +50", DecodeError::UnsupportedOperation),
-            ("resistfire max 50", DecodeError::UnsupportedOperation),
-            ("resistfire min -1", DecodeError::UnsupportedOperation),
-            ("resistmagic min 50", DecodeError::UnsupportedTarget),
-            ("ac +1, resistfire min 50", DecodeError::MultipleOperations),
-            ("ac +1 ac +2", DecodeError::MultipleOperations),
+    fn reports_the_malformed_clause() {
+        use ClauseError::*;
+        for (record, index, kind) in [
+            ("", 1, MissingTarget),
+            ("ac", 1, MissingOperation),
+            ("resistfire", 1, MissingOperation),
+            ("resistfire min", 1, MissingValue),
+            ("ac +", 1, InvalidValue),
+            ("ac +2147483648", 1, InvalidValue),
+            ("resistfire min 50x", 1, InvalidValue),
+            ("ac +1, resistpoison min", 2, MissingValue),
+            ("ac +1,, resistfire min 1", 2, MissingTarget),
+            (", ac +1", 1, MissingTarget),
+            ("ac +1,", 2, MissingTarget),
+            ("ac +1 resistfire min 50", 1, TrailingTokens),
         ] {
-            assert_eq!(decode_effect(record), Err(error), "{record:?}");
+            assert_eq!(
+                decode_effect(record),
+                Err(DecodeError::Clause { index, kind }),
+                "{record:?}"
+            );
+        }
+        assert_eq!(
+            decode_effect(&" ".repeat(MAX_INPUT_BYTES + 1)),
+            Err(DecodeError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn rejects_the_entire_record_when_an_operation_is_unsupported() {
+        use ClauseError::*;
+        for (record, index, kind) in [
+            ("ac +5%", 1, UnsupportedOperation),
+            ("ac *2", 1, UnsupportedOperation),
+            ("ac min 30", 1, UnsupportedOperation),
+            ("resistfire +50", 1, UnsupportedOperation),
+            ("resistfire max 50", 1, UnsupportedOperation),
+            ("resistfire min -1", 1, UnsupportedOperation),
+            ("resistmagic min 50", 1, UnsupportedTarget),
+            ("ac +1, resistelectrical *2", 2, UnsupportedOperation),
+            ("ac +1, resistfire min 50, speed +2", 3, UnsupportedTarget),
+        ] {
+            assert_eq!(
+                decode_effect(record),
+                Err(DecodeError::Clause { index, kind }),
+                "{record:?}"
+            );
         }
     }
 }

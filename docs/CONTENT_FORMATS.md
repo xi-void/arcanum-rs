@@ -357,6 +357,24 @@ A separate byte check of the loose Sword of Defense prototype (`proto/006084 - w
 
 The inspection path resolves one selected definition from the existing table. CE's engine-wide and module-specific registration rules remain separate from the imported key. Additional targets, composite records, percentage operators and the interaction between bounds remain outside the supported subset. A future runtime needs an activation ID distinct from the effect definition ID, with the source instance and target actor, so independent grants of the same definition can end separately.
 
+## Milestone 14 composite effect definitions
+
+The CE-policy VFS selects effect **54** at line 8 of loose `data/rules/effect.mes`. The MES payload is `resistfire min 95, resistelectrical +8, resistpoison min 97`. Its trailing comment labels it Body of Fire. Separately mounted copies of `Arcanum3.dat`, `Arcanum5.dat`, and `ArcanumXRaces.dat` agree on the payload bytes. The loose winner is parsed through the existing Windows-1252 MES path. The automated import check compares it against `Arcanum3.dat` as an independent mount.
+
+| Clause in source order | Verified operation |
+| --- | --- |
+| `resistfire min 95` | Fire resistance lower bound of 95%. |
+| `resistelectrical +8` | Add eight percentage points to Electrical resistance. |
+| `resistpoison min 97` | Poison resistance lower bound of 97%. |
+
+The original MES row stores one ID and a comma-delimited list of clauses. CE revision `fb721982` in `effect_parse` tokenizes on spaces and commas and stores target IDs, operators, and integers. The three clauses in 54 target independent channels. `effect_adjust_func` selects the current target and combines the operations from active effects by kind. For a shared target it applies scaling, then signed additions, then the strongest minimum and tightest maximum. The upper bound is applied last and can reduce a value below a conflicting minimum. The selected record contains no upper bound. Explicit signed zero is retained by the importer. An addition of zero makes no numerical change, while an explicit zero floor is a bound. CE uses −1 as the unset minimum sentinel.
+
+The base value, worn adjustments, Constitution-derived poison contribution, other active effects and caller rules are runtime inputs. For example, `object_get_resistance` ordinarily clamps the final value to 95, so Body of Fire's stored 97% poison floor is an intermediate constraint. CE bypasses that final clamp for monstrous NPCs. The effect row carries neither an activation nor the associated spell's duration.
+
+`EffectDefinition.operations` preserves clause identity and source order for inspection. CE evaluation groups by target and operation kind. This milestone accepts the two Milestone 13 forms plus signed Electrical additions and Poison floors. A comma is required between clauses. Missing, empty, malformed, or unsupported clauses fail the entire record with a one-based clause number. Both the MES loader and the standalone effect decoder bound input. Legacy IDs and VFS provenance remain separate from native definition IDs.
+
+Nearby records 51 and 55 contain `damage max 0`, which was useful evidence for explicit zero and maximum syntax. The decoder rejects those records as a whole because their targets and operators extend beyond this slice. The compiled CE per-category count and the legacy file's written limit disagree, and no CE layout limit is used in the native representation. A future evaluator needs separate rules for conflicts across effects and caller clamps, along with a grant identity to distinguish multiple activations of the same definition.
+
 ### Primary reference locations
 
 - CE `src/game/proto.c` (`proto_init`, `sub_468660`, `sub_468860`, and the four `BP_*` initializers), `descriptions.h`, `obj_id.h`, `obj_id.c`.
