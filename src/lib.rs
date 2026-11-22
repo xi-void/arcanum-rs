@@ -4,6 +4,7 @@ pub mod art;
 pub mod compositor;
 pub mod content;
 pub mod dat;
+pub mod isometric;
 pub mod mes;
 mod mod_id;
 pub mod mods;

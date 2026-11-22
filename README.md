@@ -210,11 +210,13 @@ cargo run --features windowed -- art demo
 cargo run --features windowed -- art view "$game" art/item/bread.art 0
 cargo run --features windowed -- art overlap-demo
 cargo run --features windowed -- art overlap "$game"
+cargo run --features windowed -- art floor-demo
+cargo run --features windowed -- art floor "$game"
 ```
 
 The synthetic demos require only a display session. `art overlap` shows
 bread and alignment frames with explicit draw order and independent anchors.
-[Native sprite viewer](docs/SPRITE_VIEWER.md)
+[Native sprite viewer](docs/SPRITE_VIEWER.md) · [Fixed isometric floor](docs/ISOMETRIC_FLOOR.md)
 
 ## Prototype and schematic inspection
 
