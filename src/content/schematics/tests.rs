@@ -284,7 +284,7 @@ path = "resources"
         load_schematic(&mut vfs, GROUP).unwrap().definition.unwrap(),
         definition
     );
-    let audit = audit::audit_schematics(&mut vfs, &[GROUP]).unwrap();
+    let audit = audit::audit_all_schematics(&mut vfs).unwrap();
     assert_eq!(
         audit.rules_source.mod_id.as_ref().unwrap().as_str(),
         "override"
@@ -292,6 +292,19 @@ path = "resources"
     assert_eq!(
         audit.references[0].1.as_ref().unwrap().definition.as_ref(),
         Some(&definition)
+    );
+    let audited_item = &audit.references[0].1.as_ref().unwrap().items[&BasicPrototypeId(10100)];
+    assert_eq!(
+        audited_item
+            .prototype
+            .as_ref()
+            .unwrap()
+            .source
+            .mod_id
+            .as_ref()
+            .unwrap()
+            .as_str(),
+        "override"
     );
 }
 
@@ -322,20 +335,25 @@ fn preserves_unresolved_ids_and_rejects_ambiguous_or_mismatched_prototypes() {
     assert!(report.definition.is_none());
     assert!(report.illustration.is_none());
     assert!(report.items.values().all(|item| item.definition.is_none()));
-    for (field, message) in [
-        ("description", "key 32"),
-        ("illustration", "drawing.art"),
-        ("ingredient 1", "ambiguous"),
-        ("ingredient 2", "declares ID 10199"),
-        ("product", "serialized 10122"),
-        ("ingredient 2", "serialized 10125"),
-        ("product", "serialized 10126"),
+    use DiagnosticKind::*;
+    for (kind, field, message) in [
+        (MissingDescription, "description", "key 32"),
+        (MissingIllustration, "illustration", "drawing.art"),
+        (AmbiguousPrototype, "ingredient 1", "ambiguous"),
+        (
+            PrototypeIdentityMismatch,
+            "ingredient 2",
+            "declares ID 10199",
+        ),
+        (MissingPrototype, "product", "serialized 10122"),
+        (MissingPrototype, "ingredient 2", "serialized 10125"),
+        (MissingPrototype, "product", "serialized 10126"),
     ] {
         assert!(
             report
                 .diagnostics
                 .iter()
-                .any(|d| d.field == field && d.message.contains(message)),
+                .any(|d| d.kind == kind && d.field == field && d.message.contains(message)),
             "{:?}",
             report.diagnostics
         );
@@ -450,5 +468,73 @@ fn audit_checks_only_selected_references_and_reports_missing_groups() {
             .diagnostics
             .iter()
             .any(|diag| diag.message.contains("serialized 10120"))
+    );
+}
+
+#[test]
+fn full_audit_classifies_independent_failures_in_recipe_order() {
+    use DiagnosticKind::{InvalidPrototype, MissingDescription, MissingIllustration};
+
+    let fixture = Fixture::new();
+    fixture.populate();
+    let rules = format!(
+        "{{2023}}{{10100}}{RULE_DATA}
+        {{4210}}{{31}}{{4211}}{{32}}{{4212}}{{34}}
+        {{4213}}{{10103}}{{4214}}{{2147483647}}{{4215}}{{10104}}{{4216}}{{1}}"
+    );
+    fixture.write("base/rules/schematic.mes", rules);
+    fixture.write("base/proto/010123 - food.pro", food_bytes(10123, 499, 8));
+    fixture.write("base/proto/010124 - food.pro", [119, 0, 0, 0]);
+
+    let mut vfs = fixture.vfs();
+    let full = audit::audit_all_schematics(&mut vfs).unwrap();
+    let ids = [LegacyRecipeId(4210), GROUP, LegacyRecipeId(2020), GROUP];
+    let selected = audit::audit_schematics(&mut vfs, &ids).unwrap();
+    assert_eq!(full.groups.len(), 3);
+    assert_eq!(
+        full.references
+            .iter()
+            .map(|(id, _)| id.0)
+            .collect::<Vec<_>>(),
+        [2020, 4200, 4210]
+    );
+    assert!(matches!(
+        full.references[0].1,
+        Err(GroupError::Missing(2020))
+    ));
+    assert!(full.references[1].1.as_ref().unwrap().definition.is_some());
+    let incomplete = full.references[2].1.as_ref().unwrap();
+    assert!(incomplete.definition.is_none());
+    assert_eq!(
+        incomplete.items[&BasicPrototypeId(10103)]
+            .prototype
+            .as_ref()
+            .unwrap()
+            .description,
+        Some(DescriptionId(499))
+    );
+    assert_eq!(
+        incomplete
+            .diagnostics
+            .iter()
+            .map(|d| d.kind)
+            .collect::<Vec<_>>(),
+        [
+            MissingIllustration,
+            MissingDescription,
+            InvalidPrototype,
+            InvalidPrototype
+        ]
+    );
+    assert!(
+        incomplete.diagnostics[1]
+            .message
+            .contains("missing key 499")
+    );
+    assert!(incomplete.diagnostics[2].message.contains("truncated"));
+    assert!(incomplete.diagnostics[3].message.contains("2147483647"));
+    assert_eq!(
+        format!("{:?}", full.references),
+        format!("{:?}", selected.references)
     );
 }

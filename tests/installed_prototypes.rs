@@ -267,3 +267,51 @@ fn audits_learned_and_found_coverage_and_selected_references() {
         assert_eq!(label.source.mount_path.file_name().unwrap(), "Arcanum5.dat");
     }
 }
+
+#[test]
+#[ignore = "requires the installed Arcanum data"]
+fn validates_references_for_all_learned_and_found_groups() {
+    use arcanum_rs::content::schematics::audit::audit_all_schematics;
+
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    let audit = audit_all_schematics(&mut vfs).unwrap();
+    assert_eq!(audit.groups.len(), 119);
+    assert_eq!(audit.references.len(), 119);
+    assert!(audit.duplicate_keys.is_empty());
+    let mut variant_ids = Vec::new();
+    for (id, report) in audit.references {
+        let report = report.unwrap_or_else(|error| panic!("recipe {}: {error}", id.0));
+        assert!(
+            report.diagnostics.is_empty(),
+            "recipe {}: {:?}",
+            id.0,
+            report.diagnostics
+        );
+        let definition = report
+            .definition
+            .unwrap_or_else(|| panic!("recipe {} has no definition", id.0));
+        assert_eq!(definition.quantity, report.legacy.quantity);
+        let item_id = |basic: BasicPrototypeId| {
+            let entry = &report.items[&basic];
+            let prototype = entry.prototype.as_ref().unwrap();
+            assert_eq!(Some(prototype.header.id), basic.serialized());
+            assert!(entry.name.is_some());
+            entry.id.as_ref().unwrap().clone()
+        };
+        let expected: Vec<_> = report
+            .legacy
+            .variants
+            .iter()
+            .map(|legacy| RecipeVariant {
+                ingredients: legacy.ingredients.map(item_id),
+                product: item_id(legacy.product),
+            })
+            .collect();
+        assert_eq!(definition.variants, expected);
+        if definition.variants.len() > 1 {
+            variant_ids.push(id.0);
+        }
+    }
+    assert_eq!(variant_ids, [2450, 3250, 3260, 4450, 5090]);
+}

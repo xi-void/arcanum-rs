@@ -1,8 +1,8 @@
 //! Structural coverage of learned and found schematic records.
 
 use super::{
-    GroupError, LegacyGroup, LegacyRecipeId, MAX_VARIANTS, RULES, SchematicReport, item_references,
-    prototype_candidates, resolve_schematic,
+    GroupError, LegacyGroup, LegacyRecipeId, MAX_VARIANTS, MesTables, RULES, SchematicReport,
+    item_references, prototype_candidates, resolve_schematic,
 };
 use crate::content::{Error, Source, load_mes};
 use crate::mes::{EntryId, Mes};
@@ -42,7 +42,7 @@ pub struct SchematicAudit {
     pub rules_source: Source,
     pub groups: Vec<GroupAudit>,
     pub duplicate_keys: Vec<EntryId>,
-    /// Explicitly selected groups in ascending ID order. A report can still
+    /// Selected groups in ascending ID order. A report can still
     /// contain missing or invalid references and lack a native definition.
     pub references: Vec<(LegacyRecipeId, Result<SchematicReport, GroupError>)>,
 }
@@ -139,9 +139,22 @@ pub fn audit_schematics(
     vfs: &mut Vfs,
     selected: &[LegacyRecipeId],
 ) -> Result<SchematicAudit, Error> {
+    audit(vfs, Some(selected))
+}
+
+/// Validate references for every discovered group. Unsupported or malformed
+/// groups are reported without attempting reference resolution.
+pub fn audit_all_schematics(vfs: &mut Vfs) -> Result<SchematicAudit, Error> {
+    audit(vfs, None)
+}
+
+fn audit(vfs: &mut Vfs, selected: Option<&[LegacyRecipeId]>) -> Result<SchematicAudit, Error> {
     let rules = load_mes(vfs, RULES)?;
     let groups = audit_groups(&rules.mes);
-    let selected: BTreeSet<_> = selected.iter().map(|id| id.0).collect();
+    let selected: BTreeSet<_> = match selected {
+        Some(ids) => ids.iter().map(|id| id.0).collect(),
+        None => groups.iter().map(|group| group.id.0).collect(),
+    };
     let selected = selected
         .into_iter()
         .map(|base| {
@@ -168,12 +181,15 @@ pub fn audit_schematics(
             .filter_map(|(_, group)| group.as_ref().ok())
             .flat_map(|group| item_references(group).map(|(_, id)| id)),
     );
+    let mut tables = MesTables::new();
     let references = selected
         .into_iter()
         .map(|(id, group)| {
             (
                 id,
-                group.map(|group| resolve_schematic(vfs, &rules, group.clone(), &candidates)),
+                group.map(|group| {
+                    resolve_schematic(vfs, &rules, group.clone(), &candidates, &mut tables)
+                }),
             )
         })
         .collect();
