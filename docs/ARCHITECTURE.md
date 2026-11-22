@@ -69,6 +69,23 @@ Core systems should use:
 
 Legacy engine behavior should not dictate internal data structures.
 
+#### Future effect activation ownership
+
+An immutable effect definition, a source instance, a target actor, and
+an activation each have distinct identities. A source can be an equipped
+item instance or another runtime owner. Each activation records which
+definition supplied it and the contribution actually granted to its
+target, such as the applied count or the individual grants. Removal
+selects the activation owned by the ending source. Two sources that grant
+the same definition to the same target remain independently removable.
+
+Sword of Defense is the reference case. Its wield-on script derives a
+count of effect 128 grants from aptitude and saves that count. Wield-off
+uses the saved count. A native implementation must keep the outstanding
+grants or applied count across aptitude changes so it can retire the
+previous contribution before any refresh. This contract leaves storage,
+evaluation and serialization for future milestones.
+
 ### 5. Behavioral Compatibility
 
 Preserve original Arcanum gameplay behavior where appropriate,

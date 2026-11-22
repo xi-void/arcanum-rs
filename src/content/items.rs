@@ -130,6 +130,9 @@ pub struct ArmourDefinition {
     pub base_weight: u32,
     /// Base worth in game currency units.
     pub base_worth: u32,
+    /// Signed base magic/technology complexity. Positive is magical, negative
+    /// is technological, and zero is neutral.
+    pub magic_tech_complexity: i32,
     /// Signed contribution in armour class points.
     pub armour_class_adjustment: i32,
     /// Stored magical adjustment in AC points, before aptitude or identification rules.
@@ -275,6 +278,18 @@ impl PrototypeInspection {
         };
         let common = fields.item();
         let (display_name, name_source) = resolve_item_name(vfs, common.description)?;
+        Ok(Some(ResolvedWeaponAmmo {
+            definition: self.weapon_ammo_definition(fields, display_name)?,
+            name_source,
+        }))
+    }
+
+    pub(super) fn weapon_ammo_definition(
+        &self,
+        fields: prototype::WeaponAmmoFields,
+        display_name: String,
+    ) -> Result<WeaponAmmoDefinition, ItemDefinitionError> {
+        let common = fields.item();
         let id = ItemId::from_prototype(self.prototype.header.id);
         let base_weight = unsigned("base weight", common.weight)?;
         let base_worth = unsigned("base worth", common.worth)?;
@@ -334,10 +349,7 @@ impl PrototypeInspection {
                 kind: ammo_kind(ammo.ammo_type)?,
             }),
         };
-        Ok(Some(ResolvedWeaponAmmo {
-            definition,
-            name_source,
-        }))
+        Ok(definition)
     }
 
     /// Find direct wield attachments on a decoded Weapon. Each reference
@@ -372,27 +384,36 @@ impl PrototypeInspection {
             return Ok(None);
         };
         let (display_name, name_source) = resolve_item_name(vfs, fields.item.description)?;
+        Ok(Some(ResolvedArmour {
+            definition: self.armour_definition(fields, display_name)?,
+            name_source,
+        }))
+    }
+
+    pub(super) fn armour_definition(
+        &self,
+        fields: prototype::ArmourFields,
+        display_name: String,
+    ) -> Result<ArmourDefinition, ItemDefinitionError> {
         let coverage = armour_coverage(fields)?;
         let sizes = [ArmourSize::Small, ArmourSize::Medium, ArmourSize::Large]
             .into_iter()
             .enumerate()
             .filter_map(|(index, size)| (fields.flags & (1 << index) != 0).then_some(size))
             .collect();
-        Ok(Some(ResolvedArmour {
-            definition: ArmourDefinition {
-                id: ItemId::from_prototype(self.prototype.header.id),
-                display_name,
-                base_weight: unsigned("base weight", fields.item.weight)?,
-                base_worth: unsigned("base worth", fields.item.worth)?,
-                armour_class_adjustment: fields.armour_class_adjustment,
-                magical_armour_class_adjustment: fields.magical_armour_class_adjustment,
-                coverage,
-                sizes,
-                resistances: resistance_adjustments(fields.resistance_adjustments),
-                magical_resistances: resistance_adjustments(fields.magical_resistance_adjustments),
-            },
-            name_source,
-        }))
+        Ok(ArmourDefinition {
+            id: ItemId::from_prototype(self.prototype.header.id),
+            display_name,
+            base_weight: unsigned("base weight", fields.item.weight)?,
+            base_worth: unsigned("base worth", fields.item.worth)?,
+            magic_tech_complexity: fields.item.magic_tech_complexity,
+            armour_class_adjustment: fields.armour_class_adjustment,
+            magical_armour_class_adjustment: fields.magical_armour_class_adjustment,
+            coverage,
+            sizes,
+            resistances: resistance_adjustments(fields.resistance_adjustments),
+            magical_resistances: resistance_adjustments(fields.magical_resistance_adjustments),
+        })
     }
 }
 
@@ -457,13 +478,17 @@ fn resolve_item_name(
     id: prototype::DescriptionId,
 ) -> Result<(String, Source), ItemDefinitionError> {
     let names = load_mes(vfs, description_path(id)).map_err(ItemDefinitionError::Text)?;
-    let Some(name) = names.mes.get(id.0).filter(|name| !name.trim().is_empty()) else {
+    let Some(name) = names.mes.get(id.0).and_then(item_display_name) else {
         return Err(ItemDefinitionError::MissingName {
             id,
             source: Box::new(names.source),
         });
     };
     Ok((name.to_owned(), names.source))
+}
+
+pub(super) fn item_display_name(text: &str) -> Option<&str> {
+    (!text.trim().is_empty()).then_some(text)
 }
 
 fn armour_coverage(fields: prototype::ArmourFields) -> Result<ArmourCoverage, ItemDefinitionError> {

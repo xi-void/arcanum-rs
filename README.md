@@ -173,6 +173,7 @@ target/debug/arcanum-rs schematic inspect "$game" 4220
 target/debug/arcanum-rs schematic inspect "$game" 2450
 target/debug/arcanum-rs schematic audit "$game" 2450 3250 4220
 target/debug/arcanum-rs schematic audit "$game" --all-references
+target/debug/arcanum-rs schematic audit "$game" --readiness 2450 4220
 ```
 
 These commands accept the MES command's `--mods <mods-directory> <mod-id> ...` argument. Prototype inspection shows selected Food fields, Weapon damage channels, base speed and range, and ammunition compatibility. For Ammo it reports the stored prototype quantity separately. Armour inspection reports its base AC and resistance adjustments, coverage and fit sizes. Key and Generic inspection includes the description key. [Weapon and Ammo fields](docs/CONTENT_FORMATS.md#milestone-10-native-weapon-and-ammo-definitions) · [Armour fields](docs/CONTENT_FORMATS.md#milestone-11-native-armour-definitions)
@@ -182,6 +183,8 @@ Prototype inspection also shows stored magical Armour adjustments separately and
 Schematic inspection reports the selected group’s resource sources, unresolved references and any ordered input-to-output variants. [Content formats](docs/CONTENT_FORMATS.md#milestone-6-healing-jacket-variants)
 
 With no selection, the audit reports structural coverage. Use `--all-references` for a full reference summary and incomplete recipe IDs. Pass individual IDs for detailed diagnostics. [Validation findings](docs/CONTENT_FORMATS.md#milestone-8-full-schematic-reference-validation)
+
+Use `--readiness` to add item-definition and illustration-read checks for reference-complete recipes. With no recipe IDs after the flag, it checks all discovered recipes. An unsupported item subtype is reported separately from a failed decode. The illustration check validates readability and size with a 16 MiB cap. ART decoding and gameplay validation are outside this check. [Readiness guarantees and installed coverage](docs/CONTENT_FORMATS.md#milestone-16-schematic-readiness-and-armour-complexity)
 
 ```sh
 ARCANUM_GAME_DIR="$HOME/Work/arcanum-ce-test" \
