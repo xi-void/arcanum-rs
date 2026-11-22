@@ -39,6 +39,179 @@ fn electrical(id: &str, percentage_points: i32) -> EffectDefinition {
     }
 }
 
+fn electrical_floor(id: &str, minimum_percent: i32) -> EffectDefinition {
+    EffectDefinition {
+        id: EffectId(id.into()),
+        operations: vec![EffectOperation::ResistanceFloor {
+            channel: ResistanceKind::Electrical,
+            minimum_percent,
+        }],
+    }
+}
+
+#[test]
+fn electrical_additions_precede_floors_in_either_clause_order() {
+    let item = item();
+    let mut effect = electrical("smithing:effect/grounding", 8);
+    effect
+        .operations
+        .extend(electrical_floor("demo:effect/minimum", 50).operations);
+    let mut reordered = effect.clone();
+    reordered.operations.reverse();
+    for definition in [&effect, &reordered] {
+        let mut runtime = Runtime::default();
+        let actor = runtime.create_actor(10).unwrap();
+        let source = equip(&mut runtime, actor, &item);
+        let grant = runtime.activate_effect(source, actor, definition).unwrap();
+        let active = runtime.activation(grant).unwrap();
+        assert_eq!(active.definition.id, effect.id);
+        assert_eq!(active.electrical_resistance_points, 8);
+        assert_eq!(active.electrical_resistance_floor, Some(50));
+        for (underlying, intermediate, queried) in
+            [(20, 50, 50), (45, 53, 53), (70, 78, 78), (92, 100, 95)]
+        {
+            runtime
+                .set_underlying_electrical_resistance(actor, underlying)
+                .unwrap();
+            assert_eq!(
+                runtime.underlying_electrical_resistance(actor),
+                Ok(underlying)
+            );
+            assert_eq!(
+                runtime.electrical_resistance_after_effects(actor),
+                Ok(intermediate)
+            );
+            assert_eq!(runtime.electrical_resistance(actor), Ok(queried));
+        }
+        runtime.remove_activation(grant).unwrap();
+        assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(92));
+    }
+}
+
+#[test]
+fn removals_recompute_surviving_additions_and_floors() {
+    let item = item();
+    let plus = electrical("smithing:effect/conductor", 8);
+    let drain = electrical("smithing:effect/drain", -10);
+    let floor = electrical_floor("smithing:effect/grounding", 50);
+    let higher = electrical_floor("smithing:effect/higher-minimum", 60);
+    let mut runtime = Runtime::default();
+    let actor = runtime.create_actor(10).unwrap();
+    let other = runtime.create_actor(10).unwrap();
+    runtime
+        .set_underlying_electrical_resistance(actor, 45)
+        .unwrap();
+    runtime
+        .set_underlying_electrical_resistance(other, 12)
+        .unwrap();
+
+    let plus_sources = [
+        equip(&mut runtime, actor, &item),
+        equip(&mut runtime, actor, &item),
+    ];
+    let floor_sources = [
+        equip(&mut runtime, actor, &item),
+        equip(&mut runtime, actor, &item),
+    ];
+    for source in plus_sources {
+        runtime.activate_effect(source, actor, &plus).unwrap();
+    }
+    let floors =
+        floor_sources.map(|source| runtime.activate_effect(source, actor, &floor).unwrap());
+    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(61));
+
+    let drain_source = equip(&mut runtime, actor, &item);
+    let drain_id = runtime
+        .activate_effect(drain_source, actor, &drain)
+        .unwrap();
+    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(51));
+    runtime.unequip(plus_sources[0], actor).unwrap();
+    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(50));
+    let higher_id = runtime
+        .activate_effect(floor_sources[0], actor, &higher)
+        .unwrap();
+    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(60));
+    runtime.remove_activation(higher_id).unwrap();
+
+    runtime.remove_activation(floors[0]).unwrap();
+    assert_eq!(
+        runtime.activation(floors[1]).unwrap().source,
+        floor_sources[1]
+    );
+    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(50));
+    runtime.unequip(floor_sources[1], actor).unwrap();
+    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(43));
+    runtime.remove_activation(drain_id).unwrap();
+    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(53));
+    runtime.unequip(plus_sources[1], actor).unwrap();
+    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(45));
+    assert_eq!(runtime.electrical_resistance_after_effects(other), Ok(12));
+}
+
+#[test]
+fn a_floor_cannot_mask_overflow_on_activation_or_removal() {
+    let item = item();
+    let mut mixed = electrical("smithing:effect/grounding", 1);
+    mixed
+        .operations
+        .extend(electrical_floor("demo:effect/minimum", 50).operations);
+    let drain = electrical("smithing:effect/drain", -1);
+    let surviving_floor = electrical_floor("smithing:effect/surviving-minimum", 40);
+    let mut runtime = Runtime::default();
+    let actor = runtime.create_actor(10).unwrap();
+    let source = equip(&mut runtime, actor, &item);
+    let drain_source = equip(&mut runtime, actor, &item);
+    runtime
+        .set_underlying_electrical_resistance(actor, i32::MAX)
+        .unwrap();
+    assert_eq!(
+        runtime.activate_effect(source, actor, &mixed),
+        Err(Error::ElectricalResistanceOverflow)
+    );
+    assert_eq!(
+        runtime.electrical_resistance_after_effects(actor),
+        Ok(i32::MAX)
+    );
+    assert!(runtime.activations.is_empty());
+
+    runtime
+        .set_underlying_electrical_resistance(actor, i32::MIN)
+        .unwrap();
+    let grant = runtime.activate_effect(source, actor, &mixed).unwrap();
+    let drain_id = runtime
+        .activate_effect(drain_source, actor, &drain)
+        .unwrap();
+    let floor_id = runtime
+        .activate_effect(drain_source, actor, &surviving_floor)
+        .unwrap();
+    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(50));
+    assert_eq!(
+        runtime.remove_activation(grant),
+        Err(Error::ElectricalResistanceOverflow)
+    );
+    assert_eq!(
+        runtime.unequip(source, actor),
+        Err(Error::ElectricalResistanceOverflow)
+    );
+    assert_eq!(
+        runtime
+            .activation(grant)
+            .unwrap()
+            .electrical_resistance_floor,
+        Some(50)
+    );
+    assert_eq!(runtime.item(source).unwrap().equipped_by, Some(actor));
+    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(50));
+    runtime.remove_activation(drain_id).unwrap();
+    runtime.unequip(source, actor).unwrap();
+    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(40));
+    runtime.remove_activation(floor_id).unwrap();
+    assert_eq!(
+        runtime.electrical_resistance_after_effects(actor),
+        Ok(i32::MIN)
+    );
+}
+
 fn equip<'a>(
     runtime: &mut Runtime<'a>,
     actor: ActorId,
@@ -326,7 +499,7 @@ fn unsupported_operation_rejects_all_clauses_of_a_composite() {
     let item = item();
     let mut composite = body_of_fire();
     let unsupported = EffectOperation::ResistanceFloor {
-        channel: ResistanceKind::Electrical,
+        channel: ResistanceKind::Physical,
         minimum_percent: 60,
     };
     composite.operations.push(unsupported);
@@ -672,7 +845,7 @@ fn fire_floor_rejects_invalid_handles_and_other_channels() {
     let item = item();
     let effect = fire_floor("arcanum:effect/53", 50);
     let unsupported = EffectOperation::ResistanceFloor {
-        channel: ResistanceKind::Electrical,
+        channel: ResistanceKind::Physical,
         minimum_percent: 50,
     };
     let mut composite = fire_floor("smithing:effect/unsupported", 95);

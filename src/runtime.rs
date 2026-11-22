@@ -61,6 +61,8 @@ pub struct EffectActivation<'content> {
     pub poison_resistance_floor: Option<i32>,
     /// The signed Electrical adjustment in percentage points granted at activation.
     pub electrical_resistance_points: i32,
+    /// The strongest Electrical minimum granted by this activation, if any.
+    pub electrical_resistance_floor: Option<i32>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -222,10 +224,16 @@ impl<'content> Runtime<'content> {
         Ok(())
     }
 
-    /// Apply the active additions before the bounds stage. Electrical currently has no bounds.
+    /// Add surviving Electrical adjustments, then apply the strongest active minimum.
     pub fn electrical_resistance_after_effects(&self, actor: ActorId) -> Result<i32, Error> {
         let underlying = self.underlying_electrical_resistance(actor)?;
-        checked_electrical(self.total_electrical(actor, underlying, |_| true))
+        let after_additions =
+            checked_electrical(self.total_electrical(actor, underlying, |_| true))?;
+        Ok(
+            self.apply_resistance_floors(actor, after_additions, |grant| {
+                grant.electrical_resistance_floor
+            }),
+        )
     }
 
     /// Ordinary Electrical resistance query, clamped after evaluating active effects.
@@ -310,6 +318,7 @@ impl<'content> Runtime<'content> {
         let mut points = 0i128;
         let mut fire_resistance_floor: Option<i32> = None;
         let mut poison_resistance_floor: Option<i32> = None;
+        let mut electrical_resistance_floor: Option<i32> = None;
         let mut electrical_points = 0i128;
         for &operation in &definition.operations {
             match operation {
@@ -327,6 +336,13 @@ impl<'content> Runtime<'content> {
                     minimum_percent,
                 } => {
                     poison_resistance_floor = poison_resistance_floor.max(Some(minimum_percent));
+                }
+                EffectOperation::ResistanceFloor {
+                    channel: ResistanceKind::Electrical,
+                    minimum_percent,
+                } => {
+                    electrical_resistance_floor =
+                        electrical_resistance_floor.max(Some(minimum_percent));
                 }
                 EffectOperation::AddResistance {
                     channel: ResistanceKind::Electrical,
@@ -354,6 +370,7 @@ impl<'content> Runtime<'content> {
                 fire_resistance_floor,
                 poison_resistance_floor,
                 electrical_resistance_points,
+                electrical_resistance_floor,
             },
         );
         Ok(id)
