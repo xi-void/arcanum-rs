@@ -81,8 +81,17 @@ including:
 - Dialogue and quests
 - World simulation
 
-Compatibility means reproducing observable behavior, not
-reproducing implementation defects.
+Compatibility means preserving original game content and intended
+gameplay behavior, not reproducing implementation defects.
+
+Arcanum CE serves as a reference for established algorithms, formulas,
+resource interpretation, and observable gameplay behavior.
+
+Proven algorithms may be reused or adapted where appropriate, subject
+to licensing and code provenance.
+
+Behavioral compatibility does not require architectural equivalence.
+Legacy implementation details must not dictate native Rust data models.
 
 ### 6. Modding as a First-Class Requirement
 
@@ -171,9 +180,14 @@ before expanding the implementation.
 
 ## Guiding Principle
 
-Preserve Arcanum's behavior and atmosphere.
+Preserve Arcanum's content, mechanics, and atmosphere.
 
 Replace its technical limitations.
 
-Arcanum-RS must never become a direct translation of Arcanum CE
-that reproduces the same architectural problems in Rust.
+Use Arcanum CE as a source of behavioral evidence and proven algorithms,
+not as the architectural blueprint for the new engine.
+
+Design independent Rust systems around explicit ownership, native
+content models, and extensibility.
+
+Compatibility is an external contract. Architecture is our choice.
