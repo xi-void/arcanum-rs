@@ -42,6 +42,7 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] art inspect <game-directory> <resource-path> <frame> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art export <game-directory> <resource-path> <frame> <output.pam> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs art demo                          (requires --features windowed)
+  arcanum-rs [--ordered] art sector <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs art floor-demo                    (requires --features windowed)
   arcanum-rs [--ordered] art floor <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs art overlap-demo                  (requires --features windowed)
@@ -104,6 +105,10 @@ fn main() -> ExitCode {
             viewer::show_synthetic_overlap().map_err(Into::into)
         }
         #[cfg(feature = "windowed")]
+        (Some("art"), [_, action, game, options @ ..]) if action == "sector" => {
+            show_sector_floor(Path::new(game), options, policy)
+        }
+        #[cfg(feature = "windowed")]
         (Some("art"), [_, action]) if action == "floor-demo" && policy == Policy::Ce => {
             viewer::show_floor(
                 "Arcanum-RS | Synthetic isometric floor".into(),
@@ -138,7 +143,8 @@ fn main() -> ExitCode {
                 || action == "overlap"
                 || action == "overlap-demo"
                 || action == "floor"
-                || action == "floor-demo" =>
+                || action == "floor-demo"
+                || action == "sector" =>
         {
             Err("sprite presentation requires a build with --features windowed".into())
         }
@@ -849,6 +855,64 @@ fn show_art_floor(game: &Path, options: &[OsString], policy: Policy) -> Result<(
         "Arcanum-RS | Original isometric floor".into(),
         &floor.decoded.frame,
         &foreground.decoded.frame,
+    )?)
+}
+
+#[cfg(feature = "windowed")]
+fn show_sector_floor(
+    game: &Path,
+    options: &[OsString],
+    policy: Policy,
+) -> Result<(), Box<dyn Error>> {
+    use content::sector::{DEMO_MAP, DEMO_ORIGIN, DEMO_SECTOR, load_patch};
+
+    let patch = load_patch(
+        &mut inspection_vfs(game, options, policy)?,
+        DEMO_MAP,
+        DEMO_SECTOR,
+        DEMO_ORIGIN,
+    )?;
+    let mut out = io::stdout().lock();
+    writeln!(
+        out,
+        "Sector: {} from {}",
+        patch.source.virtual_path, patch.source
+    )?;
+    writeln!(
+        out,
+        "Terrain names: {} from {}",
+        patch.names_source.virtual_path, patch.names_source
+    )?;
+    writeln!(
+        out,
+        "Lights: {}, tile array at byte {}",
+        patch.light_count, patch.tile_offset
+    )?;
+    writeln!(
+        out,
+        "Patch center: {:?}, {} floor tiles",
+        patch.center,
+        patch.tiles().len()
+    )?;
+    for frame in patch.artwork() {
+        writeln!(
+            out,
+            "ART: {} from {}",
+            frame.source.virtual_path, frame.source
+        )?;
+    }
+    drop(out);
+    let layers: Vec<_> = patch
+        .draws()
+        .map(|draw| viewer::Layer {
+            frame: draw.frame,
+            // This five-by-five patch is bounded to 160 pixels from center.
+            relative_anchor: (draw.anchor.0 as i16, draw.anchor.1 as i16),
+        })
+        .collect();
+    Ok(viewer::show_layers(
+        "Arcanum-RS | Bates Mansion floor".into(),
+        &layers,
     )?)
 }
 

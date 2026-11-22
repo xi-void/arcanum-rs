@@ -16,25 +16,27 @@ pub fn project_tile(x: i32, y: i32) -> Option<(i32, i32)> {
     ))
 }
 
+/// Place a verified 78 × 40 floor frame at a projected tile center.
+pub fn floor_draw(frame: &SpriteFrame, x: i32, y: i32) -> Option<SpriteDraw<'_>> {
+    if (frame.width, frame.height) != FLOOR_SIZE || frame.hotspot != FLOOR_HOTSPOT {
+        return None;
+    }
+    let (sx, sy) = project_tile(x, y)?;
+    // The 78 × 40 raster starts at center − (39, 20).
+    Some(SpriteDraw {
+        frame,
+        anchor: (sx, sy.checked_add(FLOOR_HOTSPOT.1 - 20)?),
+    })
+}
+
 /// Build the fixed demo's 3 × 3 floor pass, followed by one centered sprite.
-/// The floor must match the verified frame dimensions and stored hotspot.
 pub fn fixed_scene<'a>(
     floor: &'a SpriteFrame,
     foreground: &'a SpriteFrame,
 ) -> Option<impl Iterator<Item = SpriteDraw<'a>>> {
-    if (floor.width, floor.height) != FLOOR_SIZE || floor.hotspot != FLOOR_HOTSPOT {
-        return None;
-    }
+    floor_draw(floor, 0, 0)?;
     let floor_draws = (-1..=1).flat_map(move |y| {
-        (-1..=1).map(move |x| {
-            let (sx, sy) = project_tile(x, y).expect("fixed patch fits signed screen coordinates");
-            // CE places the 78 × 40 raster at center − (39, 20).
-            // Its bottom hotspot is (39, 39), so the draw anchor is 19 px below center.
-            SpriteDraw {
-                frame: floor,
-                anchor: (sx, sy + FLOOR_HOTSPOT.1 - 20),
-            }
-        })
+        (-1..=1).map(move |x| floor_draw(floor, x, y).expect("fixed patch fits screen coordinates"))
     });
     Some(floor_draws.chain([SpriteDraw {
         frame: foreground,
