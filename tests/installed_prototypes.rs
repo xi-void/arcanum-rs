@@ -160,3 +160,110 @@ fn healing_jacket_preserves_ordered_size_variants_and_provenance() {
         Some(definition)
     );
 }
+
+#[test]
+#[ignore = "requires the installed Arcanum data"]
+fn audits_learned_and_found_coverage_and_selected_references() {
+    use arcanum_rs::content::schematics::audit::{GroupStatus, audit_schematics};
+    use std::collections::BTreeMap;
+
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    let cases = [
+        (2450, [3, 3], 15108, [8091, 8099, 8107], [8148, 8149, 8150]),
+        (3250, [3, 3], 15123, [8091, 8099, 8107], [8130, 8131, 8292]),
+        (3260, [3, 3], 15155, [8130, 8131, 8292], [8115, 8123, 8128]),
+        (4450, [1, 3], 15108, [8075, 8083, 8088], [8229, 8230, 8231]),
+        (5090, [1, 3], 15177, [8115, 8123, 8128], [8073, 8081, 8291]),
+    ];
+    let ids = [
+        LegacyRecipeId(4220),
+        LegacyRecipeId(2450),
+        LegacyRecipeId(3250),
+    ];
+    let audit = audit_schematics(&mut vfs, &ids).unwrap();
+    assert_eq!(audit.rules_source.storage, Storage::Loose);
+    assert!(audit.duplicate_keys.is_empty());
+    assert_eq!(audit.groups.len(), 119);
+    assert_eq!(
+        audit
+            .groups
+            .iter()
+            .filter(|group| group.id.0 < 4000)
+            .count(),
+        56
+    );
+    let mut quantities = BTreeMap::new();
+    let mut variants = Vec::new();
+    for group in &audit.groups {
+        let GroupStatus::Supported(decoded) = &group.status else {
+            panic!("unsupported installed group {group:?}");
+        };
+        let shape = group.shape.unwrap();
+        assert!(shape.lists_align);
+        assert!(!shape.repeated_ingredients[1]);
+        *quantities.entry(shape.output_quantity.get()).or_insert(0) += 1;
+        if decoded.variants.len() == 1 {
+            assert_eq!(shape.ingredient_ids, [1, 1]);
+            assert_eq!(shape.product_ids, 1);
+        } else {
+            variants.push((group.id.0, shape, &decoded.variants));
+        }
+    }
+    assert_eq!(
+        quantities,
+        BTreeMap::from([(1, 94), (2, 3), (3, 15), (4, 2), (5, 5)])
+    );
+    assert_eq!(variants.len(), cases.len());
+    for ((id, shape, variants), (expected_id, widths, first, second, products)) in
+        variants.into_iter().zip(cases)
+    {
+        assert_eq!(id, expected_id);
+        assert_eq!(shape.ingredient_ids, widths);
+        assert_eq!(shape.repeated_ingredients, [widths[0] > 1, false]);
+        assert_eq!(shape.product_ids, 3);
+        assert_eq!(shape.output_quantity.get(), 1);
+        assert_eq!(
+            *variants,
+            second
+                .into_iter()
+                .zip(products)
+                .map(|(input, product)| RecipeVariant {
+                    ingredients: [BasicPrototypeId(first), BasicPrototypeId(input)],
+                    product: BasicPrototypeId(product),
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(audit.references.len(), ids.len());
+    for (_, report) in &audit.references {
+        let report = report.as_ref().unwrap();
+        assert!(report.definition.is_some());
+        assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    }
+    let chainmail = audit.references[1].1.as_ref().unwrap();
+    assert_eq!(chainmail.legacy.id, LegacyRecipeId(3250));
+    assert_eq!(
+        chainmail.title.as_ref().unwrap().text,
+        "Feather-Weight Chainmail"
+    );
+    let art = &chainmail.illustration.as_ref().unwrap().asset_source;
+    assert_eq!(
+        art.virtual_path,
+        "art/interface/ultralite_chain_mail_scheme.art"
+    );
+    assert_eq!(art.mount_path.file_name().unwrap(), "Arcanum1.dat");
+    for (basic, serialized, expected_name) in [
+        (15123, 15143, "Spool of Heavy Wire"),
+        (8292, 8312, "Large Feather-Weight Chain"),
+    ] {
+        let item = &chainmail.items[&BasicPrototypeId(basic)];
+        let prototype = item.prototype.as_ref().unwrap();
+        assert_eq!(prototype.header.id, SerializedPrototypeId(serialized));
+        assert_eq!(prototype.description, Some(DescriptionId(basic as i32)));
+        assert_eq!(prototype.source.storage, Storage::Loose);
+        let label = item.name.as_ref().unwrap();
+        assert_eq!(label.text, expected_name);
+        assert_eq!(label.source.mount_path.file_name().unwrap(), "Arcanum5.dat");
+    }
+}

@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::num::NonZeroU32;
 
+pub mod audit;
+
 const RULES: &str = "rules/schematic.mes";
 const TEXT: &str = "mes/schematic_text.mes";
 const INTERFACE: &str = "art/interface/interface.mes";
@@ -256,6 +258,27 @@ pub fn load_schematic(vfs: &mut Vfs, id: LegacyRecipeId) -> Result<SchematicRepo
         source: Box::new(rules.source.clone()),
         error,
     })?;
+    let candidates = prototype_candidates(vfs, item_references(&legacy).map(|(_, id)| id));
+    Ok(resolve_schematic(vfs, &rules, legacy, &candidates))
+}
+
+fn item_references(legacy: &LegacyGroup) -> impl Iterator<Item = (&'static str, BasicPrototypeId)> {
+    legacy.variants.iter().flat_map(|variant| {
+        [
+            ("ingredient 1", variant.ingredients[0]),
+            ("ingredient 2", variant.ingredients[1]),
+            ("product", variant.product),
+        ]
+    })
+}
+
+fn resolve_schematic(
+    vfs: &mut Vfs,
+    rules: &LoadedMes,
+    legacy: LegacyGroup,
+    candidates: &BTreeMap<SerializedPrototypeId, Vec<String>>,
+) -> SchematicReport {
+    let id = legacy.id;
     let mut diagnostics = Vec::new();
     for key in id.0..=id.0 + 6 {
         if rules.duplicates.iter().any(|duplicate| duplicate.id == key) {
@@ -277,23 +300,16 @@ pub fn load_schematic(vfs: &mut Vfs, id: LegacyRecipeId) -> Result<SchematicRepo
     );
     let illustration = resolve_illustration(vfs, legacy.illustration, &mut diagnostics);
     let mut references = BTreeMap::new();
-    for variant in &legacy.variants {
-        for (field, id) in [
-            ("ingredient 1", variant.ingredients[0]),
-            ("ingredient 2", variant.ingredients[1]),
-            ("product", variant.product),
-        ] {
-            references.entry(id).or_insert(field);
-        }
+    for (field, id) in item_references(&legacy) {
+        references.entry(id).or_insert(field);
     }
-    let candidates = prototype_candidates(vfs, references.keys().copied());
     let mut description_tables = BTreeMap::new();
     let items = references
         .into_iter()
         .map(|(id, field)| {
             let item = resolve_item(
                 vfs,
-                &candidates,
+                candidates,
                 &mut description_tables,
                 field,
                 id,
@@ -303,7 +319,7 @@ pub fn load_schematic(vfs: &mut Vfs, id: LegacyRecipeId) -> Result<SchematicRepo
         })
         .collect();
     let mut report = SchematicReport {
-        rules_source: rules.source,
+        rules_source: rules.source.clone(),
         legacy,
         title,
         description,
@@ -313,7 +329,7 @@ pub fn load_schematic(vfs: &mut Vfs, id: LegacyRecipeId) -> Result<SchematicRepo
         diagnostics,
     };
     report.definition = native_definition(&report);
-    Ok(report)
+    report
 }
 
 fn native_definition(report: &SchematicReport) -> Option<SchematicDefinition> {
@@ -436,6 +452,9 @@ fn prototype_candidates(
         .filter_map(BasicPrototypeId::serialized)
         .collect();
     let mut found = BTreeMap::<_, Vec<_>>::new();
+    if wanted.is_empty() {
+        return found;
+    }
     for path in vfs.paths_with_prefix("proto/") {
         let name = path.strip_prefix("proto/").expect("matching prefix");
         if name.contains('/') || !name.ends_with(".pro") {

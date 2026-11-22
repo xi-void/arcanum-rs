@@ -166,9 +166,10 @@ game="$HOME/Work/arcanum-ce-test"
 target/debug/arcanum-rs prototype inspect "$game" 'proto/010087 - Food.pro'
 target/debug/arcanum-rs schematic inspect "$game" 4220
 target/debug/arcanum-rs schematic inspect "$game" 2450
+target/debug/arcanum-rs schematic audit "$game" 2450 3250 4220
 ```
 
-Both commands accept the MES command's `--mods <mods-directory> <mod-id> ...` argument. The version 119 prototype reader covers the fixed header, selected Food fields and the description key for Armor and Generic. Schematic inspection reports the selected group’s resource sources, unresolved references and any ordered input-to-output variants. [Content formats](docs/CONTENT_FORMATS.md#milestone-6-healing-jacket-variants)
+These commands accept the MES command's `--mods <mods-directory> <mod-id> ...` argument. The version 119 prototype reader covers the fixed header, selected Food fields and the description key for Armor and Generic. Schematic inspection reports the selected group’s resource sources, unresolved references and any ordered input-to-output variants. [Content formats](docs/CONTENT_FORMATS.md#milestone-6-healing-jacket-variants)
 
 ```sh
 ARCANUM_GAME_DIR="$HOME/Work/arcanum-ce-test" \
@@ -200,6 +201,8 @@ The MES scan parsed 713 of 725 installed archive and loose tables. The remaining
 A standalone comparison with CE's MES parser checked 7,177 unique IDs across seven tables. Each Rust value matched a corresponding CE record after decoding and newline normalization. For duplicate IDs this comparison allows any of CE's retained records, while Rust applies its last-record rule.
 
 The external integration test checks that `mes/gamedesc.mes` comes from `Arcanum.PATCH6` in CE mode and that enabling `vfs-smoke` changes ID `40000` to `Arcanum-RS test override`, with `vfs-smoke` reported as the source. Run it against the existing read-only fixtures with the following command.
+
+The audit summarizes learned and found groups in the winning rules table. Supply recipe IDs to validate their references in the same run, or omit IDs for structural coverage alone. [Audit findings](docs/CONTENT_FORMATS.md#milestone-7-schematic-coverage-audit)
 
 ```sh
 ARCANUM_GAME_DIR="$HOME/Work/arcanum-ce-test" \

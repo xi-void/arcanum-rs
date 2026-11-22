@@ -284,6 +284,15 @@ path = "resources"
         load_schematic(&mut vfs, GROUP).unwrap().definition.unwrap(),
         definition
     );
+    let audit = audit::audit_schematics(&mut vfs, &[GROUP]).unwrap();
+    assert_eq!(
+        audit.rules_source.mod_id.as_ref().unwrap().as_str(),
+        "override"
+    );
+    assert_eq!(
+        audit.references[0].1.as_ref().unwrap().definition.as_ref(),
+        Some(&definition)
+    );
 }
 
 #[test]
@@ -331,4 +340,115 @@ fn preserves_unresolved_ids_and_rejects_ambiguous_or_mismatched_prototypes() {
             report.diagnostics
         );
     }
+}
+
+#[test]
+fn audit_discovers_recipe_cells_and_reports_structure_in_id_order() {
+    use audit::{GroupStatus, audit_groups};
+
+    let variant = VARIANT_DATA
+        .replace("420", "201")
+        .replace("10100 10100 10100", "10100");
+    let cases = [
+        "{2023}{10100}",
+        "{1999}{reserved}{2037}{unused}{6000}{title page}{7000}{factory}",
+        RULE_DATA,
+        &variant,
+    ];
+    let groups = audit_groups(&Mes::parse_text(&cases.concat()).unwrap());
+    let reversed =
+        audit_groups(&Mes::parse_text(&cases.into_iter().rev().collect::<String>()).unwrap());
+    assert_eq!(groups, reversed);
+    assert_eq!(
+        groups.iter().map(|group| group.id.0).collect::<Vec<_>>(),
+        [2010, 2020, 4200]
+    );
+    let shape = groups[0].shape.unwrap();
+    assert_eq!(shape.ingredient_ids, [1, 3]);
+    assert_eq!(shape.repeated_ingredients, [false, false]);
+    assert_eq!(shape.product_ids, 3);
+    assert_eq!(shape.output_quantity.get(), 2);
+    assert!(shape.lists_align);
+    let GroupStatus::Supported(group) = &groups[0].status else {
+        panic!("expected ordered variants");
+    };
+    assert_eq!(
+        group
+            .variants
+            .iter()
+            .map(|variant| (variant.ingredients[1].0, variant.product.0))
+            .collect::<Vec<_>>(),
+        [(10101, 10102), (10103, 10104), (10105, 10106)]
+    );
+    assert_eq!(
+        groups[1].status,
+        GroupStatus::MalformedOrIncomplete(GroupError::Missing(2020))
+    );
+    assert!(groups[1].shape.is_none());
+    assert!(matches!(groups[2].status, GroupStatus::Supported(_)));
+}
+
+#[test]
+fn audit_separates_unsupported_shapes_from_bad_records() {
+    use audit::{GroupStatus, audit_groups};
+
+    let unsupported = VARIANT_DATA.replace("10102 10104 10106", "10102");
+    let malformed = unsupported.replace("{4206}{2}", "{4206}{bad}");
+    let overlong = VARIANT_DATA.replace("10102 10104 10106", "10102 10104 10106 10107");
+    for (rules, is_unsupported) in [
+        (&unsupported, true),
+        (&malformed, false),
+        (&overlong, false),
+    ] {
+        let groups = audit_groups(&Mes::parse_text(rules).unwrap());
+        assert_eq!(groups.len(), 1);
+        if is_unsupported {
+            assert!(matches!(
+                groups[0].status,
+                GroupStatus::Unsupported(GroupError::UnsupportedMapping { key: 4205, .. })
+            ));
+            let shape = groups[0].shape.unwrap();
+            assert!(!shape.lists_align);
+            assert_eq!(shape.repeated_ingredients, [true, false]);
+        } else {
+            assert!(matches!(
+                groups[0].status,
+                GroupStatus::MalformedOrIncomplete(_)
+            ));
+        }
+    }
+}
+
+#[test]
+fn audit_checks_only_selected_references_and_reports_missing_groups() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "base/rules/schematic.mes",
+        format!("{RULE_DATA}{{4206}}{{2}}"),
+    );
+    let mut vfs = fixture.vfs();
+    let report = audit::audit_schematics(&mut vfs, &[]).unwrap();
+    assert!(report.references.is_empty());
+    assert_eq!(report.duplicate_keys, [4206]);
+    assert!(matches!(
+        report.groups[0].status,
+        audit::GroupStatus::Supported(_)
+    ));
+
+    let absent = LegacyRecipeId(4190);
+    let report = audit::audit_schematics(&mut vfs, &[GROUP, absent, GROUP]).unwrap();
+    assert_eq!(report.references.len(), 2);
+    assert_eq!(report.references[0].0, absent);
+    assert!(matches!(
+        report.references[0].1,
+        Err(GroupError::Missing(4190))
+    ));
+    let selected = report.references[1].1.as_ref().unwrap();
+    assert!(selected.definition.is_none());
+    assert!(
+        selected
+            .diagnostics
+            .iter()
+            .any(|diag| diag.message.contains("serialized 10120"))
+    );
 }
