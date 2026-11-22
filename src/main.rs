@@ -42,7 +42,8 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] schematic audit <game-directory> [--all-references | [--readiness] [<recipe-id> ...]] [--mods <mods-directory> <mod-id> ...]
   arcanum-rs simulate equipment-demo
   arcanum-rs simulate resistance-demo
-  arcanum-rs simulate electrical-demo";
+  arcanum-rs simulate electrical-demo
+  arcanum-rs simulate composite-demo";
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -71,6 +72,9 @@ fn main() -> ExitCode {
         }
         (Some("simulate"), [_, demo]) if policy == Policy::Ce && demo == "electrical-demo" => {
             electrical_demo(&mut io::stdout().lock())
+        }
+        (Some("simulate"), [_, demo]) if policy == Policy::Ce && demo == "composite-demo" => {
+            composite_demo(&mut io::stdout().lock())
         }
         (Some("mes"), [_, action, game, resource, options @ ..]) if action == "inspect" => {
             inspect_mes(Path::new(game), resource, None, options, policy)
@@ -304,6 +308,100 @@ fn electrical_demo(out: &mut impl Write) -> Result<(), Box<dyn Error>> {
         runtime.electrical_resistance(actor)?
     )?;
     Ok(())
+}
+
+fn composite_demo(out: &mut impl Write) -> Result<(), Box<dyn Error>> {
+    use items::ResistanceKind::{Electrical, Fire, Poison};
+
+    let item = items::GenericDefinition {
+        id: items::ItemId("demo:item/composite-charm".into()),
+        display_name: "Composite charm".into(),
+        base_weight: 1,
+        base_worth: 0,
+        magic_tech_complexity: 0,
+    };
+    let effect = EffectDefinition {
+        id: EffectId("arcanum:effect/54".into()),
+        operations: vec![
+            EffectOperation::ResistanceFloor {
+                channel: Fire,
+                minimum_percent: 95,
+            },
+            EffectOperation::AddResistance {
+                channel: Electrical,
+                percentage_points: 8,
+            },
+            EffectOperation::ResistanceFloor {
+                channel: Poison,
+                minimum_percent: 97,
+            },
+        ],
+    };
+    let mut runtime = Runtime::default();
+    let actor = runtime.create_actor(10)?;
+    runtime.set_underlying_fire_resistance(actor, 20)?;
+    runtime.set_underlying_electrical_resistance(actor, 30)?;
+    runtime.set_underlying_poison_resistance(actor, 10)?;
+    let show_resistance = |out: &mut dyn Write,
+                           runtime: &Runtime<'_>|
+     -> Result<(), Box<dyn Error>> {
+        writeln!(
+            out,
+            "  Intermediate / ordinary query: Fire {}% / {}%, Electrical {}% / {}%, Poison {}% / {}%",
+            runtime.fire_resistance_after_effects(actor)?,
+            runtime.fire_resistance(actor)?,
+            runtime.electrical_resistance_after_effects(actor)?,
+            runtime.electrical_resistance(actor)?,
+            runtime.poison_resistance_after_effects(actor)?,
+            runtime.poison_resistance(actor)?
+        )?;
+        Ok(())
+    };
+    writeln!(
+        out,
+        "{actor:?} underlying: Fire {}%, Electrical {}%, Poison {}%",
+        runtime.underlying_fire_resistance(actor)?,
+        runtime.underlying_electrical_resistance(actor)?,
+        runtime.underlying_poison_resistance(actor)?
+    )?;
+    let first = runtime.instantiate_item(ItemDefinitionRef::Generic(&item))?;
+    let second = runtime.instantiate_item(ItemDefinitionRef::Generic(&item))?;
+    let mut grant = |source| -> Result<_, Box<dyn Error>> {
+        runtime.equip(source, actor)?;
+        let id = runtime.activate_effect(source, actor, &effect)?;
+        writeln!(
+            out,
+            "Equipped {source:?}, granted {} as {id:?}",
+            effect.id.0
+        )?;
+        show_resistance(out, &runtime)?;
+        Ok(id)
+    };
+    let first_grant = grant(first)?;
+    let remaining = grant(second)?;
+    runtime.remove_activation(first_grant)?;
+    let surviving = runtime.activation(remaining)?;
+    writeln!(
+        out,
+        "Removed {first_grant:?}, {:?} from {:?} remains",
+        surviving.id, surviving.source
+    )?;
+    show_resistance(out, &runtime)?;
+
+    runtime.set_underlying_fire_resistance(actor, 98)?;
+    runtime.set_underlying_electrical_resistance(actor, 92)?;
+    runtime.set_underlying_poison_resistance(actor, 90)?;
+    writeln!(
+        out,
+        "Underlying changed: Fire {}%, Electrical {}%, Poison {}%",
+        runtime.underlying_fire_resistance(actor)?,
+        runtime.underlying_electrical_resistance(actor)?,
+        runtime.underlying_poison_resistance(actor)?
+    )?;
+    show_resistance(out, &runtime)?;
+    runtime.unequip(second, actor)?;
+    writeln!(out, "Unequipped {second:?}, removed {remaining:?}")?;
+    show_resistance(out, &runtime)
 }
 
 fn open_archive(path: &Path) -> Result<Archive<File>, Box<dyn Error>> {

@@ -303,18 +303,33 @@ fn electrical_adjustments_follow_underlying_values_with_separate_query_clamping(
     assert_eq!(runtime.electrical_resistance(actor), Ok(3));
 }
 
+fn body_of_fire() -> EffectDefinition {
+    EffectDefinition {
+        id: EffectId("arcanum:effect/54".into()),
+        operations: crate::content::effects::decode_effect(
+            "resistfire min 95, resistelectrical +8, resistpoison min 97",
+        )
+        .unwrap(),
+    }
+}
+
+fn intermediate(runtime: &Runtime<'_>, actor: ActorId) -> [i32; 3] {
+    [
+        runtime.fire_resistance_after_effects(actor).unwrap(),
+        runtime.electrical_resistance_after_effects(actor).unwrap(),
+        runtime.poison_resistance_after_effects(actor).unwrap(),
+    ]
+}
+
 #[test]
-fn entire_body_of_fire_activation_is_rejected() {
+fn unsupported_operation_rejects_all_clauses_of_a_composite() {
     let item = item();
-    let mut composite = fire_floor("arcanum:effect/54", 95);
-    composite
-        .operations
-        .extend(electrical("demo:effect/electrical", 8).operations);
-    let poison = EffectOperation::ResistanceFloor {
-        channel: ResistanceKind::Poison,
-        minimum_percent: 97,
+    let mut composite = body_of_fire();
+    let unsupported = EffectOperation::ResistanceFloor {
+        channel: ResistanceKind::Electrical,
+        minimum_percent: 60,
     };
-    composite.operations.push(poison);
+    composite.operations.push(unsupported);
     let existing = fire_floor("arcanum:effect/53", 50);
     let mut runtime = Runtime::default();
     let actor = runtime.create_actor(10).unwrap();
@@ -326,10 +341,9 @@ fn entire_body_of_fire_activation_is_rejected() {
     let floor = runtime.activate_effect(first, actor, &existing).unwrap();
     assert_eq!(
         runtime.activate_effect(second, actor, &composite),
-        Err(Error::UnsupportedOperation(poison))
+        Err(Error::UnsupportedOperation(unsupported))
     );
-    assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(30));
-    assert_eq!(runtime.fire_resistance(actor), Ok(50));
+    assert_eq!(intermediate(&runtime, actor), [50, 30, 0]);
     assert_eq!(runtime.armour_class(actor), Ok(10));
     assert_eq!(runtime.activation(floor).unwrap().source, first);
     assert_eq!(runtime.activations.len(), 1);
@@ -344,6 +358,167 @@ fn entire_body_of_fire_activation_is_rejected() {
         runtime.activate_effect(unknown_item, actor, &composite),
         Err(Error::UnknownItem(unknown_item))
     );
+}
+
+#[test]
+fn poison_floor_follows_the_underlying_value_and_preserves_the_intermediate() {
+    let item = item();
+    let effect = EffectDefinition {
+        id: EffectId("smithing:effect/poison-ward".into()),
+        operations: vec![EffectOperation::ResistanceFloor {
+            channel: ResistanceKind::Poison,
+            minimum_percent: 97,
+        }],
+    };
+    let mut runtime = Runtime::default();
+    let actor = runtime.create_actor(10).unwrap();
+    let source = equip(&mut runtime, actor, &item);
+    let id = runtime.activate_effect(source, actor, &effect).unwrap();
+    for (underlying, expected) in [(20, 97), (90, 97), (97, 97), (99, 99)] {
+        runtime
+            .set_underlying_poison_resistance(actor, underlying)
+            .unwrap();
+        assert_eq!(runtime.underlying_poison_resistance(actor), Ok(underlying));
+        assert_eq!(runtime.poison_resistance_after_effects(actor), Ok(expected));
+        assert_eq!(runtime.poison_resistance(actor), Ok(95));
+        assert_eq!(
+            runtime.activation(id).unwrap().poison_resistance_floor,
+            Some(97)
+        );
+    }
+    runtime.remove_activation(id).unwrap();
+    assert_eq!(runtime.poison_resistance_after_effects(actor), Ok(99));
+    assert_eq!(runtime.poison_resistance(actor), Ok(95));
+}
+
+#[test]
+fn independent_composite_sources_repeat_without_residual_operations() {
+    let item = item();
+    let effect = body_of_fire();
+    let mut reordered = effect.clone();
+    reordered.operations.reverse();
+    let mut runtime = Runtime::default();
+    let actor = runtime.create_actor(10).unwrap();
+    let other = runtime.create_actor(10).unwrap();
+    runtime.set_underlying_fire_resistance(actor, 20).unwrap();
+    runtime
+        .set_underlying_electrical_resistance(actor, 30)
+        .unwrap();
+    runtime.set_underlying_poison_resistance(actor, 10).unwrap();
+    let sources = [
+        runtime
+            .instantiate_item(ItemDefinitionRef::Generic(&item))
+            .unwrap(),
+        runtime
+            .instantiate_item(ItemDefinitionRef::Generic(&item))
+            .unwrap(),
+    ];
+    for (removed, kept) in [(0, 1), (1, 0)] {
+        let mut grants = Vec::new();
+        for (source, definition) in sources.into_iter().zip([&effect, &reordered]) {
+            runtime.equip(source, actor).unwrap();
+            grants.push(runtime.activate_effect(source, actor, definition).unwrap());
+            let expected = if grants.len() == 1 { 38 } else { 46 };
+            assert_eq!(intermediate(&runtime, actor), [95, expected, 97]);
+        }
+        assert_ne!(grants[0], grants[1]);
+        let grant = runtime.activation(grants[0]).unwrap();
+        assert_eq!(
+            (grant.id, grant.target, grant.source),
+            (grants[0], actor, sources[0])
+        );
+        assert_eq!(grant.definition, &effect);
+        assert_eq!(
+            (
+                grant.fire_resistance_floor,
+                grant.electrical_resistance_points,
+                grant.poison_resistance_floor
+            ),
+            (Some(95), 8, Some(97))
+        );
+        assert_eq!(runtime.poison_resistance(actor), Ok(95));
+        runtime.unequip(sources[removed], actor).unwrap();
+        assert!(matches!(
+            runtime.activation(grants[removed]),
+            Err(Error::UnknownActivation(_))
+        ));
+        assert_eq!(
+            runtime.activation(grants[kept]).unwrap().source,
+            sources[kept]
+        );
+        assert_eq!(intermediate(&runtime, actor), [95, 38, 97]);
+        assert_eq!(intermediate(&runtime, other), [0, 0, 0]);
+
+        runtime.set_underlying_fire_resistance(actor, 98).unwrap();
+        runtime
+            .set_underlying_electrical_resistance(actor, 92)
+            .unwrap();
+        runtime.set_underlying_poison_resistance(actor, 90).unwrap();
+        assert_eq!(intermediate(&runtime, actor), [98, 100, 97]);
+        assert_eq!(
+            [
+                runtime.fire_resistance(actor),
+                runtime.electrical_resistance(actor),
+                runtime.poison_resistance(actor)
+            ],
+            [Ok(95), Ok(95), Ok(95)]
+        );
+        runtime.remove_activation(grants[kept]).unwrap();
+        assert_eq!(
+            runtime.remove_activation(grants[kept]),
+            Err(Error::UnknownActivation(grants[kept]))
+        );
+        assert_eq!(intermediate(&runtime, actor), [98, 92, 90]);
+        assert_eq!(runtime.armour_class(actor), Ok(10));
+        runtime.unequip(sources[kept], actor).unwrap();
+        assert!(runtime.activations.is_empty());
+        runtime.set_underlying_fire_resistance(actor, 20).unwrap();
+        runtime
+            .set_underlying_electrical_resistance(actor, 30)
+            .unwrap();
+        runtime.set_underlying_poison_resistance(actor, 10).unwrap();
+    }
+}
+
+#[test]
+fn electrical_overflow_blocks_composite_activation_and_removal_atomically() {
+    let item = item();
+    let effect = body_of_fire();
+    let cancelling = electrical("smithing:effect/drain", -8);
+    let mut runtime = Runtime::default();
+    let actor = runtime.create_actor(10).unwrap();
+    let source = equip(&mut runtime, actor, &item);
+    let other = equip(&mut runtime, actor, &item);
+    runtime
+        .set_underlying_electrical_resistance(actor, i32::MAX)
+        .unwrap();
+    assert_eq!(
+        runtime.activate_effect(source, actor, &effect),
+        Err(Error::ElectricalResistanceOverflow)
+    );
+    assert_eq!(intermediate(&runtime, actor), [0, i32::MAX, 0]);
+    assert!(runtime.activations.is_empty());
+    assert_eq!(runtime.item(source).unwrap().equipped_by, Some(actor));
+
+    runtime
+        .set_underlying_electrical_resistance(actor, i32::MIN)
+        .unwrap();
+    let id = runtime.activate_effect(source, actor, &effect).unwrap();
+    let drain = runtime.activate_effect(other, actor, &cancelling).unwrap();
+    assert_eq!(
+        runtime.remove_activation(id),
+        Err(Error::ElectricalResistanceOverflow)
+    );
+    assert_eq!(
+        runtime.unequip(source, actor),
+        Err(Error::ElectricalResistanceOverflow)
+    );
+    assert_eq!(intermediate(&runtime, actor), [95, i32::MIN, 97]);
+    assert_eq!(runtime.activation(id).unwrap().source, source);
+    assert_eq!(runtime.item(source).unwrap().equipped_by, Some(actor));
+    runtime.remove_activation(drain).unwrap();
+    runtime.unequip(source, actor).unwrap();
+    assert_eq!(intermediate(&runtime, actor), [0, i32::MIN, 0]);
 }
 
 #[test]
@@ -496,12 +671,12 @@ fn signed_underlying_resistance_and_native_floors_stay_unclamped_until_query() {
 fn fire_floor_rejects_invalid_handles_and_other_channels() {
     let item = item();
     let effect = fire_floor("arcanum:effect/53", 50);
-    let poison = EffectOperation::ResistanceFloor {
-        channel: ResistanceKind::Poison,
-        minimum_percent: 97,
+    let unsupported = EffectOperation::ResistanceFloor {
+        channel: ResistanceKind::Electrical,
+        minimum_percent: 50,
     };
     let mut composite = fire_floor("smithing:effect/unsupported", 95);
-    composite.operations.push(poison);
+    composite.operations.push(unsupported);
     let mut runtime = Runtime::default();
     let actor = runtime.create_actor(10).unwrap();
     let source = equip(&mut runtime, actor, &item);
@@ -525,7 +700,7 @@ fn fire_floor_rejects_invalid_handles_and_other_channels() {
     );
     assert_eq!(
         runtime.activate_effect(source, actor, &composite),
-        Err(Error::UnsupportedOperation(poison))
+        Err(Error::UnsupportedOperation(unsupported))
     );
     assert_eq!(runtime.fire_resistance(actor), Ok(0));
     assert!(runtime.activations.is_empty());

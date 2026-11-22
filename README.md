@@ -7,8 +7,7 @@ The long-term objective is a standalone, extensible engine with
 original-game compatibility and OpenMW-style modding capabilities.
 
 **Current status:** Resource and content inspection, mod-aware loading,
-and a headless runtime for additive AC, Fire resistance floors, and
-Electrical resistance additions.
+and a headless runtime for additive AC and selected resistance effects.
 
 ## Roadmap
 
@@ -40,6 +39,7 @@ Build with `cargo build`, then run these commands from the project directory.
 target/debug/arcanum-rs simulate equipment-demo
 target/debug/arcanum-rs simulate resistance-demo
 target/debug/arcanum-rs simulate electrical-demo
+target/debug/arcanum-rs simulate composite-demo
 ```
 
 The asset-free equipment demo applies effect 128 to one actor from two item
@@ -55,6 +55,11 @@ Body of Fire using a synthetic one-operation definition. It shows two
 independent grants, then changes the underlying value while one grant
 is still active. At that point the intermediate result is 100% and the
 ordinary query returns 95%.
+
+The composite demo grants effect 54's three statistical operations as
+one activation per item. It shows both resistance stages, including the
+97% intermediate Poison floor and the 95% ordinary query. Body of Fire's
+spell casting and transformation remain outside the simulation.
 [Effect activation ownership](docs/ARCHITECTURE.md#headless-effect-activation-ownership)
 
 ```sh

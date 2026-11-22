@@ -57,6 +57,8 @@ pub struct EffectActivation<'content> {
     pub armour_class_points: i32,
     /// The strongest Fire minimum granted by this activation, if any.
     pub fire_resistance_floor: Option<i32>,
+    /// The strongest Poison minimum granted by this activation, if any.
+    pub poison_resistance_floor: Option<i32>,
     /// The signed Electrical adjustment in percentage points granted at activation.
     pub electrical_resistance_points: i32,
 }
@@ -110,6 +112,7 @@ struct ActorState {
     base_ac: i32,
     underlying_fire_resistance: i32,
     underlying_electrical_resistance: i32,
+    underlying_poison_resistance: i32,
 }
 
 /// Owns mutable state. IDs are local to the issuing runtime and never reused
@@ -131,6 +134,7 @@ impl<'content> Runtime<'content> {
                 base_ac,
                 underlying_fire_resistance: 0,
                 underlying_electrical_resistance: 0,
+                underlying_poison_resistance: 0,
             },
         );
         Ok(id)
@@ -191,12 +195,7 @@ impl<'content> Runtime<'content> {
     /// Evaluate the active lower bounds, before any final query clamp.
     pub fn fire_resistance_after_effects(&self, actor: ActorId) -> Result<i32, Error> {
         let underlying = self.underlying_fire_resistance(actor)?;
-        Ok(self
-            .activations
-            .values()
-            .filter(|grant| grant.target == actor)
-            .filter_map(|grant| grant.fire_resistance_floor)
-            .fold(underlying, i32::max))
+        Ok(self.apply_resistance_floors(actor, underlying, |grant| grant.fire_resistance_floor))
     }
 
     /// Ordinary Fire resistance query, clamped after evaluating active floors.
@@ -234,6 +233,35 @@ impl<'content> Runtime<'content> {
         Ok(self
             .electrical_resistance_after_effects(actor)?
             .clamp(0, 95))
+    }
+
+    /// Stored Poison resistance in signed percentage points, before active floors.
+    pub fn underlying_poison_resistance(&self, actor: ActorId) -> Result<i32, Error> {
+        Ok(self.actor(actor)?.underlying_poison_resistance)
+    }
+
+    pub fn set_underlying_poison_resistance(
+        &mut self,
+        actor: ActorId,
+        value: i32,
+    ) -> Result<(), Error> {
+        let state = self
+            .actors
+            .get_mut(&actor)
+            .ok_or(Error::UnknownActor(actor))?;
+        state.underlying_poison_resistance = value;
+        Ok(())
+    }
+
+    /// Evaluate active Poison minima before the ordinary query clamp.
+    pub fn poison_resistance_after_effects(&self, actor: ActorId) -> Result<i32, Error> {
+        let underlying = self.underlying_poison_resistance(actor)?;
+        Ok(self.apply_resistance_floors(actor, underlying, |grant| grant.poison_resistance_floor))
+    }
+
+    /// Ordinary Poison resistance query, clamped after evaluating active floors.
+    pub fn poison_resistance(&self, actor: ActorId) -> Result<i32, Error> {
+        Ok(self.poison_resistance_after_effects(actor)?.clamp(0, 95))
     }
 
     pub fn item(&self, item: ItemInstanceId) -> Result<&ItemInstance<'content>, Error> {
@@ -281,6 +309,7 @@ impl<'content> Runtime<'content> {
         self.require_wearer(source, target)?;
         let mut points = 0i128;
         let mut fire_resistance_floor: Option<i32> = None;
+        let mut poison_resistance_floor: Option<i32> = None;
         let mut electrical_points = 0i128;
         for &operation in &definition.operations {
             match operation {
@@ -292,6 +321,12 @@ impl<'content> Runtime<'content> {
                     minimum_percent,
                 } => {
                     fire_resistance_floor = fire_resistance_floor.max(Some(minimum_percent));
+                }
+                EffectOperation::ResistanceFloor {
+                    channel: ResistanceKind::Poison,
+                    minimum_percent,
+                } => {
+                    poison_resistance_floor = poison_resistance_floor.max(Some(minimum_percent));
                 }
                 EffectOperation::AddResistance {
                     channel: ResistanceKind::Electrical,
@@ -317,6 +352,7 @@ impl<'content> Runtime<'content> {
                 definition,
                 armour_class_points,
                 fire_resistance_floor,
+                poison_resistance_floor,
                 electrical_resistance_points,
             },
         );
@@ -341,6 +377,19 @@ impl<'content> Runtime<'content> {
 
     fn actor(&self, actor: ActorId) -> Result<&ActorState, Error> {
         self.actors.get(&actor).ok_or(Error::UnknownActor(actor))
+    }
+
+    fn apply_resistance_floors(
+        &self,
+        actor: ActorId,
+        intermediate: i32,
+        floor: impl Fn(&EffectActivation<'content>) -> Option<i32>,
+    ) -> i32 {
+        self.activations
+            .values()
+            .filter(|grant| grant.target == actor)
+            .filter_map(floor)
+            .fold(intermediate, i32::max)
     }
 
     fn total_ac(

@@ -86,9 +86,9 @@ grants or applied count across aptitude changes so it can retire the
 previous contribution before any refresh.
 
 [The headless runtime](../src/runtime.rs) implements this contract for
-explicit equipment grants, additive AC, Fire resistance floors and
-Electrical resistance additions.
-`Runtime` owns actor base AC and underlying Fire and Electrical resistance, item
+explicit equipment grants, additive AC, Fire and Poison resistance floors,
+and Electrical resistance additions.
+`Runtime` owns actor base AC and underlying resistance values, item
 associations and active records. Its typed actor, item instance
 and activation IDs are allocated deterministically and never reused
 within a runtime. Callers keep these handles with their issuing runtime.
@@ -106,16 +106,18 @@ operations and changes that would leave a total outside the signed
 32-bit range fail before state changes. This includes a removal if
 cancelling adjustments had kept the total in range.
 
-AC and Electrical points are captured at activation. A Fire floor
+AC and Electrical points are captured at activation. A Fire or Poison floor
 stores the minimum as an active constraint. The Electrical intermediate
 value is the actor's current signed underlying value plus its active
-additions. The Fire intermediate value is the maximum of its current
-underlying value and its active floors. CE evaluates additions before
+additions. The Fire and Poison intermediate values take the maximum of
+each current underlying value and its active floors. CE evaluates additions before
 bounds. This slice supports one of those stages per channel, with no
 channel combining both.
 
 The ordinary queries clamp the intermediate values to 0–95% without
-modifying the inputs or active grants. This follows CE's ordinary
+modifying the inputs or active grants. A Poison floor of 97% therefore
+remains 97% at the intermediate stage when the underlying value is at
+or below 97%. This follows CE's ordinary
 resistance query and omits its monstrous NPC exception. Electrical
 overflow checks cover new grants, changes to the underlying value and
 removals that could expose a previously cancelled overflow. The runtime
@@ -123,12 +125,18 @@ checks AC and Electrical totals before revoking grants or changing
 equipment ownership. An unsupported operation rejects the entire
 activation.
 
-The demo's +8 Electrical adjustment is the verified operation stored
-in effect 54. The demo constructs a single-operation native effect under
-its own ID and equips synthetic items. Body of Fire remains unsupported
-as a complete definition because its Poison floor has no runtime
-implementation. Other resistance additions, floors, and ceilings
-remain outside this slice.
+Effect 54's Fire minimum of 95%, Electrical addition of eight points,
+and Poison minimum of 97% can now run as one activation. The runtime
+collects each supported operation by channel before inserting the
+activation. Changing clause order leaves the result unchanged.
+Removal revokes the entire activation after checking the remaining
+totals, so a failure leaves both floors and the addition intact.
+The composite demo supplies the three verified clauses as one native
+definition with effect 54's ID. The Electrical demo still exercises
+the isolated +8 operation under its own ID. Both demos equip synthetic
+items. Spell casting, transformation, duration, Constitution-derived
+Poison resistance, and other resistance operations remain outside
+this runtime slice.
 [Resist Fire evidence](CONTENT_FORMATS.md#milestone-13-bounded-effect-definitions)
 · [Body of Fire evidence](CONTENT_FORMATS.md#milestone-14-composite-effect-definitions)
 

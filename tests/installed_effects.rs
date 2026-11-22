@@ -1,6 +1,7 @@
 use arcanum_rs::content::effects::{EffectId, EffectOperation, LegacyEffectId, load_effect};
-use arcanum_rs::content::items::ResistanceKind;
+use arcanum_rs::content::items::{GenericDefinition, ItemId, ResistanceKind};
 use arcanum_rs::mes::Encoding;
+use arcanum_rs::runtime::{ItemDefinitionRef, Runtime};
 use arcanum_rs::vfs::{Policy, Storage, Vfs};
 use std::path::{Path, PathBuf};
 
@@ -68,5 +69,32 @@ fn selected_effects_match_an_independently_mounted_archive() {
         assert_eq!(archived.source.mount_id, archive_mount);
         assert_eq!(archived.definition, selected.definition);
         assert_eq!(archived.record, selected.record);
+
+        if id == 54 {
+            let item = GenericDefinition {
+                id: ItemId("test:item/ward".into()),
+                display_name: "Ward".into(),
+                base_weight: 1,
+                base_worth: 0,
+                magic_tech_complexity: 0,
+            };
+            let mut runtime = Runtime::default();
+            let actor = runtime.create_actor(10).unwrap();
+            let source = runtime
+                .instantiate_item(ItemDefinitionRef::Generic(&item))
+                .unwrap();
+            runtime.equip(source, actor).unwrap();
+            let grant = runtime
+                .activate_effect(source, actor, &selected.definition)
+                .unwrap();
+            assert_eq!(runtime.fire_resistance_after_effects(actor), Ok(95));
+            assert_eq!(runtime.electrical_resistance_after_effects(actor), Ok(8));
+            assert_eq!(runtime.poison_resistance_after_effects(actor), Ok(97));
+            assert_eq!(runtime.poison_resistance(actor), Ok(95));
+            runtime.remove_activation(grant).unwrap();
+            assert_eq!(runtime.fire_resistance(actor), Ok(0));
+            assert_eq!(runtime.electrical_resistance(actor), Ok(0));
+            assert_eq!(runtime.poison_resistance(actor), Ok(0));
+        }
     }
 }
