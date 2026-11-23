@@ -5,10 +5,12 @@ use arcanum_rs::art::SpriteFrame;
 
 #[cfg(feature = "gpu")]
 mod gpu;
+mod hud;
 mod menu;
 use arcanum_rs::camera::{Camera, CameraScene};
 use arcanum_rs::compositor::{Modulation, SpriteDraw, blit_modulated};
 use arcanum_rs::content::world::{Destination, DoorStates, InteractiveWorld, WorldStream};
+pub(super) use hud::Hud;
 use menu::{Command as MenuCommand, Menu, Settings};
 use softbuffer::{Context, Surface};
 use std::{
@@ -158,6 +160,7 @@ pub struct StreamOptions<'a> {
     pub animation_ms: Option<u64>,
     pub explore: bool,
     pub travel: Option<(String, TravelLoader<'a>)>,
+    pub hud: Option<Box<Hud>>,
 }
 
 pub fn show_stream(
@@ -173,6 +176,7 @@ pub fn show_stream(
         animation_ms,
         explore,
         travel,
+        hud,
     } = options;
     #[cfg(not(feature = "gpu"))]
     if renderer != RenderBackend::Cpu {
@@ -210,6 +214,7 @@ pub fn show_stream(
             trace,
             animation_ms,
             travel,
+            hud,
         },
         PhysicalSize::<u32>::from(size).into(),
         event_loop,
@@ -232,6 +237,7 @@ enum ViewContent<'a> {
         trace: bool,
         animation_ms: Option<u64>,
         travel: Option<Travel<'a>>,
+        hud: Option<Box<Hud>>,
     },
     World {
         scene: &'a CameraScene<'a>,
@@ -404,6 +410,7 @@ enum Presentation {
 struct CpuSurface {
     surface: Surface<OwnedDisplayHandle, Arc<Window>>,
     pixels: Vec<[u8; 3]>,
+    overlay_pixels: Vec<[u8; 3]>,
 }
 
 impl Viewer<'_> {
@@ -418,6 +425,29 @@ impl Viewer<'_> {
             .map_or(now, |(_, paused)| *paused)
             .saturating_duration_since(self.epoch)
             .saturating_sub(self.paused_for)
+    }
+
+    fn pause_game(&mut self, event_loop: &ActiveEventLoop) {
+        if let ViewContent::Stream { world, shift, .. } = &mut self.content {
+            world.cancel_player_route();
+            *shift = false;
+        }
+        self.navigation = Navigation::default();
+        self.player_deadline = None;
+        self.animation_deadline = None;
+        self.pause = Some((Menu::new(), Instant::now()));
+        self.menu_action(MenuCommand::Stay, event_loop);
+    }
+
+    fn hud_action(&mut self, action: hud::Action, event_loop: &ActiveEventLoop) {
+        match action {
+            hud::Action::Pause => self.pause_game(event_loop),
+            hud::Action::ToggleRun => self.settings.run = !self.settings.run,
+            hud::Action::ResetZoom => self.settings.zoom = 1,
+        }
+        if let Some(view) = &self.view {
+            view.window.request_redraw();
+        }
     }
 
     fn menu_action(&mut self, command: MenuCommand, event_loop: &ActiveEventLoop) {
@@ -533,6 +563,7 @@ impl Viewer<'_> {
                 Presentation::Cpu(CpuSurface {
                     surface,
                     pixels: Vec::new(),
+                    overlay_pixels: Vec::new(),
                 })
             }
             #[cfg(feature = "gpu")]
@@ -750,15 +781,7 @@ impl ApplicationHandler for Viewer<'_> {
                         let command = menu.back();
                         self.menu_action(command, event_loop);
                     } else {
-                        if let ViewContent::Stream { world, shift, .. } = &mut self.content {
-                            world.cancel_player_route();
-                            *shift = false;
-                        }
-                        self.navigation = Navigation::default();
-                        self.player_deadline = None;
-                        self.animation_deadline = None;
-                        self.pause = Some((Menu::new(), Instant::now()));
-                        self.menu_action(MenuCommand::Stay, event_loop);
+                        self.pause_game(event_loop);
                     }
                     return;
                 }
@@ -809,6 +832,69 @@ impl ApplicationHandler for Viewer<'_> {
                 return;
             }
         }
+        if let ViewContent::Stream {
+            hud: Some(hud),
+            shift,
+            ..
+        } = &mut self.content
+        {
+            let view = self.view.as_ref().unwrap();
+            let size = view.window.inner_size();
+            hud.layout((size.width, size.height));
+            if let WindowEvent::KeyboardInput {
+                event: key,
+                is_synthetic: false,
+                ..
+            } = &event
+                && key.state.is_pressed()
+                && !key.repeat
+            {
+                if key.logical_key == Key::Named(NamedKey::Tab) {
+                    hud.advance_focus(*shift);
+                    view.window.request_redraw();
+                    return;
+                }
+                if matches!(
+                    key.logical_key,
+                    Key::Named(NamedKey::Enter | NamedKey::Space)
+                ) && let Some(action) = hud.focused_action()
+                {
+                    self.hud_action(action, event_loop);
+                    return;
+                }
+                let step = match &key.logical_key {
+                    Key::Character(ch) if ch == "[" => -25,
+                    Key::Character(ch) if ch == "]" => 25,
+                    _ => 0,
+                };
+                if step != 0 {
+                    hud.adjust_scale(step);
+                    hud.hover(self.cursor);
+                    view.window.request_redraw();
+                    return;
+                }
+            }
+            if hud.hover(self.cursor) {
+                view.window.request_redraw();
+            }
+            let hit = self.cursor.map_or(hud::Hit::World, |point| hud.hit(point));
+            if hit != hud::Hit::World {
+                match event {
+                    WindowEvent::MouseInput {
+                        state: ElementState::Pressed,
+                        button: MouseButton::Left,
+                        ..
+                    } => {
+                        if let hud::Hit::Button(action) = hit {
+                            self.hud_action(action, event_loop);
+                        }
+                        return;
+                    }
+                    WindowEvent::MouseWheel { .. } => return,
+                    _ => {}
+                }
+            }
+        }
         self.render_event(event_loop, id, event, elapsed);
     }
 }
@@ -831,6 +917,7 @@ impl Viewer<'_> {
                     last_presented: Some(camera),
                     last_viewport,
                     last_zoom,
+                    hud,
                     ..
                 } = &mut self.content
                     && world.playing()
@@ -842,6 +929,10 @@ impl Viewer<'_> {
                         )
                     && world.update_hover(
                         self.cursor
+                            .filter(|&point| {
+                                hud.as_ref()
+                                    .is_none_or(|hud| hud.hit(point) == hud::Hit::World)
+                            })
                             .map(|(x, y)| (x / u32::from(*last_zoom), y / u32::from(*last_zoom))),
                         logical_size(view.window.inner_size(), *last_zoom),
                         camera,
@@ -1110,6 +1201,7 @@ impl Viewer<'_> {
                         waiting,
                         trace,
                         animation_ms,
+                        hud,
                         ..
                     } => {
                         let sampled = Instant::now();
@@ -1135,6 +1227,7 @@ impl Viewer<'_> {
                                 settings: self.settings,
                                 menu: menu.as_ref(),
                                 cursor: self.cursor,
+                                hud: hud.as_deref_mut(),
                             },
                         )
                         .map(|ready| {
@@ -1183,6 +1276,7 @@ struct FrameOptions<'a> {
     elapsed: Duration,
     settings: Settings,
     menu: Option<&'a Arc<arcanum_rs::content::art::LoadedFrame>>,
+    hud: Option<&'a mut Hud>,
     cursor: Option<(u32, u32)>,
 }
 
@@ -1200,6 +1294,7 @@ impl WindowSurface {
             elapsed,
             settings,
             menu,
+            hud,
             cursor,
         } = options;
         let zoom = settings.zoom;
@@ -1217,6 +1312,12 @@ impl WindowSurface {
             return Ok(false);
         }
         world.start_player()?;
+        let hud = hud.filter(|_| menu.is_none()).map(|hud| {
+            hud.layout((size.width, size.height));
+            &*hud
+        });
+        let cursor =
+            cursor.filter(|&point| hud.is_none_or(|hud| hud.hit(point) == hud::Hit::World));
         if world.playing() {
             let scale = u32::from(zoom);
             world.update_hover(
@@ -1273,10 +1374,16 @@ impl WindowSurface {
                 );
             }
             renderer.redraw(
-                (size.width, size.height),
-                zoom,
+                ((size.width, size.height), zoom),
                 background,
                 draws,
+                hud.into_iter()
+                    .flat_map(|hud| hud.draws(settings.run))
+                    .map(|(asset, sprite)| arcanum_rs::content::world::WorldDraw {
+                        asset,
+                        sprite,
+                        modulation: Modulation::Unlit,
+                    }),
                 &self.window,
                 trace,
             )?;
@@ -1287,6 +1394,7 @@ impl WindowSurface {
             zoom,
             background,
             draws.map(|draw| (draw.sprite, draw.modulation)),
+            hud.map(|hud| (hud, settings.run)),
         )?;
         if trace
             || prepared.scheduling
@@ -1320,7 +1428,7 @@ impl WindowSurface {
         size: PhysicalSize<u32>,
         draws: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
     ) -> Result<FrameTiming, String> {
-        self.redraw_scaled(size, 1, BACKGROUND, draws)
+        self.redraw_scaled(size, 1, BACKGROUND, draws, None)
     }
 
     fn redraw_scaled<'a>(
@@ -1329,9 +1437,10 @@ impl WindowSurface {
         zoom: u8,
         background: [u8; 3],
         draws: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
+        hud: Option<(&Hud, bool)>,
     ) -> Result<FrameTiming, String> {
         match &mut self.backend {
-            Presentation::Cpu(cpu) => cpu.redraw(size, zoom, background, draws, &self.window),
+            Presentation::Cpu(cpu) => cpu.redraw(size, zoom, background, draws, hud, &self.window),
             #[cfg(feature = "gpu")]
             Presentation::Gpu(_) => Err("GPU presentation requires a streamed world".into()),
         }
@@ -1345,6 +1454,7 @@ impl CpuSurface {
         zoom: u8,
         background: [u8; 3],
         draws: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
+        hud: Option<(&Hud, bool)>,
         window: &Window,
     ) -> Result<FrameTiming, String> {
         let (Some(width), Some(height)) =
@@ -1372,6 +1482,32 @@ impl CpuSurface {
         self.pixels.fill(background);
         blit_modulated(&mut self.pixels, viewport, viewport.0 as usize, draws)
             .map_err(|error| format!("cannot composite sprite: {error}"))?;
+        let (mut pixels, mut pack_zoom) = (&mut self.pixels, zoom);
+        if let Some((hud, running)) = hud {
+            if zoom > 1 {
+                self.overlay_pixels.resize(count, background);
+                for (y, row) in self
+                    .overlay_pixels
+                    .chunks_exact_mut(size.width as usize)
+                    .enumerate()
+                {
+                    for (x, pixel) in row.iter_mut().enumerate() {
+                        *pixel = self.pixels
+                            [y / usize::from(zoom) * viewport.0 as usize + x / usize::from(zoom)];
+                    }
+                }
+                pixels = &mut self.overlay_pixels;
+                pack_zoom = 1;
+            }
+            blit_modulated(
+                pixels,
+                (size.width, size.height),
+                size.width as usize,
+                hud.draws(running)
+                    .map(|(_, sprite)| (sprite, Modulation::Unlit)),
+            )
+            .map_err(|error| format!("cannot composite HUD: {error}"))?;
+        }
         let composition = start.elapsed();
         let start = Instant::now();
         self.surface
@@ -1387,8 +1523,8 @@ impl CpuSurface {
                 buffer.len()
             ));
         }
-        if zoom == 1 {
-            for (output, &[r, g, b]) in buffer.iter_mut().zip(&self.pixels) {
+        if pack_zoom == 1 {
+            for (output, &[r, g, b]) in buffer.iter_mut().zip(pixels.iter()) {
                 *output = u32::from_be_bytes([0, r, g, b]);
             }
         } else {

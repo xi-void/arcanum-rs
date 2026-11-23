@@ -52,6 +52,12 @@ enter, then click the exit inside to return. Select Bates Mansion with
 `--map 5011`. For K’na Tha, add `--map "k'na tha" --center 383 928`.
 With `--features gpu`, add `--renderer vulkan` to use Vulkan.
 
+The default Classic HUD uses your installed Arcanum interface artwork.
+Use **[** and **]** to adjust HUD scale independently of camera zoom.
+Pass `--ui ui/field-notes` for the example replacement,
+`--ui /path/to/package` for your own, or `--ui off` to play without a HUD.
+[Theme format and controls](docs/UI_THEMES.md)
+
 The alpha uses original human standing, walking and running sprites.
 The shipped walk and run clips use 17 and 20 FPS respectively, with
 movement speed derived from their stored per-frame strides.

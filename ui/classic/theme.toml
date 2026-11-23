@@ -1,0 +1,210 @@
+name = "Classic"
+scale = 125
+
+[[hud]]
+id = "top"
+anchor = "top"
+size = [800, 41]
+image = "vfs:art/interface/inttop.art"
+capture = true
+
+[[hud]]
+id = "bottom"
+anchor = "bottom"
+size = [800, 159]
+image = "vfs:art/interface/intbotom.art"
+capture = true
+
+[[hud]]
+id = "character"
+parent = "top"
+offset = [4, 2]
+size = [34, 34]
+image = "vfs:art/interface/char_but.art"
+disabled = true
+
+[[hud]]
+id = "journal"
+parent = "top"
+offset = [41, 2]
+size = [34, 34]
+image = "vfs:art/interface/log_but.art"
+disabled = true
+
+[[hud]]
+id = "map"
+parent = "top"
+offset = [78, 2]
+size = [34, 34]
+image = "vfs:art/interface/tmap_but.art"
+disabled = true
+
+[[hud]]
+id = "inventory"
+parent = "top"
+offset = [115, 2]
+size = [34, 34]
+image = "vfs:art/interface/invn_but.art"
+disabled = true
+
+[[hud]]
+id = "fate"
+parent = "top"
+offset = [157, 9]
+size = [23, 23]
+image = "vfs:art/interface/lilgrnbut.art"
+disabled = true
+
+[[hud]]
+id = "rest"
+parent = "top"
+offset = [605, 9]
+size = [23, 23]
+image = "vfs:art/interface/lilgrnbut.art"
+disabled = true
+
+[[hud]]
+id = "slot-1"
+parent = "bottom"
+offset = [198, 4]
+size = [32, 32]
+image = "vfs:art/interface/hkslt1.art"
+disabled = true
+
+[[hud]]
+id = "slot-2"
+parent = "bottom"
+offset = [237, 4]
+size = [32, 32]
+image = "vfs:art/interface/hkslt1.art"
+disabled = true
+
+[[hud]]
+id = "slot-3"
+parent = "bottom"
+offset = [276, 4]
+size = [32, 32]
+image = "vfs:art/interface/hkslt1.art"
+disabled = true
+
+[[hud]]
+id = "slot-4"
+parent = "bottom"
+offset = [315, 4]
+size = [32, 32]
+image = "vfs:art/interface/hkslt1.art"
+disabled = true
+
+[[hud]]
+id = "slot-5"
+parent = "bottom"
+offset = [354, 4]
+size = [32, 32]
+image = "vfs:art/interface/hkslt1.art"
+disabled = true
+
+[[hud]]
+id = "slot-6"
+parent = "bottom"
+offset = [418, 4]
+size = [32, 32]
+image = "vfs:art/interface/hkslt1.art"
+disabled = true
+
+[[hud]]
+id = "slot-7"
+parent = "bottom"
+offset = [456, 4]
+size = [32, 32]
+image = "vfs:art/interface/hkslt1.art"
+disabled = true
+
+[[hud]]
+id = "slot-8"
+parent = "bottom"
+offset = [495, 4]
+size = [32, 32]
+image = "vfs:art/interface/hkslt1.art"
+disabled = true
+
+[[hud]]
+id = "slot-9"
+parent = "bottom"
+offset = [534, 4]
+size = [32, 32]
+image = "vfs:art/interface/hkslt1.art"
+disabled = true
+
+[[hud]]
+id = "slot-10"
+parent = "bottom"
+offset = [573, 4]
+size = [32, 32]
+image = "vfs:art/interface/hkslt1.art"
+disabled = true
+
+[[hud]]
+id = "message-background"
+parent = "bottom"
+offset = [196, 51]
+size = [410, 107]
+image = "vfs:art/interface/dialoguewindow.art"
+disabled = true
+
+[[hud]]
+id = "health-vial"
+parent = "bottom"
+offset = [14, 31]
+size = [28, 88]
+image = "vfs:art/interface/clrvial.art"
+source_rect = [0, 0, 28, 88]
+disabled = true
+
+[[hud]]
+id = "fatigue-vial"
+parent = "bottom"
+offset = [754, 32]
+size = [28, 88]
+image = "vfs:art/interface/clrvial.art"
+source_rect = [0, 0, 28, 88]
+disabled = true
+
+[[hud]]
+id = "combat"
+parent = "bottom"
+offset = [86, 16]
+size = [39, 39]
+image = "vfs:art/interface/combat_button.art"
+disabled = true
+
+[[hud]]
+id = "skills"
+parent = "bottom"
+offset = [693, 15]
+size = [39, 39]
+image = "vfs:art/interface/skills_button.art"
+disabled = true
+
+[[hud]]
+id = "spells"
+parent = "bottom"
+offset = [649, 53]
+size = [39, 39]
+image = "vfs:art/interface/spells_button.art"
+disabled = true
+
+[[hud]]
+id = "schematics"
+parent = "bottom"
+offset = [693, 98]
+size = [39, 39]
+image = "vfs:art/interface/schematics_button.art"
+disabled = true
+
+[[hud]]
+id = "hotkey-switch"
+parent = "bottom"
+offset = [616, 14]
+size = [14, 14]
+image = "vfs:art/interface/hktshoff.art"
+disabled = true

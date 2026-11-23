@@ -16,16 +16,20 @@ struct Output {
     @location(1) @interpolate(flat) shade: vec4<u32>,
     @location(2) @interpolate(flat) nodes_a: vec4<u32>,
     @location(3) @interpolate(flat) nodes_b: vec4<u32>,
+    @location(4) @interpolate(flat) scale: f32,
 }
 
 @vertex
 fn vs(instance: Instance, @builtin(vertex_index) vertex: u32) -> Output {
     let corners = array(vec2(0., 0.), vec2(1., 0.), vec2(0., 1.),
                         vec2(0., 1.), vec2(1., 0.), vec2(1., 1.));
-    let relative = (instance.rect.xy + corners[vertex] * instance.rect.zw) * viewport.zoom / viewport.size;
+    let scale = select(viewport.zoom, 1., instance.rect.w < 0.);
+    let extent = vec2(instance.rect.z, abs(instance.rect.w));
+    let relative = (instance.rect.xy + corners[vertex] * extent) * scale / viewport.size;
     var out: Output;
     out.position = vec4(relative * vec2(2., -2.) + vec2(-1., 1.), 0., 1.);
     out.origin = instance.rect.xy;
+    out.scale = scale;
     out.shade = instance.shade;
     out.nodes_a = instance.nodes_a;
     out.nodes_b = instance.nodes_b;
@@ -44,7 +48,7 @@ fn node(input: Output, index: u32) -> vec3<u32> {
 
 @fragment
 fn fs(input: Output) -> @location(0) vec4<f32> {
-    let p = vec2<u32>(input.position.xy / viewport.zoom - input.origin);
+    let p = vec2<u32>(input.position.xy / input.scale - input.origin);
     // Integer texel coordinates mean nearest sampling with no interpolation,
     // including at sprite edges and when a quad is clipped.
     let texel = vec4<u32>(round(textureLoad(sprite, vec2<i32>(p), 0) * 255.));

@@ -330,6 +330,17 @@ impl Compositor {
         zoom: u8,
         input: impl IntoIterator<Item = WorldDraw<'a>>,
     ) -> Result<Preparation, String> {
+        self.prepare_with_overlay(size, zoom, input, std::iter::empty())
+    }
+
+    /// The overlay is already laid out in physical pixels.
+    pub fn prepare_with_overlay<'a>(
+        &mut self,
+        size: (u32, u32),
+        zoom: u8,
+        input: impl IntoIterator<Item = WorldDraw<'a>>,
+        overlay: impl IntoIterator<Item = WorldDraw<'a>>,
+    ) -> Result<Preparation, String> {
         if !(1..=3).contains(&zoom) {
             return Err("zoom must be 1, 2 or 3".into());
         }
@@ -353,7 +364,11 @@ impl Compositor {
         let mut missing = BTreeMap::new();
         let mut visible_bytes = 0;
         let limit = self.device.limits().max_texture_dimension_2d;
-        for draw in input {
+        for (draw, overlay) in input
+            .into_iter()
+            .map(|draw| (draw, false))
+            .chain(overlay.into_iter().map(|draw| (draw, true)))
+        {
             let blend = Blend::for_modulation(draw.modulation);
             if self.draws.len() == MAX_DRAWS {
                 return Err("GPU frame exceeds the draw limit".into());
@@ -371,7 +386,13 @@ impl Compositor {
                 stats.uploaded_bytes += bytes;
                 entry.insert(draw.asset);
             }
-            let data = instance_data(&draw, &mut self.columns)?;
+            let mut data = instance_data(&draw, &mut self.columns)?;
+            if overlay {
+                // The shader uses the sign to bypass camera zoom without
+                // adding another field to every sprite instance.
+                data.rect[3] = -data.rect[3];
+            }
+
             let index = self.draws.len() as u32;
             self.draws.push(data);
             match self.commands.last_mut() {
