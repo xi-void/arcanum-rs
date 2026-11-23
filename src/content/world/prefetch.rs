@@ -559,7 +559,7 @@ impl InteractiveWorld {
             i64::from(y) + i64::from(screen.1) - i64::from(size.1 / 2),
         );
         self.cancel_player_route();
-        if let Some(key) = self.cache.pick(point, elapsed) {
+        if let Some(key) = self.cache.pick(point, self.reference, elapsed) {
             let steps = self.cache.approach(key, run);
             self.pending_use = steps.map(|_| key);
             if steps.is_none() {
@@ -634,6 +634,8 @@ impl InteractiveWorld {
                 previous != anchor || asset != Arc::as_ptr(pose.asset) || tile != pose.tile
             });
         let player = self.cache.player.as_ref().unwrap();
+        let facing_now = player.facing();
+        let moving = player.moving();
         if let Some((_, _, tile, facing)) = before
             && tile != player.tile()
         {
@@ -650,12 +652,13 @@ impl InteractiveWorld {
                     pose.asset.source.virtual_path
                 );
             }
+            self.cache.refresh_roofs();
         }
         if self.transition.is_none()
-            && !player.moving()
+            && !moving
             && let Some(key) = self.pending_use.take()
         {
-            let facing = player.facing();
+            let facing = facing_now;
             match self.cache.use_target(key, now) {
                 Some(Ok(Some(dst))) => self.transition = Some((dst, facing)),
                 Some(Err(error)) => {

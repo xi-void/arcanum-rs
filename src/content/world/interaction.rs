@@ -22,6 +22,7 @@ pub(super) struct Door {
     pub originally_open: bool,
     pub direction: u8,
     flags: u32,
+    unlock: Result<(), String>,
     frames: [(Arc<LoadedFrame>, (i32, i32)); 4],
     period: Duration,
 }
@@ -55,20 +56,29 @@ impl DoorStates {
         cell
     }
 
-    fn change(&mut self, door: &Door, tick: Duration, hour: u8) -> Result<bool, &'static str> {
+    fn change(&mut self, door: &Door, tick: Duration, hour: u8) -> Result<bool, String> {
         if self
             .0
             .get(&door.id)
             .is_some_and(|change| door.delay(*change, tick).is_some())
         {
-            return Err("door is moving");
+            return Err("door is moving".into());
         }
         let open = !self
             .0
             .get(&door.id)
             .map_or(door.originally_open, |change| change.open);
-        if open && barred(door.flags, hour) {
-            return Err("door is locked, jammed or held");
+        if open {
+            door.unlock.clone()?;
+            if door.flags & 0x02 != 0 {
+                return Err("door is jammed".into());
+            }
+            if door.flags & 0x04 != 0 {
+                return Err("door is magically held".into());
+            }
+            if locked(door.flags, hour) {
+                return Err("door is locked".into());
+            }
         }
         self.0.insert(
             door.id,
@@ -81,11 +91,9 @@ impl DoorStates {
     }
 }
 
-fn barred(flags: u32, hour: u8) -> bool {
-    // OPF_JAMMED, MAGICALLY_HELD and ALWAYS_LOCKED disallow ordinary use.
-    if flags & 0x16 != 0 {
-        return true;
-    }
+fn locked(flags: u32, hour: u8) -> bool {
+    // CE object_locked_get. ALWAYS_LOCKED gates the indoor egress exception
+    // in ai_attempt_open_portal, rather than replacing OPF_LOCKED.
     if flags & 8 != 0 {
         return false;
     } // NEVER_LOCKED
@@ -143,18 +151,10 @@ pub(super) fn prepare(
         let tile = portal.placement.tile;
         let action = if portal.use_script > 0 {
             use_action(vfs, portal.use_script)
-        } else if portal.unlock_script > 0 {
-            Action::Unsupported(format!(
-                "Unlock script {} is unsupported",
-                portal.unlock_script
-            ))
         } else {
             let mut build = || -> Result<_, Box<dyn std::error::Error>> {
                 let art = portal.art;
-                let first = match art.rotation & 6 {
-                    0 | 6 => 4,
-                    _ => 1,
-                };
+                let first = usize::from(art.first_opening_frame());
                 let mut sequence = Vec::with_capacity(4);
                 for index in [0, first, first + 1, first + 2] {
                     let asset = frames.load(
@@ -182,6 +182,11 @@ pub(super) fn prepare(
                     direction: art.rotation | 1,
                     originally_open: art.frame != 0,
                     flags: portal.appearance.portal_flags,
+                    unlock: if portal.unlock_script > 0 {
+                        super::super::jumps::unlock_for_new_game(vfs, portal.unlock_script)
+                    } else {
+                        Ok(())
+                    },
                     frames: sequence.try_into().expect("four door poses"),
                     period,
                 })
@@ -246,24 +251,37 @@ impl SectorCache {
         }
     }
 
-    pub(super) fn pick(&self, point: (i64, i64), elapsed: Duration) -> Option<WorldOrder> {
+    pub(super) fn pick(
+        &self,
+        point: (i64, i64),
+        reference: Tile,
+        elapsed: Duration,
+    ) -> Option<WorldOrder> {
+        if let Some(tile) =
+            crate::isometric::world_tile_at_pixel((point.0, point.1.checked_add(120)?), reference)
+            && let Ok(index) = self
+                .ordered
+                .binary_search_by_key(&roof_key(roof::cell_center(tile)), |raster| raster.key)
+        {
+            let roof = &self.ordered[index];
+            if self.raster_revealed(roof) && hits(roof.frame_draw(&roof.frame), point) {
+                return None;
+            }
+        }
         self.ordered
             .iter()
             .rev()
-            .filter(|raster| raster.key.0)
+            .filter(|raster| {
+                raster.key.0
+                    && !matches!(raster.object_light, ObjectLight::Roof)
+                    && self.raster_revealed(raster)
+            })
             .find_map(|raster| {
                 let sprite = self.door_frame(raster, elapsed).map_or_else(
                     || raster.frame_draw(raster.asset_at(elapsed, self.fidget)),
                     |(_, sprite)| sprite,
                 );
-                let origin = sprite_origin(sprite.frame, sprite.anchor);
-                let x = usize::try_from(point.0 - origin.0).ok()?;
-                let y = usize::try_from(point.1 - origin.1).ok()?;
-                let width = sprite.frame.width as usize;
-                (x < width
-                    && y < sprite.frame.height as usize
-                    && sprite.frame.pixels[y * width + x][3] != 0)
-                    .then_some(raster.key)
+                hits(sprite, point).then_some(raster.key)
             })
             .filter(|&key| self.target(key).is_some())
     }
@@ -315,10 +333,7 @@ impl SectorCache {
         }
         match &target.action {
             Action::Door(door) => {
-                let result = self
-                    .door_states
-                    .change(door, tick, self.hour)
-                    .map_err(str::to_owned);
+                let result = self.door_states.change(door, tick, self.hour);
                 Some(result.map(|open| {
                     eprintln!(
                         "Door {:?} record {} at {:?} {}",
@@ -361,6 +376,19 @@ impl SectorCache {
             })
             .min()
     }
+}
+
+fn hits(sprite: SpriteDraw<'_>, point: (i64, i64)) -> bool {
+    let origin = sprite_origin(sprite.frame, sprite.anchor);
+    let (Ok(x), Ok(y)) = (
+        u32::try_from(point.0 - origin.0),
+        u32::try_from(point.1 - origin.1),
+    ) else {
+        return false;
+    };
+    x < sprite.frame.width
+        && y < sprite.frame.height
+        && sprite.frame.pixels[(y * sprite.frame.width + x) as usize][3] != 0
 }
 
 fn neighbor((x, y): Tile, direction: u8) -> Option<Tile> {
@@ -474,11 +502,12 @@ mod tests {
 
     #[test]
     fn lock_flags_have_original_time_gate() {
-        assert!(barred(1, 12));
-        assert!(barred(0x10, 12));
-        assert!(barred(0x21, 12));
-        assert!(!barred(0x21, 22));
-        assert!(barred(0x41, 22));
-        assert!(!barred(8 | 1, 22));
+        assert!(locked(1, 12));
+        assert!(locked(0x11, 12));
+        assert!(!locked(0x10, 12));
+        assert!(locked(0x21, 12));
+        assert!(!locked(0x21, 22));
+        assert!(locked(0x41, 22));
+        assert!(!locked(8 | 1, 22));
     }
 }
