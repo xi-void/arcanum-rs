@@ -67,6 +67,21 @@ pub(super) fn use_destination(
     vfs: &mut Vfs,
     id: i32,
 ) -> Result<Destination, Box<dyn std::error::Error>> {
+    read_script(vfs, id, decode_use)
+}
+
+/// Resolve the read-only portion of an unlock handler in the alpha's new-game
+/// state. CE initializes global flags to zero. Saved and quest states aren't loaded.
+pub(super) fn unlock_for_new_game(vfs: &mut Vfs, id: i32) -> Result<(), String> {
+    read_script(vfs, id, |bytes| decode_unlock(bytes, |_| false))
+        .map_err(|error| format!("Unlock script {id}: {error}"))
+}
+
+fn read_script<T>(
+    vfs: &mut Vfs,
+    id: i32,
+    decode: impl FnOnce(&[u8]) -> Result<T, &'static str>,
+) -> Result<T, Box<dyn std::error::Error>> {
     let prefix = format!("scr/{id:05}");
     let paths: Vec<_> = vfs
         .paths_with_prefix(&prefix)
@@ -74,11 +89,45 @@ pub(super) fn use_destination(
         .filter(|path| path.ends_with(".scr") && !path[prefix.len()..].contains('/'))
         .collect();
     let [path] = paths.as_slice() else {
-        return Err(format!("missing or ambiguous Use script {id}").into());
+        return Err(format!("missing or ambiguous script {id}").into());
     };
     let path = (*path).to_owned();
     let (source, bytes) = read_bounded(vfs, &path, 64 * 1024)?;
-    decode_use(&bytes).map_err(|e| format!("{path} from {source}: {e}").into())
+    decode(&bytes).map_err(|e| format!("{path} from {source}: {e}").into())
+}
+
+fn decode_unlock(bytes: &[u8], global_flag: impl Fn(u32) -> bool) -> Result<(), &'static str> {
+    const UNSUPPORTED: &str = "unsupported unlock script behavior";
+    let header = bytes.get(..64).ok_or("truncated script header")?;
+    let word = |bytes: &[u8], at| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+    let (rows, remainder) = bytes[64..].as_chunks::<132>();
+    if !remainder.is_empty() || rows.len() != word(header, 52) as usize {
+        return Err("invalid script length");
+    }
+    // Script flags can invoke traps or remove the attachment even on a return.
+    if word(header, 48) != 0 {
+        return Err(UNSUPPORTED);
+    }
+    let mut line = 0;
+    for _ in 0..rows.len() {
+        let row = rows.get(line).ok_or("invalid unlock branch")?;
+        let condition = match word(row, 0) {
+            0 => true, // SCT_TRUE
+            4 if row[4..6] == [4, 3] && word(row, 12) < 3200 => {
+                u32::from(global_flag(word(row, 12))) == word(row, 16)
+            }
+            _ => return Err(UNSUPPORTED),
+        };
+        let action = if condition { &row[44..88] } else { &row[88..] };
+        match word(action, 0) {
+            0 => line += 1, // SAT_DO_NOTHING
+            1 => return Err("original handler disallows opening"),
+            2 => return Ok(()),
+            3 if action[4] == 3 => line = word(action, 12) as usize, // SAT_GOTO literal
+            _ => return Err(UNSUPPORTED),
+        }
+    }
+    Err("unlock script never reached a return")
 }
 
 fn decode_use(bytes: &[u8]) -> Result<Destination, &'static str> {
@@ -112,6 +161,40 @@ fn decode_use(bytes: &[u8]) -> Result<Destination, &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unlock_branch_respects_original_flag_conditions_and_fails_closed() {
+        let mut bytes = vec![0u8; 64 + 3 * 132];
+        for (at, value) in [
+            (52, 3u32),   // number of rows
+            (64, 4),      // SCT_EQ
+            (68, 0x0304), // global flag, literal
+            (76, 7),      // flag ID
+            (80, 1),      // equals one
+            (64 + 88, 3), // false: GOTO literal row 2
+            (64 + 92, 3),
+            (64 + 100, 2),
+            (64 + 132 + 44, 1), // row 1 denies the default
+            (64 + 264 + 44, 2), // row 2 allows the default
+        ] {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        assert_eq!(decode_unlock(&bytes, |_| false), Ok(()));
+        assert_eq!(
+            decode_unlock(&bytes, |flag| flag == 7),
+            Err("original handler disallows opening")
+        );
+        bytes[64 + 264 + 44] = 54;
+        assert_eq!(
+            decode_unlock(&bytes, |_| false),
+            Err("unsupported unlock script behavior")
+        );
+        bytes.pop();
+        assert_eq!(
+            decode_unlock(&bytes, |_| false),
+            Err("invalid script length")
+        );
+    }
 
     #[test]
     fn unconditional_script_decodes_a_literal_destination_only() {

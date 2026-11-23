@@ -70,8 +70,8 @@ tiles and a bounded subset of original Use scripts determine transitions.
 See [original transition sources](docs/ORIGINAL_TRANSITIONS.md).
 Movement stops if a sector's collision data is unavailable. The
 free-camera diagnostic is still available via `art world`.
-Party-dependent roof and wall visibility, including Tulla’s interior views,
-remains existing rendering work.
+Play draws original roofs and reveals roof groups as the player enters them.
+Wall-dependent partial roof fading remains pending.
 
 ## Usage
 

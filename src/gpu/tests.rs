@@ -615,6 +615,47 @@ fn compare_world_frame(
     compare_world_tick(gpu, world, camera, size, Duration::ZERO)
 }
 
+#[test]
+#[ignore = "requires installed original data and a hardware GPU"]
+fn playable_tarant_gate_and_gatehouse_roofs_match_cpu_after_pan_and_resize() {
+    use crate::{
+        content::world::{SectorRegion, WorldStream},
+        sector::Coordinates,
+    };
+    let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+    let backend = test_backend();
+    let context = instance(backend);
+    let adapter = hardware_adapter(&context, backend, None).unwrap();
+    let mut gpu = Compositor::new(&adapter, TextureFormat::Rgba8Unorm, false).unwrap();
+    let region = SectorRegion {
+        first: Coordinates { x: 967, y: 1025 },
+        last: Coordinates { x: 970, y: 1027 },
+    };
+    let center = (61997, 65660);
+    let mut camera = region.camera(center).unwrap();
+    let mut world = WorldStream::new(
+        Vfs::from_game(game, Policy::Ce).unwrap(),
+        "arcanum1-024-fixed".into(),
+        region,
+        center,
+    )
+    .unwrap()
+    .with_starting_lighting()
+    .unwrap()
+    .with_player()
+    .unwrap();
+    let size = (1280, 720);
+    let tick = Duration::from_millis(246);
+    let first = compare_world_tick(&mut gpu, &mut world, &camera, size, tick).0;
+    camera.follow((150, 320));
+    compare_world_tick(&mut gpu, &mut world, &camera, (853, 521), tick);
+    camera.follow((0, 0));
+    assert_eq!(
+        first,
+        compare_world_tick(&mut gpu, &mut world, &camera, size, tick).0
+    );
+}
+
 fn compare_world_tick(
     gpu: &mut Compositor,
     world: &mut crate::content::world::WorldStream,

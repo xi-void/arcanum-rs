@@ -85,14 +85,26 @@ impl PortalArt {
 
     pub fn visual_state(self) -> Result<PortalState, Box<dyn Error>> {
         if self.kind == Kind::Door && !self.damaged {
-            match (self.frame, self.rotation, self.palette, self.mirror_x) {
-                (0, 1, 0, false) | (0, 7, 1, true) => return Ok(PortalState::Closed),
-                // Rotations 3 and 5 use the 1–3 opening sequence.
-                (3, 3, 1, true) | (3, 5, 0, false) => return Ok(PortalState::Open),
-                _ => {}
+            // TIG selects the mirrored palette for directions 2/3 and 6/7.
+            let mirrored = matches!(self.rotation / 2, 1 | 3);
+            if (self.palette, self.mirror_x) == (u8::from(mirrored), mirrored) {
+                if self.frame == 0 {
+                    return Ok(PortalState::Closed);
+                }
+                if self.frame == self.first_opening_frame() + 2 {
+                    return Ok(PortalState::Open);
+                }
             }
         }
         Err(format!("unsupported static portal appearance {self:?}").into())
+    }
+
+    pub(super) fn first_opening_frame(self) -> u8 {
+        // CE portal_open/portal_close clear the low rotation bit first.
+        match self.rotation & 6 {
+            0 | 6 => 4,
+            _ => 1,
+        }
     }
 
     pub fn pivot(self, frame: &SpriteFrame) -> (i64, i64) {
@@ -314,7 +326,7 @@ mod tests {
             0x3178_6c00,
             0x3178_ac00,
             0x3178_ec01,
-            0x3178_cc00,
+            0x3178_8c00,
             0x3178_fc11,
         ] {
             assert!(
@@ -322,6 +334,17 @@ mod tests {
                     .unwrap()
                     .visual_state()
                     .is_err()
+            );
+        }
+        for rotation in 0..8 {
+            let mirror = u32::from(matches!(rotation / 2, 1 | 3));
+            let closed = 0x32c0_0400 | (rotation << 11) | (mirror * 0x11);
+            let door = PortalArt::decode(closed).unwrap();
+            assert_eq!(door.visual_state().unwrap(), PortalState::Closed);
+            let open = closed | u32::from(door.first_opening_frame() + 2) << 14;
+            assert_eq!(
+                PortalArt::decode(open).unwrap().visual_state().unwrap(),
+                PortalState::Open
             );
         }
         assert!(

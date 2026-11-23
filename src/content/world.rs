@@ -8,6 +8,7 @@ use super::{
     load_mes,
     mobile::{self, Caster, DirectionalFidget, FidgetPlayback, MobileShadows, Walk, WalkStep},
     player::Player,
+    roof,
     scenery::{
         DrawOrder, LoadStages, ObjectLight, RoomOverview, WorldRegion, load_streamed_sector,
     },
@@ -208,6 +209,10 @@ pub struct WorldDraw<'a> {
 
 type WorldOrder = (bool, DrawOrder);
 
+fn roof_key((x, y): (u32, u32)) -> WorldOrder {
+    (true, (true, u32::MAX, y, i64::from(x), 0, 0, None))
+}
+
 #[derive(Clone)]
 enum RasterAnimation {
     Loop(Arc<FrameLoop>, usize),
@@ -360,6 +365,7 @@ struct CachedSector {
     collision: Option<Collision>,
     interactions: BTreeMap<WorldOrder, interaction::Target>,
     doors_at: BTreeMap<(u32, u32), Vec<WorldOrder>>,
+    roofs: BTreeMap<(u32, u32), roof::Cell>,
 }
 
 impl CachedSector {
@@ -393,6 +399,7 @@ impl CachedSector {
             collision: None,
             interactions: BTreeMap::new(),
             doors_at: BTreeMap::new(),
+            roofs: BTreeMap::new(),
         }
     }
 
@@ -536,6 +543,7 @@ impl CachedSector {
             collision: world.collision,
             interactions: BTreeMap::new(),
             doors_at: BTreeMap::new(),
+            roofs: BTreeMap::new(),
         }
     }
 
@@ -691,6 +699,7 @@ struct SectorCache {
     player_shadows: Option<MobileShadows>,
     jumps: super::jumps::Jumps,
     door_states: DoorStates,
+    roof_state: Option<roof::State>,
 }
 
 struct MovingDraw {
@@ -793,6 +802,7 @@ impl SectorCache {
                 .enumerate()
                 .filter_map(|(index, raster)| raster.animation.is_some().then_some(index)),
         );
+        self.refresh_roofs();
         if self.ambient.is_none() {
             return Duration::ZERO;
         }
@@ -811,6 +821,44 @@ impl SectorCache {
         let id = tile_sector_id(tile);
         self.active.contains(&id)
             && self.entries[&id].0.outdoor_rows[(tile.1 & 63) as usize] & (1 << (tile.0 & 63)) != 0
+    }
+
+    fn refresh_roofs(&mut self) {
+        if let (Some(state), Some(player)) = (&mut self.roof_state, &self.player) {
+            state.recalc(player.tile(), |tile| {
+                let (sector, _) = self.entries.get(&tile_sector_id(tile))?;
+                Some(sector.roofs.get(&tile).copied())
+            });
+        }
+    }
+
+    fn roof_covered(&self, tile: (u32, u32)) -> bool {
+        self.roof_state.as_ref().is_some_and(|state| {
+            !self.outdoor(tile)
+                && state.covered(tile, |center| {
+                    self.entries
+                        .get(&tile_sector_id(center))?
+                        .0
+                        .roofs
+                        .get(&center)
+                        .copied()
+                })
+        })
+    }
+
+    fn raster_revealed(&self, raster: &Raster) -> bool {
+        let Some(state) = &self.roof_state else {
+            return true;
+        };
+        if matches!(raster.object_light, ObjectLight::Roof) {
+            let tile = (raster.key.1.3 as u32, raster.key.1.2);
+            return self
+                .entries
+                .get(&tile_sector_id(tile))
+                .and_then(|(sector, _)| sector.roofs.get(&tile))
+                .is_some_and(|&cell| !state.filled(tile, cell));
+        }
+        !raster.key.0 || !self.roof_covered((raster.key.1.2, raster.key.1.1))
     }
 
     fn light_active(&self, source: &DynamicLight) -> bool {
@@ -1310,7 +1358,12 @@ impl SectorCache {
                 self.walking.is_none()
                     || Some(*index) != self.walk_subject.as_ref().map(|&(index, _)| index)
             })
-            .filter_map(|index| self.ordered[index].next_change(&viewport, elapsed, self.fidget))
+            .filter_map(|index| {
+                let raster = &self.ordered[index];
+                self.raster_revealed(raster)
+                    .then(|| raster.next_change(&viewport, elapsed, self.fidget))
+                    .flatten()
+            })
             .chain(self.walk_delay(&viewport, elapsed))
             .chain(self.door_delay(&viewport, elapsed))
             .min()
@@ -1418,6 +1471,9 @@ impl SectorCache {
             } else {
                 raster.visible_at(&viewport, elapsed, self.fidget)?
             };
+            if !self.raster_revealed(raster) {
+                return None;
+            }
             let modulation = self.shades.get(index).map_or_else(
                 || {
                     if matches!(raster.object_light, ObjectLight::Additive) {
@@ -1443,6 +1499,9 @@ impl SectorCache {
     ) -> Option<(WorldOrder, WorldDraw<'_>)> {
         let player = self.player.as_ref()?;
         let pose = player.sample(elapsed);
+        if self.roof_covered(pose.tile) {
+            return None;
+        }
         let draw = SpriteDraw {
             frame: &pose.asset.decoded.frame,
             anchor: pose.anchor,
@@ -1666,6 +1725,8 @@ impl WorldStream {
         self.loader.frames.finish_sector();
         self.cache.player = Some(player);
         self.loader.playing = true;
+        self.loader.roofs = true;
+        self.cache.roof_state = Some(roof::State::default());
         Ok(self)
     }
 
@@ -1932,9 +1993,10 @@ impl WorldStream {
             .iter()
             .filter(|raster| raster.key.0 && !matches!(raster.object_light, ObjectLight::Roof))
         {
-            if raster
-                .visible_at(&viewport, Duration::ZERO, self.cache.fidget)
-                .is_some()
+            if self.cache.raster_revealed(raster)
+                && raster
+                    .visible_at(&viewport, Duration::ZERO, self.cache.fidget)
+                    .is_some()
             {
                 submitted += 1;
             } else {
@@ -2075,16 +2137,17 @@ impl SectorLoader {
                         self.walking,
                     )
                 });
-                let (roofs, roof_issues) = if self.roofs {
+                let roofs = if self.roofs {
                     super::roof::prepare(
                         &mut self.vfs,
                         &mut self.frames,
                         sector,
                         self.reference,
                         &room.roof_words,
+                        self.playing,
                     )
                 } else {
-                    (Vec::new(), Vec::new())
+                    roof::Prepared::default()
                 };
                 let interactions = if self.playing {
                     interaction::prepare(
@@ -2115,21 +2178,11 @@ impl SectorLoader {
                     }
                 }
                 cached.interactions = interactions;
-                cached.report.diagnostics.extend(roof_issues);
-                for roof in roofs {
+                cached.report.diagnostics.extend(roofs.issues);
+                cached.roofs = roofs.cells;
+                for roof in roofs.rasters {
                     // CE's separate pass is globally ordered by roof row, then column.
-                    let key = (
-                        true,
-                        (
-                            true,
-                            u32::MAX,
-                            roof.tile.1,
-                            i64::from(roof.tile.0),
-                            0,
-                            0,
-                            None,
-                        ),
-                    );
+                    let key = roof_key(roof.tile);
                     let mut raster = Raster::new(key, &roof.asset, roof.anchor);
                     raster.object_light = ObjectLight::Roof;
                     if project_world_tile(roof.tile, self.reference)
@@ -2163,6 +2216,103 @@ impl SectorLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires the installed original game"]
+    fn tarant_pedestrian_gate_and_both_gatehouses_load_in_play() {
+        let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+        let mut vfs = Vfs::from_game(game, crate::vfs::Policy::Ce).unwrap();
+        let catalog = super::super::maps::Catalog::load(&mut vfs).unwrap();
+        let map = catalog.find("5000").unwrap();
+        let files = map.files(&mut vfs).unwrap();
+        let (source, bytes) = super::super::read_bounded(
+            &mut vfs,
+            "maps/arcanum1-024-fixed/68786586568.sec",
+            crate::sector::MAX_INPUT_BYTES,
+        )
+        .unwrap();
+        assert!(source.mount_path.ends_with("Arcanum.PATCH1"), "{source}");
+        let records = crate::sector::objects::decode(&bytes).unwrap();
+        let original = records.portals.iter().find(|r| r.index == 646).unwrap();
+        assert_eq!(original.art_id, 0x32c0_2c00);
+        assert_eq!(original.fields.unlock_script, Some(1151));
+        assert_eq!(original.fields.portal_flags, Some(0x11));
+        assert_eq!(original.stored_tile, (61998, 65660));
+        let start = (61997, 65660);
+        let size = (1280, 720);
+        let region = files.region_at(start);
+        let camera = region.camera(start).unwrap();
+        let mut world = WorldStream::new(vfs, map.directory.clone(), region, start)
+            .unwrap()
+            .with_player()
+            .unwrap();
+        world.prepare(&camera, size).unwrap();
+
+        let tile = (61998, 65660);
+        let sector = &world.cache.entries[&tile_sector_id(tile)].0;
+        let (&key, target) = sector
+            .interactions
+            .iter()
+            .find(|(key, _)| key.1.6 == Some(646))
+            .expect("original pedestrian gate must register for use");
+        assert_eq!(target.tile, tile);
+        let interaction::Action::Door(door) = &target.action else {
+            panic!("original pedestrian gate must use the ordinary door rules");
+        };
+        assert!(!door.originally_open);
+        assert_eq!(door.direction, 5);
+        let crosses_gate = |cache: &SectorCache| {
+            collision::step(tile, 5, |cell| {
+                SectorCache::player_cell(&cache.entries, &cache.door_states, cell)
+            })
+        };
+        assert_eq!(crosses_gate(&world.cache), None);
+        let raster = world
+            .cache
+            .ordered
+            .iter()
+            .find(|raster| raster.key == key)
+            .unwrap();
+        assert_eq!(raster.frame.source.virtual_path, "art/portal/rire3au0.art");
+        let sprite = raster.frame_draw(&raster.frame);
+        let origin = crate::compositor::sprite_origin(sprite.frame, sprite.anchor);
+        assert!(
+            (0..sprite.frame.height).any(|y| (0..sprite.frame.width).any(|x| {
+                world.cache.pick(
+                    (origin.0 + i64::from(x), origin.1 + i64::from(y)),
+                    start,
+                    Duration::ZERO,
+                ) == Some(key)
+            })),
+            "the original gate must be pickable from this view"
+        );
+
+        for (y, slots) in [(65654, [218, 219, 234, 235]), (65670, [26, 27, 42, 43])] {
+            for (index, (x, y)) in [(61994, y), (61998, y), (61994, y + 4), (61998, y + 4)]
+                .into_iter()
+                .enumerate()
+            {
+                let roof = world
+                    .cache
+                    .ordered
+                    .iter()
+                    .find(|raster| raster.key == roof_key((x, y)))
+                    .unwrap_or_else(|| panic!("missing gatehouse roof slot {}", slots[index]));
+                assert!(world.cache.raster_revealed(roof));
+                assert_eq!(roof.frame.source.virtual_path, "art/roof/gb0.art");
+            }
+        }
+        assert_eq!(world.cache.approach(key, false), Some(1));
+        world.cache.update_player((0, 0), false, Duration::ZERO);
+        let arrived = Duration::from_secs(1);
+        world.cache.update_player((0, 0), false, arrived);
+        assert_eq!(world.cache.player.as_ref().unwrap().tile(), tile);
+        assert_eq!(
+            world.cache.use_target(key, arrived).unwrap(),
+            Err("door is locked".into())
+        );
+        assert_eq!(crosses_gate(&world.cache), None);
+    }
 
     #[test]
     #[ignore = "requires the installed original game"]
