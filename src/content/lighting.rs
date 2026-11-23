@@ -509,7 +509,9 @@ pub(super) fn prepare(
             if flags & 1 != 0 {
                 return Ok(None);
             }
-            if flags & !0x0800_0080 != 0 {
+            // Object-owned masks use the same darkness and ambient tint
+            // bits as sector lights. MODIFIED and 0x08000000 are metadata.
+            if flags & !0x0800_00da != 0 {
                 return Err(format!("unsupported object light flags {flags:#x}").into());
             }
             let color = light.color.ok_or("missing object light color")?;
@@ -518,7 +520,7 @@ pub(super) fn prepare(
                 owner: 0,
                 tile: object.tile,
                 offset: object.appearance.offset,
-                flags: 0,
+                flags: flags & 0x5a,
                 art_id: light.art_id,
                 rgb: [red, green, blue],
             };

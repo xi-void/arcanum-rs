@@ -9,6 +9,8 @@
 | Bates Mansion Level 1 | Sector 67108865, staircase scenery records 179 and 209, Use script 1266 | Map 5012 at (99, 91) |
 | Bates Mansion Level 2 | Staircase records 167 and 183, Use script 1267 | Map 5011 at (104, 92) |
 | Tulla Interior | `map.jmp` source (307, 219) | Same map at (438, 219) |
+| Zephyr crash site | Sector 86570436011, scenery record 7 at (92910, 82598), Use script 2793 | Map 5078 at (2087, 2018) |
+| Crash Site Cave | Sector 2080374816, scenery record 99 at (2093, 2019), Use script 1532 | Map 5000 at (92913, 82598) |
 
 The winning VFS resources supply the destinations. The Bates
 `map.jmp` is in `modules/Arcanum.dat`. The exterior entrance record
@@ -107,22 +109,22 @@ the indoor tile at the object and the roof piece at (x+3, y+3).
 Picking uses the visible roof cell at the inverted cursor at
 (screen x, screen y+120) and tests its opaque texels.
 
-Partial fading remains separate. CE's `wallcheck_recalc` uses
-the local player's tile relative to (2, 2) modulo 4, adjusts at wall
-boundaries according to wall rotation, and selects wall runs using
-its quadrant mask and 34 run definitions, each sampling up to three
-wall tiles. It then uses wall orientation and the selected side masks
-to assign per-wall translucency. Participating walls reference-count
-their requests to fade the normalized roof cell at the wall tile.
-The final release clears the fade bit. CE's object pass still treats
-a faded roof as covering, while coverage callers that opt out of
-fade consider the affected cells uncovered. The hardware roof pass
-interpolates piece-specific corner opacities from
-`art/roof/roofshade.mes` (255, 200, 80). CE's software path uses
-stipple mode. Reproducing see-through walls also requires CE's
-wall flags and object-pass rules. This is the next roof visibility
-slice for playable exploration. The current viewer reports authored
-fade words as unsupported.
+Partial fading follows CE's `wallcheck_recalc`. It uses the local
+player's tile relative to (2, 2) modulo 4, adjusts at wall boundaries
+according to rotation, and selects wall runs using its quadrant mask
+and 34 run definitions, each sampling up to three wall tiles. The
+native viewer derives the current wall and roof fade set from prepared
+sector records. CE's object pass still treats faded roofs as covering.
+The roof pass uses the piece-specific corner opacities from
+`art/roof/roofshade.mes` (255, 200, 80). CPU and GPU use the same
+integer corner interpolation with the source ART mask. The separate
+CE software stipple mode is outside this slice.
+
+The winning Tarant sectors at X=967–968, Y=1025–1026 have no roof
+slots centered in the mansion frontage band Y=65638–65690 except
+the two gatehouse groups. The mansion entrance at (61974, 65664)
+and the adjacent architectural silhouette use original object ART.
+The roof pass draws the authored sector cells and preserves their gaps.
 
 Direct play inspection from the mansion side of the pedestrian gate:
 
@@ -130,6 +132,39 @@ Direct play inspection from the mansion side of the pedestrian gate:
 cargo run --locked --release --features gpu -- play "$HOME/Work/arcanum-ce-test" \
   --map 5000 --center 61997 65660 --renderer vulkan
 ```
+
+## New game and click-to-move
+
+CE's new-game menu selects `MAP_TYPE_START_MAP` through
+`rules/maplist.mes`, then takes that row's X and Y through
+`map_get_starting_location`. The original row 5000 from
+`modules/Arcanum.dat` is `Arcanum1-024-fixed`, (92958, 82592).
+The directory's `startloc.txt` supplies a separate editor/default
+loading coordinate. `--map` and `--center` still override the map
+and initial position.
+
+The cave links in the table use the same bounded `SAT_TELEPORT`
+handler as the mansion stairs. The crash-site plane raster at
+(92914, 82546), sector 86503327147 record 2, uses
+`small_plane_crashed.art` and remains solid. Campfire records
+127 and 138 in sector 86570436012 use animated `campfire.art`.
+The site's darkness masks use `LF_DARK | LF_OUTDOOR` and
+the original outdoor ambient tint. Flat `OSCF_UNDER_ALL` scenery
+goes at the head of the tile's flat-object order. Unknown script
+paths, crash-site NPCs and quest interactions remain outside the alpha.
+
+Mouse routes can plan through an edge that becomes traversable by
+opening an eligible door. Actual movement stops at that edge and uses
+the door, waits for the last opening frame, then replans toward the
+original destination. Keyboard movement or a new click cancels the
+pending route. A locked edge remains blocked and can report the
+reason the destination is unavailable.
+
+For hover feedback, CE adds a copy of the object's sprite tinted
+RGB (200, 200, 200) in the object pass. Play uses the same operator
+for supported interaction targets, after ordinary objects and
+before roofs, with the original transparency mask, zoom and
+currently displayed pose.
 
 ## Viewer settings
 

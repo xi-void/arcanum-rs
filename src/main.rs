@@ -152,12 +152,7 @@ fn main() -> ExitCode {
         }
         #[cfg(feature = "windowed")]
         (Some("play"), [_, game, options @ ..]) => {
-            let mut args = Vec::new();
-            if options.first().is_none_or(|flag| flag != "--map") {
-                args.extend([OsString::from("--map"), OsString::from("5011")]);
-            }
-            args.extend_from_slice(options);
-            show_world(Path::new(game), &args, policy, true)
+            show_world(Path::new(game), options, policy, true)
         }
         #[cfg(feature = "windowed")]
         (Some("art"), [_, action, game, options @ ..]) if action == "world" => {
@@ -1392,15 +1387,15 @@ fn streaming_world(
 ) -> Result<Option<StreamPreview>, Box<dyn Error>> {
     use arcanum_rs::sector::Coordinates;
     use content::world::{SectorRegion, WorldStream};
-    let [flag, rest @ ..] = options else {
-        return Ok(None);
-    };
-    let (name, explicit, size, rest) = if flag == "--map" {
+    let (flag, rest) = options
+        .split_first()
+        .map_or((None, options), |(flag, rest)| (Some(flag), rest));
+    let (name, explicit, size, rest) = if flag.is_some_and(|flag| flag == "--map") {
         let [name, rest @ ..] = rest else {
             return Err("expected a map name after --map".into());
         };
-        (resource_name(name)?, None, (1280, 720), rest)
-    } else if flag == "--sectors" {
+        (Some(resource_name(name)?), None, (1280, 720), rest)
+    } else if flag.is_some_and(|flag| flag == "--sectors") {
         let [
             map,
             min_x,
@@ -1437,7 +1432,14 @@ fn streaming_world(
             parse_view_number::<u32>(width, "width")?,
             parse_view_number::<u32>(height, "height")?,
         );
-        (resource_name(map)?, Some((region, center)), size, rest)
+        (
+            Some(resource_name(map)?),
+            Some((region, center)),
+            size,
+            rest,
+        )
+    } else if playing {
+        (None, None, (1280, 720), options)
     } else {
         return Ok(None);
     };
@@ -1466,7 +1468,7 @@ fn streaming_world(
                 rest
             }
             [flag, ..] if flag == "--center" => {
-                return Err("expected one --center X Y with --map".into());
+                return Err("expected one --center X Y without --sectors".into());
             }
             [flag, rest @ ..] if flag == "--roofs" => {
                 roofs = true;
@@ -1525,10 +1527,17 @@ fn streaming_world(
     }
     let mut vfs = inspection_vfs(game, options, policy)?;
     let (map, region, reference) = if let Some((region, reference)) = explicit {
-        (name.to_owned(), region, reference)
+        (
+            name.expect("explicit sector namespace").to_owned(),
+            region,
+            reference,
+        )
     } else {
         let catalog = content::maps::Catalog::load(&mut vfs)?;
-        let map = catalog.find(name)?;
+        let map = match name {
+            Some(name) => catalog.find(name)?,
+            None => catalog.new_game()?,
+        };
         let files = map.files(&mut vfs)?;
         let center = files.center(center_override)?;
         (

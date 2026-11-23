@@ -46,8 +46,10 @@ and use it. **Mouse wheel** zooms from 1× to 3×. Press **0** to reset.
 **Escape** pauses the game. Use the mouse or **Up/Down** and **Enter**
 to choose Resume, Options, or Quit. Escape backs out of menus.
 The camera follows the character, and original sectors load in the
-background. The default spawn is Bates Mansion Level 1's authored in-game
-entry. For outdoor exploration, add `--map "k'na tha" --center 383 928`.
+background. The default spawn is the original Zephyr crash site, resolved
+from the game's `START_MAP` metadata. Click the nearby cave entrance to
+enter, then click the exit inside to return. Select Bates Mansion with
+`--map 5011`. For K’na Tha, add `--map "k'na tha" --center 383 928`.
 With `--features gpu`, add `--renderer vulkan` to use Vulkan.
 
 The alpha uses original human standing, walking and running sprites.
@@ -59,8 +61,11 @@ installed game). Use `--lighting <hour>` to select another fixed hour.
 Mouse routes use loaded sectors and stop when a destination is blocked or
 unreachable. Movement checks sector tile-block masks, terrain and facade
 flags, static scenery, and orientation-dependent wall and door edges. Open doors permit passage.
-Click an open leaf to close it. Locked doors and unsupported scripts
-report why ordinary use failed. Door state lasts for the current session
+Hover an interactive object to highlight its visible sprite. Clicking
+past an accessible closed door routes to the doorway, opens it, and
+resumes the route after the animation. Click an open leaf to close it.
+Locked doors and unsupported scripts report why ordinary use failed.
+Door state lasts for the current session
 and survives leaving the map.
 
 Walk across the original front exit of Bates Mansion to reach Tarant.
@@ -70,8 +75,8 @@ tiles and a bounded subset of original Use scripts determine transitions.
 See [original transition sources](docs/ORIGINAL_TRANSITIONS.md).
 Movement stops if a sector's collision data is unavailable. The
 free-camera diagnostic is still available via `art world`.
-Play draws original roofs and reveals roof groups as the player enters them.
-Wall-dependent partial roof fading remains pending.
+Play draws original roofs, reveals roof groups on entry, and fades
+walls and roof edges based on the player's tile.
 
 ## Usage
 

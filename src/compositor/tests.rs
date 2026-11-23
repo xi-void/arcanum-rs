@@ -1,5 +1,36 @@
 use super::*;
 
+#[test]
+fn gradient_opacity_uses_unclipped_coordinates_and_the_art_mask() {
+    let frame = SpriteFrame {
+        width: 4,
+        height: 1,
+        hotspot: (0, 0),
+        offset: (0, 0),
+        pixels: vec![[255; 4], [255; 4], [255, 255, 255, 0], [255; 4]],
+    };
+    let draw = SpriteDraw {
+        frame: &frame,
+        anchor: (-1, 0),
+    };
+    let mut target = [[0; 3]; 3];
+    blit_modulated(
+        &mut target,
+        (3, 1),
+        3,
+        [(
+            draw,
+            Modulation::Fade {
+                corners: [0, 252, 252, 0],
+                color: [255; 3],
+                columns: &[],
+            },
+        )],
+    )
+    .unwrap();
+    assert_eq!(target, [[63; 3], [0; 3], [189; 3]]);
+}
+
 const BACKGROUND: [u8; 3] = [10, 20, 30];
 
 fn frame(width: u32, height: u32, pixels: Vec<[u8; 4]>) -> SpriteFrame {

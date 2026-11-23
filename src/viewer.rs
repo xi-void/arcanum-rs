@@ -28,6 +28,10 @@ use winit::window::{Window, WindowId};
 const BACKGROUND: [u8; 3] = [32, 43, 58];
 const MAX_SURFACE_PIXELS: usize = 16 * 1024 * 1024;
 
+fn stream_background(playing: bool) -> [u8; 3] {
+    if playing { [0; 3] } else { BACKGROUND }
+}
+
 pub struct Layer<'a> {
     pub frame: &'a SpriteFrame,
     /// Physical pixel offset from the center of the drawable area.
@@ -821,6 +825,32 @@ impl Viewer<'_> {
             return;
         };
         match event {
+            WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } => {
+                if let ViewContent::Stream {
+                    world,
+                    last_presented: Some(camera),
+                    last_viewport,
+                    last_zoom,
+                    ..
+                } = &mut self.content
+                    && world.playing()
+                    && self.pause.is_none()
+                    && *last_viewport
+                        == (
+                            view.window.inner_size().width,
+                            view.window.inner_size().height,
+                        )
+                    && world.update_hover(
+                        self.cursor
+                            .map(|(x, y)| (x / u32::from(*last_zoom), y / u32::from(*last_zoom))),
+                        logical_size(view.window.inner_size(), *last_zoom),
+                        camera,
+                        play_elapsed,
+                    )
+                {
+                    view.window.request_redraw();
+                }
+            }
             WindowEvent::CloseRequested | WindowEvent::Destroyed => event_loop.exit(),
             WindowEvent::Resized(size) if size.width != 0 && size.height != 0 => {
                 view.window.request_redraw();
@@ -1104,6 +1134,7 @@ impl Viewer<'_> {
                                 elapsed,
                                 settings: self.settings,
                                 menu: menu.as_ref(),
+                                cursor: self.cursor,
                             },
                         )
                         .map(|ready| {
@@ -1152,6 +1183,7 @@ struct FrameOptions<'a> {
     elapsed: Duration,
     settings: Settings,
     menu: Option<&'a Arc<arcanum_rs::content::art::LoadedFrame>>,
+    cursor: Option<(u32, u32)>,
 }
 
 impl WindowSurface {
@@ -1168,8 +1200,10 @@ impl WindowSurface {
             elapsed,
             settings,
             menu,
+            cursor,
         } = options;
         let zoom = settings.zoom;
+        let background = stream_background(world.playing());
         let viewport = logical_size(size, zoom);
         if size.width == 0 || size.height == 0 {
             return Ok(false);
@@ -1183,6 +1217,17 @@ impl WindowSurface {
             return Ok(false);
         }
         world.start_player()?;
+        if world.playing() {
+            let scale = u32::from(zoom);
+            world.update_hover(
+                cursor
+                    .filter(|_| menu.is_none())
+                    .map(|(x, y)| (x / scale, y / scale)),
+                viewport,
+                camera,
+                elapsed,
+            );
+        }
         let start = trace.then(Instant::now);
         let pose = world.update_walk(elapsed);
         if let (Some(start), Some(pose)) = (start, pose) {
@@ -1197,7 +1242,14 @@ impl WindowSurface {
             .filter_map(|mut draw| {
                 match draw.modulation {
                     Modulation::Shadow(_) if !settings.shadows => return None,
-                    Modulation::Shadow(_) | Modulation::Additive => {}
+                    Modulation::Shadow(_) | Modulation::Additive | Modulation::AdditiveTint(_) => {}
+                    Modulation::Fade { corners, .. } if !settings.lighting => {
+                        draw.modulation = Modulation::Fade {
+                            corners,
+                            color: [255; 3],
+                            columns: &[],
+                        };
+                    }
                     _ if !settings.lighting => draw.modulation = Modulation::Unlit,
                     _ => {}
                 }
@@ -1220,11 +1272,22 @@ impl WindowSurface {
                     prepared.shading,
                 );
             }
-            renderer.redraw((size.width, size.height), zoom, draws, &self.window, trace)?;
+            renderer.redraw(
+                (size.width, size.height),
+                zoom,
+                background,
+                draws,
+                &self.window,
+                trace,
+            )?;
             return Ok(true);
         }
-        let frame =
-            self.redraw_scaled(size, zoom, draws.map(|draw| (draw.sprite, draw.modulation)))?;
+        let frame = self.redraw_scaled(
+            size,
+            zoom,
+            background,
+            draws.map(|draw| (draw.sprite, draw.modulation)),
+        )?;
         if trace
             || prepared.scheduling
                 + prepared.ordering
@@ -1257,17 +1320,18 @@ impl WindowSurface {
         size: PhysicalSize<u32>,
         draws: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
     ) -> Result<FrameTiming, String> {
-        self.redraw_scaled(size, 1, draws)
+        self.redraw_scaled(size, 1, BACKGROUND, draws)
     }
 
     fn redraw_scaled<'a>(
         &mut self,
         size: PhysicalSize<u32>,
         zoom: u8,
+        background: [u8; 3],
         draws: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
     ) -> Result<FrameTiming, String> {
         match &mut self.backend {
-            Presentation::Cpu(cpu) => cpu.redraw(size, zoom, draws, &self.window),
+            Presentation::Cpu(cpu) => cpu.redraw(size, zoom, background, draws, &self.window),
             #[cfg(feature = "gpu")]
             Presentation::Gpu(_) => Err("GPU presentation requires a streamed world".into()),
         }
@@ -1279,6 +1343,7 @@ impl CpuSurface {
         &mut self,
         size: PhysicalSize<u32>,
         zoom: u8,
+        background: [u8; 3],
         draws: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
         window: &Window,
     ) -> Result<FrameTiming, String> {
@@ -1303,8 +1368,8 @@ impl CpuSurface {
         self.pixels
             .try_reserve(pixels.saturating_sub(self.pixels.len()))
             .map_err(|error| format!("cannot allocate sprite framebuffer: {error}"))?;
-        self.pixels.resize(pixels, BACKGROUND);
-        self.pixels.fill(BACKGROUND);
+        self.pixels.resize(pixels, background);
+        self.pixels.fill(background);
         blit_modulated(&mut self.pixels, viewport, viewport.0 as usize, draws)
             .map_err(|error| format!("cannot composite sprite: {error}"))?;
         let composition = start.elapsed();
@@ -1354,6 +1419,12 @@ impl CpuSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playable_viewport_clears_to_black_and_diagnostics_keep_their_clear_color() {
+        assert_eq!(stream_background(true), [0, 0, 0]);
+        assert_eq!(stream_background(false), [32, 43, 58]);
+    }
 
     #[test]
     fn zoom_maps_surface_pixels_to_original_tile_under_the_same_camera() {

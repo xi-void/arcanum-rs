@@ -11,13 +11,42 @@ use std::{collections::BTreeMap, error::Error, sync::Arc};
 
 type Tile = (u32, u32);
 
+pub(super) mod wallcheck;
+
 #[derive(Clone, Copy)]
 pub(super) struct Cell {
     piece: u8,
     filled: bool,
+    faded: bool,
 }
 
 impl Cell {
+    pub fn opacity(self, wall_fades: bool, shades: [u8; 3]) -> Option<[u8; 4]> {
+        if !(self.faded || wall_fades) {
+            return None;
+        }
+        let [full, partial, edge] = shades;
+        Some(match self.piece {
+            0 => [edge, partial, partial, edge],
+            1 => [partial, full, partial, edge],
+            2 => [edge, partial, full, partial],
+            3 => [partial, full, full, partial],
+            4 => [partial, partial, edge, edge],
+            5 => [full, full, partial, partial],
+            6 => [partial, partial, full, full],
+            7 => [edge, edge, partial, partial],
+            8 | 12 => [full; 4],
+            9 => [partial, edge, edge, partial],
+            10 => [full, full, edge, partial],
+            11 => [partial, edge, partial, full],
+            _ => unreachable!("validated roof piece"),
+        })
+    }
+
+    pub fn authored_fade(self) -> bool {
+        self.faded
+    }
+
     fn interior(self, (x, y): Tile) -> bool {
         // roof_recalc and the coverage table in CE's roof.c.
         let (x, y) = (x & 3, y & 3);
@@ -159,6 +188,7 @@ pub(super) struct Prepared {
     pub cells: BTreeMap<Tile, Cell>,
     pub rasters: Vec<Roof>,
     pub issues: Vec<String>,
+    pub shades: Option<[u8; 3]>,
 }
 
 pub(super) fn prepare(
@@ -180,6 +210,19 @@ pub(super) fn prepare(
             return result;
         }
     };
+    match load_mes(vfs, "art/roof/roofshade.mes").map(|table| {
+        let shade = |key| table.mes.get(key).and_then(|s| s.trim().parse::<u8>().ok());
+        shade(0)
+            .zip(shade(1))
+            .zip(shade(2))
+            .map(|((a, b), c)| [a, b, c])
+    }) {
+        Ok(Some(shades)) => result.shades = Some(shades),
+        Ok(None) => result
+            .issues
+            .push("invalid roofshade.mes opacity values".into()),
+        Err(error) => result.issues.push(format!("roof opacity: {error}")),
+    }
     for &(slot, id) in words {
         let mut load = || -> Result<Option<Roof>, Box<dyn Error>> {
             if id >> 28 != 10 || id & 0x0000_0fee != 0 {
@@ -198,9 +241,6 @@ pub(super) fn prepare(
             let filled = id & 0x2000 != 0;
             if filled && !player {
                 return Ok(None); // Stored diagnostic draws only visible authored cells.
-            }
-            if id & 0x1000 != 0 {
-                return Err("stored faded roof requires CE fade interpolation".into());
             }
             let name = names.mes.entries().nth(index).ok_or("missing roof name")?.1;
             let name = normalize(name)?;
@@ -227,6 +267,7 @@ pub(super) fn prepare(
                 Cell {
                     piece: frame as u8 + if mirror { 9 } else { 0 },
                     filled,
+                    faded: id & 0x1000 != 0,
                 },
             );
             Ok(Some(Roof {
@@ -258,6 +299,7 @@ mod tests {
         let cell = |piece| Cell {
             piece,
             filled: false,
+            faded: false,
         };
         let lookup = |east_ready: bool, tile| match tile {
             t if t == left => Some(Some(cell(11))),

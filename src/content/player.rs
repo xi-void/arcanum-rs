@@ -8,7 +8,7 @@ use super::{
 use crate::{isometric::project_world_tile, vfs::Vfs};
 use std::{collections::VecDeque, error::Error, sync::Arc, time::Duration};
 
-mod path;
+pub(super) mod path;
 
 type Tile = (u32, u32);
 
@@ -191,18 +191,28 @@ impl Player {
         self.step.is_some() || !self.route.is_empty()
     }
 
+    #[cfg(test)]
     pub(super) fn destination(
         &mut self,
         tile: Tile,
         run: bool,
         cell: impl Fn(Tile) -> Option<super::collision::Cell>,
     ) -> Option<usize> {
-        let from = self.step.map_or(self.tile, |step| step.to);
+        let from = self.route_origin();
         let path = path::find(from, tile, cell);
         let count = path.as_ref().map(VecDeque::len);
         self.route = path.unwrap_or_default();
         self.route_runs = run;
         count
+    }
+
+    pub(super) fn route_origin(&self) -> Tile {
+        self.step.map_or(self.tile, |step| step.to)
+    }
+
+    pub(super) fn follow_route(&mut self, route: VecDeque<u8>, run: bool) {
+        self.route = route;
+        self.route_runs = run;
     }
 
     pub(super) fn destination_near(

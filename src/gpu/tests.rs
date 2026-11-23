@@ -72,6 +72,41 @@ fn test_backend() -> Backends {
 }
 
 #[test]
+#[ignore = "requires a hardware GPU adapter"]
+fn roof_fade_and_object_highlight_match_cpu() {
+    let backend = test_backend();
+    let instance = instance(backend);
+    let adapter = hardware_adapter(&instance, backend, None).unwrap();
+    let mut gpu = Compositor::new(&adapter, TextureFormat::Rgba8Unorm, false).unwrap();
+    let asset = fixture(
+        4,
+        4,
+        (0..16)
+            .map(|i| [125, 16 * i, 200, if i == 2 { 0 } else { 255 }])
+            .collect(),
+    );
+    let bg = [40, 24, 62];
+    let size = (6, 6);
+    let draws = || {
+        [
+            draw(&asset, (1, 1), Modulation::AdditiveTint([200; 3])),
+            draw(
+                &asset,
+                (2, 2),
+                Modulation::Fade {
+                    corners: [80, 255, 128, 200],
+                    color: [255; 3],
+                    columns: &[[210, 232, 190]; 4],
+                },
+            ),
+        ]
+    };
+    let mut cpu = vec![bg; 36];
+    blit_modulated(&mut cpu, size, 6, draws().map(|d| (d.sprite, d.modulation))).unwrap();
+    assert_eq!(read_frame(&mut gpu, size, bg, draws()).0, cpu);
+}
+
+#[test]
 #[ignore = "requires hardware GPU"]
 fn integer_zoom_matches_palette_and_clipping_at_odd_viewport_sizes() {
     let backend = test_backend();
@@ -682,19 +717,48 @@ fn compare_world_tick(
         background,
         world.visible_assets_at(camera, size, tick),
     );
-    if let Some((index, (expected, actual))) = cpu
-        .iter()
-        .zip(&rendered)
-        .enumerate()
-        .find(|(_, (a, b))| a != b)
-    {
-        let stride = size.0 as usize;
-        let count = cpu.iter().zip(&rendered).filter(|(a, b)| a != b).count();
-        panic!(
-            "{size:?} camera {:?} tick {tick:?}: {count} different pixels; first at ({}, {}), CPU {expected:?}, GPU {actual:?}",
-            camera.position(),
-            index % stride,
-            index / stride
+    if cpu != rendered {
+        // Fixed-function UNORM blending can round by one byte per translucent
+        // layer. Limit that tolerance to visible texels of the new fade draws.
+        let mut fade_layers = vec![0u8; cpu.len()];
+        let (width, height) = (i64::from(size.0), i64::from(size.1));
+        for draw in world.visible_assets_at(camera, size, tick) {
+            let Modulation::Fade { corners, .. } = draw.modulation else {
+                continue;
+            };
+            if corners == [255; 4] {
+                continue;
+            }
+            let frame = draw.sprite.frame;
+            let (left, top) = sprite_origin(frame, draw.sprite.anchor);
+            for y in top.max(0)..(top + i64::from(frame.height)).min(height) {
+                for x in left.max(0)..(left + i64::from(frame.width)).min(width) {
+                    let texel = ((y - top) * i64::from(frame.width) + x - left) as usize;
+                    if frame.pixels[texel][3] != 0 {
+                        let layers = &mut fade_layers[(y * width + x) as usize];
+                        *layers = layers.saturating_add(1);
+                    }
+                }
+            }
+        }
+        let mut different = 0;
+        let mut largest = 0;
+        for (index, ((cpu, gpu), allowed)) in cpu.iter().zip(&rendered).zip(fade_layers).enumerate()
+        {
+            let difference = (0..3).map(|i| cpu[i].abs_diff(gpu[i])).max().unwrap();
+            assert!(
+                difference <= allowed,
+                "{size:?} camera {:?} tick {tick:?} at ({}, {}): CPU {cpu:?}, GPU {gpu:?}, fade layers {allowed}",
+                camera.position(),
+                index % size.0 as usize,
+                index / size.0 as usize
+            );
+            different += usize::from(difference != 0);
+            largest = largest.max(difference);
+        }
+        eprintln!(
+            "{size:?} camera {:?} tick {tick:?}: {different} pixels differ inside fades, max channel difference {largest}",
+            camera.position()
         );
     }
     (rendered, stats)
