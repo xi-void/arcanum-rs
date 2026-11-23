@@ -1,6 +1,6 @@
 //! Static scenery appearance and the bounded Bates Mansion room preview.
 
-use super::{LoadedMes, Source, art, load_mes, sector, wall};
+use super::{LoadedMes, Source, art, load_mes, portal, sector, wall};
 use crate::{
     compositor::{SpriteDraw, sprite_origin},
     isometric::project_world_tile,
@@ -14,6 +14,7 @@ use crate::{
         },
     },
     vfs::Vfs,
+    wall::{WallArtId, opening_order_key},
 };
 use std::{
     collections::{BTreeMap, btree_map::Entry},
@@ -237,6 +238,7 @@ pub struct Room {
     pub floor: sector::FloorPatch,
     pub walls: Vec<wall::ImportedWall>,
     pub scenery: Vec<ImportedScenery>,
+    pub portals: Vec<portal::ImportedPortal>,
 }
 
 /// The preview selects base-sector records and uses their original coordinates.
@@ -263,10 +265,11 @@ pub fn load_room(vfs: &mut Vfs) -> Result<Room, Box<dyn Error>> {
         floor,
         walls,
         scenery,
+        portals: Vec::new(),
     })
 }
 
-/// Fixed overview of the original sector, clipped to a 1280 × 720 canvas.
+/// A bounded base-sector scene and import diagnostics.
 pub struct RoomOverview {
     pub room: Room,
     pub issues: Vec<SceneIssue>,
@@ -288,15 +291,59 @@ pub const OVERVIEW_SIZE: (u32, u32) = (1280, 720);
 /// Import a contiguous 25 × 25 surface and select visible static rasters from
 /// the same original sector. Raster intersection retains overhanging objects.
 pub fn load_room_overview(vfs: &mut Vfs) -> Result<RoomOverview, Box<dyn Error>> {
-    use sector::{DEMO_MAP, DEMO_SECTOR};
-    let (source, bytes) = sector::read_base_sector(vfs, DEMO_MAP, DEMO_SECTOR)?;
+    load_overview(vfs, WorldRegion::BATES_MANSION, false)
+}
+
+#[derive(Clone, Copy)]
+pub struct WorldRegion<'a> {
+    pub map: &'a str,
+    pub sector: Coordinates,
+    pub origin: (u8, u8),
+    pub side: u8,
+    pub center: (u32, u32),
+    pub viewport: (u32, u32),
+}
+
+impl WorldRegion<'static> {
+    pub const BATES_MANSION: Self = Self {
+        map: sector::DEMO_MAP,
+        sector: sector::DEMO_SECTOR,
+        origin: (25, 7),
+        side: 25,
+        center: (101, 83),
+        viewport: OVERVIEW_SIZE,
+    };
+}
+
+/// Import supported surfaces and static objects into one draw pass.
+pub fn load_world(vfs: &mut Vfs, region: WorldRegion<'_>) -> Result<RoomOverview, Box<dyn Error>> {
+    load_overview(vfs, region, true)
+}
+
+fn load_overview(
+    vfs: &mut Vfs,
+    region: WorldRegion<'_>,
+    include_portals: bool,
+) -> Result<RoomOverview, Box<dyn Error>> {
+    let WorldRegion {
+        map,
+        sector: coordinates,
+        origin,
+        side,
+        center,
+        viewport,
+    } = region;
+    let (width, height) = viewport;
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 16 * 1024 * 1024 {
+        return Err("invalid world preview viewport".into());
+    }
+    let (source, bytes) = sector::read_base_sector(vfs, map, coordinates)?;
     let objects =
         decode(&bytes).map_err(|err| format!("{} from {source}: {err}", source.virtual_path))?;
     if objects.count > 512 {
         return Err("room overview exceeds 512 original object records".into());
     }
-    let floor = sector::load_facade_region(vfs, DEMO_MAP, DEMO_SECTOR, (25, 7), 25)?;
-    let center = floor.center;
+    let floor = sector::load_centered_facade_region(vfs, map, coordinates, origin, side, center)?;
     let counts = (
         objects.walls.len(),
         objects.portal_count,
@@ -305,6 +352,21 @@ pub fn load_room_overview(vfs: &mut Vfs) -> Result<RoomOverview, Box<dyn Error>>
     let mut walls = Vec::new();
     let mut scenery = Vec::new();
     let mut issues = Vec::new();
+    let mut portals = Vec::new();
+    let mut portal_import = (include_portals && !objects.portals.is_empty())
+        .then(|| portal::PortalImport::new(vfs))
+        .transpose()?;
+    // The supported portal configuration has exactly one same-tile wall opening.
+    let mut openings = BTreeMap::new();
+    if portal_import.is_some() {
+        for wall in &objects.walls {
+            let tile = wall.world_tile(coordinates).ok_or("invalid wall tile")?;
+            openings
+                .entry(tile)
+                .and_modify(|pair| *pair = None)
+                .or_insert(Some((wall.index, wall.art_id)));
+        }
+    }
     let mut wall_import = wall::WallImport::new(vfs, &source, objects.start, counts)?;
     let mut scenery_import = SceneryImport::new(vfs)?;
     let mut report = |record, category, tile, art_id, reason| {
@@ -312,7 +374,7 @@ pub fn load_room_overview(vfs: &mut Vfs) -> Result<RoomOverview, Box<dyn Error>>
         // the selected floor or with a tile anchor near the overview.
         let on_floor = floor.tiles().iter().any(|cell| cell.world == tile);
         let near_view = project_world_tile(tile, center).is_some_and(|(x, y)| {
-            x.abs_diff(0) < OVERVIEW_SIZE.0 / 2 + 128 && y.abs_diff(0) < OVERVIEW_SIZE.1 / 2 + 128
+            x.abs_diff(0) < width / 2 + 128 && y.abs_diff(0) < height / 2 + 128
         });
         if on_floor || near_view {
             issues.push(SceneIssue {
@@ -331,25 +393,43 @@ pub fn load_room_overview(vfs: &mut Vfs) -> Result<RoomOverview, Box<dyn Error>>
         .chain(objects.portals)
     {
         let tile = record
-            .world_tile(DEMO_SECTOR)
+            .world_tile(coordinates)
             .ok_or("invalid overview object tile")?;
         let (index, category, art_id) = (record.index, record.category, record.art_id);
         let result = match category {
-            StaticCategory::Wall => wall_import.resolve(vfs, DEMO_SECTOR, record).map(|wall| {
-                if wall.draw(center).is_some_and(intersects_overview) {
+            StaticCategory::Wall => wall_import.resolve(vfs, coordinates, record).map(|wall| {
+                if wall
+                    .draw(center)
+                    .is_some_and(|draw| intersects_viewport(draw, viewport))
+                {
                     walls.push(wall);
                 }
             }),
             StaticCategory::Scenery => {
                 scenery_import
-                    .resolve(vfs, DEMO_SECTOR, record)
+                    .resolve(vfs, coordinates, record)
                     .map(|prop| {
-                        if prop.draw(center).is_some_and(intersects_overview) {
+                        if prop
+                            .draw(center)
+                            .is_some_and(|draw| intersects_viewport(draw, viewport))
+                        {
                             scenery.push(prop);
                         }
                     })
             }
-            StaticCategory::Portal => Err("portal rendering is unsupported".into()),
+            StaticCategory::Portal => match &mut portal_import {
+                Some(importer) => matched_opening(openings.get(&tile).copied().flatten(), art_id)
+                    .and_then(|wall| importer.resolve(vfs, coordinates, record, wall))
+                    .map(|leaf| {
+                        if leaf
+                            .draw(center)
+                            .is_some_and(|draw| intersects_viewport(draw, viewport))
+                        {
+                            portals.push(leaf);
+                        }
+                    }),
+                None => Err("portal rendering is disabled in this preview".into()),
+            },
         };
         if let Err(error) = result {
             report(index, category, tile, art_id, error.to_string());
@@ -367,25 +447,33 @@ pub fn load_room_overview(vfs: &mut Vfs) -> Result<RoomOverview, Box<dyn Error>>
             floor,
             walls,
             scenery,
+            portals,
         },
         issues,
         sector_object_counts: counts,
     })
 }
 
-fn intersects_overview(draw: SpriteDraw<'_>) -> bool {
+fn intersects_viewport(draw: SpriteDraw<'_>, viewport: (u32, u32)) -> bool {
     let (x, y) = sprite_origin(draw.frame, draw.anchor);
-    let (width, height) = (
-        i64::from(OVERVIEW_SIZE.0 / 2),
-        i64::from(OVERVIEW_SIZE.1 / 2),
-    );
-    x < width
-        && y < height
+    let (width, height) = (i64::from(viewport.0 / 2), i64::from(viewport.1 / 2));
+    x < i64::from(viewport.0) - width
+        && y < i64::from(viewport.1) - height
         && x + i64::from(draw.frame.width) > -width
         && y + i64::from(draw.frame.height) > -height
 }
 
-type DrawOrder = (bool, u32, u32, i64, i64, usize);
+fn matched_opening(wall: Option<(usize, u32)>, raw_portal: u32) -> Result<usize, Box<dyn Error>> {
+    let (index, wall_art) = wall.ok_or("expected one same-tile wall opening for portal")?;
+    let wall_art = WallArtId(wall_art).fields()?;
+    let portal_art = portal::PortalArt::decode(raw_portal)?;
+    if !(21..=33).contains(&wall_art.piece) || wall_art.rotation != portal_art.rotation {
+        return Err("portal does not match the wall opening's piece and rotation".into());
+    }
+    Ok(index)
+}
+
+type DrawOrder = (bool, u32, u32, i64, i64, usize, Option<usize>);
 
 fn order(tile: (u32, u32), offset: (i32, i32), flat: bool, index: usize) -> DrawOrder {
     // CE uses truncation toward zero for half-pixels in the within-tile key.
@@ -397,14 +485,15 @@ fn order(tile: (u32, u32), offset: (i32, i32), flat: bool, index: usize) -> Draw
     } else {
         (vertical + horizontal, vertical - horizontal)
     };
-    (!flat, tile.1, tile.0, depth, across, index)
+    (!flat, tile.1, tile.0, depth, across, index, None)
 }
 
 impl Room {
     /// Ordered base surface followed by flat and upright object draws.
     pub fn draws(&self) -> Option<impl Iterator<Item = SpriteDraw<'_>>> {
         let center = self.floor.center;
-        let mut objects = Vec::with_capacity(self.walls.len() + self.scenery.len());
+        let mut objects =
+            Vec::with_capacity(self.walls.len() + self.scenery.len() + self.portals.len());
         for wall in &self.walls {
             let tile = wall.placement.tile;
             let (depth, across) = wall.orientation.order_key();
@@ -415,6 +504,7 @@ impl Room {
                 i64::from(depth),
                 i64::from(across),
                 wall.record.index,
+                None,
             );
             objects.push((key, wall.draw(center)?));
         }
@@ -426,6 +516,20 @@ impl Room {
                 scenery.record.index,
             );
             objects.push((key, scenery.draw(center)?));
+        }
+        for portal in &self.portals {
+            let (x, y) = portal.placement.tile;
+            let (depth, across) = opening_order_key(portal.art.rotation);
+            let key = (
+                true,
+                y,
+                x,
+                i64::from(depth),
+                i64::from(across),
+                portal.paired_wall_index,
+                Some(portal.record.index),
+            );
+            objects.push((key, portal.draw(center)?));
         }
         objects.sort_unstable_by_key(|(key, _)| *key);
         Some(
@@ -491,7 +595,7 @@ mod tests {
 
     #[test]
     fn flats_precede_uprights_and_ties_keep_original_insertion_order() {
-        let upper_wall = (true, 80, 100, -40, 0, 4);
+        let upper_wall = (true, 80, 100, -40, 0, 4, None);
         let tile = (100, 80);
         assert!(order((200, 200), (0, 0), true, 9) < upper_wall);
         assert!(order(tile, (8, -3), false, 2) > upper_wall);

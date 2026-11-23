@@ -126,7 +126,7 @@ fn rejects_unsupported_types_and_fields_and_invalid_record_boundaries() {
         decode(&bytes).unwrap_err().message
     };
     assert!(wrap(&instance(16, [0; 3], &[])).contains("unsupported object category"));
-    assert!(wrap(&instance(1, [4, 0, 0], &[0; 4])).contains("unsupported object fields"));
+    assert!(wrap(&instance(1, [1 << 20, 0, 0], &[0; 4])).contains("unsupported object fields"));
     let mut bad = wall();
     bad[56] = 1;
     assert!(wrap(&bad).contains("field count and bitmap disagree"));
@@ -168,4 +168,35 @@ fn retains_scenery_placements_and_rejects_a_truncated_override() {
     assert_eq!(scene.fields.scenery_flags, Some(0x20));
     assert!(decode(&sector(&record[..record.len() - 1])).is_err());
     assert!(decode(&sector(&instance(3, [1 << 28, 0, 0], &[0; 4]))).is_err());
+}
+
+#[test]
+fn portal_retains_current_art_and_optional_appearance_fields() {
+    let mut data = 0x3210_3c11_u32.to_le_bytes().to_vec();
+    data.push(1);
+    data.extend(94u32.to_le_bytes());
+    data.extend(90u32.to_le_bytes());
+    data.extend((-6i32).to_le_bytes());
+    data.extend(100u32.to_le_bytes());
+    data.extend(0u32.to_le_bytes());
+    let record = instance(1, [0x807, 0, 1], &data);
+    let sector = |record: &[u8]| {
+        let mut bytes = sector_header(0xaa0000);
+        bytes.extend(record);
+        bytes.extend(1u32.to_le_bytes());
+        bytes
+    };
+    let list = decode(&sector(&record)).unwrap();
+    let portal = &list.portals[0];
+    assert_eq!(portal.category, StaticCategory::Portal);
+    assert_eq!(portal.art_id, 0x3210_3c11);
+    assert_eq!(portal.stored_tile, (94, 90));
+    assert_eq!(portal.fields.offset_x, Some(-6));
+    assert_eq!(portal.fields.offset_y, None);
+    assert_eq!(portal.fields.scale, Some(100));
+    assert_eq!(portal.fields.portal_flags, Some(0));
+
+    for end in 0..record.len() {
+        assert!(decode(&sector(&record[..end])).is_err(), "prefix {end}");
+    }
 }

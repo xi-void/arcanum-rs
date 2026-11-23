@@ -46,6 +46,8 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] art sector-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector-facade <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector-wall-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs [--ordered] art world-inspect <game-directory> [--view <local-x> <local-y> <side> <center-x> <center-y> <width> <height>] [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs [--ordered] art world <game-directory> [--view <local-x> <local-y> <side> <center-x> <center-y> <width> <height>] [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector-room-wide-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art sector-room-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector-room-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
@@ -130,6 +132,13 @@ fn main() -> ExitCode {
         (Some("art"), [_, action, game, options @ ..]) if action == "sector-room-wide-inspect" => {
             inspect_room_overview(Path::new(game), options, policy)
         }
+        (Some("art"), [_, action, game, options @ ..]) if action == "world-inspect" => {
+            load_world_preview(Path::new(game), options, policy).map(|_| ())
+        }
+        #[cfg(feature = "windowed")]
+        (Some("art"), [_, action, game, options @ ..]) if action == "world" => {
+            show_world(Path::new(game), options, policy)
+        }
         #[cfg(feature = "windowed")]
         (Some("art"), [_, action, game, options @ ..])
             if action == "sector-room" || action == "sector-room-wide" =>
@@ -193,6 +202,7 @@ fn main() -> ExitCode {
                 || action == "sector-walls"
                 || action == "sector-room"
                 || action == "sector-room-wide"
+                || action == "world"
                 || action == "sector-facade" =>
         {
             Err("sprite presentation requires a build with --features windowed".into())
@@ -1047,6 +1057,92 @@ fn show_room(
         room
     };
     drop(vfs);
+    if wide {
+        present_room(
+            &room,
+            "Arcanum-RS | Bates Mansion Level 1 overview",
+            Some(content::scenery::OVERVIEW_SIZE),
+        )
+    } else {
+        present_room(&room, "Arcanum-RS | Bates Mansion room", None)
+    }
+}
+
+#[cfg(feature = "windowed")]
+fn show_world(game: &Path, options: &[OsString], policy: Policy) -> Result<(), Box<dyn Error>> {
+    let (room, region) = load_world_preview(game, options, policy)?;
+    present_room(
+        &room,
+        "Arcanum-RS | Bates Mansion world",
+        Some(region.viewport),
+    )
+}
+
+fn load_world_preview(
+    game: &Path,
+    options: &[OsString],
+    policy: Policy,
+) -> Result<
+    (
+        content::scenery::Room,
+        content::scenery::WorldRegion<'static>,
+    ),
+    Box<dyn Error>,
+> {
+    use content::scenery::{WorldRegion, load_world};
+    let mut region = WorldRegion::BATES_MANSION;
+    let options = match options {
+        [
+            flag,
+            x,
+            y,
+            side,
+            center_x,
+            center_y,
+            width,
+            height,
+            rest @ ..,
+        ] if flag == "--view" => {
+            region.origin = (
+                parse_view_number(x, "local X")?,
+                parse_view_number(y, "local Y")?,
+            );
+            region.side = parse_view_number(side, "side")?;
+            region.center = (
+                parse_view_number(center_x, "center X")?,
+                parse_view_number(center_y, "center Y")?,
+            );
+            region.viewport = (
+                parse_view_number(width, "width")?,
+                parse_view_number(height, "height")?,
+            );
+            rest
+        }
+        [flag, ..] if flag == "--view" => return Err("expected seven numbers after --view".into()),
+        options => options,
+    };
+    let mut vfs = inspection_vfs(game, options, policy)?;
+    let overview = load_world(&mut vfs, region)?;
+    report_room_overview(&mut io::stdout().lock(), &overview)?;
+    Ok((overview.room, region))
+}
+
+fn parse_view_number<T: std::str::FromStr>(
+    value: &OsStr,
+    field: &str,
+) -> Result<T, Box<dyn Error>> {
+    value
+        .to_str()
+        .and_then(|text| text.parse().ok())
+        .ok_or_else(|| format!("invalid world preview {field}: {value:?}").into())
+}
+
+#[cfg(feature = "windowed")]
+fn present_room(
+    room: &content::scenery::Room,
+    title: &str,
+    size: Option<(u32, u32)>,
+) -> Result<(), Box<dyn Error>> {
     let layers = room
         .draws()
         .ok_or("room anchor exceeds the drawable range")?
@@ -1057,17 +1153,10 @@ fn show_room(
             })
         })
         .collect::<Result<Vec<_>, std::num::TryFromIntError>>()?;
-    if wide {
-        Ok(viewer::show_layers_at_size(
-            "Arcanum-RS | Bates Mansion Level 1 overview".into(),
-            &layers,
-            content::scenery::OVERVIEW_SIZE,
-        )?)
+    if let Some(size) = size {
+        Ok(viewer::show_layers_at_size(title.into(), &layers, size)?)
     } else {
-        Ok(viewer::show_layers(
-            "Arcanum-RS | Bates Mansion room".into(),
-            &layers,
-        )?)
+        Ok(viewer::show_layers(title.into(), &layers)?)
     }
 }
 
@@ -1155,6 +1244,38 @@ fn report_room(out: &mut impl Write, room: &content::scenery::Room) -> Result<()
             top_left,
             fields.flags,
             fields.scenery_flags
+        )?;
+    }
+    for portal in &room.portals {
+        let path = &portal.artwork.source;
+        let draw = portal
+            .draw(floor.center)
+            .ok_or("portal anchor exceeds the drawable range")?;
+        writeln!(
+            out,
+            "Record {} {:?} (Portal type 1) bytes {:?}, tile {:?}, wall {}, prototype {} ART {:#010x} from {}, stored ART {:#010x}: {} from {}, frame {}, rotation {}, palette {}, mirror {}, offset {:?}, scale {}%, flags {:#x}, portal flags {:#x}, hotspot {:?}, pivot {:?}, relative raster origin {:?}",
+            portal.record.index,
+            portal.art.kind,
+            portal.record.span,
+            portal.placement.tile,
+            portal.paired_wall_index,
+            portal.record.prototype.0,
+            portal.prototype_art_id,
+            portal.prototype_source,
+            portal.record.art_id,
+            path.virtual_path,
+            path,
+            portal.art.frame,
+            portal.art.rotation,
+            portal.art.palette,
+            portal.art.mirror_x,
+            portal.appearance.offset,
+            portal.appearance.scale,
+            portal.appearance.flags,
+            portal.appearance.portal_flags,
+            draw.frame.hotspot,
+            portal.art.pivot(draw.frame),
+            arcanum_rs::compositor::sprite_origin(draw.frame, draw.anchor),
         )?;
     }
     Ok(())

@@ -96,7 +96,7 @@ pub fn load_region(
     origin: (u8, u8),
     side: u8,
 ) -> Result<FloorPatch, Box<dyn Error>> {
-    load_surface(vfs, map, coordinates, origin, side, false)
+    load_surface(vfs, map, coordinates, origin, side, false, None)
 }
 
 /// Import a bounded region containing floor tiles and baked facade pieces.
@@ -108,7 +108,18 @@ pub fn load_facade_region(
     origin: (u8, u8),
     side: u8,
 ) -> Result<FloorPatch, Box<dyn Error>> {
-    load_surface(vfs, map, coordinates, origin, side, true)
+    load_surface(vfs, map, coordinates, origin, side, true, None)
+}
+
+pub(super) fn load_centered_facade_region(
+    vfs: &mut Vfs,
+    map: &str,
+    coordinates: Coordinates,
+    origin: (u8, u8),
+    side: u8,
+    center: (u32, u32),
+) -> Result<FloorPatch, Box<dyn Error>> {
+    load_surface(vfs, map, coordinates, origin, side, true, Some(center))
 }
 
 fn load_surface(
@@ -118,6 +129,7 @@ fn load_surface(
     origin: (u8, u8),
     side: u8,
     include_facades: bool,
+    center: Option<(u32, u32)>,
 ) -> Result<FloorPatch, Box<dyn Error>> {
     let max_side = if include_facades {
         MAX_FACADE_SIDE
@@ -133,9 +145,14 @@ fn load_surface(
     }
     let (source, floor, names) = load_floor_and_names(vfs, map, coordinates)?;
     let midpoint = (origin.0 + side / 2, origin.1 + side / 2);
-    let center = coordinates
-        .world_tile(midpoint.0, midpoint.1)
-        .expect("validated sector and midpoint");
+    let center = center.unwrap_or_else(|| {
+        coordinates
+            .world_tile(midpoint.0, midpoint.1)
+            .expect("validated sector and midpoint")
+    });
+    if (center.0 >> 6, center.1 >> 6) != (coordinates.x, coordinates.y) {
+        return Err("scene center must be in the selected sector".into());
+    }
     let mut tiles = Vec::with_capacity(usize::from(side).pow(2));
     let mut facade_names: Option<LoadedMes> = None;
     for y in origin.1..origin.1 + side {
