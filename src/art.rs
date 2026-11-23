@@ -28,6 +28,8 @@ pub struct DecodedFrame {
     pub rotation_count: u8,
     pub stored_rotation: u8,
     pub stored_palette: u8,
+    /// Original RGB of palette index zero, before sprite transparency.
+    pub palette_key: [u8; 3],
     pub frames_per_second: i32,
     /// Stored animation action-frame marker.
     pub action_frame: i32,
@@ -215,6 +217,7 @@ pub fn decode_direction(
         rotation_count,
         stored_rotation,
         stored_palette,
+        palette_key: [palette[2], palette[1], palette[0]],
         frames_per_second: word(header, 4),
         action_frame: word(header, 28),
         ignored_trailing_bytes: input.len() - payload_offset,

@@ -51,6 +51,10 @@ keeps its validated floor and reports the object-layer error. An absent
 sector or unsupported floor cell leaves the normal cleared background.
 Original black void tiles remain regular original draws.
 
+The streamed viewer also supports opt-in [original static lighting](STATIC_LIGHTING.md)
+at a fixed scheme hour, with mask preparation in the same sector worker
+and shared shading for floors, scenery, walls and portals.
+
 ## Streaming and ordering
 
 The camera keeps one pixel transform relative to the initial world tile.

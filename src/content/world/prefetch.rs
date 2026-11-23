@@ -224,6 +224,7 @@ pub struct PrefetchStats {
 pub struct ViewPreparation {
     pub ready: bool,
     pub ordering: Duration,
+    pub shading: Duration,
     pub scheduling: Duration,
 }
 
@@ -385,10 +386,12 @@ impl InteractiveWorld {
             self.cache.activate(&[]);
         }
         let start = Instant::now();
-        if ready && self.cache.active != next {
-            self.cache.activate(next);
-        }
-        let ordering = start.elapsed();
+        let shading = if ready && self.cache.active != next {
+            self.cache.activate(next)
+        } else {
+            Duration::ZERO
+        };
+        let ordering = start.elapsed().saturating_sub(shading);
         if ready {
             if let Some(start) = self.hold_started.take() {
                 let hold = start.elapsed();
@@ -437,7 +440,8 @@ impl InteractiveWorld {
         Ok(ViewPreparation {
             ready,
             ordering,
-            scheduling: begin.elapsed() - ordering,
+            shading,
+            scheduling: begin.elapsed().saturating_sub(ordering + shading),
         })
     }
 
@@ -459,6 +463,14 @@ impl InteractiveWorld {
         viewport: (u32, u32),
     ) -> impl Iterator<Item = SpriteDraw<'_>> {
         self.cache.visible(camera, viewport)
+    }
+
+    pub fn visible_modulated(
+        &self,
+        camera: &Camera,
+        size: (u32, u32),
+    ) -> impl Iterator<Item = (SpriteDraw<'_>, crate::compositor::Modulation<'_>)> {
+        self.cache.visible_modulated(camera, size)
     }
 }
 

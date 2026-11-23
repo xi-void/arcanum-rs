@@ -1457,3 +1457,110 @@ fn kna_tha_passage_is_placed_on_the_overworld() {
         "art/scenery/tree_door.art"
     );
 }
+
+#[test]
+#[ignore = "requires installed Arcanum data"]
+fn original_static_light_masks_modulate_the_scene_without_moving_rasters() {
+    use arcanum_rs::{
+        compositor::Modulation,
+        content::world::{SectorRegion, WorldStream},
+        sector::Coordinates,
+    };
+
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    for (map, sector, center, hour, expected_counts, expected_center) in [
+        (
+            DEMO_MAP,
+            DEMO_SECTOR,
+            (101, 83),
+            12,
+            (9, 9, 0),
+            [107, 113, 131],
+        ),
+        (
+            "k'na tha",
+            Coordinates { x: 12, y: 12 },
+            (798, 786),
+            0,
+            (16, 16, 0),
+            [74, 170, 234],
+        ),
+    ] {
+        let vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+        let region = SectorRegion {
+            first: sector,
+            last: sector,
+        };
+        let size = (1280, 720);
+        let mut camera = region.camera(center).unwrap();
+        camera.resize(size);
+        let mut world = WorldStream::new(vfs, map.into(), region, center)
+            .unwrap()
+            .with_lighting(hour)
+            .unwrap();
+        world.prepare(&camera, size).unwrap();
+        let report = world.reports().next().unwrap();
+        assert_eq!(report.light_counts, Some(expected_counts));
+        if map == DEMO_MAP {
+            assert_eq!(report.wall_count, 268);
+        }
+        let center_anchor = (640 - camera.position().0, 379 - camera.position().1);
+        let mut shaded_center = false;
+        let mut lit_objects = 0;
+        let mut column_lit = 0;
+        let mut checked_original_objects = 0;
+        for (ordinary, (draw, shade)) in world
+            .visible(&camera, size)
+            .zip(world.visible_modulated(&camera, size))
+        {
+            assert_eq!(ordinary.anchor, draw.anchor);
+            assert!(std::ptr::eq(ordinary.frame, draw.frame));
+            if map == DEMO_MAP {
+                let position = (
+                    draw.anchor.0 + camera.position().0 - 640,
+                    draw.anchor.1 + camera.position().1 - 360,
+                );
+                let expected = match (draw.frame.width, draw.frame.height, position) {
+                    (121, 109, (-177, -28)) => Some([101, 107, 125]), // Sofa 61.
+                    (121, 109, (12, -42)) => Some([94, 100, 118]),    // Sofa 78.
+                    (40, 154, (0, -160)) => Some([74, 80, 98]),       // Wall 52.
+                    _ => None,
+                };
+                if let Some(expected) = expected {
+                    assert!(matches!(shade, Modulation::Uniform(actual) if actual == expected));
+                    checked_original_objects += 1;
+                }
+            }
+            if draw.anchor == center_anchor
+                && let Modulation::Floor(nodes) = shade
+            {
+                // Measured independently by decoding the original mask indices
+                // and sampling the center location in each original record.
+                assert_eq!(nodes[4], expected_center);
+                shaded_center = true;
+            }
+            if (draw.frame.width, draw.frame.height) != (78, 40) {
+                lit_objects += usize::from(!matches!(shade, Modulation::Unlit));
+                if let Modulation::Columns(columns) = shade {
+                    assert_eq!(columns.len(), draw.frame.width as usize);
+                    assert!(columns.windows(2).any(|pair| pair[0] != pair[1]));
+                    column_lit += 1;
+                }
+            }
+        }
+        assert!(shaded_center);
+        assert!(lit_objects > 0);
+        assert!(column_lit > 0);
+        if map == DEMO_MAP {
+            assert_eq!(checked_original_objects, 3);
+        }
+        let before = world.stats();
+        camera.pan((32, -16), size);
+        let warm_timing = world.prepare(&camera, size).unwrap();
+        assert!(warm_timing.shading.is_zero());
+        let after = world.stats();
+        assert_eq!(after.vfs_reads, before.vfs_reads);
+        assert_eq!(after.art.decodes, before.art.decodes);
+        assert_eq!(after.light_samples, before.light_samples);
+    }
+}

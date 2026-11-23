@@ -26,7 +26,8 @@ are the low six bits of each map coordinate. `tile_id_from_loc` and
 `sector_light_list_load` reads a signed little-endian 32-bit count.
 `light_read` in `src/game/light.c` reads one fixed 48-byte wire record
 per light. The Rust reader consumes and bounds-checks each record in
-sequence, with no lighting state or interpretation of light fields.
+sequence. Milestone 42 exposes the verified fields and uses them in
+the opt-in [static lighting](STATIC_LIGHTING.md) pass.
 `sector_tile_list_load_internal` then reads 4,096 little-endian 32-bit
 tile art IDs, totaling 16,384 bytes. The 51,112-byte Bates resource
 declares nine lights, so the tile array starts at **436** and ends at

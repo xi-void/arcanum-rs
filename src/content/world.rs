@@ -1,12 +1,17 @@
 //! Bounded streaming of original base sectors for the read-only world viewer.
 
 use super::{
+    LoadedMes,
     art::{FrameCache, FrameCacheStats, LoadedFrame},
-    scenery::{DrawOrder, LoadStages, RoomOverview, WorldRegion, load_streamed_sector},
+    lighting::{self, Ambient, LightGrid, LightImport, StaticLight, WallFace},
+    load_mes,
+    scenery::{
+        DrawOrder, LoadStages, ObjectLight, RoomOverview, WorldRegion, load_streamed_sector,
+    },
 };
 use crate::{
     camera::{Camera, RasterBounds, Viewport},
-    compositor::SpriteDraw,
+    compositor::{Modulation, SpriteDraw},
     isometric::project_world_tile,
     sector::{Coordinates, SIDE},
     vfs::Vfs,
@@ -108,6 +113,8 @@ pub struct SectorReport {
     pub portal_count: usize,
     pub original_object_counts: (usize, usize, usize),
     pub diagnostics: Vec<String>,
+    /// Total, prepared and switched-off original light records.
+    pub light_counts: Option<(usize, usize, usize)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -120,6 +127,11 @@ pub struct StreamStats {
     pub vfs_reads: u64,
     /// Reserved storage for sector and merged raster descriptors, excluding shared RGBA.
     pub raster_bytes: usize,
+    /// Nonzero world-grid entries in the active static surface lighting.
+    pub light_samples: usize,
+    /// Entry data in the active and cached light grids, excluding tree overhead.
+    pub light_grid_payload_bytes: usize,
+    pub draw_lighting_bytes: usize,
     pub art: FrameCacheStats,
 }
 
@@ -131,6 +143,7 @@ pub struct PrepareTiming {
     pub art_read: Duration,
     pub art_decode: Duration,
     pub ordering: Duration,
+    pub shading: Duration,
 }
 
 type WorldOrder = (bool, DrawOrder);
@@ -141,6 +154,7 @@ struct Raster {
     frame: Arc<LoadedFrame>,
     anchor: (i32, i32),
     bounds: RasterBounds,
+    object_light: ObjectLight,
 }
 
 impl Raster {
@@ -149,6 +163,7 @@ impl Raster {
             key,
             frame: Arc::clone(frame),
             anchor,
+            object_light: ObjectLight::Unlit,
             bounds: RasterBounds::new(SpriteDraw {
                 frame: &frame.decoded.frame,
                 anchor,
@@ -167,6 +182,9 @@ impl Raster {
 struct CachedSector {
     report: SectorReport,
     draws: Vec<Raster>,
+    lights: LightGrid,
+    emitters: Vec<StaticLight>,
+    outdoor_rows: [u64; 64],
 }
 
 impl CachedSector {
@@ -182,12 +200,21 @@ impl CachedSector {
                 portal_count: 0,
                 original_object_counts: (0, 0, 0),
                 diagnostics: vec![error],
+                light_counts: None,
             },
             draws: Vec::new(),
+            lights: LightGrid::default(),
+            emitters: Vec::new(),
+            outdoor_rows: [0; 64],
         }
     }
 
-    fn from_room(id: u64, world: RoomOverview, reference: (u32, u32)) -> Self {
+    fn from_room(
+        id: u64,
+        world: RoomOverview,
+        reference: (u32, u32),
+        lights: Option<LightImport>,
+    ) -> Self {
         let room = &world.room;
         let mut report = SectorReport {
             id,
@@ -207,6 +234,9 @@ impl CachedSector {
             portal_count: 0,
             original_object_counts: world.sector_object_counts,
             diagnostics: room.floor.surface_issues.clone(),
+            light_counts: lights
+                .as_ref()
+                .map(|lights| (room.floor.lights.len(), lights.accepted, lights.off)),
         };
         report.diagnostics.extend(world.object_issue);
         report
@@ -232,13 +262,14 @@ impl CachedSector {
             })
             .collect();
         if let Some(objects) = room.shared_objects() {
-            for (key, draw, frame) in objects {
+            for (key, draw, frame, light) in objects {
                 let tile =
                     project_world_tile((key.2, key.1), reference).expect("bounded object tile");
-                if let Some(raster) = shift(draw.anchor)
+                if let Some(mut raster) = shift(draw.anchor)
                     .map(|anchor| Raster::new((true, key), frame, anchor))
                     .filter(|raster| within_overhang(raster.bounds, tile))
                 {
+                    raster.object_light = light;
                     draws.push(raster);
                 } else {
                     report.diagnostics.push(format!("object at ({}, {}) record {} exceeds the {OVERHANG}px raster overhang bound", key.2, key.1, key.6.unwrap_or(key.5)));
@@ -253,7 +284,15 @@ impl CachedSector {
         report.wall_count = room.walls.len();
         report.scenery_count = room.scenery.len();
         report.portal_count = room.portals.len();
-        Self { report, draws }
+        let lights = lights.unwrap_or_default();
+        report.diagnostics.extend(lights.issues);
+        Self {
+            report,
+            draws,
+            lights: lights.grid,
+            emitters: lights.sources,
+            outdoor_rows: room.floor.outdoor_rows,
+        }
     }
 }
 
@@ -265,6 +304,28 @@ fn within_overhang(bounds: RasterBounds, (x, y): (i32, i32)) -> bool {
         && bounds.max.1 <= y + OVERHANG
 }
 
+enum PreparedShade {
+    Tint(Modulation<'static>),
+    Columns(Box<[[u8; 3]]>),
+}
+
+impl PreparedShade {
+    fn modulation(&self) -> Modulation<'_> {
+        match self {
+            Self::Tint(shade) => *shade,
+            Self::Columns(colors) => Modulation::Columns(colors),
+        }
+    }
+
+    fn uniform(color: [u8; 3]) -> Self {
+        Self::Tint(if color == [255; 3] {
+            Modulation::Unlit
+        } else {
+            Modulation::Uniform(color)
+        })
+    }
+}
+
 #[derive(Default)]
 struct SectorCache {
     entries: BTreeMap<u64, (CachedSector, Option<u64>)>,
@@ -274,6 +335,9 @@ struct SectorCache {
     loads: u64,
     hits: u64,
     evictions: u64,
+    ambient: Option<(Ambient, (u32, u32))>,
+    lights: LightGrid,
+    shades: Vec<PreparedShade>,
 }
 
 impl SectorCache {
@@ -303,10 +367,11 @@ impl SectorCache {
         }
         let load = start.elapsed();
         let start = Instant::now();
-        self.activate(required);
+        let shading = self.activate(required);
         PrepareTiming {
             load,
-            ordering: start.elapsed(),
+            ordering: start.elapsed().saturating_sub(shading),
+            shading,
             ..PrepareTiming::default()
         }
     }
@@ -328,7 +393,7 @@ impl SectorCache {
         victim.is_some()
     }
 
-    fn activate(&mut self, required: &[u64]) {
+    fn activate(&mut self, required: &[u64]) -> Duration {
         self.step += 1;
         self.ordered.clear();
         self.active.clear();
@@ -339,6 +404,80 @@ impl SectorCache {
             self.ordered.extend(sector.draws.iter().cloned());
         }
         self.ordered.sort_unstable_by_key(|draw| draw.key);
+        let Some((ambient, reference)) = self.ambient else {
+            return Duration::ZERO;
+        };
+        let start = Instant::now();
+        self.lights.clear();
+        self.shades.clear();
+        let mut emitters = Vec::new();
+        // SectorList and light list construction both prepend in CE.
+        for id in required.iter().rev() {
+            let sector = &self.entries[id].0;
+            self.lights.merge(&sector.lights);
+            emitters.extend(sector.emitters.iter().rev());
+        }
+        let ambient_at = |(x, y): (u32, u32)| {
+            let id = u64::from(x >> 6) | (u64::from(y >> 6) << 26);
+            if self.entries.get(&id).is_some_and(|(sector, _)| {
+                self.active.contains(&id)
+                    && sector.outdoor_rows[(y & 63) as usize] & (1 << (x & 63)) != 0
+            }) {
+                ambient.outdoor
+            } else {
+                ambient.indoor
+            }
+        };
+        self.shades.reserve(self.ordered.len());
+        for raster in &self.ordered {
+            let tile = (raster.key.1.2, raster.key.1.1);
+            let base = ambient_at(tile);
+            let shade = if !raster.key.0 {
+                let (x, y) = raster.anchor;
+                PreparedShade::Tint(Modulation::floor(self.lights.surface((x, y - 19), base)))
+            } else {
+                match raster.object_light {
+                    ObjectLight::Point => {
+                        PreparedShade::uniform(lighting::point(&emitters, raster.anchor, base))
+                    }
+                    ObjectLight::Portal(rotation) => {
+                        let (sample_tile, offset) = lighting::portal_sample(tile, rotation);
+                        let color = project_world_tile(sample_tile, reference)
+                            .and_then(|(x, y)| Some((x.checked_add(offset)?, y.checked_sub(10)?)))
+                            .map_or(base, |sample| {
+                                lighting::point(&emitters, sample, ambient_at(sample_tile))
+                            });
+                        PreparedShade::uniform(color)
+                    }
+                    ObjectLight::Wall(rotation) => {
+                        let face = WallFace::from_rotation(rotation);
+                        let base = if face.exterior() {
+                            ambient.outdoor
+                        } else {
+                            base
+                        };
+                        let center =
+                            project_world_tile(tile, reference).expect("prepared wall tile");
+                        let colors = face.columns(
+                            &emitters,
+                            tile,
+                            center,
+                            raster.bounds.min.0,
+                            raster.frame.decoded.frame.width as usize,
+                            base,
+                        );
+                        if colors.iter().all(|&color| color == colors[0]) {
+                            PreparedShade::uniform(colors[0])
+                        } else {
+                            PreparedShade::Columns(colors.into_boxed_slice())
+                        }
+                    }
+                    ObjectLight::Unlit => PreparedShade::Tint(Modulation::Unlit),
+                }
+            };
+            self.shades.push(shade);
+        }
+        start.elapsed()
     }
 
     fn stats(&self, (reads, art): (u64, FrameCacheStats)) -> StreamStats {
@@ -357,6 +496,22 @@ impl SectorCache {
                     .sum::<usize>())
                 * size_of::<Raster>(),
             art,
+            light_samples: self.lights.samples(),
+            draw_lighting_bytes: self.shades.capacity() * size_of::<PreparedShade>()
+                + self
+                    .shades
+                    .iter()
+                    .map(|shade| match shade {
+                        PreparedShade::Columns(colors) => size_of_val(colors.as_ref()),
+                        _ => 0,
+                    })
+                    .sum::<usize>(),
+            light_grid_payload_bytes: self.lights.payload_bytes()
+                + self
+                    .entries
+                    .values()
+                    .map(|(sector, _)| sector.lights.payload_bytes())
+                    .sum::<usize>(),
         }
     }
 
@@ -365,6 +520,25 @@ impl SectorCache {
         self.ordered
             .iter()
             .filter_map(move |draw| viewport.place(draw.draw(), draw.bounds))
+    }
+
+    fn visible_modulated(
+        &self,
+        camera: &Camera,
+        size: (u32, u32),
+    ) -> impl Iterator<Item = (SpriteDraw<'_>, Modulation<'_>)> {
+        let viewport = Viewport::new(camera.position(), size);
+        self.ordered
+            .iter()
+            .enumerate()
+            .filter_map(move |(index, raster)| {
+                let draw = viewport.place(raster.draw(), raster.bounds)?;
+                let shade = self
+                    .shades
+                    .get(index)
+                    .map_or(Modulation::Unlit, PreparedShade::modulation);
+                Some((draw, shade))
+            })
     }
 }
 
@@ -396,9 +570,22 @@ impl WorldStream {
                 reference,
                 vfs,
                 frames: FrameCache::default(),
+                lighting: None,
             },
             cache: SectorCache::default(),
         })
+    }
+
+    /// Opt in to static surface lighting at a fixed original scheme hour.
+    pub fn with_lighting(mut self, hour: u8) -> Result<Self, Box<dyn std::error::Error>> {
+        if !self.cache.entries.is_empty() {
+            return Err("select world lighting before loading a sector".into());
+        }
+        let ambient = Ambient::load(&mut self.loader.vfs, &self.loader.map, hour)?;
+        let names = load_mes(&mut self.loader.vfs, "art/light/light.mes")?;
+        self.loader.lighting = Some((ambient, names));
+        self.cache.ambient = Some((ambient, self.loader.reference));
+        Ok(self)
     }
 
     /// Synchronous inspection and controlled benchmarking. The viewer uses into_interactive.
@@ -416,6 +603,7 @@ impl WorldStream {
             stages.object_parse += slice.object_parse;
             stages.object_import += slice.object_import;
             stages.rasters += slice.rasters;
+            stages.lighting += slice.lighting;
             sector
         });
         timing.stages = stages;
@@ -474,6 +662,14 @@ impl WorldStream {
     ) -> impl Iterator<Item = SpriteDraw<'_>> {
         self.cache.visible(camera, size)
     }
+
+    pub fn visible_modulated(
+        &self,
+        camera: &Camera,
+        size: (u32, u32),
+    ) -> impl Iterator<Item = (SpriteDraw<'_>, Modulation<'_>)> {
+        self.cache.visible_modulated(camera, size)
+    }
 }
 
 struct SectorLoader {
@@ -481,6 +677,7 @@ struct SectorLoader {
     reference: (u32, u32),
     vfs: Vfs,
     frames: FrameCache,
+    lighting: Option<(Ambient, LoadedMes)>,
 }
 
 impl SectorLoader {
@@ -498,12 +695,29 @@ impl SectorLoader {
             viewport: (1, 1),
         };
         let (room, mut timing) = load_streamed_sector(&mut self.vfs, &mut self.frames, region);
-        let start = Instant::now();
         let sector = match room {
-            Ok(room) => CachedSector::from_room(id, room, self.reference),
+            Ok(room) => {
+                let start = Instant::now();
+                let lights = self.lighting.as_ref().map(|(ambient, names)| {
+                    lighting::prepare(
+                        &mut self.vfs,
+                        &mut self.frames,
+                        &names.mes,
+                        &room.room.floor.lights,
+                        sector,
+                        self.reference,
+                        *ambient,
+                    )
+                });
+                self.frames.finish_sector();
+                timing.lighting = start.elapsed();
+                let start = Instant::now();
+                let cached = CachedSector::from_room(id, room, self.reference, lights);
+                timing.rasters = start.elapsed();
+                cached
+            }
             Err(error) => CachedSector::missing(id, error.to_string()),
         };
-        timing.rasters = start.elapsed();
         (sector, timing)
     }
 

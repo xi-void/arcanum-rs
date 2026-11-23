@@ -48,7 +48,7 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] art sector-wall-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art world-inspect <game-directory> [--view <local-x> <local-y> <side> <center-x> <center-y> <width> <height>] [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art world <game-directory> [--view <local-x> <local-y> <side> <center-x> <center-y> <width> <height>] [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
-  arcanum-rs [--ordered] art world <game-directory> --sectors <map> <min-x> <min-y> <max-x> <max-y> <world-x> <world-y> <width> <height> [--trace] [--mods …]
+  arcanum-rs [--ordered] art world <game-directory> --sectors <map> <min-x> <min-y> <max-x> <max-y> <world-x> <world-y> <width> <height> [--trace] [--lighting <hour>] [--mods …]
   arcanum-rs [--ordered] art sector-room-wide-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art sector-room-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector-room-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
@@ -1160,6 +1160,13 @@ fn inspect_world(game: &Path, options: &[OsString], policy: Policy) -> Result<()
                     "  Object rasters: {submitted} submitted, {culled} viewport-culled"
                 )?;
             }
+            if let Some((total, prepared, off)) = report.light_counts {
+                writeln!(
+                    out,
+                    "  Sector lights: {total} original, {prepared} prepared, {off} off, {} unsupported",
+                    total - prepared - off
+                )?;
+            }
             for diagnostic in &report.diagnostics {
                 writeln!(out, "  {diagnostic}")?;
             }
@@ -1243,8 +1250,19 @@ fn streaming_world(
         .camera(reference)
         .ok_or("invalid sector rectangle or world camera position")?;
     let trace = rest.first().is_some_and(|flag| flag == "--trace");
-    let vfs = inspection_vfs(game, &rest[usize::from(trace)..], policy)?;
-    let world = WorldStream::new(vfs, map.to_owned(), region, reference)?;
+    let rest = &rest[usize::from(trace)..];
+    let (hour, options) = match rest {
+        [flag, hour, options @ ..] if flag == "--lighting" => {
+            (Some(parse_view_number(hour, "lighting hour")?), options)
+        }
+        [flag] if flag == "--lighting" => return Err("expected an hour after --lighting".into()),
+        _ => (None, rest),
+    };
+    let vfs = inspection_vfs(game, options, policy)?;
+    let mut world = WorldStream::new(vfs, map.to_owned(), region, reference)?;
+    if let Some(hour) = hour {
+        world = world.with_lighting(hour)?;
+    }
     Ok(Some((world, camera, size, trace, map.to_owned())))
 }
 

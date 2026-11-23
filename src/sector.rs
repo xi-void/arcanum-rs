@@ -188,7 +188,34 @@ impl std::error::Error for ArtError {}
 pub struct Floor {
     pub light_count: u32,
     pub tile_offset: usize,
+    pub lights: Vec<LightRecord>,
     ids: [TileArtId; SIDE * SIDE],
+}
+
+/// Static light source fields from a base sector. The legacy tint and palette
+/// words are rebuilt by the original renderer and have no rendering authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LightRecord {
+    pub owner: u64,
+    pub tile: (u32, u32),
+    pub offset: (i32, i32),
+    pub flags: u32,
+    pub art_id: u32,
+    pub rgb: [u8; 3],
+}
+
+impl LightRecord {
+    fn decode(bytes: &[u8; LIGHT_BYTES]) -> Self {
+        let word = |index| u32::from_le_bytes(bytes.as_chunks::<4>().0[index]);
+        Self {
+            owner: u64::from(word(0)) | (u64::from(word(1)) << 32),
+            tile: (word(2), word(3)),
+            offset: (word(4) as i32, word(5) as i32),
+            flags: word(6),
+            art_id: word(7),
+            rgb: [bytes[32], bytes[34], bytes[33]],
+        }
+    }
 }
 
 impl Floor {
@@ -245,8 +272,8 @@ pub fn decode_floor(input: &[u8]) -> Result<Floor, Error> {
     let mut tile_offset = 4;
     for _ in 0..light_count {
         // The verified light wire record is fixed-width and has no length tag.
-        // Its fields are opaque to the floor importer; there is no marker
-        // to distinguish full-width misplaced bytes from a light record.
+        // There is no marker to distinguish full-width misplaced bytes from
+        // a light record. Interpret fields only after checking the list span.
         let (_, rest) =
             remaining
                 .split_first_chunk::<LIGHT_BYTES>()
@@ -260,9 +287,16 @@ pub fn decode_floor(input: &[u8]) -> Result<Floor, Error> {
         offset: tile_offset,
     })?;
     let (words, _) = tiles.as_chunks::<4>();
+    let lights = input[4..tile_offset]
+        .as_chunks::<LIGHT_BYTES>()
+        .0
+        .iter()
+        .map(LightRecord::decode)
+        .collect();
     Ok(Floor {
         light_count,
         tile_offset,
+        lights,
         ids: std::array::from_fn(|i| TileArtId(u32::from_le_bytes(words[i]))),
     })
 }
