@@ -216,7 +216,7 @@ impl PortalImport {
             }
         };
         let appearance = PortalAppearance::resolve(record.fields, prototype.appearance)?;
-        let path = art.resource_path(&self.names.mes)?;
+        let path = frames.resolve(|| art.resource_path(&self.names.mes))?;
         let artwork = frames.load(
             vfs,
             &path,

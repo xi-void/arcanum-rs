@@ -204,7 +204,7 @@ impl SceneryImport {
         let appearance = SceneryAppearance::resolve(record.fields, *parent)
             .map_err(|err| format!("scenery record {index}: {err}"))?;
         let art = SceneryArt::decode(record.art_id)?;
-        let path = art.resource_path(&self.names.mes)?;
+        let path = frames.resolve(|| art.resource_path(&self.names.mes))?;
         let artwork = frames.load(vfs, &path, usize::from(art.frame), art.palette, false)?;
         let frame = &artwork.decoded.frame;
         if frame.width > 512 || frame.height > 512 {
@@ -348,10 +348,21 @@ pub(super) fn load_streamed_sector(
     vfs: &mut Vfs,
     frames: &mut art::FrameCache,
     region: WorldRegion<'_>,
-) -> Result<RoomOverview, Box<dyn Error>> {
-    let result = load_overview(vfs, frames, region, LoadMode::Streamed);
+) -> (Result<RoomOverview, Box<dyn Error>>, LoadStages) {
+    let mut timing = LoadStages::default();
+    let result = load_overview_timed(vfs, frames, region, LoadMode::Streamed, &mut timing);
     frames.finish_sector();
-    result
+    (result, timing)
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LoadStages {
+    pub sector_read: std::time::Duration,
+    pub floor_parse: std::time::Duration,
+    pub surfaces: std::time::Duration,
+    pub object_parse: std::time::Duration,
+    pub object_import: std::time::Duration,
+    pub rasters: std::time::Duration,
 }
 
 #[derive(Clone, Copy)]
@@ -368,6 +379,18 @@ fn load_overview(
     region: WorldRegion<'_>,
     mode: LoadMode,
 ) -> Result<RoomOverview, Box<dyn Error>> {
+    load_overview_timed(vfs, frames, region, mode, &mut LoadStages::default())
+}
+
+fn load_overview_timed(
+    vfs: &mut Vfs,
+    frames: &mut art::FrameCache,
+    region: WorldRegion<'_>,
+    mode: LoadMode,
+    timing: &mut LoadStages,
+) -> Result<RoomOverview, Box<dyn Error>> {
+    use std::time::Instant;
+
     let include_portals = !matches!(mode, LoadMode::RoomPreview);
     let initial_view_only = matches!(mode, LoadMode::RoomPreview | LoadMode::WorldPreview);
     let partial = matches!(mode, LoadMode::Streamed);
@@ -383,11 +406,18 @@ fn load_overview(
     if width == 0 || height == 0 || u64::from(width) * u64::from(height) > 16 * 1024 * 1024 {
         return Err("invalid world preview viewport".into());
     }
-    let (source, bytes) = sector::read_base_sector(vfs, map, coordinates)?;
+    let start = Instant::now();
+    let base = sector::read_base_sector(vfs, map, coordinates);
+    timing.sector_read = start.elapsed();
+    let (source, bytes) = base?;
+    let start = Instant::now();
+    let floor = sector::parse_surface(&source, &bytes)?;
+    timing.floor_parse = start.elapsed();
+    let start = Instant::now();
     let floor = sector::resolve_surface(
         vfs,
         frames,
-        (source.clone(), &bytes),
+        (source.clone(), floor),
         coordinates,
         sector::SurfaceView {
             origin,
@@ -397,6 +427,8 @@ fn load_overview(
             partial,
         },
     )?;
+    timing.surfaces = start.elapsed();
+    let start = Instant::now();
     let objects = decode(&bytes)
         .map_err(|err| format!("{} from {source}: {err}", source.virtual_path))
         .and_then(|objects| {
@@ -407,6 +439,8 @@ fn load_overview(
                 Ok(objects)
             }
         });
+    timing.object_parse = start.elapsed();
+    let start = Instant::now();
     let objects = match objects {
         Ok(objects) => objects,
         Err(error) if partial => {
@@ -553,6 +587,7 @@ fn load_overview(
         }
     }
     issues.sort_unstable_by_key(|issue| issue.record);
+    timing.object_import = start.elapsed();
     let outside = |tile: (u32, u32)| !inside_floor(tile);
     Ok(RoomOverview {
         outside_floor_walls: walls

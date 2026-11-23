@@ -129,10 +129,11 @@ fn load_surface(
     include_facades: bool,
 ) -> Result<FloorPatch, Box<dyn Error>> {
     let (source, bytes) = read_base_sector(vfs, map, coordinates)?;
+    let floor = parse_surface(&source, &bytes)?;
     resolve_surface(
         vfs,
         &mut art::FrameCache::default(),
-        (source, &bytes),
+        (source, floor),
         coordinates,
         SurfaceView {
             origin,
@@ -152,10 +153,18 @@ pub(super) struct SurfaceView {
     pub partial: bool,
 }
 
+pub(super) fn parse_surface(
+    source: &Source,
+    bytes: &[u8],
+) -> Result<sector::Floor, Box<dyn Error>> {
+    sector::decode_floor(bytes)
+        .map_err(|err| format!("{} from {source}: {err}", source.virtual_path).into())
+}
+
 pub(super) fn resolve_surface(
     vfs: &mut Vfs,
     cache: &mut art::FrameCache,
-    (source, bytes): (Source, &[u8]),
+    (source, floor): (Source, sector::Floor),
     coordinates: Coordinates,
     SurfaceView {
         origin,
@@ -177,8 +186,6 @@ pub(super) fn resolve_surface(
     if origin.0 > limit || origin.1 > limit {
         return Err("floor patch crosses the sector boundary".into());
     }
-    let floor = sector::decode_floor(bytes)
-        .map_err(|err| format!("{} from {source}: {err}", source.virtual_path))?;
     let names = load_mes(vfs, "art/tile/tilename.mes")?;
     let midpoint = (origin.0 + side / 2, origin.1 + side / 2);
     let center = center.unwrap_or_else(|| {
@@ -201,22 +208,24 @@ pub(super) fn resolve_surface(
             let id = floor.tile(x, y).expect("validated local tile");
             let facade = FacadeId::from_raw(id.0).filter(|_| include_facades);
             let value = resolved.entry(id).or_insert_with(|| {
-                if let Some(facade) = facade {
-                    if facade_names.is_none() {
-                        match load_mes(vfs, "art/facade/facadename.mes") {
-                            Ok(names) => facade_names = Some(names),
-                            Err(error) => return Err(error.to_string()),
+                cache.resolve(|| {
+                    if let Some(facade) = facade {
+                        if facade_names.is_none() {
+                            match load_mes(vfs, "art/facade/facadename.mes") {
+                                Ok(names) => facade_names = Some(names),
+                                Err(error) => return Err(error.to_string()),
+                            }
                         }
+                        facade
+                            .artwork_path(&facade_names.as_ref().unwrap().mes)
+                            .map(|path| (path, false))
+                            .map_err(|e| e.to_string())
+                    } else {
+                        id.resolve(&names.mes)
+                            .map(|tile| (tile.path, tile.fields.flip_x))
+                            .map_err(|e| e.to_string())
                     }
-                    facade
-                        .artwork_path(&facade_names.as_ref().unwrap().mes)
-                        .map(|path| (path, false))
-                        .map_err(|e| e.to_string())
-                } else {
-                    id.resolve(&names.mes)
-                        .map(|tile| (tile.path, tile.fields.flip_x))
-                        .map_err(|e| e.to_string())
-                }
+                })
             });
             let (artwork, flip_x) = match value {
                 Ok((path, flip)) => (path.clone(), *flip),

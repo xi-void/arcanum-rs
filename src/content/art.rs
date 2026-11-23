@@ -68,6 +68,7 @@ pub struct FrameCacheStats {
     pub evictions: u64,
     pub frames: usize,
     pub pixel_bytes: usize,
+    pub resolution_time: Duration,
     pub read_time: Duration,
     pub decode_time: Duration,
 }
@@ -91,6 +92,13 @@ impl FrameCache {
 
     pub(super) fn finish_sector(&mut self) {
         self.last_input = None;
+    }
+
+    pub(super) fn resolve<T>(&mut self, resolve: impl FnOnce() -> T) -> T {
+        let start = Instant::now();
+        let value = resolve();
+        self.stats.resolution_time += start.elapsed();
+        value
     }
 
     pub(super) fn load(

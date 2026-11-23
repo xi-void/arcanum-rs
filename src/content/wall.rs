@@ -208,8 +208,8 @@ impl WallImport {
         }
         let art_id = WallArtId(record.art_id);
         let orientation = art_id.fields()?;
-        let path = art_id
-            .resolve(&self.structure.mes, &self.names.mes)
+        let path = frames
+            .resolve(|| art_id.resolve(&self.structure.mes, &self.names.mes))
             .map_err(|error| {
                 format!(
                     "wall record {record_index}, ART {:#010x}: {error}",
