@@ -273,9 +273,18 @@ pub fn load_room(vfs: &mut Vfs) -> Result<Room, Box<dyn Error>> {
 pub struct RoomOverview {
     pub room: Room,
     pub issues: Vec<SceneIssue>,
+    pub culled_portals: Vec<CulledPortal>,
     pub sector_object_counts: (usize, usize, usize),
     pub outside_floor_walls: usize,
     pub outside_floor_scenery: usize,
+}
+
+pub struct CulledPortal {
+    pub record: usize,
+    pub tile: (u32, u32),
+    pub art_id: u32,
+    pub art: portal::PortalArt,
+    pub state: portal::PortalState,
 }
 
 pub struct SceneIssue {
@@ -353,6 +362,7 @@ fn load_overview(
     let mut scenery = Vec::new();
     let mut issues = Vec::new();
     let mut portals = Vec::new();
+    let mut culled_portals = Vec::new();
     let mut portal_import = (include_portals && !objects.portals.is_empty())
         .then(|| portal::PortalImport::new(vfs))
         .transpose()?;
@@ -376,7 +386,7 @@ fn load_overview(
         let near_view = project_world_tile(tile, center).is_some_and(|(x, y)| {
             x.abs_diff(0) < width / 2 + 128 && y.abs_diff(0) < height / 2 + 128
         });
-        if on_floor || near_view {
+        if on_floor || near_view || (include_portals && category == StaticCategory::Portal) {
             issues.push(SceneIssue {
                 record,
                 category,
@@ -426,6 +436,14 @@ fn load_overview(
                             .is_some_and(|draw| intersects_viewport(draw, viewport))
                         {
                             portals.push(leaf);
+                        } else {
+                            culled_portals.push(CulledPortal {
+                                record: index,
+                                tile,
+                                art_id,
+                                art: leaf.art,
+                                state: leaf.state,
+                            });
                         }
                     }),
                 None => Err("portal rendering is disabled in this preview".into()),
@@ -450,6 +468,7 @@ fn load_overview(
             portals,
         },
         issues,
+        culled_portals,
         sector_object_counts: counts,
     })
 }

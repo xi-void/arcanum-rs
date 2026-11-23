@@ -1,0 +1,35 @@
+name: Rust CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Install Rust tools
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy --no-self-update
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Run portable tests
+        run: |
+          cargo test --locked
+          cargo test --locked --features windowed
+      - name: Build headless and windowed
+        run: |
+          cargo build --locked
+          cargo build --locked --release
+          cargo build --locked --release --features windowed

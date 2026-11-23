@@ -1009,3 +1009,102 @@ fn native_scenery_reuses_vfs_frame_and_clips_at_shared_anchor() {
     blit_ordered(&mut surface, (3, 1), 3, [draw]).unwrap();
     assert_eq!(surface, [[1, 2, 3], [20, 30, 40], [20, 30, 40]]);
 }
+
+#[test]
+fn open_portal_uses_frame_three_and_rejects_a_shorter_replacement() {
+    use crate::{
+        prototype::SerializedPrototypeId,
+        sector::{
+            Coordinates,
+            objects::{AppearanceFields, StaticCategory, StaticRecord},
+        },
+    };
+    use std::sync::Arc;
+
+    let fixture = Fixture::new();
+    fixture.write("art/portal/portal.mes", b"{47}{TestDoor.ART 2008}");
+    let mut prototype = vec![0; 68];
+    for (start, value) in [(0, 119u32), (4, 0xffff), (28, 1), (36, 2028), (52, 1)] {
+        prototype[start..start + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for index in (0..36).chain(64..72) {
+        if matches!(index, 1 | 5..=7 | 15..=17 | 30 | 31 | 34 | 35 | 70 | 71) {
+            prototype.push(0);
+        } else {
+            let value: i32 = match index {
+                3 => 12,
+                9 => 0xff_ffff,
+                10 => 255,
+                11 => 100,
+                64 => 9,
+                _ => 0,
+            };
+            prototype.extend(value.to_le_bytes());
+        }
+    }
+    fixture.write("proto/002028 - portal.pro", &prototype);
+    let door_path = "art/portal/testdoor.art";
+    let make_art = |count: usize| {
+        let mut bytes = vec![0; 132 + 1024 + 28 * count];
+        for (offset, word) in [(0, 1), (8, 8), (12, 1), (32, count as u32)] {
+            bytes[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        bytes[136..139].copy_from_slice(&[30, 20, 10]);
+        for frame in 0..count {
+            let offset = 1156 + 28 * frame;
+            for (field, value) in [2i32, 1, 2, frame as i32, 0, 0, 0].into_iter().enumerate() {
+                bytes[offset + field * 4..offset + field * 4 + 4]
+                    .copy_from_slice(&value.to_le_bytes());
+            }
+            bytes.extend(if frame == 3 { [0, 1] } else { [1, 0] });
+        }
+        bytes
+    };
+    fixture.write(door_path, &make_art(4));
+
+    let make_record = |index| StaticRecord {
+        category: StaticCategory::Portal,
+        index,
+        span: 0..0,
+        prototype: SerializedPrototypeId(2028),
+        instance_id: [0; 24],
+        art_id: 0x3178_ec00,
+        stored_tile: (2, 3),
+        fields: AppearanceFields {
+            offset_y: Some(0),
+            ..AppearanceFields::default()
+        },
+    };
+    let sector = Coordinates { x: 0, y: 0 };
+    let mut vfs = Vfs::new(Policy::Ordered);
+    vfs.mount_directory(&fixture.0).unwrap();
+    let mut importer = portal::PortalImport::new(&mut vfs).unwrap();
+    let door = importer
+        .resolve(&mut vfs, sector, make_record(1), 0)
+        .unwrap();
+    let another = importer
+        .resolve(&mut vfs, sector, make_record(3), 2)
+        .unwrap();
+    assert_eq!(door.state, portal::PortalState::Open);
+    assert_eq!(door.record.art_id, 0x3178_ec00);
+    assert_eq!(door.appearance.offset, (0, 0));
+    assert_eq!(door.art.pivot(&door.artwork.decoded.frame), (3, 0));
+    assert_eq!(
+        door.artwork.decoded.frame.pixels,
+        [[0; 4], [10, 20, 30, 255]]
+    );
+    assert!(Arc::ptr_eq(&door.artwork, &another.artwork));
+
+    let replacement = Fixture::new();
+    replacement.write(door_path, &make_art(3));
+    vfs.mount_directory(&replacement.0).unwrap();
+    let mut importer = portal::PortalImport::new(&mut vfs).unwrap();
+    let err = importer
+        .resolve(&mut vfs, sector, make_record(1), 0)
+        .err()
+        .unwrap();
+    assert!(
+        err.to_string()
+            .contains("ART frame 3 is out of range for 3 frames")
+    );
+}

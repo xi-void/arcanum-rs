@@ -1191,6 +1191,21 @@ fn report_room_overview(
         overview.outside_floor_walls, overview.outside_floor_scenery
     )?;
     report_room(out, room)?;
+    for leaf in &overview.culled_portals {
+        writeln!(
+            out,
+            "Culled record {} {:?} (Portal type 1) at {:?}, ART {:#010x}, state {:?}, frame {}, rotation {}, palette {}, mirror {}: outside viewport",
+            leaf.record,
+            leaf.art.kind,
+            leaf.tile,
+            leaf.art_id,
+            leaf.state,
+            leaf.art.frame,
+            leaf.art.rotation,
+            leaf.art.palette,
+            leaf.art.mirror_x,
+        )?;
+    }
     for issue in &overview.issues {
         writeln!(
             out,
@@ -1253,7 +1268,7 @@ fn report_room(out: &mut impl Write, room: &content::scenery::Room) -> Result<()
             .ok_or("portal anchor exceeds the drawable range")?;
         writeln!(
             out,
-            "Record {} {:?} (Portal type 1) bytes {:?}, tile {:?}, wall {}, prototype {} ART {:#010x} from {}, stored ART {:#010x}: {} from {}, frame {}, rotation {}, palette {}, mirror {}, offset {:?}, scale {}%, flags {:#x}, portal flags {:#x}, hotspot {:?}, pivot {:?}, relative raster origin {:?}",
+            "Record {} {:?} (Portal type 1) bytes {:?}, tile {:?}, wall {}, prototype {} ART {:#010x} from {}, stored ART {:#010x}: {} from {}, frame {}, rotation {}, palette {}, mirror {}, state {:?}, offset {:?}, scale {}%, flags {:#x}, portal flags {:#x}, hotspot {:?}, pivot {:?}, relative raster origin {:?}",
             portal.record.index,
             portal.art.kind,
             portal.record.span,
@@ -1269,6 +1284,7 @@ fn report_room(out: &mut impl Write, room: &content::scenery::Room) -> Result<()
             portal.art.rotation,
             portal.art.palette,
             portal.art.mirror_x,
+            portal.state,
             portal.appearance.offset,
             portal.appearance.scale,
             portal.appearance.flags,
