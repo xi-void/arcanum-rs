@@ -82,6 +82,7 @@ pub struct ObjectList {
     pub portals: Vec<StaticRecord>,
     pub scenery_count: usize,
     pub portal_count: usize,
+    pub(crate) tile_blocks: [u8; SIDE * SIDE / 8],
 }
 
 #[derive(Debug)]
@@ -98,6 +99,15 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// The original roof table follows the floor array. An empty marker stores no entries.
+pub(crate) fn roof_words(input: &[u8], tile_offset: usize) -> Result<&[[u8; 4]], Error> {
+    let mut reader = Reader {
+        input: &input[..input.len().saturating_sub(4)],
+        offset: tile_offset.saturating_add(SIDE * SIDE * 4),
+    };
+    reader.roof_words()
+}
+
 pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
     let floor = decode_floor(input).map_err(|error| Error {
         offset: 0,
@@ -109,13 +119,7 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
         input: &input[..count_offset],
         offset: start,
     };
-    match reader.u32("roof empty marker")? {
-        0 => {
-            reader.take(256 * 4, "roof IDs")?;
-        }
-        1 => {}
-        _ => return Err(reader.error("invalid roof empty marker")),
-    }
+    reader.roof_words()?;
     let marker = reader.u32("sector metadata marker")?;
     if !(0xaa0000..=0xaa0004).contains(&marker) {
         return Err(reader.error(format!("unsupported sector metadata marker {marker:#x}")));
@@ -130,9 +134,11 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
     if marker >= 0xaa0003 {
         reader.take(24, "townmap, aptitude, light scheme and sound fields")?;
     }
-    if marker >= 0xaa0004 {
-        reader.take(512, "tile-block mask")?;
-    }
+    let tile_blocks = if marker >= 0xaa0004 {
+        reader.fixed("tile-block mask")?
+    } else {
+        [0; SIDE * SIDE / 8]
+    };
 
     let start = reader.offset;
     let mut trailer = Reader {
@@ -152,6 +158,7 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
         portals: Vec::new(),
         scenery_count: 0,
         portal_count: 0,
+        tile_blocks,
     };
     for index in 0..count {
         let start = reader.offset;
@@ -463,6 +470,14 @@ impl<'a> Reader<'a> {
             [0] => Ok(false),
             [1] => Ok(true),
             [flag] => Err(self.error(format!("invalid optional field marker {flag}"))),
+        }
+    }
+
+    fn roof_words(&mut self) -> Result<&'a [[u8; 4]], Error> {
+        match self.u32("roof empty marker")? {
+            0 => Ok(self.take(256 * 4, "roof IDs")?.as_chunks::<4>().0),
+            1 => Ok(&[]),
+            _ => Err(self.error("invalid roof empty marker")),
         }
     }
 

@@ -1,11 +1,15 @@
 //! Bounded loading of resolved content from a caller-owned virtual filesystem.
 
 pub mod art;
+mod collision;
 pub mod effects;
 pub mod items;
 mod lighting;
+pub mod maps;
 mod mobile;
+mod player;
 pub mod portal;
+mod roof;
 pub mod scenery;
 pub mod schematics;
 pub mod sector;
@@ -19,6 +23,23 @@ use crate::vfs::{self, MountId, Storage, Vfs};
 use std::fmt;
 use std::io::{self, Write};
 use std::path::PathBuf;
+
+#[derive(Debug)]
+struct ObjectArtFailure(String);
+
+impl fmt::Display for ObjectArtFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for ObjectArtFailure {}
+
+impl ObjectArtFailure {
+    fn from_error(error: impl fmt::Display) -> Self {
+        Self(error.to_string())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Source {

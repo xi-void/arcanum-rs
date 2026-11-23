@@ -506,6 +506,49 @@ fn dynamic_lights_match_cpu_and_reuse_warm_resources() {
     );
 }
 
+#[test]
+#[ignore = "requires installed original data and a hardware GPU"]
+fn playable_avatar_and_original_shadows_match_cpu() {
+    use crate::{
+        content::world::{SectorRegion, WorldStream},
+        sector::Coordinates,
+    };
+    let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+    let backend = test_backend();
+    let context = instance(backend);
+    let adapter = hardware_adapter(&context, backend, None).unwrap();
+    let mut gpu = Compositor::new(&adapter, TextureFormat::Rgba8Unorm, false).unwrap();
+    let sector = Coordinates { x: 1, y: 1 };
+    let region = SectorRegion {
+        first: sector,
+        last: sector,
+    };
+    let center = (86, 85);
+    let camera = region.camera(center).unwrap();
+    let mut world = WorldStream::new(
+        Vfs::from_game(game, Policy::Ce).unwrap(),
+        "bates mansion lev 1".into(),
+        region,
+        center,
+    )
+    .unwrap()
+    .with_starting_lighting()
+    .unwrap()
+    .with_player()
+    .unwrap();
+    let size = (1280, 720);
+    let tick = Duration::from_millis(246);
+    let lit = compare_world_tick(&mut gpu, &mut world, &camera, size, tick).0;
+    assert_eq!(world.toggle_shadows(), Some(false));
+    let without = compare_world_tick(&mut gpu, &mut world, &camera, size, tick).0;
+    assert_ne!(lit, without);
+    assert_eq!(world.toggle_shadows(), Some(true));
+    assert_eq!(
+        lit,
+        compare_world_tick(&mut gpu, &mut world, &camera, size, tick).0
+    );
+}
+
 fn compare_world_frame(
     gpu: &mut Compositor,
     world: &mut crate::content::world::WorldStream,

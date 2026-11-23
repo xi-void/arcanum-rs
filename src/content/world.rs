@@ -3,9 +3,11 @@
 use super::{
     LoadedMes,
     art::{FrameCache, FrameCacheStats, FrameLoop, LoadedFrame},
+    collision::{self, Collision},
     lighting::{self, Ambient, LightGrid, LightImport, StaticLight, WallFace},
     load_mes,
     mobile::{self, Caster, DirectionalFidget, FidgetPlayback, MobileShadows, Walk, WalkStep},
+    player::Player,
     scenery::{
         DrawOrder, LoadStages, ObjectLight, RoomOverview, WorldRegion, load_streamed_sector,
     },
@@ -120,11 +122,14 @@ pub struct SectorReport {
     /// When set, serialized object counts are unknown and the diagnostics explain why.
     pub object_list_failed: bool,
     pub object_raster_rejections: usize,
-    pub object_audit: Vec<String>,
+    pub object_art_failures: usize,
+    pub object_audit: Vec<(usize, String)>,
     pub diagnostics: Vec<String>,
     /// Total, prepared and switched-off original light records.
     pub light_counts: Option<(usize, usize, usize)>,
     pub object_lights: usize,
+    /// Original non-invalid entries, prepared diagnostic draws.
+    pub roofs: (usize, usize),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -349,6 +354,7 @@ struct CachedSector {
     casters: Vec<Caster>,
     mobile_shadows: Option<MobileShadows>,
     walk: Option<(WorldOrder, Arc<Walk>)>,
+    collision: Option<Collision>,
 }
 
 impl CachedSector {
@@ -365,10 +371,12 @@ impl CachedSector {
                 original_object_counts: (0, 0, 0),
                 object_list_failed: true,
                 object_raster_rejections: 0,
+                object_art_failures: 0,
                 object_audit: Vec::new(),
                 diagnostics: vec![error],
                 light_counts: None,
                 object_lights: 0,
+                roofs: (0, 0),
             },
             draws: Vec::new(),
             lights: LightGrid::default(),
@@ -377,6 +385,7 @@ impl CachedSector {
             casters: Vec::new(),
             mobile_shadows: None,
             walk: None,
+            collision: None,
         }
     }
 
@@ -407,20 +416,37 @@ impl CachedSector {
             original_object_counts: world.sector_object_counts,
             object_list_failed: world.object_list_failed,
             object_raster_rejections: 0,
+            object_art_failures: world
+                .issues
+                .iter()
+                .filter(|issue| issue.art_failure)
+                .count(),
             object_audit: Vec::new(),
             diagnostics: room.floor.surface_issues.clone(),
             light_counts: lights
                 .as_ref()
                 .map(|lights| (room.floor.lights.len(), lights.accepted, lights.off)),
             object_lights: lights.as_ref().map_or(0, |lights| lights.object_lights),
+            roofs: (world.roof_words.len(), 0),
         };
-        report.diagnostics.extend(world.object_issue);
+        if let Some(error) = world.object_issue {
+            report.diagnostics.insert(0, error);
+        }
         report
             .diagnostics
             .extend(world.issues.into_iter().map(|issue| {
                 format!(
-                    "record {} {:?} at {:?} ART {:#010x}: {}",
-                    issue.record, issue.category, issue.tile, issue.art_id, issue.reason
+                    "record {} {:?} at {:?} ART {:#010x}: {}{}",
+                    issue.record,
+                    issue.category,
+                    issue.tile,
+                    issue.art_id,
+                    if issue.art_failure {
+                        "ART resolution: "
+                    } else {
+                        ""
+                    },
+                    issue.reason
                 )
             }));
         let (dx, dy) =
@@ -463,14 +489,14 @@ impl CachedSector {
                             i64::from(tile.0) + i64::from(source.offset.0) - x,
                             i64::from(tile.1) + i64::from(source.offset.1) - y,
                         );
-                        report.object_audit.push(format!(
+                        report.object_audit.push((record.index, format!(
                             "record {} {:?} bytes {:?}, identity {:02x?}, prototype {} from {}, tile {:?} (stored {:?}), ART {:#010x} (stored {:x?}), {} from {}, direction {} (stored {}), frame {}, palette {}, offset {:?}, pivot {pivot:?}, order {key:?}",
                             record.index, record.category, record.span, record.instance_id,
                             record.prototype.0, source.prototype, (key.2, key.1), record.stored_tile,
                             record.art_id, source.stored_art, frame.source.virtual_path, frame.source,
                             source.rotation, frame_info.stored_rotation, source.frame,
                             frame_info.stored_palette, source.offset,
-                        ));
+                        )));
                     }
                     draws.push(raster);
                 } else {
@@ -500,6 +526,7 @@ impl CachedSector {
             casters: Vec::new(),
             mobile_shadows: None,
             walk: None,
+            collision: world.collision,
         }
     }
 
@@ -596,7 +623,7 @@ fn light_receiver(raster: &Raster, reference: (u32, u32)) -> Option<RasterBounds
             raster.bounds.min.0,
             raster.frame.decoded.frame.width as usize,
         )),
-        ObjectLight::Unlit | ObjectLight::Additive => None,
+        ObjectLight::Unlit | ObjectLight::Additive | ObjectLight::Roof => None,
     }
 }
 
@@ -646,6 +673,8 @@ struct SectorCache {
     walk_subject: Option<(usize, Arc<Walk>)>,
     walk_facing: Option<u8>,
     walking: Option<MovingDraw>,
+    player: Option<Player>,
+    player_shadows: Option<MobileShadows>,
 }
 
 struct MovingDraw {
@@ -972,10 +1001,11 @@ impl SectorCache {
     }
 
     fn toggle_shadows(&mut self) -> Option<bool> {
-        if !self
-            .active
-            .iter()
-            .any(|id| self.entries[id].0.mobile_shadows.is_some())
+        if self.player_shadows.is_none()
+            && !self
+                .active
+                .iter()
+                .any(|id| self.entries[id].0.mobile_shadows.is_some())
         {
             return None;
         }
@@ -1198,6 +1228,7 @@ impl SectorCache {
                     PreparedShade::Columns(colors.into_boxed_slice())
                 }
             }
+            ObjectLight::Roof => PreparedShade::uniform(ambient.outdoor),
             ObjectLight::Unlit => PreparedShade::Tint(Modulation::Unlit),
             ObjectLight::Additive => PreparedShade::Tint(Modulation::Additive),
         }
@@ -1384,6 +1415,95 @@ impl SectorCache {
         })
     }
 
+    fn player_draw(
+        &self,
+        viewport: Viewport,
+        elapsed: Duration,
+    ) -> Option<(WorldOrder, WorldDraw<'_>)> {
+        let player = self.player.as_ref()?;
+        let pose = player.sample(elapsed);
+        let draw = SpriteDraw {
+            frame: &pose.asset.decoded.frame,
+            anchor: pose.anchor,
+        };
+        let sprite = viewport.place(draw, RasterBounds::new(draw))?;
+        let modulation = self.ambient.map_or(Modulation::Unlit, |(ambient, _)| {
+            let base = if self.outdoor(pose.tile) {
+                ambient.outdoor
+            } else {
+                ambient.indoor
+            };
+            Modulation::Uniform(lighting::point(self.light_emitters(), pose.anchor, base))
+        });
+        let key = (
+            true,
+            super::scenery::order(pose.tile, pose.offset, false, usize::MAX),
+        );
+        Some((
+            key,
+            WorldDraw {
+                asset: pose.asset,
+                sprite,
+                modulation,
+            },
+        ))
+    }
+
+    fn collision_cell(
+        entries: &BTreeMap<u64, (CachedSector, Option<u64>)>,
+        tile: (u32, u32),
+    ) -> Option<collision::Cell> {
+        let (sector, _) = entries.get(&tile_sector_id(tile))?;
+        Some(sector.collision.as_ref()?.cell(tile))
+    }
+
+    fn update_player(&mut self, input: (i32, i32), run: bool, now: Duration) -> Option<(i32, i32)> {
+        // Borrow the cache entries only while considering the next tile.
+        let entries = &self.entries;
+        let player = self.player.as_mut()?;
+        player.update(input, run, now, |tile, facing| {
+            collision::step(tile, facing, |tile| Self::collision_cell(entries, tile))
+        });
+        Some(player.sample(now).anchor)
+    }
+
+    fn visible_player_shadows(
+        &self,
+        viewport: Viewport,
+        elapsed: Duration,
+    ) -> impl Iterator<Item = WorldDraw<'_>> {
+        let bank = self.player_shadows.as_ref();
+        let player = self
+            .player
+            .as_ref()
+            .zip(bank)
+            .zip(self.ambient)
+            .filter(|_| !self.shadows_disabled)
+            .map(|((player, bank), (ambient, _))| {
+                let pose = player.sample(elapsed);
+                let caster = Caster {
+                    tile: pose.tile,
+                    anchor: pose.anchor,
+                };
+                let (masks, _) = self.caster_masks(bank, caster, ambient);
+                (caster.anchor, masks)
+            });
+        player.into_iter().flat_map(move |(anchor, masks)| {
+            masks.into_iter().filter_map(move |mask| {
+                let asset = bank?.asset(mask);
+                let sprite = SpriteDraw {
+                    frame: &asset.decoded.frame,
+                    anchor,
+                };
+                Some(WorldDraw {
+                    asset,
+                    sprite: viewport.place(sprite, RasterBounds::new(sprite))?,
+                    modulation: mask.modulation(),
+                })
+            })
+        })
+    }
+
     fn visible_with_shadows<'a>(
         &'a self,
         camera: &Camera,
@@ -1392,16 +1512,21 @@ impl SectorCache {
         shadows: &'a [PreparedMask],
     ) -> impl Iterator<Item = WorldDraw<'a>> {
         let viewport = Viewport::new(camera.position(), size);
-        let split = if shadows.is_empty() && self.walking.is_none() {
+        let split = if shadows.is_empty() && self.walking.is_none() && self.player.is_none() {
             self.ordered.len()
         } else {
             self.ordered
                 .partition_point(|raster| !raster.key.0 || !raster.key.1.0)
         };
-        let insertion = self
-            .walking
-            .as_ref()
-            .map_or(split, |moving| moving.insertion);
+        let player = self.player_draw(viewport, elapsed);
+        let insertion = player.as_ref().map_or_else(
+            || {
+                self.walking
+                    .as_ref()
+                    .map_or(split, |moving| moving.insertion)
+            },
+            |(key, _)| self.ordered.partition_point(|draw| draw.key < *key),
+        );
         let moving = self.walking.as_ref().and_then(|moving| {
             let (asset, sprite) =
                 moving
@@ -1425,8 +1550,10 @@ impl SectorCache {
                     modulation: draw.mask.modulation(),
                 })
             }))
+            .chain(self.visible_player_shadows(viewport, elapsed))
             .chain(self.visible_rasters(split..insertion, viewport, elapsed))
             .chain(moving)
+            .chain(player.map(|(_, draw)| draw))
             .chain(self.visible_rasters(insertion..self.ordered.len(), viewport, elapsed))
     }
 
@@ -1471,10 +1598,50 @@ impl WorldStream {
                 frames: FrameCache::default(),
                 lighting: None,
                 walking: false,
+                playing: false,
                 audit: false,
+                roofs: false,
             },
             cache: SectorCache::default(),
         })
+    }
+
+    /// Spawn the first-playable character at the resolved original map entry.
+    pub fn with_player(mut self) -> Result<Self, Box<dyn std::error::Error>> {
+        if self.loader.walking || !self.cache.entries.is_empty() {
+            return Err("player mode must be selected before loading sectors and without the rabbit preview".into());
+        }
+        let reference = self.loader.reference;
+        let player = Player::load(&mut self.loader.vfs, &mut self.loader.frames, reference)?;
+        if self.loader.lighting.is_some() {
+            // CE proto.c uses light ART (6,0,0,1) for its generic biped PC too.
+            let art = shadow::Art::decode(mobile::VERIFIED_SHADOW)?;
+            self.cache.player_shadows = Some(MobileShadows::load(
+                &mut self.loader.vfs,
+                &mut self.loader.frames,
+                art,
+            )?);
+        }
+        self.loader.frames.finish_sector();
+        self.cache.player = Some(player);
+        self.loader.playing = true;
+        Ok(self)
+    }
+
+    /// Start at the original game's authored hour, without advancing a gameplay clock.
+    pub fn with_starting_lighting(mut self) -> Result<Self, Box<dyn std::error::Error>> {
+        let hour = match load_mes(&mut self.loader.vfs, "rules/gameinit.mes") {
+            Ok(table) => table
+                .mes
+                .get(5)
+                .map_or(Ok(10), |value| value.trim().parse::<u8>())?,
+            Err(super::Error::Resource {
+                error: crate::vfs::Error::NotFound(_),
+                ..
+            }) => 15,
+            Err(error) => return Err(error.into()),
+        };
+        self.with_lighting(hour)
     }
 
     /// Opt in to static surface lighting at a fixed original scheme hour.
@@ -1580,6 +1747,16 @@ impl WorldStream {
             return Err("light position is outside the world region");
         }
         self.cache.set_dynamic(slot, state)
+    }
+
+    /// Draw the stored, unfaded roof pass for diagnostic inspection.
+    pub fn with_roofs(mut self) -> Self {
+        self.loader.roofs = true;
+        self
+    }
+
+    pub fn reference(&self) -> (u32, u32) {
+        self.loader.reference
     }
 
     /// Retain static raster provenance for headless inspection.
@@ -1695,7 +1872,11 @@ impl WorldStream {
         let viewport = Viewport::new(camera.position(), size);
         let mut submitted = 0;
         let mut culled = 0;
-        for raster in sector.draws.iter().filter(|raster| raster.key.0) {
+        for raster in sector
+            .draws
+            .iter()
+            .filter(|raster| raster.key.0 && !matches!(raster.object_light, ObjectLight::Roof))
+        {
             if raster
                 .visible_at(&viewport, Duration::ZERO, self.cache.fidget)
                 .is_some()
@@ -1706,6 +1887,31 @@ impl WorldStream {
             }
         }
         Some((submitted, culled))
+    }
+
+    /// The original records whose accepted rasters intersect the current viewport at tick zero.
+    pub fn visible_object_records(
+        &self,
+        id: u64,
+        camera: &Camera,
+        size: (u32, u32),
+    ) -> impl Iterator<Item = usize> + '_ {
+        let viewport = Viewport::new(camera.position(), size);
+        self.cache
+            .entries
+            .get(&id)
+            .into_iter()
+            .flat_map(move |(sector, _)| {
+                sector.draws.iter().filter_map(move |raster| {
+                    let (is_object, key) = raster.key;
+                    (is_object
+                        && !matches!(raster.object_light, ObjectLight::Roof)
+                        && raster
+                            .visible_at(&viewport, Duration::ZERO, self.cache.fidget)
+                            .is_some())
+                    .then(|| key.6.unwrap_or(key.5))
+                })
+            })
     }
 
     pub fn stats(&self) -> StreamStats {
@@ -1766,7 +1972,9 @@ struct SectorLoader {
     frames: FrameCache,
     lighting: Option<(Ambient, LoadedMes)>,
     walking: bool,
+    playing: bool,
     audit: bool,
+    roofs: bool,
 }
 
 impl SectorLoader {
@@ -1783,7 +1991,8 @@ impl SectorLoader {
             // Full-sector import is independent of the current viewport.
             viewport: (1, 1),
         };
-        let (room, mut timing) = load_streamed_sector(&mut self.vfs, &mut self.frames, region);
+        let (room, mut timing) =
+            load_streamed_sector(&mut self.vfs, &mut self.frames, region, self.playing);
         let sector = match room {
             Ok(room) => {
                 let start = Instant::now();
@@ -1811,11 +2020,51 @@ impl SectorLoader {
                         self.walking,
                     )
                 });
+                let (roofs, roof_issues) = if self.roofs {
+                    super::roof::prepare(
+                        &mut self.vfs,
+                        &mut self.frames,
+                        sector,
+                        self.reference,
+                        &room.roof_words,
+                    )
+                } else {
+                    (Vec::new(), Vec::new())
+                };
                 self.frames.finish_sector();
                 timing.mobiles = start.elapsed();
                 let start = Instant::now();
                 let mut cached =
                     CachedSector::from_room(id, room, self.reference, lights, self.audit);
+                cached.report.diagnostics.extend(roof_issues);
+                for roof in roofs {
+                    // CE's separate pass is globally ordered by roof row, then column.
+                    let key = (
+                        true,
+                        (
+                            true,
+                            u32::MAX,
+                            roof.tile.1,
+                            i64::from(roof.tile.0),
+                            0,
+                            0,
+                            None,
+                        ),
+                    );
+                    let mut raster = Raster::new(key, &roof.asset, roof.anchor);
+                    raster.object_light = ObjectLight::Roof;
+                    if project_world_tile(roof.tile, self.reference)
+                        .is_some_and(|center| within_overhang(raster.bounds, center))
+                    {
+                        cached.report.roofs.1 += 1;
+                        cached.draws.push(raster);
+                    } else {
+                        cached.report.diagnostics.push(format!(
+                            "roof at {:?} exceeds the sector overhang bound",
+                            roof.tile
+                        ));
+                    }
+                }
                 if let Some(mobiles) = mobiles {
                     cached.add_mobiles(mobiles, self.reference);
                 }
@@ -1835,6 +2084,223 @@ impl SectorLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires the installed original game"]
+    fn player_uses_original_movement_assets_and_collision_across_sectors() {
+        let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+        let mut vfs = Vfs::from_game(game, crate::vfs::Policy::Ce).unwrap();
+        let catalog = super::super::maps::Catalog::load(&mut vfs).unwrap();
+        let map = catalog.find("k'na tha").unwrap();
+        let files = map.files(&mut vfs).unwrap();
+        let start = files.center(Some((383, 928))).unwrap();
+        let mut camera = files.region.camera(start).unwrap();
+        camera.follow((0, 0));
+        let mut world = WorldStream::new(vfs, map.directory.clone(), files.region, start)
+            .unwrap()
+            .with_player()
+            .unwrap();
+        let size = (1280, 720);
+        world.prepare(&camera, size).unwrap();
+        let cell = |tile| SectorCache::collision_cell(&world.cache.entries, tile);
+        assert!(
+            collision::can_stand(cell(start)),
+            "original grass spawn should be walkable"
+        );
+        assert_eq!(collision::step(start, 5, cell), Some((384, 928)));
+        assert_ne!(tile_sector_id(start), tile_sector_id((384, 928)));
+
+        let still = world.cache.player.as_ref().unwrap().sample(Duration::ZERO);
+        assert_eq!(
+            still.asset.source.virtual_path,
+            "art/critter/hmm/hmmv1xaa.art"
+        );
+        assert_eq!(still.anchor, (0, 0));
+        world.cache.update_player((-1, 1), false, Duration::ZERO);
+        let middle = world
+            .cache
+            .update_player((0, 0), false, Duration::from_millis(60))
+            .unwrap();
+        assert!((-39..0).contains(&middle.0) && (1..20).contains(&middle.1));
+        let stepping = world
+            .cache
+            .player
+            .as_ref()
+            .unwrap()
+            .sample(Duration::from_millis(60));
+        assert_eq!(
+            stepping.asset.source.virtual_path,
+            "art/critter/hmm/hmmv1xab.art"
+        );
+        let destination = world
+            .cache
+            .update_player((0, 0), false, Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(destination, (-40, 20));
+        let player = world.cache.player.as_ref().unwrap();
+        assert_eq!(player.tile(), (384, 928));
+        assert!(!player.moving());
+        camera.follow(destination);
+        camera.resize((1024, 576));
+        assert_eq!(camera.position(), destination);
+        world
+            .cache
+            .update_player((1, -1), true, Duration::from_secs(3));
+        let running = world
+            .cache
+            .player
+            .as_ref()
+            .unwrap()
+            .sample(Duration::from_millis(3050));
+        assert_eq!(
+            running.asset.source.virtual_path,
+            "art/critter/hmm/hmmv1xag.art"
+        );
+        assert_ne!(running.anchor, destination);
+        world
+            .cache
+            .update_player((1, -1), false, Duration::from_secs(5));
+        let resumed = world
+            .cache
+            .player
+            .as_ref()
+            .unwrap()
+            .sample(Duration::from_millis(5050));
+        assert_eq!(
+            resumed.asset.source.virtual_path,
+            "art/critter/hmm/hmmv1xab.art"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the installed original game"]
+    fn playable_lighting_matches_world_at_the_original_hour_and_shadows_reach_pixels() {
+        let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+        let open = || Vfs::from_game(&game, crate::vfs::Policy::Ce).unwrap();
+        let mut vfs = open();
+        let catalog = super::super::maps::Catalog::load(&mut vfs).unwrap();
+        let map = catalog.find("5011").unwrap();
+        let files = map.files(&mut vfs).unwrap();
+        let start = files.center(Some((86, 85))).unwrap();
+        let mut camera = files.region.camera(start).unwrap();
+        camera.follow((0, 0));
+        let mut play = WorldStream::new(vfs, map.directory.clone(), files.region, start)
+            .unwrap()
+            .with_starting_lighting()
+            .unwrap()
+            .with_player()
+            .unwrap();
+        let mut world = WorldStream::new(open(), map.directory.clone(), files.region, start)
+            .unwrap()
+            .with_lighting(15)
+            .unwrap();
+        let size = (1280, 720);
+        play.prepare(&camera, size).unwrap();
+        world.prepare(&camera, size).unwrap();
+        assert_eq!(play.cache.hour, 15);
+        assert!(play.reports().any(|report| report.object_lights > 0));
+        assert!(!play.cache.shadows.is_empty());
+        let frame = |world: &WorldStream| {
+            let mut target = vec![[32, 43, 58]; (size.0 * size.1) as usize];
+            crate::compositor::blit_modulated(
+                &mut target,
+                size,
+                size.0 as usize,
+                world
+                    .visible_assets_at(&camera, size, Duration::from_millis(246))
+                    .map(|draw| (draw.sprite, draw.modulation)),
+            )
+            .unwrap();
+            target
+        };
+        let with_shadows = frame(&play);
+        play.toggle_shadows();
+        let without_shadows = frame(&play);
+        let changed = with_shadows
+            .iter()
+            .zip(without_shadows)
+            .filter(|(a, b)| **a != *b)
+            .count();
+        assert!(changed > 0, "shadows must change composed pixels");
+        play.toggle_shadows();
+        let player = play.cache.player.take();
+        assert!(
+            frame(&play) == frame(&world),
+            "the lit world must compose identically at the same camera and frame tick"
+        );
+        play.cache.player = player;
+        let base = frame(&play);
+        play.cache.player_shadows = None;
+        let player_shadow_pixels = base
+            .iter()
+            .zip(frame(&play))
+            .filter(|(a, b)| **a != *b)
+            .count();
+        assert!(
+            player_shadow_pixels > 0,
+            "the generic human shadow must change composed pixels"
+        );
+        eprintln!(
+            "Bates 15:00, fixed 246 ms: {changed} shadow pixels, including {player_shadow_pixels} attributable to the player shadow"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the installed original game"]
+    fn player_follows_a_detour_and_cancels_routes_in_original_bates() {
+        let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+        let sector = Coordinates { x: 1, y: 1 };
+        let region = SectorRegion {
+            first: sector,
+            last: sector,
+        };
+        let spawn = (104u32, 92u32);
+        let camera = region.camera(spawn).unwrap();
+        let mut world = WorldStream::new(
+            Vfs::from_game(game, crate::vfs::Policy::Ce).unwrap(),
+            "bates mansion lev 1".into(),
+            region,
+            spawn,
+        )
+        .unwrap()
+        .with_player()
+        .unwrap();
+        world.prepare(&camera, (1280, 720)).unwrap();
+        let entries = &world.cache.entries;
+        let cell = |tile| SectorCache::collision_cell(entries, tile);
+        let player = world.cache.player.as_mut().unwrap();
+        let (target, planned) = (98..=109)
+            .flat_map(|x| (86..=97).map(move |y| (x, y)))
+            .find_map(|tile: (u32, u32)| {
+                let straight = tile.0.abs_diff(spawn.0).max(tile.1.abs_diff(spawn.1));
+                let steps = player.destination(tile, true, cell)?;
+                (steps > straight as usize && steps < 13).then_some((tile, steps))
+            })
+            .expect("a real obstacle must force a detour");
+        eprintln!("Bates authored entry {spawn:?} to {target:?}: detour has {planned} steps");
+        let mut visited = vec![spawn];
+        for tick in 0..=planned {
+            player.update(
+                (0, 0),
+                false,
+                Duration::from_secs(tick as u64 * 2),
+                |tile, dir| collision::step(tile, dir, cell),
+            );
+            if tick != 0 {
+                visited.push(player.tile());
+            }
+        }
+        assert_eq!(visited.len(), planned + 1);
+        assert_eq!(player.tile(), target);
+        assert!(!player.moving());
+        assert_eq!(player.destination(spawn, false, cell), Some(planned));
+        assert_eq!(player.destination(target, true, cell), Some(0));
+        assert!(!player.moving());
+        assert_eq!(player.destination(spawn, false, cell), Some(planned));
+        player.update((1, 0), false, Duration::from_secs(50), |_, _| None);
+        assert!(!player.moving());
+        assert_eq!(player.tile(), target);
+    }
 
     #[test]
     fn sector_prefetch_covers_sources_outside_the_visible_tile_interval() {

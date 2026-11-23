@@ -22,6 +22,15 @@ pub fn project_world_tile(tile: (u32, u32), center: (u32, u32)) -> Option<(i32, 
     project_tile(delta(tile.0, center.0)?, delta(tile.1, center.1)?)
 }
 
+/// Invert the same centered projection used to rasterize the floor.
+pub fn world_tile_at_pixel((x, y): (i64, i64), (cx, cy): (u32, u32)) -> Option<(u32, u32)> {
+    let twice_y = y.checked_mul(2)?.checked_add(40)?;
+    Some((
+        u32::try_from(i64::from(cx) + twice_y.checked_sub(x)?.div_euclid(80)).ok()?,
+        u32::try_from(i64::from(cy) + twice_y.checked_add(x)?.div_euclid(80)).ok()?,
+    ))
+}
+
 /// Place a verified 78 × 40 floor frame at a projected tile center.
 pub fn floor_draw(frame: &SpriteFrame, x: i32, y: i32) -> Option<SpriteDraw<'_>> {
     if (frame.width, frame.height) != FLOOR_SIZE || frame.hotspot != FLOOR_HOTSPOT {

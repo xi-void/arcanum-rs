@@ -84,6 +84,7 @@ impl WallArtId {
             28..=33 => ["d6l", "d6a", "d6b", "d6c", "d6d", "d6r"][(fields.piece - 28) as usize],
             34..=36 => ["p3l", "p3a", "p3r"][(fields.piece - 34) as usize],
             37..=40 => ["p4l", "p4a", "p4b", "p4r"][(fields.piece - 37) as usize],
+            41..=45 => ["p5l", "p5a", "p5b", "p5c", "p5r"][(fields.piece - 41) as usize],
             _ => return Err(Error::Unsupported(fields)),
         };
         let id = fields.structure;

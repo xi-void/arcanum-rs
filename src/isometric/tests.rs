@@ -113,3 +113,16 @@ fn assert_tight_floor_edges(floor: &SpriteFrame) {
         }
     }
 }
+
+#[test]
+fn inverse_projection_round_trips_original_tile_centers() {
+    let reference = (104, 92);
+    for tile in [(104, 92), (103, 93), (110, 95), (0, 0)] {
+        let (x, y) = project_world_tile(tile, reference).unwrap();
+        assert_eq!(
+            world_tile_at_pixel((i64::from(x), i64::from(y)), reference),
+            Some(tile)
+        );
+    }
+    assert_eq!(world_tile_at_pixel((0, -40), (0, 0)), None);
+}

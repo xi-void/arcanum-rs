@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 pub struct Camera {
     position: (i32, i32),
     at_home: bool,
+    following: bool,
     // World tile bounds in the scaled inverse projection, 2Y − X and 2Y + X.
     axes: [(i64, i64); 2],
 }
@@ -45,6 +46,7 @@ impl Camera {
         Some(Self {
             position: (0, 0),
             at_home: true,
+            following: false,
             axes: [
                 axis(first.0, reference.0, size.0)?,
                 axis(first.1, reference.1, size.1)?,
@@ -57,6 +59,7 @@ impl Camera {
     }
 
     pub fn pan(&mut self, delta: (i32, i32), viewport: (u32, u32)) -> bool {
+        self.following = false;
         let changed = self.place(
             (
                 self.position.0.saturating_add(delta.0),
@@ -71,11 +74,21 @@ impl Camera {
     }
 
     pub fn reset(&mut self, viewport: (u32, u32)) -> bool {
+        self.following = false;
         self.at_home = true;
         self.place((0, 0), viewport)
     }
 
+    /// Player anchors already lie in the world. Keep them centered even at a map edge.
+    pub fn follow(&mut self, anchor: (i32, i32)) {
+        self.following = true;
+        self.position = anchor;
+    }
+
     pub fn resize(&mut self, viewport: (u32, u32)) -> bool {
+        if self.following {
+            return false;
+        }
         self.place(if self.at_home { (0, 0) } else { self.position }, viewport)
     }
 

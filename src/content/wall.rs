@@ -196,9 +196,9 @@ impl WallImport {
             .ok_or("missing wall blit color")?;
         let alpha = fields.alpha.or(parent.alpha).ok_or("missing wall alpha")?;
         // Only ordinary visible, non-flat, unscaled, opaque walls are drawn.
-        // Cover, shoot-through, see-through and collision bits do not affect this pass.
+        // Cover, collision and invulnerability do not affect the original draw.
         if scale != 100
-            || flags & !0x4430 != 0
+            || flags & !0x0040_4430 != 0
             || wall_flags != 0
             || blit_flags != 0
             || blit_color != 0x00ff_ffff
@@ -207,16 +207,20 @@ impl WallImport {
             return Err(format!("unsupported wall appearance at record {record_index}: scale {scale}, object flags {flags:#x}, wall flags {wall_flags:#x}, blit flags {blit_flags:#x}, color {blit_color:#x}, alpha {alpha}").into());
         }
         let art_id = WallArtId(record.art_id);
-        let orientation = art_id.fields()?;
+        let orientation = art_id
+            .fields()
+            .map_err(super::ObjectArtFailure::from_error)?;
         let path = frames
             .resolve(|| art_id.resolve(&self.structure.mes, &self.names.mes))
             .map_err(|error| {
-                format!(
+                super::ObjectArtFailure(format!(
                     "wall record {record_index}, ART {:#010x}: {error}",
                     art_id.0
-                )
+                ))
             })?;
-        let artwork = frames.load(vfs, &path, 0, orientation.palette, orientation.mirror_x())?;
+        let artwork = frames
+            .load(vfs, &path, 0, orientation.palette, orientation.mirror_x())
+            .map_err(super::ObjectArtFailure::from_error)?;
         let frame = &artwork.decoded.frame;
         if frame.width > 512 || frame.height > 512 {
             return Err(format!("wall frame exceeds 512 pixels per axis in {path}").into());

@@ -41,6 +41,7 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] mes get <game-directory> <resource-path> <entry-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art inspect <game-directory> <resource-path> <frame> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art export <game-directory> <resource-path> <frame> <output.pam> [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs [--ordered] play <game-directory> [--map <map-name-or-id>] [--center X Y] [--lighting <hour>] [--renderer cpu|vulkan|gles] (requires --features windowed)
   arcanum-rs art demo                          (requires --features windowed)
   arcanum-rs [--ordered] art sector-audit <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art sector-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
@@ -48,6 +49,9 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] art sector-wall-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art world-inspect <game-directory> [--view <local-x> <local-y> <side> <center-x> <center-y> <width> <height>] [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art world <game-directory> [--view <local-x> <local-y> <side> <center-x> <center-y> <width> <height>] [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
+  arcanum-rs [--ordered] art maps list <game-directory> [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs [--ordered] art maps info <game-directory> <map-name-or-id> [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs [--ordered] art world <game-directory> --map <map-name-or-id> [--center X Y] [--renderer cpu|vulkan|gles] [--lighting <hour>] [--roofs] [--trace]
   arcanum-rs [--ordered] art world <game-directory> --sectors <map> <min-x> <min-y> <max-x> <max-y> <world-x> <world-y> <width> <height> [--trace] [--lighting <hour>] [--animation-ms <elapsed>] [--fidget] [--walk] [--light-probe X Y | --nocturnal-probe X Y] [--renderer cpu|vulkan|gles] [--mods …]
   arcanum-rs [--ordered] art sector-room-wide-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art sector-room-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
@@ -133,12 +137,31 @@ fn main() -> ExitCode {
         (Some("art"), [_, action, game, options @ ..]) if action == "sector-room-wide-inspect" => {
             inspect_room_overview(Path::new(game), options, policy)
         }
+        (Some("art"), [_, action, verb, game, options @ ..])
+            if action == "maps" && verb == "list" =>
+        {
+            inspect_maps(Path::new(game), None, options, policy)
+        }
+        (Some("art"), [_, action, verb, game, name, options @ ..])
+            if action == "maps" && verb == "info" =>
+        {
+            inspect_maps(Path::new(game), Some(name), options, policy)
+        }
         (Some("art"), [_, action, game, options @ ..]) if action == "world-inspect" => {
             inspect_world(Path::new(game), options, policy)
         }
         #[cfg(feature = "windowed")]
+        (Some("play"), [_, game, options @ ..]) => {
+            let mut args = Vec::new();
+            if options.first().is_none_or(|flag| flag != "--map") {
+                args.extend([OsString::from("--map"), OsString::from("5011")]);
+            }
+            args.extend_from_slice(options);
+            show_world(Path::new(game), &args, policy, true)
+        }
+        #[cfg(feature = "windowed")]
         (Some("art"), [_, action, game, options @ ..]) if action == "world" => {
-            show_world(Path::new(game), options, policy)
+            show_world(Path::new(game), options, policy, false)
         }
         #[cfg(feature = "windowed")]
         (Some("art"), [_, action, game, options @ ..])
@@ -1070,18 +1093,28 @@ fn show_room(
 }
 
 #[cfg(feature = "windowed")]
-fn show_world(game: &Path, options: &[OsString], policy: Policy) -> Result<(), Box<dyn Error>> {
-    if let Some((world, camera, size, trace, map, renderer, animation_ms)) =
-        streaming_world(game, options, policy)?
+fn show_world(
+    game: &Path,
+    options: &[OsString],
+    policy: Policy,
+    playing: bool,
+) -> Result<(), Box<dyn Error>> {
+    if let Some((world, camera, size, trace, map, renderer, animation_ms, explore)) =
+        streaming_world(game, options, policy, playing)?
     {
+        let world = if playing { world.with_player()? } else { world };
+        let mode = if playing { "play" } else { "world" };
         return viewer::show_stream(
-            format!("Arcanum-RS | {map} world"),
+            format!("Arcanum-RS | {map} {mode}"),
             world,
             camera,
             size,
-            trace,
-            renderer,
-            animation_ms,
+            viewer::StreamOptions {
+                trace,
+                renderer,
+                animation_ms,
+                explore,
+            },
         )
         .map_err(Into::into);
     }
@@ -1136,9 +1169,58 @@ fn show_world(game: &Path, options: &[OsString], policy: Policy) -> Result<(), B
     .map_err(Into::into)
 }
 
+fn inspect_maps(
+    game: &Path,
+    name: Option<&OsStr>,
+    options: &[OsString],
+    policy: Policy,
+) -> Result<(), Box<dyn Error>> {
+    let mut vfs = inspection_vfs(game, options, policy)?;
+    let catalog = content::maps::Catalog::load(&mut vfs)?;
+    let mut out = io::stdout().lock();
+    writeln!(
+        out,
+        "{} from {}",
+        catalog.source.virtual_path, catalog.source
+    )?;
+    if let Some(name) = name {
+        let map = catalog.find(resource_name(name)?)?;
+        writeln!(
+            out,
+            "{} ({})\nSector namespace maps/{}/",
+            map.name, map.id, map.directory
+        )?;
+        writeln!(
+            out,
+            "Authored in-game entry {:?} from the map list",
+            map.map_list_center
+        )?;
+        let files = map.files(&mut vfs)?;
+        if let Some((start, source)) = &files.start {
+            writeln!(out, "Directory startloc.txt {start:?} from {source}")?;
+        } else {
+            writeln!(
+                out,
+                "No directory startloc.txt; the in-game entry is listed above"
+            )?;
+        }
+        writeln!(
+            out,
+            "{} winning base-sector resources, bounds {:?}; absent cells inside these bounds remain unloaded",
+            files.sectors.len(),
+            files.region
+        )?;
+    } else {
+        for map in &catalog.maps {
+            writeln!(out, "{}\t{}\tmaps/{}/", map.id, map.name, map.directory)?;
+        }
+    }
+    Ok(())
+}
+
 fn inspect_world(game: &Path, options: &[OsString], policy: Policy) -> Result<(), Box<dyn Error>> {
-    if let Some((mut world, mut camera, size, trace, _, _, _)) =
-        streaming_world(game, options, policy)?
+    if let Some((mut world, mut camera, size, trace, map, _, _, _)) =
+        streaming_world(game, options, policy, false)?
     {
         if trace {
             world = world.with_object_audit();
@@ -1146,6 +1228,12 @@ fn inspect_world(game: &Path, options: &[OsString], policy: Policy) -> Result<()
         camera.resize(size);
         let timing = world.prepare(&camera, size)?;
         let mut out = io::stdout().lock();
+        writeln!(
+            out,
+            "Map {map}, reference tile {:?}, camera pixel displacement {:?}",
+            world.reference(),
+            camera.position()
+        )?;
         for report in world.reports() {
             writeln!(
                 out,
@@ -1172,10 +1260,11 @@ fn inspect_world(game: &Path, options: &[OsString], policy: Policy) -> Result<()
                 )?;
                 writeln!(
                     out,
-                    "  Not imported: {} walls / {} scenery / {} portals; {} imported rasters rejected",
+                    "  Not imported: {} walls / {} scenery / {} portals; {} ART resolution failures; {} imported rasters rejected",
                     walls - report.wall_count,
                     scenery - report.scenery_count,
                     portals - report.portal_count,
+                    report.object_art_failures,
                     report.object_raster_rejections
                 )?;
             }
@@ -1199,8 +1288,25 @@ fn inspect_world(game: &Path, options: &[OsString], policy: Policy) -> Result<()
                     report.object_lights
                 )?;
             }
-            for record in &report.object_audit {
-                writeln!(out, "  Raster {record}")?;
+            if report.roofs.0 > 0 {
+                writeln!(
+                    out,
+                    "  Roof entries: {} original, {} prepared (--roofs enables the static pass)",
+                    report.roofs.0, report.roofs.1
+                )?;
+            }
+            if !report.object_audit.is_empty() {
+                let visible: std::collections::BTreeSet<_> = world
+                    .visible_object_records(report.id, &camera, size)
+                    .collect();
+                for (index, record) in &report.object_audit {
+                    let status = if visible.contains(index) {
+                        "submitted"
+                    } else {
+                        "viewport-culled"
+                    };
+                    writeln!(out, "  Raster {record}; {status} at tick zero")?;
+                }
             }
             for diagnostic in &report.diagnostics {
                 writeln!(out, "  {diagnostic}")?;
@@ -1237,63 +1343,71 @@ type StreamPreview = (
     String,
     RenderBackend,
     Option<u64>,
+    bool,
 );
 
 fn streaming_world(
     game: &Path,
     options: &[OsString],
     policy: Policy,
+    playing: bool,
 ) -> Result<Option<StreamPreview>, Box<dyn Error>> {
     use arcanum_rs::sector::Coordinates;
     use content::world::{SectorRegion, WorldStream};
     let [flag, rest @ ..] = options else {
         return Ok(None);
     };
-    if flag != "--sectors" {
-        return Ok(None);
-    }
-    let [
-        map,
-        min_x,
-        min_y,
-        max_x,
-        max_y,
-        start_x,
-        start_y,
-        width,
-        height,
-        rest @ ..,
-    ] = rest
-    else {
-        return Err(
-            "expected --sectors MAP MIN_X MIN_Y MAX_X MAX_Y START_X START_Y WIDTH HEIGHT".into(),
+    let (name, explicit, size, rest) = if flag == "--map" {
+        let [name, rest @ ..] = rest else {
+            return Err("expected a map name after --map".into());
+        };
+        (resource_name(name)?, None, (1280, 720), rest)
+    } else if flag == "--sectors" {
+        let [
+            map,
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+            start_x,
+            start_y,
+            width,
+            height,
+            rest @ ..,
+        ] = rest
+        else {
+            return Err(
+                "expected --sectors MAP MIN_X MIN_Y MAX_X MAX_Y START_X START_Y WIDTH HEIGHT"
+                    .into(),
+            );
+        };
+        let region = SectorRegion {
+            first: Coordinates {
+                x: parse_view_number(min_x, "first sector X")?,
+                y: parse_view_number(min_y, "first sector Y")?,
+            },
+            last: Coordinates {
+                x: parse_view_number(max_x, "last sector X")?,
+                y: parse_view_number(max_y, "last sector Y")?,
+            },
+        };
+        let center = (
+            parse_view_number(start_x, "world X")?,
+            parse_view_number(start_y, "world Y")?,
         );
+        let size = (
+            parse_view_number::<u32>(width, "width")?,
+            parse_view_number::<u32>(height, "height")?,
+        );
+        (resource_name(map)?, Some((region, center)), size, rest)
+    } else {
+        return Ok(None);
     };
-    let map = resource_name(map)?;
-    let region = SectorRegion {
-        first: Coordinates {
-            x: parse_view_number(min_x, "first sector X")?,
-            y: parse_view_number(min_y, "first sector Y")?,
-        },
-        last: Coordinates {
-            x: parse_view_number(max_x, "last sector X")?,
-            y: parse_view_number(max_y, "last sector Y")?,
-        },
-    };
-    let reference = (
-        parse_view_number(start_x, "world X")?,
-        parse_view_number(start_y, "world Y")?,
-    );
-    let size = (
-        parse_view_number::<u32>(width, "width")?,
-        parse_view_number::<u32>(height, "height")?,
-    );
     if size.0 == 0 || size.1 == 0 || u64::from(size.0) * u64::from(size.1) > 16 * 1024 * 1024 {
         return Err("invalid world viewport size".into());
     }
-    let camera = region
-        .camera(reference)
-        .ok_or("invalid sector rectangle or world camera position")?;
+    let mut center_override = None;
+    let mut roofs = false;
     let mut trace = false;
     let mut hour = None;
     let mut animation_ms = None;
@@ -1304,6 +1418,22 @@ fn streaming_world(
     let mut options = rest;
     loop {
         options = match options {
+            [flag, x, y, rest @ ..]
+                if flag == "--center" && explicit.is_none() && center_override.is_none() =>
+            {
+                center_override = Some((
+                    parse_view_number(x, "world X")?,
+                    parse_view_number(y, "world Y")?,
+                ));
+                rest
+            }
+            [flag, ..] if flag == "--center" => {
+                return Err("expected one --center X Y with --map".into());
+            }
+            [flag, rest @ ..] if flag == "--roofs" => {
+                roofs = true;
+                rest
+            }
             [flag, rest @ ..] if flag == "--trace" => {
                 trace = true;
                 rest
@@ -1352,10 +1482,30 @@ fn streaming_world(
             _ => break,
         };
     }
-    let vfs = inspection_vfs(game, options, policy)?;
-    let mut world = WorldStream::new(vfs, map.to_owned(), region, reference)?;
+    if playing && (walking || animation_ms.is_some()) {
+        return Err("play cannot be combined with --walk or --animation-ms".into());
+    }
+    let mut vfs = inspection_vfs(game, options, policy)?;
+    let (map, region, reference) = if let Some((region, reference)) = explicit {
+        (name.to_owned(), region, reference)
+    } else {
+        let catalog = content::maps::Catalog::load(&mut vfs)?;
+        let map = catalog.find(name)?;
+        let files = map.files(&mut vfs)?;
+        let center = files.center(center_override)?;
+        (map.directory.clone(), files.region, center)
+    };
+    let camera = region
+        .camera(reference)
+        .ok_or("invalid sector rectangle or world camera position")?;
+    let mut world = WorldStream::new(vfs, map.clone(), region, reference)?;
+    if roofs {
+        world = world.with_roofs();
+    }
     if let Some(hour) = hour {
         world = world.with_lighting(hour)?;
+    } else if playing {
+        world = world.with_starting_lighting()?;
     }
     if fidget {
         world = world.with_fidget_preview();
@@ -1371,9 +1521,10 @@ fn streaming_world(
         camera,
         size,
         trace,
-        map.to_owned(),
+        map,
         renderer,
         animation_ms,
+        explicit.is_none() && !walking,
     )))
 }
 

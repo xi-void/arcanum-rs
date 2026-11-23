@@ -1738,12 +1738,9 @@ fn kna_tha_rabbit_sector_retains_building_objects_after_the_locked_portal() {
     assert_eq!(report.original_object_counts, (251, 2, 400));
     assert_eq!(report.object_raster_rejections, 0);
     assert_eq!(report.object_audit.len(), 653);
-    assert!(
-        report
-            .object_audit
-            .iter()
-            .any(|line| { line.starts_with("record 558 Portal") && line.contains("dg2e3au0.art") })
-    );
+    assert!(report.object_audit.iter().any(|(index, line)| *index == 558
+        && line.starts_with("record 558 Portal")
+        && line.contains("dg2e3au0.art")));
     assert_eq!(
         (
             report.surfaces,
@@ -1773,7 +1770,7 @@ fn kna_tha_rabbit_sector_retains_building_objects_after_the_locked_portal() {
 fn tulla_is_reconstructed_from_map_metadata_and_generic_sector_import() {
     use arcanum_rs::{
         content::{
-            load_mes,
+            maps::Catalog,
             world::{SectorRegion, WorldStream},
         },
         sector::{Coordinates, objects},
@@ -1781,31 +1778,15 @@ fn tulla_is_reconstructed_from_map_metadata_and_generic_sector_import() {
 
     let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
     let mut vfs = Vfs::from_game(game, Policy::Ce).unwrap();
-    let maps = load_mes(&mut vfs, "rules/maplist.mes").unwrap();
-    let (map, cx, cy) = maps
-        .mes
-        .entries()
-        .find_map(|(_, value)| {
-            let mut fields = value.split(',').map(str::trim);
-            let map = fields.next()?;
-            if !map.eq_ignore_ascii_case("Tulla Interior") {
-                return None;
-            }
-            Some((
-                map.to_ascii_lowercase(),
-                fields.next()?.parse::<u32>().ok()?,
-                fields.next()?.parse::<u32>().ok()?,
-            ))
-        })
-        .expect("Tulla map metadata");
-    let mut start = Vec::new();
-    vfs.copy(&format!("maps/{map}/startloc.txt"), &mut start)
-        .unwrap();
-    let mut words = std::str::from_utf8(&start)
-        .unwrap()
-        .split_ascii_whitespace();
-    let sx: u32 = words.next().unwrap().parse().unwrap();
-    let sy: u32 = words.next().unwrap().parse().unwrap();
+    let maps = Catalog::load(&mut vfs).unwrap();
+    let spec = maps.find("TULLA").unwrap();
+    assert_eq!(spec.id, 5031);
+    let files = spec.files(&mut vfs).unwrap();
+    let (cx, cy) = files.center(None).unwrap();
+    let (sx, sy) = files.start.unwrap().0;
+    assert_eq!(((cx, cy), (sx, sy)), ((507, 221), (477, 178)));
+    assert_eq!(files.sectors.len(), 42);
+    let map = spec.directory.clone();
     let sector = |x, y| Coordinates { x, y };
     let region = SectorRegion {
         first: sector(cx.min(sx) / 64, cy.min(sy) / 64),
@@ -1833,7 +1814,8 @@ fn tulla_is_reconstructed_from_map_metadata_and_generic_sector_import() {
     let camera = region.camera(center).unwrap();
     let mut world = WorldStream::new(vfs, map, region, center)
         .unwrap()
-        .with_object_audit();
+        .with_object_audit()
+        .with_roofs();
     world.prepare(&camera, size).unwrap();
     let mut retained = Vec::new();
     for report in world.reports() {
@@ -1859,14 +1841,25 @@ fn tulla_is_reconstructed_from_map_metadata_and_generic_sector_import() {
             report.wall_count,
             report.portal_count,
             report.scenery_count,
+            report.roofs,
         ));
     }
-    assert_eq!(retained, [(407, 331, 5, 50), (1111, 650, 5, 53)]);
+    assert_eq!(
+        retained,
+        [(407, 356, 5, 51, (91, 91)), (1111, 695, 5, 53, (214, 214))]
+    );
     let visible = world
         .visible_assets(&camera, size)
         .map(|draw| draw.asset.source.virtual_path.as_str())
         .collect::<Vec<_>>();
-    for category in ["art/tile/", "art/wall/", "art/portal/", "art/scenery/"] {
+    assert_eq!(visible.last(), Some(&"art/roof/tul.art"));
+    for category in [
+        "art/tile/",
+        "art/wall/",
+        "art/portal/",
+        "art/scenery/",
+        "art/roof/",
+    ] {
         assert!(
             visible.iter().any(|path| path.starts_with(category)),
             "{category}"
@@ -1930,4 +1923,31 @@ fn kna_tha_south_sector_preserves_geometry_across_the_floor_boundary() {
     );
     assert_eq!(report.object_raster_rejections, 0);
     assert_eq!(world.object_visibility(id, &camera, size), Some((53, 771)));
+}
+
+#[test]
+#[ignore = "requires installed Arcanum data"]
+fn catalog_opens_kna_tha_and_bates_at_their_original_in_game_entries() {
+    use arcanum_rs::content::{maps::Catalog, world::WorldStream};
+    let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+    for (name, id, expected, sectors) in [
+        ("K’NA THA", 5067, (802, 854), 77),
+        ("5011", 5011, (104, 92), 9),
+    ] {
+        let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+        let catalog = Catalog::load(&mut vfs).unwrap();
+        let spec = catalog.find(name).unwrap();
+        assert_eq!(spec.id, id);
+        let files = spec.files(&mut vfs).unwrap();
+        assert_eq!(files.sectors.len(), sectors);
+        let reference = files.center(None).unwrap();
+        assert_eq!(reference, expected);
+        let size = (1280, 720);
+        let camera = files.region.camera(reference).unwrap();
+        let mut world =
+            WorldStream::new(vfs, spec.directory.clone(), files.region, reference).unwrap();
+        world.prepare(&camera, size).unwrap();
+        assert!(world.reports().any(|report| report.surfaces > 0));
+        assert!(world.visible_assets(&camera, size).next().is_some());
+    }
 }

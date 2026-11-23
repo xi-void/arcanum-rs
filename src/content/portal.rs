@@ -203,7 +203,7 @@ impl PortalImport {
         if record.category != StaticCategory::Portal {
             return Err("expected a portal record".into());
         }
-        let art = PortalArt::decode(record.art_id)?;
+        let art = PortalArt::decode(record.art_id).map_err(super::ObjectArtFailure::from_error)?;
         let state = art.visual_state()?;
         let (prototype_source, prototype) = match self.prototypes.entry(record.prototype) {
             Entry::Occupied(entry) => entry.into_mut(),
@@ -215,14 +215,18 @@ impl PortalImport {
             }
         };
         let appearance = PortalAppearance::resolve(record.fields, prototype.appearance)?;
-        let path = frames.resolve(|| art.resource_path(&self.names.mes))?;
-        let artwork = frames.load(
-            vfs,
-            &path,
-            usize::from(art.frame),
-            art.palette,
-            art.mirror_x,
-        )?;
+        let path = frames
+            .resolve(|| art.resource_path(&self.names.mes))
+            .map_err(super::ObjectArtFailure::from_error)?;
+        let artwork = frames
+            .load(
+                vfs,
+                &path,
+                usize::from(art.frame),
+                art.palette,
+                art.mirror_x,
+            )
+            .map_err(super::ObjectArtFailure::from_error)?;
         let frame = &artwork.decoded.frame;
         if frame.width > 512 || frame.height > 512 {
             return Err(format!("portal frame exceeds 512 pixels per axis in {path}").into());

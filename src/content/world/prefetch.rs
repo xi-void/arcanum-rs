@@ -252,6 +252,7 @@ pub struct InteractiveWorld {
     hold_started: Option<Instant>,
     view_hold: Duration,
     trace: bool,
+    player_started: bool,
 }
 
 impl InteractiveWorld {
@@ -290,6 +291,7 @@ impl InteractiveWorld {
             hold_started: None,
             view_hold: Duration::ZERO,
             trace,
+            player_started: false,
         })
     }
 
@@ -327,7 +329,7 @@ impl InteractiveWorld {
             .entries
             .get(&id)
             .map(|(sector, _)| &sector.report);
-        if self.trace || report.is_some_and(|r| r.source.is_none()) {
+        if self.trace || report.is_some_and(|r| r.object_list_failed) {
             eprintln!(
                 "Sector {id} {:?} complete: accepted {accepted}, queue {:?}, worker {:?}, stages {:?}, VFS +{}, ART reads +{}, decodes +{}, ART resolve {:?}, ART read {:?}, ART decode {:?}, insertion {insertion:?}, {} surfaces, {} diagnostics {}",
                 done.request.priority,
@@ -502,6 +504,117 @@ impl InteractiveWorld {
             return Err("light position is outside the world region");
         }
         self.cache.set_dynamic(slot, state)
+    }
+
+    pub fn playing(&self) -> bool {
+        self.cache.player.is_some()
+    }
+
+    /// Compose the camera and player raster at the same simulation timestamp.
+    pub fn follow_player(&self, elapsed: Duration, camera: &mut Camera) {
+        if let Some(player) = &self.cache.player {
+            camera.follow(player.sample(elapsed).anchor);
+        }
+    }
+
+    pub fn player_moving(&self) -> bool {
+        self.cache.player.as_ref().is_some_and(Player::moving)
+    }
+
+    pub fn start_player(&mut self) -> Result<(), String> {
+        if self.player_started {
+            return Ok(());
+        }
+        if let Some(player) = &self.cache.player {
+            let tile = player.tile();
+            let cell = SectorCache::collision_cell(&self.cache.entries, tile);
+            if !collision::can_stand(cell) {
+                let sector = self.cache.entries.get(&tile_sector_id(tile));
+                let detail = if cell.is_none() {
+                    sector
+                        .and_then(|(sector, _)| sector.report.diagnostics.first())
+                        .map_or("original collision data is unavailable", String::as_str)
+                } else {
+                    "original terrain or an object blocks this tile"
+                };
+                return Err(format!(
+                    "cannot spawn player at {tile:?}: {detail}; choose another starting tile with --center X Y"
+                ));
+            }
+        }
+        self.player_started = true;
+        Ok(())
+    }
+
+    pub fn set_player_destination(
+        &mut self,
+        screen: (u32, u32),
+        size: (u32, u32),
+        presented: &Camera,
+        run: bool,
+    ) {
+        if !self.player_started || screen.0 >= size.0 || screen.1 >= size.1 {
+            return;
+        }
+        let (x, y) = presented.position();
+        let point = (
+            i64::from(x) + i64::from(screen.0) - i64::from(size.0 / 2),
+            i64::from(y) + i64::from(screen.1) - i64::from(size.1 / 2),
+        );
+        let Some(player) = &mut self.cache.player else {
+            return;
+        };
+        let tile = crate::isometric::world_tile_at_pixel(point, self.reference);
+        player.cancel_route();
+        let entries = &self.cache.entries;
+        let steps = tile.and_then(|tile| {
+            player.destination(tile, run, |tile| SectorCache::collision_cell(entries, tile))
+        });
+        if self.trace {
+            eprintln!("Player target {tile:?}: {steps:?} steps, running {run}");
+        }
+    }
+
+    pub fn cancel_player_route(&mut self) {
+        if let Some(player) = &mut self.cache.player {
+            player.cancel_route();
+        }
+    }
+
+    pub fn move_player(
+        &mut self,
+        input: (i32, i32),
+        run: bool,
+        now: Duration,
+        camera: &mut Camera,
+    ) -> bool {
+        if !self.player_started {
+            return false;
+        }
+        let before = self.cache.player.as_ref().map(|p| {
+            let pose = p.sample(now);
+            (pose.anchor, Arc::as_ptr(pose.asset), p.tile())
+        });
+        let Some(anchor) = self.cache.update_player(input, run, now) else {
+            return false;
+        };
+        let pose = self.cache.player.as_ref().unwrap().sample(now);
+        let previous_camera = camera.position();
+        camera.follow(anchor);
+        let changed = previous_camera != anchor
+            || before.is_some_and(|(previous, asset, tile)| {
+                previous != anchor || asset != Arc::as_ptr(pose.asset) || tile != pose.tile
+            });
+        if self.trace
+            && let Some((_, _, tile)) = before
+            && tile != self.cache.player.as_ref().unwrap().tile()
+        {
+            eprintln!(
+                "Player entered tile {:?}, camera {anchor:?}, ART {}",
+                pose.tile, pose.asset.source.virtual_path
+            );
+        }
+        changed
     }
 
     /// Start at the current epoch and report whether the viewport needs redraw.
