@@ -79,9 +79,11 @@ pub fn decode_frame(input: &[u8], index: usize) -> Result<DecodedFrame, Error> {
         return Err(Error::InputTooLarge);
     }
     let header = section(input, 0, HEADER_BYTES, "header")?;
-    if word(header, 0) != 1 {
+    // The installed single-direction rug facades also set bit 3. Their
+    // palette, frame table and payload have the same layout.
+    if !matches!(word(header, 0), 0x01 | 0x09) {
         return Err(Error::Unsupported(
-            "only the single-direction flag (1) is supported",
+            "expected verified single-direction flags 0x01 or 0x09",
         ));
     }
     if word(header, 8) != 8 {

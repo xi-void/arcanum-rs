@@ -72,9 +72,11 @@ and archive or mod precedence, including a malformed winning override.
 
 ## Bounds and limitations
 
-- Accepted files use flags exactly 1, 8-bit indices, and palette slot zero
-  only. Other flag combinations, eight-direction storage, other palette
-  configurations and other bit depths return unsupported-format errors.
+- Accepted files use flags exactly `0x01` or `0x09`, 8-bit indices, and
+  palette slot zero only. The Bates rug facades establish the same layout
+  for `0x09`. Other flag combinations, eight-direction storage, other
+  palette configurations and other bit depths return unsupported-format
+  errors. [Facade evidence](FACADE_IMPORT.md)
 - Input is limited to 32 MiB, with at most 1,024 frames and 4,194,304
   pixels per frame. The decoder checks every frame's dimensions and stored
   span, and validates the selected frame's RLE packet boundaries and

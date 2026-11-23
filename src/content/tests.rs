@@ -691,3 +691,100 @@ fn sector_draws_share_artwork_while_preserving_raw_ids_and_flip() {
     assert_eq!(draws[1].frame.pixels[0], [90, 0, 0, 255]);
     assert_eq!(draws[1].anchor.0 - draws[0].anchor.0, -40);
 }
+
+#[test]
+fn sector_facades_select_frames_and_share_the_floor_draw_order() {
+    use crate::compositor::{SpriteDraw, blit_ordered};
+    use crate::sector::Coordinates;
+
+    let files = Fixture::new();
+    let mut sector_bytes = vec![0; 4 + 4096 * 4];
+    for (index, raw) in [(1, 0xb402_0803u32), (64, 0xb402_0800)] {
+        let offset = 4 + index * 4;
+        sector_bytes[offset..offset + 4].copy_from_slice(&raw.to_le_bytes());
+    }
+    files.write("maps/demo/0.sec", &sector_bytes);
+    files.write("art/tile/tilename.mes", b"{300}{abc}");
+    files.write("art/facade/facadename.mes", b"{0}{Rug}{7}{Rug-Flip}");
+    let framed = |flags: u32, colors: &[u8]| {
+        let mut bytes = vec![0; 1156 + 28 * colors.len()];
+        for (offset, value) in [(0, flags), (8, 8), (12, 1), (32, colors.len() as u32)] {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes[138] = 40;
+        bytes[142] = 90;
+        for (index, &color) in colors.iter().enumerate() {
+            let start = 1156 + index * 28;
+            for (word, value) in [78u32, 40, 3120, 39, 39].into_iter().enumerate() {
+                let offset = start + word * 4;
+                bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            // The facade's transparent left edge detects underdraw and double flipping.
+            for _ in 0..40 {
+                bytes.push(if flags == 9 { 0 } else { color });
+                bytes.extend([color; 77]);
+            }
+        }
+        bytes
+    };
+    files.write("art/tile/abcbse0a.art", &framed(1, &[1]));
+    let rug = framed(9, &[1, 2]);
+    let rug_path = files.write("art/facade/rug-flip.art", &rug);
+    let mut vfs = Vfs::new(Policy::Ordered);
+    let mount = vfs.mount_directory(&files.0).unwrap();
+    let coords = Coordinates { x: 0, y: 0 };
+    let load = |vfs: &mut Vfs| super::sector::load_facade_region(vfs, "demo", coords, (0, 0), 2);
+    let patch = load(&mut vfs).unwrap();
+    assert_eq!(patch.facade_names_source.as_ref().unwrap().mount_id, mount);
+    assert_eq!(patch.artwork().count(), 3);
+    assert_eq!(patch.flipped_frame_count(), 0);
+    assert_eq!(
+        patch
+            .tiles()
+            .iter()
+            .map(|tile| (tile.world, tile.id.0, tile.frame_index()))
+            .collect::<Vec<_>>(),
+        [
+            ((0, 0), 0, 0),
+            ((1, 0), 0xb402_0803, 1),
+            ((0, 1), 0xb402_0800, 0),
+            ((1, 1), 0, 0)
+        ]
+    );
+    let draws: Vec<_> = patch.draws().collect();
+    assert_eq!(draws[1].anchor, (-40, -1));
+    assert_eq!(draws[1].frame.pixels[0], [0; 4]);
+    assert_eq!(draws[1].frame.pixels[77], [90, 0, 0, 255]);
+    let mut clipped = [[0; 3]; 2];
+    blit_ordered(
+        &mut clipped,
+        (2, 1),
+        2,
+        draws.iter().map(|draw| SpriteDraw {
+            frame: draw.frame,
+            anchor: (draw.anchor.0 + 5, draw.anchor.1 + 25),
+        }),
+    )
+    .unwrap();
+    assert_eq!(clipped, [[90, 0, 0]; 2]);
+    let background = [12, 34, 56];
+    let mut edge = [background; 2];
+    blit_ordered(
+        &mut edge,
+        (2, 1),
+        2,
+        draws.iter().map(|draw| SpriteDraw {
+            frame: draw.frame,
+            anchor: (draw.anchor.0 + 79, draw.anchor.1 + 35),
+        }),
+    )
+    .unwrap();
+    assert_eq!(edge, [background, [90, 0, 0]]);
+    assert!(super::sector::load_region(&mut vfs, "demo", coords, (0, 0), 2).is_err());
+
+    fs::write(rug_path, &rug[..rug.len() - 1]).unwrap();
+    let error = load(&mut vfs).err().unwrap().to_string();
+    assert!(
+        error.contains("art/facade/rug-flip.art") && error.contains("truncated ART frame payload")
+    );
+}

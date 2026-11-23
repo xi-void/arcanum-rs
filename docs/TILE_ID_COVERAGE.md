@@ -35,9 +35,9 @@ The 32 ready IDs refer to 23 distinct ART paths. The table's flip row
 is a subset of the transition row. The 105 unresolved words have
 category nibble `0xb` (facade), such as `0xb5be0801` and `0xb5c2081d`.
 Their IDs and low bits remain verbatim in the array and report.
-Identifying the category does not establish how a facade should
-participate in this floor pass. The importer rejects a patch containing
-one and the audit keeps its frequency visible.
+The floor-only importer rejects a patch containing one and the audit
+keeps its frequency visible. The opt-in facade preview supports the
+verified baked pieces. [Facade evidence](FACADE_IMPORT.md)
 
 | Example raw ID | Frequency | Path under `art/tile/` | Transform |
 |---|---:|---|---|
@@ -123,6 +123,4 @@ in an asset-free network-isolated environment. All 17 installed checks
 passed, including the full sector audit and `vfs-smoke`. Both schematic
 audits remained at 119/119.
 
-The next world-rendering milestone can trace the original facade-type
-words in this sector as a separate art category. Verify one facade's
-filename and placement before adding a facade pass.
+[Milestone 32 traces and renders the baked facade cells](FACADE_IMPORT.md).

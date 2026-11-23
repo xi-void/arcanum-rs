@@ -167,3 +167,12 @@ and tests, and `git diff --check` passed. All 115 portable tests passed
 offline in an isolated headless environment. All 14 optional installed
 checks passed, including `vfs-smoke`. The five headless demos ran and
 both schematic audits remained at 119/119.
+
+## Graphical verification evidence
+
+For graphical milestones, capture the live Wayland drawable with
+`grim` and keep the unedited PNGs in the Git-ignored
+`target/visual-checks/` milestone directory. Include absolute file
+paths in the milestone report. State which reference was used, what
+features were actually compared and which visible fidelity questions
+remain open.
