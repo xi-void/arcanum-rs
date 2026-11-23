@@ -27,7 +27,15 @@ pub(super) fn read_art(vfs: &mut Vfs, path: &str) -> Result<ArtResource, Error> 
 
 impl ArtResource {
     pub(super) fn decode(&self, index: usize) -> Result<LoadedFrame, Error> {
-        match art::decode_frame(&self.bytes, index) {
+        self.decode_with_palette(index, 0)
+    }
+
+    pub(super) fn decode_with_palette(
+        &self,
+        index: usize,
+        palette: u8,
+    ) -> Result<LoadedFrame, Error> {
+        match art::decode_frame_with_palette(&self.bytes, index, palette) {
             Ok(decoded) => Ok(LoadedFrame {
                 source: self.source.clone(),
                 decoded,

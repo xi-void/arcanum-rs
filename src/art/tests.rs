@@ -233,3 +233,23 @@ fn slot_one_is_framed_without_changing_the_selected_slot_zero_colors() {
         })
     ));
 }
+
+#[test]
+fn selects_palette_one_with_the_original_slot_zero_fallback() {
+    let single = fixture(&[(2, 1, &[0, 1])]);
+    assert_eq!(
+        decode_frame_with_palette(&single, 0, 1).unwrap(),
+        decode_frame(&single, 0).unwrap()
+    );
+    let mut double = single.clone();
+    set_word(&mut double, 16, 42);
+    double.splice(1156..1156, [20; PALETTE_BYTES]);
+    assert_eq!(
+        decode_frame_with_palette(&double, 0, 1)
+            .unwrap()
+            .frame
+            .pixels,
+        [[0; 4], [20, 20, 20, 255]]
+    );
+    assert!(decode_frame_with_palette(&double, 0, 2).is_err());
+}

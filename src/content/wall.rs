@@ -1,20 +1,28 @@
 //! Read-only wall placement and source resolution through the VFS.
 
-use super::{Source, art, load_mes, read_bounded, sector::read_base_sector};
+use super::{LoadedMes, Source, art, load_mes, read_bounded, sector::read_base_sector};
 use crate::{
     compositor::SpriteDraw,
-    prototype::MAX_PROTOTYPE_BYTES,
+    prototype::{MAX_PROTOTYPE_BYTES, SerializedPrototypeId},
     sector::{
         Coordinates,
-        objects::{WallRecord, decode, decode_wall_prototype},
+        objects::{WallFields, WallRecord, decode, decode_wall_prototype},
     },
     vfs::Vfs,
-    wall::{Placement, WallArtId},
+    wall::{ArtFields, Placement, WallArtId},
 };
-use std::error::Error;
+use std::{
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    error::Error,
+    sync::Arc,
+};
 
 pub const DEMO_RECORD: usize = 52;
 pub const DEMO_ORIGIN: (u8, u8) = (34, 14);
+pub const CONNECTED_ORIGIN: (u8, u8) = (33, 13);
+pub const CONNECTED_RECORDS: [usize; 17] = [
+    30, 31, 32, 33, 34, 36, 37, 38, 39, 52, 60, 69, 77, 87, 93, 99, 107,
+];
 
 pub struct ImportedWall {
     pub sector_source: Source,
@@ -24,7 +32,9 @@ pub struct ImportedWall {
     pub prototype_source: Source,
     pub structure_source: Source,
     pub names_source: Source,
-    pub artwork: art::LoadedFrame,
+    /// Decoded pixels in draw orientation. The ART hotspot remains unchanged.
+    pub artwork: Arc<art::LoadedFrame>,
+    pub orientation: ArtFields,
     pub placement: Placement,
     pub scale: i32,
     pub flags: u32,
@@ -33,7 +43,9 @@ pub struct ImportedWall {
 
 impl ImportedWall {
     pub fn draw(&self, center: (u32, u32)) -> Option<SpriteDraw<'_>> {
-        self.placement.draw(&self.artwork.decoded.frame, center)
+        let frame = &self.artwork.decoded.frame;
+        self.placement
+            .draw_with_pivot(frame, center, self.orientation.pivot(frame))
     }
 }
 
@@ -44,22 +56,194 @@ pub fn load(
     coordinates: Coordinates,
     record_index: usize,
 ) -> Result<ImportedWall, Box<dyn Error>> {
+    Ok(load_many(vfs, map, coordinates, &[record_index])?
+        .pop()
+        .expect("selected one wall"))
+}
+
+/// Load selected base-sector walls in the isometric upright object's draw order.
+/// Selection is independent of viewport clipping. Equal order keys retain
+/// serialized insertion order, even if the caller supplies IDs out of order.
+pub fn load_many(
+    vfs: &mut Vfs,
+    map: &str,
+    coordinates: Coordinates,
+    indices: &[usize],
+) -> Result<Vec<ImportedWall>, Box<dyn Error>> {
+    if indices.len() > 64 {
+        return Err("wall selection exceeds 64 records".into());
+    }
+    let mut requested: BTreeSet<_> = indices.iter().copied().collect();
+    if requested.len() != indices.len() {
+        return Err("duplicate wall record selection".into());
+    }
+    if requested.is_empty() {
+        return Ok(Vec::new());
+    }
     let (source, bytes) = read_base_sector(vfs, map, coordinates)?;
     let list = decode(&bytes)
         .map_err(|error| format!("{} from {source}: {error}", source.virtual_path))?;
-    let object_counts = (list.walls.len(), list.portal_count, list.scenery_count);
-    let record = list
+    let records: Vec<_> = list
         .walls
         .into_iter()
-        .find(|record| record.index == record_index)
-        .ok_or_else(|| {
-            format!(
-                "no wall at object record {record_index} in {}",
-                source.virtual_path
-            )
-        })?;
+        .filter(|record| requested.remove(&record.index))
+        .collect();
+    if !requested.is_empty() {
+        return Err(format!(
+            "selection {requested:?} does not refer to walls in {}",
+            source.virtual_path
+        )
+        .into());
+    }
+    let structure = load_mes(vfs, "art/wall/structure.mes")?;
+    let names = load_mes(vfs, "art/wall/wallname.mes")?;
+    let mut import = WallImport {
+        source,
+        start: list.start,
+        counts: (
+            list.count - list.portal_count - list.scenery_count,
+            list.portal_count,
+            list.scenery_count,
+        ),
+        structure,
+        names,
+        prototypes: BTreeMap::new(),
+        artwork: BTreeMap::new(),
+    };
+    let mut walls = Vec::with_capacity(records.len());
+    for record in records {
+        walls.push(import.resolve(vfs, coordinates, record)?);
+    }
+    walls.sort_by_key(|wall| {
+        (
+            wall.placement.tile.1,
+            wall.placement.tile.0,
+            wall.orientation.order_key(),
+        )
+    });
+    Ok(walls)
+}
 
-    let prefix = format!("proto/{:06} - ", record.prototype.0);
+struct WallImport {
+    source: Source,
+    start: usize,
+    counts: (usize, usize, usize),
+    structure: LoadedMes,
+    names: LoadedMes,
+    prototypes: BTreeMap<SerializedPrototypeId, (Source, WallFields)>,
+    artwork: BTreeMap<(String, u8, bool), Arc<art::LoadedFrame>>,
+}
+
+impl WallImport {
+    fn resolve(
+        &mut self,
+        vfs: &mut Vfs,
+        coordinates: Coordinates,
+        record: WallRecord,
+    ) -> Result<ImportedWall, Box<dyn Error>> {
+        let record_index = record.index;
+        let (prototype_source, parent) = match self.prototypes.entry(record.prototype) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(load_prototype(vfs, record.prototype)?),
+        };
+        let fields = record.fields;
+        let offset_x = fields
+            .offset_x
+            .or(parent.offset_x)
+            .ok_or("missing wall X offset")?;
+        let offset_y = fields
+            .offset_y
+            .or(parent.offset_y)
+            .ok_or("missing wall Y offset")?;
+        let scale = fields.scale.or(parent.scale).ok_or("missing wall scale")?;
+        let flags = fields.flags.or(parent.flags).ok_or("missing wall flags")?;
+        let wall_flags = fields
+            .wall_flags
+            .or(parent.wall_flags)
+            .ok_or("missing wall subtype flags")?;
+        let blit_flags = fields
+            .blit_flags
+            .or(parent.blit_flags)
+            .ok_or("missing wall blit flags")?;
+        let blit_color = fields
+            .blit_color
+            .or(parent.blit_color)
+            .ok_or("missing wall blit color")?;
+        let alpha = fields.alpha.or(parent.alpha).ok_or("missing wall alpha")?;
+        // Only ordinary visible, non-flat, unscaled, opaque walls are drawn.
+        // Cover, shoot-through, see-through and collision bits do not affect this pass.
+        if scale != 100
+            || flags & !0x4430 != 0
+            || wall_flags != 0
+            || blit_flags != 0
+            || blit_color != 0x00ff_ffff
+            || alpha != 255
+        {
+            return Err(format!("unsupported wall appearance at record {record_index}: scale {scale}, object flags {flags:#x}, wall flags {wall_flags:#x}, blit flags {blit_flags:#x}, color {blit_color:#x}, alpha {alpha}").into());
+        }
+        let art_id = WallArtId(record.art_id);
+        let orientation = art_id.fields()?;
+        let path = art_id
+            .resolve(&self.structure.mes, &self.names.mes)
+            .map_err(|error| {
+                format!(
+                    "wall record {record_index}, ART {:#010x}: {error}",
+                    art_id.0
+                )
+            })?;
+        let mirror = orientation.mirror_x();
+        let artwork = match self
+            .artwork
+            .entry((path.clone(), orientation.palette, mirror))
+        {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let mut frame =
+                    art::read_art(vfs, &path)?.decode_with_palette(0, orientation.palette)?;
+                if frame.decoded.frame_count != 1 {
+                    return Err(format!("expected one static wall frame in {path}").into());
+                }
+                let sprite = &mut frame.decoded.frame;
+                if sprite.width > 512 || sprite.height > 512 {
+                    return Err(format!("wall frame exceeds 512 pixels per axis in {path}").into());
+                }
+                if mirror {
+                    for row in sprite.pixels.chunks_exact_mut(sprite.width as usize) {
+                        row.reverse();
+                    }
+                }
+                entry.insert(Arc::new(frame))
+            }
+        };
+        let placement = Placement {
+            tile: record
+                .world_tile(coordinates)
+                .ok_or("invalid sector tile coordinate")?,
+            pixel_offset: (offset_x, offset_y),
+        };
+        Ok(ImportedWall {
+            sector_source: self.source.clone(),
+            object_list_offset: self.start,
+            object_counts: self.counts,
+            record,
+            prototype_source: prototype_source.clone(),
+            structure_source: self.structure.source.clone(),
+            names_source: self.names.source.clone(),
+            artwork: Arc::clone(artwork),
+            orientation,
+            placement,
+            scale,
+            flags,
+            wall_flags,
+        })
+    }
+}
+
+fn load_prototype(
+    vfs: &mut Vfs,
+    id: SerializedPrototypeId,
+) -> Result<(Source, WallFields), Box<dyn Error>> {
+    let prefix = format!("proto/{:06} - ", id.0);
     let candidates: Vec<_> = vfs
         .paths_with_prefix(&prefix)
         .into_iter()
@@ -68,78 +252,13 @@ pub fn load(
     let [path] = candidates.as_slice() else {
         return Err(format!(
             "expected one wall prototype for {}, found {candidates:?}",
-            record.prototype.0
+            id.0
         )
         .into());
     };
     let path = (*path).to_owned();
-    let (prototype_source, bytes) = read_bounded(vfs, &path, MAX_PROTOTYPE_BYTES)?;
-    let parent = decode_wall_prototype(&bytes, record.prototype).map_err(|error| {
-        format!(
-            "{} from {prototype_source}: {error}",
-            prototype_source.virtual_path
-        )
-    })?;
-    let fields = record.fields;
-    let offset_x = fields
-        .offset_x
-        .or(parent.offset_x)
-        .ok_or("missing wall X offset")?;
-    let offset_y = fields
-        .offset_y
-        .or(parent.offset_y)
-        .ok_or("missing wall Y offset")?;
-    let scale = fields.scale.or(parent.scale).ok_or("missing wall scale")?;
-    let flags = fields.flags.or(parent.flags).ok_or("missing wall flags")?;
-    let wall_flags = fields
-        .wall_flags
-        .or(parent.wall_flags)
-        .ok_or("missing wall subtype flags")?;
-    let blit_flags = fields
-        .blit_flags
-        .or(parent.blit_flags)
-        .ok_or("missing wall blit flags")?;
-    let blit_color = fields
-        .blit_color
-        .or(parent.blit_color)
-        .ok_or("missing wall blit color")?;
-    let alpha = fields.alpha.or(parent.alpha).ok_or("missing wall alpha")?;
-    // Only ordinary visible, non-flat, unscaled, opaque walls are drawn.
-    // Cover, shoot-through, see-through and collision bits do not affect this pass.
-    if scale != 100
-        || flags & !0x4430 != 0
-        || wall_flags != 0
-        || blit_flags != 0
-        || blit_color != 0x00ff_ffff
-        || alpha != 255
-    {
-        return Err(format!("unsupported wall appearance at record {record_index}: scale {scale}, object flags {flags:#x}, wall flags {wall_flags:#x}, blit flags {blit_flags:#x}, color {blit_color:#x}, alpha {alpha}").into());
-    }
-    let structures = load_mes(vfs, "art/wall/structure.mes")?;
-    let names = load_mes(vfs, "art/wall/wallname.mes")?;
-    let path = WallArtId(record.art_id).resolve(&structures.mes, &names.mes)?;
-    let artwork = art::load_frame(vfs, &path, 0)?;
-    if artwork.decoded.frame_count != 1 {
-        return Err(format!("expected one static wall frame in {path}").into());
-    }
-    let placement = Placement {
-        tile: record
-            .world_tile(coordinates)
-            .ok_or("invalid sector tile coordinate")?,
-        pixel_offset: (offset_x, offset_y),
-    };
-    Ok(ImportedWall {
-        sector_source: source,
-        object_list_offset: list.start,
-        object_counts,
-        record,
-        prototype_source,
-        structure_source: structures.source,
-        names_source: names.source,
-        artwork,
-        placement,
-        scale,
-        flags,
-        wall_flags,
-    })
+    let (source, bytes) = read_bounded(vfs, &path, MAX_PROTOTYPE_BYTES)?;
+    let fields = decode_wall_prototype(&bytes, id)
+        .map_err(|error| format!("{} from {source}: {error}", source.virtual_path))?;
+    Ok((source, fields))
 }

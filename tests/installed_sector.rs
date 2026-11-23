@@ -432,3 +432,167 @@ fn bates_wall_uses_inherited_appearance_and_matches_the_independent_scene() {
         assert_eq!(actual, &full[start..start + 400]);
     }
 }
+
+#[test]
+#[ignore = "requires installed Arcanum data"]
+fn bates_connected_wall_run_matches_original_order_palette_and_shared_coordinates() {
+    use arcanum_rs::{
+        compositor::sprite_origin,
+        content::{
+            sector::{FACADE_ORIGIN, WIDE_SIDE, load_facade_region},
+            wall,
+        },
+    };
+
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    let mut requested = wall::CONNECTED_RECORDS;
+    requested.reverse();
+    let walls = wall::load_many(&mut vfs, DEMO_MAP, DEMO_SECTOR, &requested).unwrap();
+    assert_eq!(
+        walls
+            .iter()
+            .map(|wall| wall.record.index)
+            .collect::<Vec<_>>(),
+        [
+            30, 31, 32, 33, 34, 36, 37, 38, 39, 52, 60, 69, 77, 87, 93, 99, 107
+        ]
+    );
+    assert!(std::sync::Arc::ptr_eq(&walls[0].artwork, &walls[2].artwork));
+    assert!(!std::sync::Arc::ptr_eq(
+        &walls[0].artwork,
+        &walls[1].artwork
+    ));
+    assert_eq!(
+        walls[0].artwork.source.virtual_path,
+        walls[1].artwork.source.virtual_path
+    );
+    for (wall, tile, art, rotation, slot, pivot, path) in [
+        (
+            &walls[1],
+            (98, 78),
+            0x10300800,
+            1,
+            0,
+            (-1, 152),
+            "art/wall/in4bseu0.art",
+        ),
+        (
+            &walls[2],
+            (98, 78),
+            0x10303811,
+            7,
+            1,
+            (39, 152),
+            "art/wall/in4bseu0.art",
+        ),
+        (
+            &walls[4],
+            (100, 78),
+            0x10397911,
+            7,
+            1,
+            (39, 152),
+            "art/wall/in4p4lu1.art",
+        ),
+        (
+            &walls[12],
+            (98, 82),
+            0x10378800,
+            1,
+            0,
+            (-1, 152),
+            "art/wall/in4d6bu0.art",
+        ),
+    ] {
+        assert_eq!(wall.placement.tile, tile);
+        assert_eq!(wall.record.art_id, art);
+        assert_eq!(
+            (wall.orientation.rotation, wall.orientation.palette),
+            (rotation, slot)
+        );
+        assert_eq!(wall.orientation.pivot(&wall.artwork.decoded.frame), pivot);
+        assert_eq!(wall.artwork.source.virtual_path, path);
+        assert_eq!((wall.scale, wall.placement.pixel_offset), (100, (0, 0)));
+    }
+    let patch = load_facade_region(
+        &mut vfs,
+        DEMO_MAP,
+        DEMO_SECTOR,
+        wall::CONNECTED_ORIGIN,
+        WIDE_SIDE,
+    )
+    .unwrap();
+    let other =
+        load_facade_region(&mut vfs, DEMO_MAP, DEMO_SECTOR, FACADE_ORIGIN, WIDE_SIDE).unwrap();
+    assert_eq!(patch.center, (101, 81));
+    let anchor_shift = |from: SpriteDraw<'_>, to: SpriteDraw<'_>| {
+        assert_eq!(
+            (to.anchor.0 - from.anchor.0, to.anchor.1 - from.anchor.1),
+            (40, -60)
+        );
+    };
+    for wall in &walls {
+        anchor_shift(
+            wall.draw(patch.center).unwrap(),
+            wall.draw(other.center).unwrap(),
+        );
+    }
+    let mut common = 0;
+    for (tile, draw) in patch.tiles().iter().zip(patch.draws()) {
+        if let Some((_, rebased)) = other
+            .tiles()
+            .iter()
+            .zip(other.draws())
+            .find(|(candidate, _)| candidate.world == tile.world)
+        {
+            anchor_shift(draw, rebased);
+            common += 1;
+        }
+    }
+    assert_eq!(common, 56);
+
+    let last = walls.last().unwrap();
+    assert_eq!(last.placement.tile, (98, 86));
+    assert!(
+        patch
+            .tiles()
+            .iter()
+            .all(|tile| tile.world != last.placement.tile)
+    );
+    let last_draw = last.draw(patch.center).unwrap();
+    assert_eq!(
+        sprite_origin(last_draw.frame, last_draw.anchor),
+        (321, -112)
+    );
+    let mut full = vec![[32, 43, 58]; 800 * 600];
+    let draws = |(x, y): (i32, i32)| {
+        patch
+            .draws()
+            .chain(walls.iter().map(|wall| wall.draw(patch.center).unwrap()))
+            .map(move |mut draw| {
+                draw.anchor.0 += x;
+                draw.anchor.1 += y;
+                draw
+            })
+    };
+    // The independently decoded pixel in the actual same-column overlap.
+    blit_ordered(&mut full, (800, 600), 800, draws((400, 300)).take(82)).unwrap();
+    assert_eq!(full[28 * 800 + 401], [92, 88, 90]);
+    blit_ordered(&mut full, (800, 600), 800, draws((400, 300)).skip(82)).unwrap();
+    assert_eq!(full[28 * 800 + 401], [47, 48, 49]);
+    let hash = full
+        .as_flattened()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, &byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+    assert_eq!(hash, 0xc65c_248f_bb57_a534);
+
+    let mut clipped = vec![[32, 43, 58]; 400 * 400];
+    blit_ordered(&mut clipped, (400, 400), 400, draws((200, 200))).unwrap();
+    for (row, actual) in clipped.chunks(400).enumerate() {
+        let start = (row + 100) * 800 + 200;
+        assert_eq!(actual, &full[start..start + 400]);
+    }
+}

@@ -788,3 +788,128 @@ fn sector_facades_select_frames_and_share_the_floor_draw_order() {
         error.contains("art/facade/rug-flip.art") && error.contains("truncated ART frame payload")
     );
 }
+
+#[test]
+fn selected_wall_instances_keep_depth_order_and_reuse_oriented_frames() {
+    use crate::sector::Coordinates;
+
+    let fixture = Fixture::new();
+    let mut sector = vec![0; 4 + 64 * 64 * 4];
+    sector.extend(1u32.to_le_bytes());
+    sector.extend(0xaa0000u32.to_le_bytes());
+    let mut records = Vec::new();
+    for (art_id, x, offset, scale) in [
+        (0x1000_3811u32, 8u32, None, 100i32),
+        (0x1000_0800, 7, Some(-3i32), 100),
+        (0x1000_3811, 7, None, 100),
+        (0x1000_0800, 7, None, 80),
+    ] {
+        let mut header = [0; 70];
+        header[0] = 119;
+        header[4] = 1;
+        header[12] = 20;
+        header[56] = 3 + u8::from(offset.is_some());
+        header[58..62]
+            .copy_from_slice(&(0x803u32 | (u32::from(offset.is_some()) << 2)).to_le_bytes());
+        records.push(sector.len());
+        sector.extend(header);
+        sector.extend(art_id.to_le_bytes());
+        sector.push(1);
+        sector.extend(x.to_le_bytes());
+        sector.extend(10u32.to_le_bytes());
+        if let Some(offset) = offset {
+            sector.extend(offset.to_le_bytes());
+        }
+        sector.extend(scale.to_le_bytes());
+    }
+    sector.extend(4u32.to_le_bytes());
+    let sector_path = fixture.write("maps/synthetic/0.sec", &sector);
+
+    let mut prototype = vec![0; 68];
+    prototype[0] = 119;
+    prototype[4..6].copy_from_slice(&(-1i16).to_le_bytes());
+    prototype[28] = 1;
+    prototype[36] = 20;
+    for slot in (0..36).chain(64..69) {
+        match slot {
+            1 | 5..=7 | 15..=17 | 30 | 31 | 34 | 35 | 67 | 68 => prototype.push(0),
+            _ => {
+                let value = match slot {
+                    2 => 0u32,
+                    3 => 2,
+                    9 => 0x00ff_ffff,
+                    10 => 255,
+                    11 => 100,
+                    _ => 0,
+                };
+                prototype.extend(value.to_le_bytes());
+            }
+        }
+    }
+    fixture.write("proto/000020 - wall.pro", &prototype);
+    fixture.write("art/wall/structure.mes", b"{0}{In40 Gb11 wd1 gb1}");
+    fixture.write("art/wall/wallname.mes", b"{0}{In40}");
+    let mut artwork = vec![0; 132 + 2 * 1024 + 28];
+    for (offset, value) in [
+        (0, 1u32),
+        (8, 8),
+        (12, 1),
+        (16, 1),
+        (32, 1),
+        (2180, 3),
+        (2184, 1),
+        (2188, 3),
+        (2192, 39),
+        (2196, 132),
+    ] {
+        artwork[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    artwork[138] = 10;
+    artwork[1162] = 20;
+    artwork.extend([1, 0, 0]);
+    fixture.write("art/wall/in4bseu0.art", &artwork);
+
+    let mut vfs = Vfs::new(Policy::Ordered);
+    vfs.mount_directory(&fixture.0).unwrap();
+    let coords = Coordinates { x: 0, y: 0 };
+    let many = |vfs: &mut Vfs, indices| super::wall::load_many(vfs, "synthetic", coords, indices);
+    let loaded = many(&mut vfs, &[2, 0, 1]).unwrap();
+    assert_eq!(
+        loaded
+            .iter()
+            .map(|wall| wall.record.index)
+            .collect::<Vec<_>>(),
+        [1, 2, 0]
+    );
+    assert_eq!(loaded[0].placement.pixel_offset, (-3, 2));
+    assert_eq!(loaded[1].placement.pixel_offset, (0, 2));
+    assert_eq!(loaded[0].scale, 100);
+    assert!(std::sync::Arc::ptr_eq(
+        &loaded[1].artwork,
+        &loaded[2].artwork
+    ));
+    assert_eq!(loaded[0].artwork.decoded.frame.pixels[0], [10, 0, 0, 255]);
+    assert_eq!(loaded[1].artwork.decoded.frame.pixels[2], [20, 0, 0, 255]);
+    assert_eq!(loaded[1].artwork.decoded.frame.hotspot, (39, 132));
+    let mut overlap = [[1, 2, 3]; 3];
+    crate::compositor::blit_ordered(
+        &mut overlap,
+        (3, 1),
+        3,
+        loaded[..2].iter().map(|wall| {
+            let mut draw = wall.draw((7, 10)).unwrap();
+            draw.anchor.0 += 2;
+            draw.anchor.1 += 150;
+            draw
+        }),
+    )
+    .unwrap();
+    assert_eq!(overlap, [[10, 0, 0], [1, 2, 3], [20, 0, 0]]);
+    let error = |vfs: &mut Vfs, indices| many(vfs, indices).err().unwrap().to_string();
+    assert!(error(&mut vfs, &[3]).contains("scale 80"));
+    assert!(error(&mut vfs, &[1, 1]).contains("duplicate"));
+    assert!(error(&mut vfs, &[4]).contains("does not refer to walls"));
+    sector[records[3] + 74] = 6;
+    fs::write(sector_path, sector).unwrap();
+    assert!(error(&mut vfs, &[0, 1]).contains("invalid optional field marker"));
+}
