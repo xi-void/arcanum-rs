@@ -71,14 +71,8 @@ fn test_backend() -> Backends {
     }
 }
 
-fn read_frame<'a>(
-    gpu: &mut Compositor,
-    size: (u32, u32),
-    bg: [u8; 3],
-    draws: impl IntoIterator<Item = (WorldDraw<'a>, Blend)>,
-) -> (Vec<[u8; 3]>, Preparation) {
-    let stats = gpu.prepare(size, draws).unwrap();
-    let target = gpu.device.create_texture(&TextureDescriptor {
+fn read_target(gpu: &Compositor, size: (u32, u32)) -> Texture {
+    gpu.device.create_texture(&TextureDescriptor {
         label: Some("GPU verification target"),
         size: extent(size),
         mip_level_count: 1,
@@ -87,7 +81,17 @@ fn read_frame<'a>(
         format: TextureFormat::Rgba8Unorm,
         usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
         view_formats: &[],
-    });
+    })
+}
+
+fn read_frame<'a>(
+    gpu: &mut Compositor,
+    size: (u32, u32),
+    bg: [u8; 3],
+    draws: impl IntoIterator<Item = WorldDraw<'a>>,
+) -> (Vec<[u8; 3]>, Preparation) {
+    let stats = gpu.prepare(size, draws).unwrap();
+    let target = read_target(gpu, size);
     let stride = (size.0 * 4).next_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT);
     let copy = buffer(
         &gpu.device,
@@ -102,7 +106,8 @@ fn read_frame<'a>(
         &mut encoder,
         &target.create_view(&TextureViewDescriptor::default()),
         bg,
-    );
+    )
+    .unwrap();
     encoder.copy_texture_to_buffer(
         target.as_image_copy(),
         TexelCopyBufferInfo {
@@ -185,12 +190,7 @@ fn hardware_matches_cpu_shading_and_saturating_additive_blending() {
         draws().into_iter().map(|d| (d.sprite, d.modulation)),
     )
     .unwrap();
-    let (rendered, cold) = read_frame(
-        &mut gpu,
-        size,
-        bg,
-        draws().into_iter().map(|d| (d, Blend::SourceOver)),
-    );
+    let (rendered, cold) = read_frame(&mut gpu, size, bg, draws());
     assert_eq!(cold.uploaded, 2);
     for (pos, (actual, reference)) in rendered.iter().zip(&cpu).enumerate() {
         let alpha_edge = matches!(pos, 81 | 3519);
@@ -206,16 +206,20 @@ fn hardware_matches_cpu_shading_and_saturating_additive_blending() {
         1,
         vec![[75, 140, 30, 255], [250, 250, 250, 0], [30, 100, 200, 255]],
     );
-    let (additive, hot) = read_frame(
-        &mut gpu,
+    let fire_draws =
+        || std::array::from_fn::<_, 2, _>(|_| draw(&fire, (1, 1), Modulation::Additive));
+    let background = [200, 100, 80];
+    let (additive, hot) = read_frame(&mut gpu, (3, 1), background, fire_draws());
+    let mut cpu = [background; 3];
+    blit_modulated(
+        &mut cpu,
         (3, 1),
-        [200, 100, 80],
-        [
-            (draw(&fire, (1, 1), Modulation::Unlit), Blend::Add),
-            (draw(&fire, (1, 1), Modulation::Unlit), Blend::Add),
-        ],
-    );
+        3,
+        fire_draws().map(|d| (d.sprite, d.modulation)),
+    )
+    .unwrap();
     assert_eq!(hot.uploaded, 1);
+    assert_eq!(additive, cpu);
     assert_eq!(additive, [[255, 255, 140], [200, 100, 80], [255, 255, 255]]);
     let shadow_draws = || {
         [
@@ -231,24 +235,11 @@ fn hardware_matches_cpu_shading_and_saturating_additive_blending() {
         shadow_draws().map(|d| (d.sprite, d.modulation)),
     )
     .unwrap();
-    let (subtractive, warm) = read_frame(
-        &mut gpu,
-        (3, 1),
-        [200, 100, 80],
-        shadow_draws().map(|d| {
-            let blend = Blend::for_modulation(d.modulation);
-            (d, blend)
-        }),
-    );
+    let (subtractive, warm) = read_frame(&mut gpu, (3, 1), [200, 100, 80], shadow_draws());
     assert_eq!(warm.uploaded, 0);
     assert_eq!(subtractive, cpu);
     assert_eq!(subtractive, [[100, 0, 40], [200, 100, 80], [160, 0, 0]]);
-    let (_, hot) = read_frame(
-        &mut gpu,
-        size,
-        bg,
-        draws().into_iter().map(|d| (d, Blend::SourceOver)),
-    );
+    let (_, hot) = read_frame(&mut gpu, size, bg, draws());
     assert_eq!(hot.uploaded, 0);
 }
 
@@ -266,8 +257,9 @@ fn installed_world_matches_cpu_across_maps_resizing_and_eviction() {
     let instance = instance(backend);
     let adapter = hardware_adapter(&instance, backend, None).unwrap();
     let mut gpu = Compositor::new(&adapter, TextureFormat::Rgba8Unorm, false).unwrap();
-    for (map, first, last, center, offset, hour) in [
+    for (label, map, first, last, center, offset, hour) in [
         (
+            "Bates lit interior",
             "bates mansion lev 1",
             (1, 1),
             (1, 1),
@@ -276,6 +268,7 @@ fn installed_world_matches_cpu_across_maps_resizing_and_eviction() {
             Some(12),
         ),
         (
+            "Bates unlit interior",
             "bates mansion lev 1",
             (1, 1),
             (1, 1),
@@ -283,8 +276,17 @@ fn installed_world_matches_cpu_across_maps_resizing_and_eviction() {
             (64, 16),
             None,
         ),
-        ("k'na tha", (5, 14), (6, 14), (341, 928), (-1532, 934), None),
         (
+            "K’na Tha populated seam",
+            "k'na tha",
+            (5, 14),
+            (6, 14),
+            (341, 928),
+            (-1532, 934),
+            None,
+        ),
+        (
+            "K’na Tha brazier court",
             "k'na tha",
             (12, 12),
             (12, 12),
@@ -293,6 +295,7 @@ fn installed_world_matches_cpu_across_maps_resizing_and_eviction() {
             Some(0),
         ),
         (
+            "Forest Passage",
             "arcanum1-024-fixed",
             (1434, 613),
             (1436, 615),
@@ -363,7 +366,8 @@ fn installed_world_matches_cpu_across_maps_resizing_and_eviction() {
         camera.reset(size);
         assert_eq!(
             home,
-            compare_world_frame(&mut gpu, &mut world, &camera, size).0
+            compare_world_frame(&mut gpu, &mut world, &camera, size).0,
+            "{label} home frame changed",
         );
     }
 
@@ -534,17 +538,23 @@ fn compare_world_tick(
         gpu,
         size,
         background,
-        world.visible_assets_at(camera, size, tick).map(|d| {
-            let blend = Blend::for_modulation(d.modulation);
-            (d, blend)
-        }),
+        world.visible_assets_at(camera, size, tick),
     );
-    assert!(
-        cpu == rendered,
-        "{size:?} camera {:?}: {} different pixels",
-        camera.position(),
-        cpu.iter().zip(&rendered).filter(|(a, b)| a != b).count()
-    );
+    if let Some((index, (expected, actual))) = cpu
+        .iter()
+        .zip(&rendered)
+        .enumerate()
+        .find(|(_, (a, b))| a != b)
+    {
+        let stride = size.0 as usize;
+        let count = cpu.iter().zip(&rendered).filter(|(a, b)| a != b).count();
+        panic!(
+            "{size:?} camera {:?} tick {tick:?}: {count} different pixels; first at ({}, {}), CPU {expected:?}, GPU {actual:?}",
+            camera.position(),
+            index % stride,
+            index / stride
+        );
+    }
     (rendered, stats)
 }
 
@@ -560,8 +570,8 @@ fn texture_pressure_protects_visible_hits_and_retires_dead_assets() {
     let lingering = fixture(1, 1, vec![[255, 0, 0, 255]]);
     let dormant = fixture(1, 1, vec![[0, 255, 0, 255]]);
     let arriving = fixture(1, 1, vec![[0, 0, 255, 255]]);
-    fn at(x: i32, asset: &Arc<LoadedFrame>) -> (WorldDraw<'_>, Blend) {
-        (draw(asset, (x, 1), Modulation::Unlit), Blend::SourceOver)
+    fn at(x: i32, asset: &Arc<LoadedFrame>) -> WorldDraw<'_> {
+        draw(asset, (x, 1), Modulation::Unlit)
     }
     read_frame(&mut gpu, size, [0; 3], [at(1, &lingering)]);
     read_frame(&mut gpu, size, [0; 3], [at(2, &dormant)]);
@@ -598,6 +608,53 @@ fn texture_pressure_protects_visible_hits_and_retires_dead_assets() {
         ),
         (1, 0, 1, 4)
     );
+}
+
+#[test]
+#[ignore = "requires a hardware GPU adapter"]
+fn failed_frame_cannot_encode_partial_commands_and_next_frame_recovers() {
+    let backend = test_backend();
+    let instance = instance(backend);
+    let adapter = hardware_adapter(&instance, backend, None).unwrap();
+    let mut gpu = Compositor::new(&adapter, TextureFormat::Rgba8Unorm, false).unwrap();
+    let size = (2, 1);
+    let bg = [0; 3];
+    let cached = fixture(1, 1, vec![[255, 0, 0, 255]]);
+    let pending = fixture(1, 1, vec![[0, 0, 255, 255]]);
+    let target = read_target(&gpu, size).create_view(&TextureViewDescriptor::default());
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&CommandEncoderDescriptor::default());
+    assert!(gpu.encode(&mut encoder, &target, bg).is_err());
+    read_frame(
+        &mut gpu,
+        size,
+        bg,
+        [draw(&cached, (1, 1), Modulation::Unlit)],
+    );
+
+    let invalid = [
+        draw(&pending, (1, 1), Modulation::Unlit),
+        draw(&cached, (2, 1), Modulation::Columns(&[[255; 3]; 2])),
+    ];
+    assert!(
+        gpu.prepare(size, invalid)
+            .unwrap_err()
+            .contains("column modulation")
+    );
+    let error = gpu.encode(&mut encoder, &target, bg).unwrap_err();
+    assert!(error.contains("successful frame preparation"));
+    let (pixels, stats) = read_frame(
+        &mut gpu,
+        size,
+        bg,
+        [
+            draw(&cached, (1, 1), Modulation::Unlit),
+            draw(&pending, (2, 1), Modulation::Unlit),
+        ],
+    );
+    assert_eq!(pixels, [[255, 0, 0], [0, 0, 255]]);
+    assert_eq!((stats.reused, stats.uploaded), (1, 1));
 }
 
 #[test]
@@ -657,7 +714,6 @@ fn installed_bates_shadow_pass_matches_cpu_with_clipping() {
         camera.pan(offset, size);
         world.prepare(&camera, size).unwrap();
         let draws = || world.visible_assets_with_shadows(&camera, size, time, &shadows);
-        let blend = |d: &WorldDraw<'_>| Blend::for_modulation(d.modulation);
         let reference = |shadows| {
             let mut pixels = vec![bg; size.0 as usize * size.1 as usize];
             blit_modulated(
@@ -672,15 +728,7 @@ fn installed_bates_shadow_pass_matches_cpu_with_clipping() {
             pixels
         };
 
-        let (actual, _) = read_frame(
-            &mut gpu,
-            size,
-            bg,
-            draws().map(|d| {
-                let mode = blend(&d);
-                (d, mode)
-            }),
-        );
+        let (actual, _) = read_frame(&mut gpu, size, bg, draws());
         assert_eq!(actual, reference(&shadows));
         assert_ne!(actual, reference(&[]));
         if size == (1280, 720) {
@@ -691,15 +739,7 @@ fn installed_bates_shadow_pass_matches_cpu_with_clipping() {
             }
         }
 
-        let (warm, stats) = read_frame(
-            &mut gpu,
-            size,
-            bg,
-            draws().map(|d| {
-                let mode = blend(&d);
-                (d, mode)
-            }),
-        );
+        let (warm, stats) = read_frame(&mut gpu, size, bg, draws());
         assert_eq!(warm, actual);
         assert_eq!(stats.uploaded, 0);
     }

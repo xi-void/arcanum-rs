@@ -3,7 +3,7 @@
 use crate::RenderBackend;
 use arcanum_rs::{
     content::world::WorldDraw,
-    gpu::{self, Blend, Compositor},
+    gpu::{self, Compositor},
 };
 use std::{sync::Arc, time::Instant};
 use wgpu::{
@@ -120,13 +120,7 @@ impl WindowRenderer {
             Err(error) => return Err(format!("cannot acquire GPU frame: {error}")),
         };
         let acquire = start.elapsed();
-        let stats = self.compositor.prepare(
-            size,
-            draws.into_iter().map(|draw| {
-                let blend = Blend::for_modulation(draw.modulation);
-                (draw, blend)
-            }),
-        )?;
+        let stats = self.compositor.prepare(size, draws)?;
         let begin = Instant::now();
         let target = frame.texture.create_view(&TextureViewDescriptor::default());
         let mut encoder = self
@@ -134,7 +128,7 @@ impl WindowRenderer {
             .device
             .create_command_encoder(&CommandEncoderDescriptor::default());
         self.compositor
-            .encode(&mut encoder, &target, super::BACKGROUND);
+            .encode(&mut encoder, &target, super::BACKGROUND)?;
         let commands = encoder.finish();
         self.compositor.check_health()?;
         let encode = begin.elapsed();

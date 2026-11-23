@@ -177,6 +177,56 @@ demonstration choices. The runtime receives explicit grants and has no
 aptitude formula, script interpreter, slot rules or serialized state.
 [Sword of Defense evidence](CONTENT_FORMATS.md#sword-of-defense-wield-scripts)
 
+#### Original world rendering
+
+- [DAT](../src/dat.rs) validates archive records, indexes normalized paths,
+  and bounds decompression. [VFS](../src/vfs.rs) owns the mounted sources and
+  precedence. Prototype discovery enumerates candidate names through each
+  DAT's lexical index, then resolves each name through the ordinary VFS
+  lookup. [ART](../src/art.rs) validates and decodes bounded RGBA frames
+  with signed placement metadata.
+- [World preparation](../src/content/world.rs) reads original sector
+  surfaces, embedded facades, supported objects and lights. It resolves ART
+  and constructs globally positioned rasters. Floor parsing can still
+  produce a reported floor-only result when object import is unsupported.
+  Missing sectors remain explicit and are distinct from original black ART.
+- [Prefetch](../src/content/world/prefetch.rs) queues demand work ahead of
+  speculative work. Its worker owns its preparation state and publishes one
+  complete sector per completion. The event thread protects required
+  sectors in the bounded 12-entry cache and retains the last complete view
+  while a required sector is pending. A ready plan is keyed by camera
+  position, viewport and direction. Completions invalidate that plan.
+- Scene rasters and animation banks retain decoded frames through `Arc`.
+  Eviction from either the sector or decoded-frame cache cannot invalidate a
+  still-referenced raster. Prepared draw commands borrow those rasters.
+  [GPU textures](../src/gpu.rs) track frame identity through `Weak` and have
+  a separate residency budget. The GPU retires stale entries between frame
+  preparations and can evict invisible textures under pressure.
+- Both backends consume ordered `WorldDraw` values with shared geometry,
+  pivots, clipping, frame selection and pixel modulation. Surfaces and flat
+  objects are followed by verified subtractive mobile shadow masks and
+  upright objects, including walls, portals, scenery and supported mobiles.
+  The CPU [compositor](../src/compositor.rs) is the pixel reference. The GPU
+  derives blending from the same draw intent and only encodes a successfully
+  prepared frame. Window acquisition, submission and presentation stay in
+  the corresponding [viewer](../src/viewer.rs) backend.
+- The viewer uses one monotonic scene clock, or an explicit fixed timestamp
+  for captures. Visible looping flames and finite rabbit fidgets contribute
+  independent next-frame deadlines. Input and visible sector completions
+  may request redraws. Dynamic-light changes update affected light and shadow
+  state from prepared masks while leaving clock progress and ART frames
+  intact. An unchanged view with no visible animation has no periodic
+  presentation.
+- Original content support is bounded to the verified floor/facade forms,
+  static object and portal appearances, mobile poses and rabbit fidget,
+  original static and object-owned light masks, the supported dynamic-light
+  operations and the verified mobile shadow case. Gameplay state, broad
+  critter animation, unknown ART and object variants, and generalized shadow
+  casting remain outside the rendering contract.
+
+See the [Milestone 50 audit](ARCHITECTURE_AUDIT.md#milestone-50-stabilization-audit)
+and [matched regression workload](PERFORMANCE_BASELINE.md#milestone-50-consolidation).
+
 ### 5. Behavioral Compatibility
 
 Preserve original Arcanum gameplay behavior where appropriate,
