@@ -230,6 +230,8 @@ cargo run -- art sector-audit "$game"
 
 The synthetic demos require only a display session. `art overlap` shows
 bread and alignment frames with explicit draw order and independent anchors.
+In `art world`, use the arrow keys to pan, Shift to pan faster, Home to restore
+the initial view, and Escape to close the viewer. [World camera](docs/WORLD_CAMERA.md)
 [Native sprite viewer](docs/SPRITE_VIEWER.md) · [Fixed isometric floor](docs/ISOMETRIC_FLOOR.md) · [Original map sector floor](docs/SECTOR_FLOOR.md) · [Tile-ID coverage](docs/TILE_ID_COVERAGE.md) · [Baked facade import](docs/FACADE_IMPORT.md) · [Conventional wall import](docs/WALL_OBJECT_IMPORT.md) · [Connected walls](docs/CONNECTED_WALLS.md) · [Bounded room scenery](docs/BOUNDED_ROOM_SCENERY.md) · [Static world portals](docs/STATIC_PORTALS.md)
 
 ## Prototype and schematic inspection

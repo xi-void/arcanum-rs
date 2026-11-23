@@ -300,7 +300,7 @@ pub const OVERVIEW_SIZE: (u32, u32) = (1280, 720);
 /// Import a contiguous 25 × 25 surface and select visible static rasters from
 /// the same original sector. Raster intersection retains overhanging objects.
 pub fn load_room_overview(vfs: &mut Vfs) -> Result<RoomOverview, Box<dyn Error>> {
-    load_overview(vfs, WorldRegion::BATES_MANSION, false)
+    load_overview(vfs, WorldRegion::BATES_MANSION, false, true)
 }
 
 #[derive(Clone, Copy)]
@@ -326,13 +326,22 @@ impl WorldRegion<'static> {
 
 /// Import supported surfaces and static objects into one draw pass.
 pub fn load_world(vfs: &mut Vfs, region: WorldRegion<'_>) -> Result<RoomOverview, Box<dyn Error>> {
-    load_overview(vfs, region, true)
+    load_overview(vfs, region, true, true)
+}
+
+/// Load and retain the region and supported sector objects for subsequent panning.
+pub fn load_navigation_world(
+    vfs: &mut Vfs,
+    region: WorldRegion<'_>,
+) -> Result<RoomOverview, Box<dyn Error>> {
+    load_overview(vfs, region, true, false)
 }
 
 fn load_overview(
     vfs: &mut Vfs,
     region: WorldRegion<'_>,
     include_portals: bool,
+    initial_view_only: bool,
 ) -> Result<RoomOverview, Box<dyn Error>> {
     let WorldRegion {
         map,
@@ -386,7 +395,11 @@ fn load_overview(
         let near_view = project_world_tile(tile, center).is_some_and(|(x, y)| {
             x.abs_diff(0) < width / 2 + 128 && y.abs_diff(0) < height / 2 + 128
         });
-        if on_floor || near_view || (include_portals && category == StaticCategory::Portal) {
+        if !initial_view_only
+            || on_floor
+            || near_view
+            || (include_portals && category == StaticCategory::Portal)
+        {
             issues.push(SceneIssue {
                 record,
                 category,
@@ -408,9 +421,10 @@ fn load_overview(
         let (index, category, art_id) = (record.index, record.category, record.art_id);
         let result = match category {
             StaticCategory::Wall => wall_import.resolve(vfs, coordinates, record).map(|wall| {
-                if wall
-                    .draw(center)
-                    .is_some_and(|draw| intersects_viewport(draw, viewport))
+                if !initial_view_only
+                    || wall
+                        .draw(center)
+                        .is_some_and(|draw| intersects_viewport(draw, viewport))
                 {
                     walls.push(wall);
                 }
@@ -419,9 +433,10 @@ fn load_overview(
                 scenery_import
                     .resolve(vfs, coordinates, record)
                     .map(|prop| {
-                        if prop
-                            .draw(center)
-                            .is_some_and(|draw| intersects_viewport(draw, viewport))
+                        if !initial_view_only
+                            || prop
+                                .draw(center)
+                                .is_some_and(|draw| intersects_viewport(draw, viewport))
                         {
                             scenery.push(prop);
                         }
@@ -431,9 +446,10 @@ fn load_overview(
                 Some(importer) => matched_opening(openings.get(&tile).copied().flatten(), art_id)
                     .and_then(|wall| importer.resolve(vfs, coordinates, record, wall))
                     .map(|leaf| {
-                        if leaf
-                            .draw(center)
-                            .is_some_and(|draw| intersects_viewport(draw, viewport))
+                        if !initial_view_only
+                            || leaf
+                                .draw(center)
+                                .is_some_and(|draw| intersects_viewport(draw, viewport))
                         {
                             portals.push(leaf);
                         } else {
