@@ -280,6 +280,21 @@ impl<R: Read + Seek> Archive<R> {
         &self.entries
     }
 
+    /// Enumerate matching normalized names using the existing lexical index.
+    /// Disk order remains available through `entries`.
+    pub(crate) fn entries_with_prefix<'a>(
+        &'a self,
+        prefix: &str,
+    ) -> impl Iterator<Item = &'a Entry> {
+        let start = self
+            .by_path
+            .partition_point(|&index| self.entries[index].path.as_str() < prefix);
+        self.by_path[start..]
+            .iter()
+            .map(|&index| &self.entries[index])
+            .take_while(move |entry| entry.path.starts_with(prefix))
+    }
+
     pub fn entry(&self, path: &str) -> Result<&Entry, Error> {
         self.find(path).map(|index| &self.entries[index])
     }

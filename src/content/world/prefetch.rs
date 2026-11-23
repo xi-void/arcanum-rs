@@ -228,6 +228,13 @@ pub struct ViewPreparation {
     pub scheduling: Duration,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ViewPlan {
+    position: (i32, i32),
+    viewport: (u32, u32),
+    direction: (i32, i32),
+}
+
 /// Owns only prepared, immutable raster resources on the presentation thread.
 pub struct InteractiveWorld {
     region: SectorRegion,
@@ -237,6 +244,7 @@ pub struct InteractiveWorld {
     resources: (u64, FrameCacheStats),
     required: Vec<u64>,
     speculative: Vec<u64>,
+    ready_plan: Option<ViewPlan>,
     prefetch_hits: u64,
     prefetch_misses: u64,
     required_misses: u64,
@@ -274,6 +282,7 @@ impl InteractiveWorld {
             resources,
             required: Vec::new(),
             speculative: Vec::new(),
+            ready_plan: None,
             prefetch_hits: 0,
             prefetch_misses: 0,
             required_misses: 0,
@@ -289,6 +298,8 @@ impl InteractiveWorld {
         let Some(done) = self.worker.take() else {
             return false;
         };
+        // A completion can change available entries and speculative eviction.
+        self.ready_plan = None;
         let id = done.request.id;
         let required = self.required.contains(&id);
         let wanted = required || self.speculative.contains(&id);
@@ -357,6 +368,18 @@ impl InteractiveWorld {
             return Err("sector preparation worker stopped".into());
         }
         let position = camera.position();
+        let plan = ViewPlan {
+            position,
+            viewport,
+            direction,
+        };
+        if self.ready_plan == Some(plan) {
+            return Ok(ViewPreparation {
+                ready: true,
+                scheduling: begin.elapsed(),
+                ..ViewPreparation::default()
+            });
+        }
         let needed = self.region.needed(self.reference, position, viewport)?;
         let next = needed.as_slice();
         for id in next.iter().filter(|id| !self.required.contains(id)) {
@@ -437,6 +460,7 @@ impl InteractiveWorld {
                 .map(|&id| (id, Priority::Prefetch)),
         );
         self.worker.plan(&jobs, self.trace);
+        self.ready_plan = ready.then_some(plan);
         Ok(ViewPreparation {
             ready,
             ordering,
@@ -652,6 +676,50 @@ mod tests {
         assert!(world.prepare(&camera, VIEWPORT, (0, 0)).unwrap().ready);
         assert_eq!(world.stats().cache.cached_sectors, 1);
         assert!(world.cache.entries[&0].0.report.diagnostics[0].contains("maps/missing/0.sec"));
+    }
+
+    #[test]
+    fn ready_plan_is_reused_until_view_changes_or_worker_completes() {
+        let (wake, done) = mpsc::channel();
+        let region = strip();
+        let reference = (34, 32);
+        let camera = region.camera(reference).unwrap();
+        let mut world = WorldStream::new(
+            Vfs::new(crate::vfs::Policy::Ordered),
+            "missing".into(),
+            region,
+            reference,
+        )
+        .unwrap()
+        .into_interactive(
+            move || {
+                let _ = wake.send(());
+            },
+            false,
+        )
+        .unwrap();
+
+        assert!(!world.prepare(&camera, VIEWPORT, (0, 0)).unwrap().ready);
+        assert!(world.ready_plan.is_none());
+        done.recv_timeout(TIMEOUT).unwrap();
+        assert!(world.receive());
+        assert!(world.prepare(&camera, VIEWPORT, (0, 0)).unwrap().ready);
+        assert!(world.prepare(&camera, VIEWPORT, (0, 0)).unwrap().ready);
+        assert_eq!(world.stats().cache.sector_reads, 1);
+        assert!(world.speculative.is_empty());
+
+        let direction = (-64, 32);
+        assert!(world.prepare(&camera, VIEWPORT, direction).unwrap().ready);
+        assert_eq!(world.speculative, [1]);
+        assert_eq!(world.ready_plan.unwrap().direction, direction);
+        done.recv_timeout(TIMEOUT).unwrap();
+        assert!(!world.receive()); // Speculative completion does not redraw.
+        assert!(world.ready_plan.is_none());
+        let resized = (161, 101);
+        assert!(world.prepare(&camera, resized, direction).unwrap().ready);
+        assert_eq!(world.ready_plan.unwrap().viewport, resized);
+        assert_eq!(world.stats().cache.sector_reads, 2);
+        assert_eq!(world.cache.active, [0]);
     }
 
     #[test]

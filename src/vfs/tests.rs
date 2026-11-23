@@ -337,3 +337,34 @@ fn discovers_stock_ce_order_without_creating_or_deleting_directories() {
     assert!(vfs.resolve("TIGCache/a").unwrap().winner().is_none());
     assert!(f.0.join("DATA/TIGCache/a").is_file());
 }
+
+#[test]
+fn prefix_inventory_deduplicates_across_mounts_before_resolving_winners() {
+    let fixture = Fixture::new();
+    let base = fixture.archive(
+        "base.dat",
+        &[
+            ("proto/017089 - npc.pro", PLAIN, b"other"),
+            ("proto/017088 - scenery.pro", PLAIN, b"scenery"),
+            ("Proto\\017088 - NPC.PRO", PLAIN, b"base"),
+        ],
+    );
+    fixture.write("loose/proto/017088 - npc.pro", b"override");
+    let mut vfs = Vfs::new(Policy::Ordered);
+    vfs.mount_archive(base).unwrap();
+    let loose = fixture.0.join("loose");
+    let winner = vfs.mount_directory(loose).unwrap();
+    let prefix = "proto/017088 - ";
+    let paths = vfs
+        .paths_with_prefix(prefix)
+        .into_iter()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths,
+        ["proto/017088 - npc.pro", "proto/017088 - scenery.pro"]
+    );
+    assert_eq!(
+        vfs.resolve(paths[0]).unwrap().winner().unwrap().mount.id,
+        winner
+    );
+}

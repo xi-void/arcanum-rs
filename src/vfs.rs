@@ -269,10 +269,8 @@ impl Vfs {
             match &mount.contents {
                 Contents::Archive { archive, .. } => paths.extend(
                     archive
-                        .entries()
-                        .iter()
-                        .map(|entry| entry.path.as_str())
-                        .filter(|path| path.starts_with(prefix)),
+                        .entries_with_prefix(prefix)
+                        .map(|entry| entry.path.as_str()),
                 ),
                 Contents::Directory(directory) => paths.extend(
                     directory

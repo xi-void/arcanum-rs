@@ -140,3 +140,40 @@ All generated fixtures were temporary. The probes wrote no game, CE or external 
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `cargo build`, and `git diff --check` passed. The normal and isolated portable suites each passed 69 tests, with nine installed-data tests skipped by default.
 - With `ARCANUM_GAME_DIR` and `ARCANUM_MODS_DIR` set, `cargo test -- --ignored` passed all nine installed tests, including `vfs-smoke`. It verified both the `Arcanum.PATCH6` baseline and the mod's ID 40000 override. The CLI full audit also gave 119/119 complete, five variant groups and zero diagnostics.
 - Reviewed the [architecture](ARCHITECTURE.md), [content evidence](CONTENT_FORMATS.md), [README](../README.md), [Cargo manifest](../Cargo.toml) and lockfile, DAT, VFS, path normalization, MES and encoding modules, prototype and content modules, manifest and plan code, CLI, and portable and installed regression tests. CE review was limited to documented reference paths and the relevant resource, object, stat, item, script, effect, and schematic behavior. Historical TIG differential results were reviewed from the repository record.
+
+## Milestone 50 stabilization audit
+
+| Priority | Evidence from the existing paths | Selected change |
+| --- | --- | --- |
+| High, GPU correctness | `WorldDraw` carries modulation, while GPU preparation accepts an independent blend. The hardware additive fixture passes `Unlit` with an additive blend, a combination the CPU path cannot express. A failed GPU preparation can also leave commands referring to a texture it never uploaded. | Derive GPU blend from shared draw intent. Guard GPU encode until preparation succeeds and exercise rejection and recovery. |
+| High, cold preparation | VFS archive prefix queries scan every DAT entry for each prototype prefix. DAT already retains a normalized lexical index. Exact resolution and precedence happen separately. | Use the existing lexical index for prefix matching. Keep on-disk entry order, candidate semantics and VFS precedence. |
+| Medium, event-thread overhead | `InteractiveWorld::prepare` repeats sector prediction, job allocation and mailbox planning on an unchanged, ready view. A flame, fidget or light redraw can hit this path even though sector requirements are stable. | Reuse a completed plan for the same camera position, size and direction. Replan on a different request or worker completion. |
+
+The audit also traced the surrounding ownership paths. DAT streams
+bounded decompression, VFS selects a winning source and ART decoding
+checks frame spans before allocating pixels. Sector parsing keeps floor
+framing independent of static-object interpretation, which permits a
+reported floor-only result for unsupported object records. The worker
+publishes one complete sector at a time. Active sectors are protected
+from eviction and scene rasters hold decoded frames through `Arc`.
+The GPU holds its own textures and tracks decoded-frame identity
+through `Weak`. Existing texture pressure tests exercise eviction of
+an invisible texture and retirement after the corresponding CPU owner
+drops.
+
+The ordered world stream already gives both renderers the same
+projection, pivots, clipping and lighting. Floor and flat-object draws
+precede the shadow pass, followed by upright objects. Lighting samples
+and frame selection live in world code. Flame loops and the finite
+rabbit fidget read one viewer epoch and return visible deadlines.
+The fidget input schedules its first visible transition. Light changes
+refresh affected shading and shadow selections from prepared assets.
+This ownership and clock split requires coverage, with no separate
+scheduler or new scene representation.
+
+Deferred issues include unsupported sector and mobile formats, a
+possible provenance/read lookup consolidation, pinned decoded assets
+counted against the shared cache budget, and device/surface recovery
+beyond the current validated path. The CLI reference commands and older
+static viewers have distinct input lifetimes. Merging those paths
+would expand the change surface without addressing the selected defects.

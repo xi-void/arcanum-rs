@@ -346,3 +346,135 @@ The sandbox had no CE, TIG, original assets or external mod directories.
 All 12 optional installed-data tests passed, including `vfs-smoke`.
 Reference validation and supported-content readiness each passed 119/119
 learned and found schematics.
+
+## Milestone 50 consolidation
+
+### Matched workloads
+
+Measurements use two offline optimized `--features gpu` binaries from
+immediately before and after the three stabilization changes. The same
+ThinkPad X270 ran both builds with its i5-6300U, Intel HD Graphics 520,
+16 GiB RAM, kernel 7.2.15-1-omarchy, Rust 1.100.0 and Mesa 26.2.5 over
+native Wayland. The Vulkan device was the Intel integrated GPU. The frame
+timings below are independent of the offscreen pixel-readback tests.
+
+- **Cold preparation.** Run `art world-inspect` in a fresh process per
+  sample, seven times per scene with the OS file cache left enabled.
+  Bates Mansion uses sector (1,1), camera (91,79) and hour 12.
+  K’na Tha's brazier court uses sector (12,12), camera (798,786) and
+  hour 0. Both use 1280×720. The reported load timer covers sector
+  preparation. Object import and ART timings can overlap within that
+  timer and should not be added to it.
+- **Streaming.** Replay five runs along the original K’na Tha sector
+  strip from (5,14) toward (18,14) in 2,560-by-1,280-pixel isometric
+  steps and return to the first view. Use a 1280×720 viewport, wait on
+  worker completion and use zero direction for a reproducible
+  demand-only cache test. Run 250,000 unchanged ready-view calls per
+  replay to measure scheduling in isolation.
+- **Interactive rendering.** Run `art world` with the same scene
+  positions, sizes and lighting and collect `--trace` output. For Bates,
+  use `--animation-ms 90 --light-probe 90 79`, warm both light positions,
+  then collect 60 alternating one-tile light moves. For the court, use
+  live animation, warm the visible flame frames and sample 4.5 seconds
+  of flame-driven redraws. Use the same input spacing for both backends
+  and both builds. Vulkan completion is the traced wait through GPU
+  submission completion. It includes host work and differs from the
+  timestamped sprite pass and from the host return from `present`.
+  Physical display scanout is outside these timers.
+
+### Regression scenes
+
+| Case | Primary check |
+| --- | --- |
+| Bates Mansion (91,79), lit and unlit | 268-wall audit, portals, furniture, dynamic-light move and exclusion, fixed animation time |
+| Bates kitchen mobile (80,81) | Original shadow mask, overlap and clipping, CPU/GPU equality during light updates |
+| K’na Tha wilderness and populated seam around (383,928) | Real adjacent sectors, global ordering, resize, eviction and repeatability |
+| K’na Tha Forest Passage and brazier court around (798,786) | Original surfaces, static and object lighting, saturating flame blend, live deadline |
+| K’na Tha rabbit at (420,814) | Finite fidget, direction and pivots, fixed-time comparison |
+| K’na Tha boundary at (575,928) | Explicit missing sector and stable viewer background |
+
+Run the headless regression suites with `cargo test --offline --locked`
+and `cargo test --offline --locked --all-features`. Use
+`ARCANUM_GAME_DIR` and `ARCANUM_MODS_DIR` with `cargo test --offline
+--locked -- --ignored` for installed-data checks. On a hardware Wayland
+host, run `cargo test --offline --locked --release --features gpu --lib
+gpu::tests -- --ignored --test-threads=1` with `ARCANUM_GAME_DIR` and
+`ARCANUM_GPU_BACKEND` set to `vulkan` or `gles`. Parity tests report the
+fixture, animation time, coordinate and colors of the first wrong pixel.
+Native captures and per-stage timing traces belong under
+`target/visual-checks/` and stay local.
+
+### Consolidation results
+
+| Fresh-process CPU stage | Before median | After median |
+| --- | ---: | ---: |
+| Bates sector preparation | 72.46 ms | 47.51 ms |
+| Bates object import | 41.36 ms | 20.52 ms |
+| Court sector preparation | 55.16 ms | 37.26 ms |
+| Court object import | 36.40 ms | 16.03 ms |
+
+Bates ART read/decode medians were 27.16/14.50 ms before and
+25.84/13.71 ms after. Court ART read/decode medians were
+19.03/6.95 ms before and 20.66/7.20 ms after. The largest
+improvement was in object import, where indexed DAT prefix matches
+replace repeated archive scans. The consolidated build's cold
+sector-preparation maxima were 48.65 ms for Bates and 38.41 ms for
+the court in the paired repeat.
+
+| Streaming or scheduling stage | Before median | After median |
+| --- | ---: | ---: |
+| Unchanged ready-view scheduling, isolated | 1.893 µs | 0.065 µs |
+| Outbound sector traversal, including worker readiness | 114.77 ms | 48.01 ms |
+| Back to initial view after eviction | 19.04 ms | 7.11 ms |
+| Bates Vulkan redraw sector scheduling | 6.56 µs | 0.14 µs |
+| Court Vulkan redraw sector scheduling | 6.92 µs | 0.31 µs |
+
+The traversal read or attempted 15 sectors, evicted three entries from
+the 12-slot cache and decoded zero ART frames on the return in both
+builds. Waiting for worker readiness in the replay measures elapsed wall
+time. The Wayland event thread continued reporting zero synchronous
+loading wait. A required sector can still delay publication of a new
+view while the last complete frame remains visible.
+
+| Warm 1280×720 workload | Before median / p95 / max | After median / p95 / max |
+| --- | ---: | ---: |
+| Bates CPU compose | 13.52 / 13.89 / 18.10 ms | 13.94 / 14.82 / 21.10 ms |
+| Bates CPU compose, pack and submit | 15.16 / 15.54 / 19.82 ms | 15.59 / 16.46 / 22.80 ms |
+| Bates Vulkan completion | 3.52 / 4.21 / 4.77 ms | 3.47 / 4.28 / 5.09 ms |
+| Bates Vulkan timestamped sprite pass | 1.73 / 2.34 / 2.92 ms | 1.74 / 2.04 / 2.52 ms |
+| Court CPU compose | 9.76 / 10.93 / 22.23 ms | 9.91 / 11.27 / 11.36 ms |
+| Court CPU compose, pack and submit | 11.43 / 12.61 / 24.04 ms | 11.59 / 12.94 / 13.12 ms |
+| Court Vulkan completion | 3.04 / 3.76 / 4.53 ms | 3.00 / 3.49 / 3.76 ms |
+| Court Vulkan timestamped sprite pass | 1.18 / 1.50 / 1.90 ms | 1.17 / 1.55 / 1.60 ms |
+
+Vulkan host submit and presentation-call medians were 0.127/0.165 ms
+before and 0.127/0.162 ms after in Bates and 0.139/0.166 ms before
+and 0.133/0.156 ms after in the court. Vulkan shadow selection during
+the Bates probe moves took 4.54 → 4.76 µs median. The whole light
+update took 0.164 → 0.163 ms median. There were no warm texture
+uploads in either sampled GPU workload and no sector reads or ART
+decodes during the 60 light moves. The court presented 50 traced frames
+in each 4.5-second sample. A separate stationary Bates capture submitted
+zero additional Wayland buffers across the two three-second idle
+intervals per backend.
+
+After resize and Home the i915 resident graphics counter was unchanged
+at 64,676 KiB for Bates and 64,608 KiB for the court. Actual texture
+payloads are smaller than this driver counter. At the matched initial
+1,536×864 compositor-selected surface, both builds uploaded 157 Bates
+textures (3,223,064 payload bytes), with 11.18 → 11.28 ms observed
+upload time in the paired run. The paired warm measurements use only
+1280×720 frames. CPU composition medians were slightly slower in the
+repeat, with mixed tail results across runs. The selected changes do
+not alter the CPU compositing inner loop. The measurements support
+faster preparation and less scheduler work. They do not establish a
+composition speedup or a sustained frame-rate claim.
+
+Real Wayland PNGs matched exactly between the before and after builds
+for fixed-time Bates, and between CPU and Vulkan for Bates, the brazier
+court, the rabbit, the populated seam and the missing-sector boundary.
+Pan, resize and Home restored the fixed-time images. OpenGL matched the
+CPU captures for the seam and rabbit, including the resized view.
+Synthetic fractional-alpha edges retain the existing one-byte tolerance
+for two known fixture pixels. Original scene comparisons require exact
+agreement.

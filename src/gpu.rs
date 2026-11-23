@@ -18,14 +18,14 @@ const CACHE_BYTES: usize = 96 * 1024 * 1024;
 const CACHE_TEXTURES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Blend {
+enum Blend {
     SourceOver,
     Add,
     Subtract,
 }
 
 impl Blend {
-    pub fn for_modulation(modulation: Modulation<'_>) -> Self {
+    fn for_modulation(modulation: Modulation<'_>) -> Self {
         match modulation {
             Modulation::Additive => Self::Add,
             Modulation::Shadow(_) => Self::Subtract,
@@ -86,6 +86,7 @@ pub struct Compositor {
     texture_bytes: usize,
     texture_budget: (usize, usize), // bytes and distinct textures
     frame: u64,
+    prepared: bool,
     timestamp_query: Option<Timestamps>,
     failure: Arc<Mutex<Option<String>>>,
 }
@@ -299,6 +300,7 @@ impl Compositor {
             texture_bytes: 0,
             texture_budget: (CACHE_BYTES, CACHE_TEXTURES),
             frame: 0,
+            prepared: false,
             timestamp_query,
             failure,
         };
@@ -316,8 +318,9 @@ impl Compositor {
     pub fn prepare<'a>(
         &mut self,
         size: (u32, u32),
-        input: impl IntoIterator<Item = (WorldDraw<'a>, Blend)>,
+        input: impl IntoIterator<Item = WorldDraw<'a>>,
     ) -> Result<Preparation, String> {
+        self.prepared = false;
         self.check_health()?;
         let start = Instant::now();
         self.frame += 1;
@@ -337,7 +340,8 @@ impl Compositor {
         let mut missing = BTreeMap::new();
         let mut visible_bytes = 0;
         let limit = self.device.limits().max_texture_dimension_2d;
-        for (draw, blend) in input {
+        for draw in input {
+            let blend = Blend::for_modulation(draw.modulation);
             if self.draws.len() == MAX_DRAWS {
                 return Err("GPU frame exceeds the draw limit".into());
             }
@@ -399,6 +403,7 @@ impl Compositor {
         stats.draws = self.draws.len();
         stats.draw_calls = self.commands.len();
         self.check_health()?;
+        self.prepared = true;
         Ok(stats)
     }
 
@@ -472,7 +477,15 @@ impl Compositor {
         self.texture_bytes += bytes;
     }
 
-    pub fn encode(&self, encoder: &mut CommandEncoder, target: &TextureView, background: [u8; 3]) {
+    pub fn encode(
+        &self,
+        encoder: &mut CommandEncoder,
+        target: &TextureView,
+        background: [u8; 3],
+    ) -> Result<(), String> {
+        if !self.prepared {
+            return Err("GPU encode requires a successful frame preparation".into());
+        }
         let [r, g, b] = background.map(|channel| f64::from(channel) / 255.);
         {
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
@@ -515,6 +528,7 @@ impl Compositor {
             encoder.resolve_query_set(&timing.query, 0..2, &timing.resolve, 0);
             encoder.copy_buffer_to_buffer(&timing.resolve, 0, &timing.read, 0, 16);
         }
+        Ok(())
     }
 
     /// Explicitly waits for completion. Only used by traced benchmark frames.

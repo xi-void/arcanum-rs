@@ -292,3 +292,34 @@ fn checks_zlib_size_stream_end_and_checksum() {
     let mut archive = read(fixture(b"", &empty_zlib, &records, Format::Dat)).unwrap();
     assert_eq!(archive.extract("empty", io::sink()).unwrap(), 0);
 }
+
+#[test]
+fn prefix_queries_use_lexical_order_without_reordering_archive_records() {
+    let archive = read(fixture(
+        b"",
+        b"data",
+        &[
+            plain(b"proto/017089 - npc.pro"),
+            plain(b"Artwork"),
+            plain(br"Proto\017088 - Scenery.PRO"),
+            plain(b"proto/0170880.pro"),
+            plain(b"proto/017088 - npc.pro"),
+        ],
+        Format::Dat,
+    ))
+    .unwrap();
+    let prefix = |prefix: &str| {
+        archive
+            .entries_with_prefix(prefix)
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(archive.entries()[0].path, "proto/017089 - npc.pro");
+    assert_eq!(
+        prefix("proto/017088 - "),
+        ["proto/017088 - npc.pro", "proto/017088 - scenery.pro"]
+    );
+    assert!(prefix("proto/017087").is_empty());
+    assert!(prefix("zz").is_empty());
+    assert_eq!(prefix("").len(), archive.entries().len());
+}
