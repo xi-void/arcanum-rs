@@ -234,7 +234,7 @@ for Vulkan, GLES and CPU comparison commands.
 
 The streamed viewer plays original additive fire scenery. Pass
 `--animation-ms 90` with `--sectors` to freeze a reproducible animation tick.
-[Original animated fire](docs/ANIMATED_FIRE.md)
+[Original animated fire](docs/ANIMATED_FIRE.md) · [Dynamic-light probes](docs/DYNAMIC_LIGHTING.md)
 
 The synthetic demos require only a display session. `art overlap` shows
 bread and alignment frames with explicit draw order and independent anchors.

@@ -465,6 +465,21 @@ impl InteractiveWorld {
         self.cache.visible(camera, viewport)
     }
 
+    pub fn dynamic_light(&self, slot: usize) -> Option<DynamicLightState> {
+        self.cache.dynamic.get(slot).map(|light| light.state)
+    }
+
+    pub fn set_dynamic_light(
+        &mut self,
+        slot: usize,
+        state: DynamicLightState,
+    ) -> Result<LightUpdate, &'static str> {
+        if self.region.camera(state.tile).is_none() {
+            return Err("light position is outside the world region");
+        }
+        self.cache.set_dynamic(slot, state)
+    }
+
     pub fn animation_delay(
         &self,
         camera: &Camera,

@@ -396,6 +396,86 @@ fn installed_world_matches_cpu_across_maps_resizing_and_eviction() {
     assert_ne!(edge[360 * 1280 + 1100], [32, 43, 58]);
 }
 
+#[test]
+#[ignore = "requires installed Arcanum data and a hardware GPU adapter"]
+fn dynamic_lights_match_cpu_and_reuse_warm_resources() {
+    use crate::{
+        content::world::{SectorRegion, WorldStream},
+        sector::Coordinates,
+    };
+    let game = std::path::PathBuf::from(
+        std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"),
+    );
+    let backend = test_backend();
+    let context = instance(backend);
+    let adapter = hardware_adapter(&context, backend, None).unwrap();
+    let mut gpu = Compositor::new(&adapter, TextureFormat::Rgba8Unorm, false).unwrap();
+    let sector = Coordinates { x: 1, y: 1 };
+    let region = SectorRegion {
+        first: sector,
+        last: sector,
+    };
+    let center = (101, 83);
+    let mut camera = region.camera(center).unwrap();
+    let size = (1280, 720);
+    let tick = Duration::from_millis(90);
+    let mut world = WorldStream::new(
+        Vfs::from_game(&game, Policy::Ce).unwrap(),
+        "bates mansion lev 1".into(),
+        region,
+        center,
+    )
+    .unwrap()
+    .with_lighting(12)
+    .unwrap();
+    world.add_light_probe((101, 83), false).unwrap();
+    world.add_light_probe((102, 83), false).unwrap();
+    let first = world.dynamic_light(0).unwrap();
+    let second = world.dynamic_light(1).unwrap();
+    let mut second_off = second;
+    second_off.active = false;
+    world.set_dynamic_light(1, second_off).unwrap();
+    let (single, _) = compare_world_tick(&mut gpu, &mut world, &camera, size, tick);
+    let warm = world.stats();
+    let update = world.set_dynamic_light(1, second).unwrap();
+    assert!((1..1000).contains(&update.receivers));
+    let (overlap, stats) = compare_world_tick(&mut gpu, &mut world, &camera, size, tick);
+    assert_ne!(single, overlap);
+    assert_eq!(stats.uploaded, 0);
+    let mut moved = first;
+    moved.tile = (104, 84);
+    assert!(world.set_dynamic_light(0, moved).unwrap().receivers > 0);
+    let (relocated, stats) = compare_world_tick(&mut gpu, &mut world, &camera, size, tick);
+    assert_ne!(overlap, relocated);
+    assert_eq!(stats.uploaded, 0);
+    let after = world.stats();
+    assert_eq!(
+        (after.sector_reads, after.vfs_reads, after.art.decodes),
+        (warm.sector_reads, warm.vfs_reads, warm.art.decodes)
+    );
+    let later = Duration::from_millis(125);
+    let (advancing, _) = compare_world_tick(&mut gpu, &mut world, &camera, size, later);
+    assert_ne!(relocated, advancing);
+    let wrapped = Duration::from_millis(2625);
+    let (wrapped_pixels, warm_animation) =
+        compare_world_tick(&mut gpu, &mut world, &camera, size, wrapped);
+    assert_eq!(advancing, wrapped_pixels);
+    assert_eq!(warm_animation.uploaded, 0);
+    camera.pan((64, 32), size);
+    compare_world_tick(&mut gpu, &mut world, &camera, size, tick);
+    camera.reset(size);
+    assert_eq!(
+        relocated,
+        compare_world_tick(&mut gpu, &mut world, &camera, size, tick).0
+    );
+    world.set_dynamic_light(0, first).unwrap();
+    world.set_dynamic_light(1, second_off).unwrap();
+    assert_eq!(
+        single,
+        compare_world_tick(&mut gpu, &mut world, &camera, size, tick).0
+    );
+}
+
 fn compare_world_frame(
     gpu: &mut Compositor,
     world: &mut crate::content::world::WorldStream,

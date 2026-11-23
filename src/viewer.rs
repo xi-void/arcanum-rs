@@ -270,6 +270,48 @@ impl Viewer<'_> {
         event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
+    fn update_light_probe(world: &mut InteractiveWorld, key: &str, trace: bool) -> bool {
+        let (slot, motion) = match key {
+            "i" => (0, Some((0, -1))),
+            "k" => (0, Some((0, 1))),
+            "j" => (0, Some((-1, 0))),
+            "l" => (0, Some((1, 0))),
+            "1" => (0, None),
+            "2" => (1, None),
+            _ => return false,
+        };
+        let Some(mut state) = world.dynamic_light(slot) else {
+            return false;
+        };
+        if let Some((dx, dy)) = motion {
+            let (Some(x), Some(y)) = (
+                state.tile.0.checked_add_signed(dx),
+                state.tile.1.checked_add_signed(dy),
+            ) else {
+                return false;
+            };
+            state.tile = (x, y);
+        } else {
+            state.active = !state.active;
+        }
+        let resources = trace.then(|| world.stats().cache);
+        let start = Instant::now();
+        let Ok(update) = world.set_dynamic_light(slot, state) else {
+            return false;
+        };
+        if let Some(before) = resources {
+            let after = world.stats().cache;
+            eprintln!(
+                "Dynamic light {slot} {state:?}: update {update:?}, main {:?}, sectors +{}, VFS +{}, decodes +{}",
+                start.elapsed(),
+                after.sector_reads - before.sector_reads,
+                after.vfs_reads - before.vfs_reads,
+                after.art.decodes - before.art.decodes
+            );
+        }
+        update.receivers != 0
+    }
+
     fn open(&self, event_loop: &ActiveEventLoop) -> Result<WindowSurface, String> {
         let attributes = Window::default_attributes()
             .with_title(&self.title)
@@ -400,6 +442,13 @@ impl ApplicationHandler for Viewer<'_> {
                 is_synthetic: false,
                 ..
             } if event.state.is_pressed() => {
+                if let Key::Character(key) = &event.logical_key
+                    && let ViewContent::Stream { world, trace, .. } = &mut self.content
+                    && Self::update_light_probe(world, key.as_str(), *trace)
+                {
+                    view.window.request_redraw();
+                    return;
+                }
                 let size = view.window.inner_size();
                 let viewport = (size.width, size.height);
                 let (camera, shift, navigation) = match &mut self.content {
@@ -576,7 +625,7 @@ impl WindowSurface {
                 > Duration::from_millis(30)
         {
             eprintln!(
-                "Frame {:?} {}x{} sync load wait 0ns schedule {:?} order {:?} shading {:?} compose {:?} pack {:?} submit {:?} host {:?}",
+                "Frame {:?} {}x{} sync load wait 0ns schedule {:?} order {:?} shading {:?} compose {:?} pack {:?} submit {:?} host {:?} animation {}ms",
                 camera.position(),
                 size.width,
                 size.height,
@@ -586,7 +635,8 @@ impl WindowSurface {
                 frame.composition,
                 frame.packing,
                 frame.submission,
-                frame.host
+                frame.host,
+                elapsed.as_millis()
             );
         }
         Ok(true)

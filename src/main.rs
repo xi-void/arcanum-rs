@@ -48,7 +48,7 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] art sector-wall-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art world-inspect <game-directory> [--view <local-x> <local-y> <side> <center-x> <center-y> <width> <height>] [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art world <game-directory> [--view <local-x> <local-y> <side> <center-x> <center-y> <width> <height>] [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
-  arcanum-rs [--ordered] art world <game-directory> --sectors <map> <min-x> <min-y> <max-x> <max-y> <world-x> <world-y> <width> <height> [--trace] [--lighting <hour>] [--animation-ms <elapsed>] [--renderer cpu|vulkan|gles] [--mods …]
+  arcanum-rs [--ordered] art world <game-directory> --sectors <map> <min-x> <min-y> <max-x> <max-y> <world-x> <world-y> <width> <height> [--trace] [--lighting <hour>] [--animation-ms <elapsed>] [--light-probe X Y | --nocturnal-probe X Y] [--renderer cpu|vulkan|gles] [--mods …]
   arcanum-rs [--ordered] art sector-room-wide-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art sector-room-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector-room-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
@@ -1274,6 +1274,7 @@ fn streaming_world(
     let mut trace = false;
     let mut hour = None;
     let mut animation_ms = None;
+    let mut probes = Vec::new();
     let mut renderer = RenderBackend::Cpu;
     let mut options = rest;
     loop {
@@ -1288,6 +1289,19 @@ fn streaming_world(
             }
             [flag, elapsed, rest @ ..] if flag == "--animation-ms" => {
                 animation_ms = Some(parse_view_number(elapsed, "animation milliseconds")?);
+                rest
+            }
+            [flag, x, y, rest @ ..] if flag == "--light-probe" || flag == "--nocturnal-probe" => {
+                if probes.len() == 2 {
+                    return Err("at most two light probes are supported".into());
+                }
+                probes.push((
+                    (
+                        parse_view_number(x, "light probe X")?,
+                        parse_view_number(y, "light probe Y")?,
+                    ),
+                    flag == "--nocturnal-probe",
+                ));
                 rest
             }
             [flag, backend, rest @ ..] if flag == "--renderer" => {
@@ -1309,6 +1323,9 @@ fn streaming_world(
     let mut world = WorldStream::new(vfs, map.to_owned(), region, reference)?;
     if let Some(hour) = hour {
         world = world.with_lighting(hour)?;
+    }
+    for (tile, nocturnal) in probes {
+        world.add_light_probe(tile, nocturnal)?;
     }
     Ok(Some((
         world,
