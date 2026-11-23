@@ -44,6 +44,7 @@ const USAGE: &str = "Usage:
   arcanum-rs art demo                          (requires --features windowed)
   arcanum-rs [--ordered] art sector-audit <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art sector-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
+  arcanum-rs [--ordered] art sector-facade <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs art floor-demo                    (requires --features windowed)
   arcanum-rs [--ordered] art floor <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
@@ -111,9 +112,9 @@ fn main() -> ExitCode {
         }
         #[cfg(feature = "windowed")]
         (Some("art"), [_, action, game, options @ ..])
-            if action == "sector" || action == "sector-wide" =>
+            if action == "sector" || action == "sector-wide" || action == "sector-facade" =>
         {
-            show_sector_floor(Path::new(game), options, policy, action == "sector-wide")
+            show_sector_floor(Path::new(game), options, policy, action)
         }
         #[cfg(feature = "windowed")]
         (Some("art"), [_, action]) if action == "floor-demo" && policy == Policy::Ce => {
@@ -152,7 +153,8 @@ fn main() -> ExitCode {
                 || action == "floor"
                 || action == "floor-demo"
                 || action == "sector"
-                || action == "sector-wide" =>
+                || action == "sector-wide"
+                || action == "sector-facade" =>
         {
             Err("sprite presentation requires a build with --features windowed".into())
         }
@@ -871,14 +873,17 @@ fn show_sector_floor(
     game: &Path,
     options: &[OsString],
     policy: Policy,
-    wide: bool,
+    action: &OsStr,
 ) -> Result<(), Box<dyn Error>> {
     use content::sector::{
-        DEMO_MAP, DEMO_ORIGIN, DEMO_SECTOR, WIDE_ORIGIN, WIDE_SIDE, load_patch, load_region,
+        DEMO_MAP, DEMO_ORIGIN, DEMO_SECTOR, FACADE_ORIGIN, WIDE_ORIGIN, WIDE_SIDE,
+        load_facade_region, load_patch, load_region,
     };
 
     let mut vfs = inspection_vfs(game, options, policy)?;
-    let patch = if wide {
+    let patch = if action == "sector-facade" {
+        load_facade_region(&mut vfs, DEMO_MAP, DEMO_SECTOR, FACADE_ORIGIN, WIDE_SIDE)?
+    } else if action == "sector-wide" {
         load_region(&mut vfs, DEMO_MAP, DEMO_SECTOR, WIDE_ORIGIN, WIDE_SIDE)?
     } else {
         load_patch(&mut vfs, DEMO_MAP, DEMO_SECTOR, DEMO_ORIGIN)?
@@ -895,6 +900,9 @@ fn show_sector_floor(
         "Terrain names: {} from {}",
         patch.names_source.virtual_path, patch.names_source
     )?;
+    if let Some(source) = &patch.facade_names_source {
+        writeln!(out, "Facade names: {} from {source}", source.virtual_path)?;
+    }
     writeln!(
         out,
         "Lights: {}, tile array at byte {}",
@@ -902,16 +910,24 @@ fn show_sector_floor(
     )?;
     writeln!(
         out,
-        "Patch center: {:?}, {} floor tiles",
+        "Patch center: {:?}, {} surface cells ({} facade pieces)",
         patch.center,
-        patch.tiles().len()
+        patch.tiles().len(),
+        patch
+            .tiles()
+            .iter()
+            .filter(|tile| tile.facade.is_some())
+            .count()
     )?;
+    let mut seen = std::collections::BTreeSet::new();
     for frame in patch.artwork() {
-        writeln!(
-            out,
-            "ART: {} from {}",
-            frame.source.virtual_path, frame.source
-        )?;
+        if seen.insert(frame.source.virtual_path.as_str()) {
+            writeln!(
+                out,
+                "ART: {} from {}",
+                frame.source.virtual_path, frame.source
+            )?;
+        }
     }
     drop(out);
     let layers: Vec<_> = patch
@@ -923,7 +939,12 @@ fn show_sector_floor(
         })
         .collect();
     Ok(viewer::show_layers(
-        "Arcanum-RS | Bates Mansion floor".into(),
+        if action == "sector-facade" {
+            "Arcanum-RS | Bates Mansion facade"
+        } else {
+            "Arcanum-RS | Bates Mansion floor"
+        }
+        .into(),
         &layers,
     )?)
 }

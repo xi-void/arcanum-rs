@@ -1,14 +1,15 @@
-//! Resolve a bounded base sector floor patch through the existing VFS.
+//! Resolve bounded base sector surface patches through the existing VFS.
 
 use super::{LoadedMes, Source, art, load_mes, read_bounded};
 use crate::{
     art::SpriteFrame,
     compositor::SpriteDraw,
+    facade::FacadeId,
     isometric::floor_draw,
     sector::{self, ArtError, Coordinates, TileArtId, TileResolution},
     vfs::Vfs,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 
 pub const PATCH_SIDE: u8 = 5;
@@ -17,23 +18,32 @@ pub const WIDE_ORIGIN: (u8, u8) = (20, 13);
 pub const DEMO_MAP: &str = "bates mansion lev 1";
 pub const DEMO_SECTOR: Coordinates = Coordinates { x: 1, y: 1 };
 pub const DEMO_ORIGIN: (u8, u8) = (29, 32);
+pub const FACADE_ORIGIN: (u8, u8) = (35, 14);
 
 pub struct PatchTile {
     pub world: (u32, u32),
     pub id: TileArtId,
     pub artwork: String,
     pub flip_x: bool,
+    pub facade: Option<FacadeId>,
     anchor: (i32, i32),
+}
+
+impl PatchTile {
+    pub fn frame_index(&self) -> usize {
+        self.facade.map_or(0, |id| usize::from(id.fields().frame))
+    }
 }
 
 pub struct FloorPatch {
     pub source: Source,
     pub names_source: Source,
+    pub facade_names_source: Option<Source>,
     pub light_count: u32,
     pub tile_offset: usize,
     pub center: (u32, u32),
     tiles: Vec<PatchTile>,
-    frames: BTreeMap<String, art::LoadedFrame>,
+    frames: BTreeMap<String, BTreeMap<usize, art::LoadedFrame>>,
     flipped: BTreeMap<String, SpriteFrame>,
 }
 
@@ -43,20 +53,23 @@ impl FloorPatch {
     }
 
     pub fn artwork(&self) -> impl Iterator<Item = &art::LoadedFrame> {
-        self.frames.values()
+        self.frames.values().flat_map(|frames| frames.values())
     }
 
     pub fn flipped_frame_count(&self) -> usize {
         self.flipped.len()
     }
 
-    /// Floor-only draws in serialized row order, relative to the patch center.
+    /// Surface draws in serialized row order, relative to the patch center.
+    /// A baked facade piece occupies its own cell in this pass.
     pub fn draws(&self) -> impl Iterator<Item = SpriteDraw<'_>> {
         self.tiles.iter().map(|tile| SpriteDraw {
             frame: if tile.flip_x {
                 &self.flipped[&tile.artwork]
             } else {
-                &self.frames[&tile.artwork].decoded.frame
+                &self.frames[&tile.artwork][&tile.frame_index()]
+                    .decoded
+                    .frame
             },
             anchor: tile.anchor,
         })
@@ -82,6 +95,29 @@ pub fn load_region(
     origin: (u8, u8),
     side: u8,
 ) -> Result<FloorPatch, Box<dyn Error>> {
+    load_surface(vfs, map, coordinates, origin, side, false)
+}
+
+/// Import a bounded region containing floor tiles and baked facade pieces.
+/// Facade previews defined by standalone walkmasks are outside this path.
+pub fn load_facade_region(
+    vfs: &mut Vfs,
+    map: &str,
+    coordinates: Coordinates,
+    origin: (u8, u8),
+    side: u8,
+) -> Result<FloorPatch, Box<dyn Error>> {
+    load_surface(vfs, map, coordinates, origin, side, true)
+}
+
+fn load_surface(
+    vfs: &mut Vfs,
+    map: &str,
+    coordinates: Coordinates,
+    origin: (u8, u8),
+    side: u8,
+    include_facades: bool,
+) -> Result<FloorPatch, Box<dyn Error>> {
     if !(1..=WIDE_SIDE).contains(&side) {
         return Err("sector region side must be between 1 and 9".into());
     }
@@ -95,53 +131,87 @@ pub fn load_region(
         .world_tile(midpoint.0, midpoint.1)
         .expect("validated sector and midpoint");
     let mut tiles = Vec::with_capacity(usize::from(side).pow(2));
-    let mut frames = BTreeMap::new();
-    let mut flipped = BTreeMap::new();
+    let mut facade_names: Option<LoadedMes> = None;
     for y in origin.1..origin.1 + side {
         for x in origin.0..origin.0 + side {
             let world = coordinates
                 .world_tile(x, y)
                 .expect("validated sector and local tile");
             let id = floor.tile(x, y).expect("validated local tile");
-            let resolved = id.resolve(&names.mes).map_err(|error| {
-                format!(
-                    "{} tile ({x}, {y}) art {:#010x}: {error}",
-                    source.virtual_path, id.0
-                )
-            })?;
-            let artwork = resolved.path;
-            let loaded = match frames.entry(artwork.clone()) {
-                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(art::load_frame(vfs, &artwork, 0)?)
+            let facade = FacadeId::from_raw(id.0).filter(|_| include_facades);
+            let (artwork, flip_x) = if let Some(facade) = facade {
+                if facade_names.is_none() {
+                    facade_names = Some(load_mes(vfs, "art/facade/facadename.mes")?);
                 }
+                let names = facade_names.as_ref().expect("facade names loaded");
+                let path = facade.artwork_path(&names.mes).map_err(|error| {
+                    format!(
+                        "{} tile ({x}, {y}) art {:#010x}: {error} in {} from {}",
+                        source.virtual_path, id.0, names.source.virtual_path, names.source
+                    )
+                })?;
+                (path, false)
+            } else {
+                let resolved = id.resolve(&names.mes).map_err(|error| {
+                    format!(
+                        "{} tile ({x}, {y}) art {:#010x}: {error}",
+                        source.virtual_path, id.0
+                    )
+                })?;
+                (resolved.path, resolved.fields.flip_x)
             };
-            let draw = floor_draw(
-                &loaded.decoded.frame,
-                i32::from(x) - i32::from(midpoint.0),
-                i32::from(y) - i32::from(midpoint.1),
-            )
-            .ok_or_else(|| {
-                format!("{artwork} requires a 78 × 40 floor frame with hotspot (39, 39)")
-            })?;
-            let flip_x = resolved.fields.flip_x;
-            if flip_x {
-                flipped
-                    .entry(artwork.clone())
-                    .or_insert_with(|| mirror_rows(draw.frame));
-            }
             tiles.push(PatchTile {
                 world,
                 id,
                 artwork,
                 flip_x,
-                anchor: draw.anchor,
+                facade,
+                anchor: (0, 0),
             });
+        }
+    }
+    let mut requests = BTreeMap::<_, BTreeSet<_>>::new();
+    for tile in &tiles {
+        requests
+            .entry(tile.artwork.as_str())
+            .or_default()
+            .insert(tile.frame_index());
+    }
+    let mut frames = BTreeMap::new();
+    for (path, indices) in requests {
+        let resource = art::read_art(vfs, path)?;
+        let mut decoded = BTreeMap::new();
+        for index in indices {
+            let frame = resource.decode(index)?;
+            if floor_draw(&frame.decoded.frame, 0, 0).is_none() {
+                return Err(format!(
+                    "{path} frame {index} from {} requires a 78 × 40 surface with hotspot (39, 39)",
+                    frame.source
+                )
+                .into());
+            }
+            decoded.insert(index, frame);
+        }
+        frames.insert(path.to_owned(), decoded);
+    }
+    let mut flipped = BTreeMap::new();
+    for tile in &mut tiles {
+        let frame = &frames[&tile.artwork][&tile.frame_index()].decoded.frame;
+        let x = (i64::from(tile.world.0) - i64::from(center.0)) as i32;
+        let y = (i64::from(tile.world.1) - i64::from(center.1)) as i32;
+        tile.anchor = floor_draw(frame, x, y)
+            .expect("validated surface frame and bounded region")
+            .anchor;
+        if tile.flip_x {
+            flipped
+                .entry(tile.artwork.clone())
+                .or_insert_with(|| mirror_rows(frame));
         }
     }
     Ok(FloorPatch {
         source,
         names_source: names.source,
+        facade_names_source: facade_names.map(|names| names.source),
         light_count: floor.light_count,
         tile_offset: floor.tile_offset,
         center,

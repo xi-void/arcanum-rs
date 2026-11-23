@@ -164,3 +164,172 @@ fn bates_audit_verifies_original_transitions_and_keeps_facade_ids() {
             .any(|row| row.iter().ne(row.iter().rev()))
     );
 }
+
+#[test]
+#[ignore = "requires installed Arcanum data"]
+fn bates_facade_replays_baked_rug_frames_in_sector_order() {
+    use arcanum_rs::content::sector::{FACADE_ORIGIN, WIDE_SIDE, load_facade_region};
+
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    let patch =
+        load_facade_region(&mut vfs, DEMO_MAP, DEMO_SECTOR, FACADE_ORIGIN, WIDE_SIDE).unwrap();
+    assert_eq!(patch.center, (103, 82));
+    assert_eq!(patch.tiles().len(), 81);
+    let archive = game.join("Arcanum2.dat").canonicalize().unwrap();
+    assert_eq!(
+        patch.facade_names_source.as_ref().unwrap().mount_path,
+        archive
+    );
+    let rug_path = "art/facade/rug3-flip.art";
+    let rug_frames: Vec<_> = patch
+        .artwork()
+        .filter(|frame| frame.source.virtual_path == rug_path)
+        .collect();
+    assert_eq!(rug_frames.len(), 15);
+    let silhouette = arcanum_rs::isometric::synthetic_floor();
+    for frame in &rug_frames {
+        assert_eq!(frame.source.mount_path, archive);
+        assert_eq!(frame.input_bytes, 28_135);
+        assert_eq!(frame.decoded.frame_count, 15);
+        assert_eq!(frame.decoded.ignored_trailing_bytes, 0);
+        assert_eq!(frame.decoded.frame.hotspot, (39, 39));
+        assert!(
+            frame
+                .decoded
+                .frame
+                .pixels
+                .iter()
+                .zip(&silhouette.pixels)
+                .all(|(actual, expected)| actual[3] == expected[3])
+        );
+    }
+    // Read independently from the sector bytes and matching FacWalk piece positions.
+    let mut pieces = Vec::new();
+    for (tile, draw) in patch.tiles().iter().zip(patch.draws()) {
+        if let Some(id) = tile.facade {
+            pieces.push(tile.frame_index());
+            assert_eq!(id.raw(), tile.id.0);
+            assert_eq!(tile.artwork, rug_path);
+            assert!(!tile.flip_x);
+            assert!(id.fields().walkable && id.fields().flippable);
+            assert_eq!(id.fields().number, 223);
+            assert_eq!(id.fields().terrain, 1);
+            assert!(std::ptr::eq(
+                draw.frame,
+                &rug_frames[tile.frame_index()].decoded.frame
+            ));
+        }
+    }
+    assert_eq!(pieces, [0, 1, 2, 3, 4, 9, 8, 7, 6, 5, 10, 11, 12, 13, 14]);
+    for (index, raw, world, anchor, rgb) in [
+        (29, 0xb5be0801, (101, 81), (40, -41), [66, 49, 41, 255]),
+        (38, 0xb5be0813, (101, 82), (80, -21), [82, 57, 33, 255]),
+        (51, 0xb5be081d, (105, 83), (-40, 79), [90, 82, 49, 255]),
+    ] {
+        assert_eq!(
+            (patch.tiles()[index].id.0, patch.tiles()[index].world),
+            (raw, world)
+        );
+        let draw = patch.draws().nth(index).unwrap();
+        assert_eq!(draw.anchor, anchor);
+        assert_eq!(draw.frame.pixels[20 * 78 + 39], rgb);
+    }
+
+    let background = [32, 43, 58];
+    let mut full = vec![background; 720 * 400];
+    let draws = |center: (i32, i32)| {
+        patch.draws().map(move |draw| SpriteDraw {
+            frame: draw.frame,
+            anchor: (draw.anchor.0 + center.0, draw.anchor.1 + center.1),
+        })
+    };
+    blit_ordered(&mut full, (720, 400), 720, draws((360, 200))).unwrap();
+    assert_eq!(
+        full.iter().filter(|&&pixel| pixel != background).count(),
+        81 * 1600
+    );
+    let mut clipped = vec![background; 80 * 40];
+    blit_ordered(&mut clipped, (80, 40), 80, draws((40, 20))).unwrap();
+    for (row, pixels) in clipped.chunks(80).enumerate() {
+        let start = (row + 180) * 720 + 320;
+        assert_eq!(pixels, &full[start..start + 80]);
+    }
+
+    let rug4 = load_facade_region(&mut vfs, DEMO_MAP, DEMO_SECTOR, (22, 29), 5).unwrap();
+    assert_eq!(rug4.tiles()[0].id.0, 0xb5c20801);
+    assert_eq!(rug4.tiles()[0].artwork, "art/facade/rug4-flip.art");
+    assert_eq!(
+        rug4.tiles()
+            .iter()
+            .filter(|tile| tile.facade.is_some())
+            .count(),
+        15
+    );
+    assert_eq!(
+        rug4.draws().next().unwrap().frame.pixels[20 * 78 + 39],
+        [41, 24, 33, 255]
+    );
+}
+
+#[test]
+#[ignore = "requires installed Arcanum data"]
+fn bates_facades_match_independent_unlit_compositions() {
+    use arcanum_rs::content::sector::{FACADE_ORIGIN, WIDE_SIDE, load_facade_region};
+
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    for (number, walkmask, origin, rug_world, expected_rgb) in [
+        (223, "df", FACADE_ORIGIN, (101, 81), 0x6e6e_ed19_8e62_2b3b),
+        (225, "e1", (35, 35), (101, 102), 0x1786_1112_b697_6e51),
+    ] {
+        let path = format!("art/facade/facwalk.{walkmask}");
+        assert_eq!(vfs.resolve(&path).unwrap().winner().unwrap().size, 218);
+        let mut bytes = Vec::new();
+        vfs.copy(&path, &mut bytes).unwrap();
+        assert_eq!(bytes.len(), 218);
+        assert_eq!(&bytes[..14], b"FacWalk V101  ");
+        let patch = load_facade_region(&mut vfs, DEMO_MAP, DEMO_SECTOR, origin, WIDE_SIDE).unwrap();
+        assert_eq!(patch.tiles().len(), patch.draws().count());
+        for (index, record) in bytes[38..].as_chunks::<12>().0.iter().enumerate() {
+            let word = |offset| u32::from_le_bytes(record[offset..offset + 4].try_into().unwrap());
+            let world = (rug_world.0 + word(0), rug_world.1 + word(4));
+            let (tile, draw) = patch
+                .tiles()
+                .iter()
+                .zip(patch.draws())
+                .find(|(tile, _)| tile.world == world)
+                .unwrap();
+            let facade = tile.facade.unwrap();
+            assert_eq!(tile.frame_index(), index);
+            assert_eq!(facade.fields().number, number);
+            assert_eq!(facade.fields().walkable, word(8) == 1);
+            assert!(!tile.flip_x);
+            assert_eq!((draw.frame.width, draw.frame.height), (78, 40));
+            assert_eq!(draw.frame.hotspot, (39, 39));
+            assert_eq!(draw.frame.offset, (0, 0));
+        }
+
+        let mut rgb = vec![[32, 43, 58]; 800 * 600];
+        blit_ordered(
+            &mut rgb,
+            (800, 600),
+            800,
+            patch.draws().map(|draw| SpriteDraw {
+                frame: draw.frame,
+                anchor: (400 + draw.anchor.0, 300 + draw.anchor.1),
+            }),
+        )
+        .unwrap();
+        // Independently decoded from the indexed ART by a Python byte reader.
+        // The reference places facade frames by their walkmask record coordinates
+        // and copies each occupied pixel at the neutral CE tile-pass origin.
+        let hash = rgb
+            .as_flattened()
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, &byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+            });
+        assert_eq!(hash, expected_rgb, "facade {number}");
+    }
+}
