@@ -97,7 +97,7 @@ fn validates_framing_and_rejects_unsupported_layouts() {
             matches!(decode_frame(&original[..length], 0), Err(Error::Truncated {section: actual, ..}) if actual == section)
         );
     }
-    for (offset, value) in [(0, 0), (0, 3), (0, 8), (0, 25), (8, 16), (12, 0), (16, 1)] {
+    for (offset, value) in [(0, 0), (0, 3), (0, 8), (0, 25), (8, 16), (12, 0), (20, 1)] {
         let mut bytes = original.clone();
         set_word(&mut bytes, offset, value);
         assert!(matches!(
@@ -212,4 +212,24 @@ fn rejects_truncated_underfilled_overfilled_and_empty_rle_runs() {
         decode_frame(&input, 1).unwrap().frame.pixels,
         [[0, 0, 0, 255]]
     );
+}
+
+#[test]
+fn slot_one_is_framed_without_changing_the_selected_slot_zero_colors() {
+    let single = fixture(&[(2, 1, &[0, 1])]);
+    let mut double = single.clone();
+    set_word(&mut double, 16, 42);
+    let slot_one = HEADER_BYTES + PALETTE_BYTES;
+    double.splice(slot_one..slot_one, [200; PALETTE_BYTES]);
+    assert_eq!(
+        decode_frame(&double, 0).unwrap(),
+        decode_frame(&single, 0).unwrap()
+    );
+    assert!(matches!(
+        decode_frame(&double[..slot_one + 9], 0),
+        Err(Error::Truncated {
+            section: "palette slot one",
+            ..
+        })
+    ));
 }
