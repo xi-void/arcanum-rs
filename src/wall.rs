@@ -59,18 +59,23 @@ impl WallArtId {
         })
     }
 
-    /// Resolve the verified undamaged interior base wall facing (rotation 1).
+    /// Resolve the undamaged interior facings and pieces used by the verified run.
     pub fn resolve(self, structures: &Mes, names: &Mes) -> Result<String, Error> {
         let fields = self.fields()?;
-        if fields.rotation != 1
-            || fields.piece != 0
-            || fields.palette != 0
-            || fields.flags != 0
-            || fields.damage != 0
+        if !matches!(
+            (fields.rotation, fields.palette, fields.flags),
+            (1, 0, 0) | (7, 1, 1)
+        ) || fields.damage != 0
             || self.0 & 0x40 != 0
         {
             return Err(Error::Unsupported(fields));
         }
+        let piece = match fields.piece {
+            0 => "bse",
+            28..=33 => ["d6l", "d6a", "d6b", "d6c", "d6d", "d6r"][(fields.piece - 28) as usize],
+            37..=40 => ["p4l", "p4a", "p4b", "p4r"][(fields.piece - 37) as usize],
+            _ => return Err(Error::Unsupported(fields)),
+        };
         let id = fields.structure;
         let entry = structures
             .get(0)
@@ -99,10 +104,40 @@ impl WallArtId {
             return Err(Error::MissingWallName(interior.into()));
         }
         Ok(format!(
-            "art/wall/{}bseu{}.art",
+            "art/wall/{}{piece}u{}.art",
             interior.to_ascii_lowercase(),
             fields.variation
         ))
+    }
+}
+
+impl ArtFields {
+    pub fn mirror_x(self) -> bool {
+        self.flags & 1 != 0
+    }
+
+    /// Adjust the legacy hotspot. Mirroring uses the wall blitter's width-minus-two rule.
+    pub fn pivot(self, frame: &SpriteFrame) -> (i64, i64) {
+        let (mut x, mut y) = (i64::from(frame.hotspot.0), i64::from(frame.hotspot.1));
+        if !(2..=5).contains(&self.rotation) {
+            x -= 40;
+            y += 20;
+        }
+        if self.mirror_x() {
+            x = i64::from(frame.width) - x - 2;
+        }
+        (x, y)
+    }
+
+    /// Within-cell ordering for upright walls. The original object list
+    /// uses a rotation-driven order offset independent of the visual offset.
+    pub fn order_key(self) -> (i32, i32) {
+        // (depth, horizontal) from sub_4F2230 and sub_4B93F0.
+        if (2..=5).contains(&self.rotation) {
+            (-2, 38)
+        } else {
+            (-40, 0)
+        }
     }
 }
 
@@ -115,13 +150,33 @@ pub struct Placement {
 
 impl Placement {
     pub fn draw(self, frame: &SpriteFrame, center: (u32, u32)) -> Option<SpriteDraw<'_>> {
+        let pivot = (
+            i64::from(frame.hotspot.0) - 40,
+            i64::from(frame.hotspot.1) + 20,
+        );
+        self.draw_with_pivot(frame, center, pivot)
+    }
+
+    pub fn draw_with_pivot(
+        self,
+        frame: &SpriteFrame,
+        center: (u32, u32),
+        pivot: (i64, i64),
+    ) -> Option<SpriteDraw<'_>> {
         let delta = |tile, center| i32::try_from(i64::from(tile) - i64::from(center)).ok();
         let (x, y) = project_tile(delta(self.tile.0, center.0)?, delta(self.tile.1, center.1)?)?;
-        // TIG changes the effective hotspot by (-40, +20) for this rotation.
-        // Keep the decoded hotspot intact and express that as an anchor shift.
+        // Keep the ART hotspot intact and express the effective pivot as an anchor shift.
         let anchor = (
-            i32::try_from(i64::from(x) + i64::from(self.pixel_offset.0) + 40).ok()?,
-            i32::try_from(i64::from(y) + i64::from(self.pixel_offset.1) - 20).ok()?,
+            i32::try_from(
+                (i64::from(x) + i64::from(self.pixel_offset.0) + i64::from(frame.hotspot.0))
+                    .checked_sub(pivot.0)?,
+            )
+            .ok()?,
+            i32::try_from(
+                (i64::from(y) + i64::from(self.pixel_offset.1) + i64::from(frame.hotspot.1))
+                    .checked_sub(pivot.1)?,
+            )
+            .ok()?,
         );
         Some(SpriteDraw { frame, anchor })
     }

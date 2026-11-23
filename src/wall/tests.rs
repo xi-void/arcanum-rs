@@ -10,12 +10,19 @@ fn resolves_the_interior_variant_and_preserves_the_orientation_bits() {
         id.resolve(&structures, &names).unwrap(),
         "art/wall/in4bseu1.art"
     );
-    let unsupported = WallArtId(0x1010_3911);
-    let fields = unsupported.fields().unwrap();
+    let mirrored = WallArtId(0x1010_3911);
+    let fields = mirrored.fields().unwrap();
     assert_eq!((fields.rotation, fields.flags, fields.palette), (7, 1, 1));
     assert_eq!(
+        mirrored.resolve(&structures, &names).unwrap(),
+        "art/wall/in4bseu1.art"
+    );
+    assert_eq!(fields.order_key(), id.fields().unwrap().order_key());
+    assert!(WallArtId(0x1010_1000).fields().unwrap().order_key() > fields.order_key());
+    let unsupported = WallArtId(0x1010_3901);
+    assert_eq!(
         unsupported.resolve(&structures, &names),
-        Err(Error::Unsupported(fields))
+        Err(Error::Unsupported(unsupported.fields().unwrap()))
     );
     assert_eq!(WallArtId(0xb000_0000).fields(), Err(Error::NotWall));
     assert!(

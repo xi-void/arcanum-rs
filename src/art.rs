@@ -75,6 +75,21 @@ impl std::error::Error for Error {}
 /// Only the selected frame's RLE packets are decoded and checked.
 /// Bytes after all declared frames count toward the input limit and are reported.
 pub fn decode_frame(input: &[u8], index: usize) -> Result<DecodedFrame, Error> {
+    decode_frame_with_palette(input, index, 0)
+}
+
+/// Decode a single-direction frame using stored palette zero or one.
+/// An absent slot one uses slot zero, as in the legacy wall blitter.
+pub fn decode_frame_with_palette(
+    input: &[u8],
+    index: usize,
+    palette_slot: u8,
+) -> Result<DecodedFrame, Error> {
+    if palette_slot > 1 {
+        return Err(Error::Unsupported(
+            "only palette slots zero and one are supported",
+        ));
+    }
     if input.len() > MAX_INPUT_BYTES {
         return Err(Error::InputTooLarge);
     }
@@ -104,10 +119,14 @@ pub fn decode_frame(input: &[u8], index: usize) -> Result<DecodedFrame, Error> {
         return Err(Error::FrameOutOfRange { index, count });
     }
 
-    let palette = section(input, HEADER_BYTES, PALETTE_BYTES, "palette")?;
+    let mut palette = section(input, HEADER_BYTES, PALETTE_BYTES, "palette")?;
     let mut table_start = HEADER_BYTES + PALETTE_BYTES;
     if word(header, 16) != 0 {
-        table_start += section(input, table_start, PALETTE_BYTES, "palette slot one")?.len();
+        let alternate = section(input, table_start, PALETTE_BYTES, "palette slot one")?;
+        if palette_slot == 1 {
+            palette = alternate;
+        }
+        table_start += alternate.len();
     }
     let table = section(input, table_start, count * FRAME_BYTES, "frame table")?;
     let mut payload_offset = table_start + table.len();

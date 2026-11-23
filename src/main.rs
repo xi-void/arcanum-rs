@@ -46,6 +46,8 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] art sector-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector-facade <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector-wall-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs [--ordered] art sector-walls-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs [--ordered] art sector-walls <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector-wall <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs art floor-demo                    (requires --features windowed)
@@ -115,12 +117,16 @@ fn main() -> ExitCode {
         (Some("art"), [_, action, game, options @ ..]) if action == "sector-wall-inspect" => {
             inspect_demo_wall(Path::new(game), options, policy)
         }
+        (Some("art"), [_, action, game, options @ ..]) if action == "sector-walls-inspect" => {
+            inspect_connected_walls(Path::new(game), options, policy)
+        }
         #[cfg(feature = "windowed")]
         (Some("art"), [_, action, game, options @ ..])
             if action == "sector"
                 || action == "sector-wide"
                 || action == "sector-facade"
-                || action == "sector-wall" =>
+                || action == "sector-wall"
+                || action == "sector-walls" =>
         {
             show_sector_floor(Path::new(game), options, policy, action)
         }
@@ -163,6 +169,7 @@ fn main() -> ExitCode {
                 || action == "sector"
                 || action == "sector-wide"
                 || action == "sector-wall"
+                || action == "sector-walls"
                 || action == "sector-facade" =>
         {
             Err("sprite presentation requires a build with --features windowed".into())
@@ -890,12 +897,22 @@ fn show_sector_floor(
     };
 
     let mut vfs = inspection_vfs(game, options, policy)?;
-    let wall = if action == "sector-wall" {
-        Some(load_demo_wall(&mut vfs)?)
+    let walls = if action == "sector-walls" {
+        load_connected_walls(&mut vfs)?
+    } else if action == "sector-wall" {
+        vec![load_demo_wall(&mut vfs)?]
     } else {
-        None
+        Vec::new()
     };
-    let patch = if wall.is_some() {
+    let patch = if action == "sector-walls" {
+        load_facade_region(
+            &mut vfs,
+            DEMO_MAP,
+            DEMO_SECTOR,
+            content::wall::CONNECTED_ORIGIN,
+            WIDE_SIDE,
+        )?
+    } else if action == "sector-wall" {
         load_facade_region(
             &mut vfs,
             DEMO_MAP,
@@ -959,8 +976,12 @@ fn show_sector_floor(
             relative_anchor: (draw.anchor.0 as i16, draw.anchor.1 as i16),
         })
         .collect();
-    if let Some(wall) = &wall {
+    if action == "sector-walls" {
+        report_connected_walls(&mut out, &walls)?;
+    } else if let [wall] = walls.as_slice() {
         report_wall(&mut out, wall)?;
+    }
+    for wall in &walls {
         let draw = wall
             .draw(patch.center)
             .ok_or("wall anchor exceeds the drawable range")?;
@@ -971,7 +992,9 @@ fn show_sector_floor(
     }
     drop(out);
     Ok(viewer::show_layers(
-        if wall.is_some() {
+        if action == "sector-walls" {
+            "Arcanum-RS | Bates Mansion wall run"
+        } else if action == "sector-wall" {
             "Arcanum-RS | Bates Mansion wall"
         } else if action == "sector-facade" {
             "Arcanum-RS | Bates Mansion facade"
@@ -1000,6 +1023,56 @@ fn inspect_demo_wall(
 ) -> Result<(), Box<dyn Error>> {
     let mut vfs = inspection_vfs(game, options, policy)?;
     report_wall(&mut io::stdout().lock(), &load_demo_wall(&mut vfs)?)
+}
+
+fn load_connected_walls(vfs: &mut Vfs) -> Result<Vec<content::wall::ImportedWall>, Box<dyn Error>> {
+    content::wall::load_many(
+        vfs,
+        content::sector::DEMO_MAP,
+        content::sector::DEMO_SECTOR,
+        &content::wall::CONNECTED_RECORDS,
+    )
+}
+
+fn inspect_connected_walls(
+    game: &Path,
+    options: &[OsString],
+    policy: Policy,
+) -> Result<(), Box<dyn Error>> {
+    let mut vfs = inspection_vfs(game, options, policy)?;
+    report_connected_walls(&mut io::stdout().lock(), &load_connected_walls(&mut vfs)?)
+}
+
+fn report_connected_walls(
+    out: &mut impl Write,
+    walls: &[content::wall::ImportedWall],
+) -> Result<(), Box<dyn Error>> {
+    if let Some(wall) = walls.first() {
+        writeln!(
+            out,
+            "Sector {} from {}",
+            wall.sector_source.virtual_path, wall.sector_source
+        )?;
+    }
+    for wall in walls {
+        let art = &wall.artwork;
+        writeln!(
+            out,
+            "Record {} Wall (type 0) at {:?} ART {:#010x}, rotation {}, palette {}, mirrored {}, {} frame 0, offset {:?}, scale {}%, pivot {:?}, from {}",
+            wall.record.index,
+            wall.placement.tile,
+            wall.record.art_id,
+            wall.orientation.rotation,
+            wall.orientation.palette,
+            wall.orientation.mirror_x(),
+            art.source.virtual_path,
+            wall.placement.pixel_offset,
+            wall.scale,
+            wall.orientation.pivot(&art.decoded.frame),
+            art.source
+        )?;
+    }
+    Ok(())
 }
 
 fn report_wall(
@@ -1052,11 +1125,9 @@ fn report_wall(
     report_art(out, &wall.artwork, 0)?;
     writeln!(
         out,
-        "Effective wall pivot: {:?}; original palette slot zero, without lighting",
-        (
-            i64::from(wall.artwork.decoded.frame.hotspot.0) - 40,
-            i64::from(wall.artwork.decoded.frame.hotspot.1) + 20
-        )
+        "Effective wall pivot: {:?}; original palette slot {}, without lighting",
+        wall.orientation.pivot(&wall.artwork.decoded.frame),
+        wall.orientation.palette
     )?;
     Ok(())
 }
