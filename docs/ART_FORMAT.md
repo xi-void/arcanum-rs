@@ -23,6 +23,14 @@ The VFS winners above were checked in CE-compatible mode. The base
 mounted. Each listed archive stores its entry in a DAT zlib stream, a
 separate compression layer from the sprite's pixel encoding.
 
+The rabbit's `art/monster/bun/bunuwxab.art` in `Arcanum1.dat`
+verifies the eight-direction `0x02` case. It stores four palettes,
+six frames per direction at 8 fps, and signed movement offsets.
+TIG's `sub_51BE30` tests bit `0x01` for a one-direction
+table and uses eight rotations otherwise. Here `0x02` does
+not require a different table or pixel decoder. Its broader
+purpose and other flag combinations remain unverified.
+
 ## Stored layout
 
 These files have no verified magic or version field. The first word is
@@ -74,7 +82,7 @@ and archive or mod precedence, including a malformed winning override.
 
 ## Bounds and limitations
 
-- Accepted files use flags `0x00` (eight directions), `0x01` or `0x09`
+- Accepted files use flags `0x00` or `0x02` (eight directions), `0x01` or `0x09`
   (one direction), and 8-bit indices. Palette slot zero is required.
   Present alternate slots are stored in ascending slot order. A request
   for a missing palette falls back to slot zero. A single-direction file

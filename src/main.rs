@@ -48,7 +48,7 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] art sector-wall-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art world-inspect <game-directory> [--view <local-x> <local-y> <side> <center-x> <center-y> <width> <height>] [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art world <game-directory> [--view <local-x> <local-y> <side> <center-x> <center-y> <width> <height>] [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
-  arcanum-rs [--ordered] art world <game-directory> --sectors <map> <min-x> <min-y> <max-x> <max-y> <world-x> <world-y> <width> <height> [--trace] [--lighting <hour>] [--animation-ms <elapsed>] [--fidget] [--light-probe X Y | --nocturnal-probe X Y] [--renderer cpu|vulkan|gles] [--mods …]
+  arcanum-rs [--ordered] art world <game-directory> --sectors <map> <min-x> <min-y> <max-x> <max-y> <world-x> <world-y> <width> <height> [--trace] [--lighting <hour>] [--animation-ms <elapsed>] [--fidget] [--walk] [--light-probe X Y | --nocturnal-probe X Y] [--renderer cpu|vulkan|gles] [--mods …]
   arcanum-rs [--ordered] art sector-room-wide-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art sector-room-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector-room-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
@@ -1137,8 +1137,12 @@ fn show_world(game: &Path, options: &[OsString], policy: Policy) -> Result<(), B
 }
 
 fn inspect_world(game: &Path, options: &[OsString], policy: Policy) -> Result<(), Box<dyn Error>> {
-    if let Some((mut world, mut camera, size, _, _, _, _)) = streaming_world(game, options, policy)?
+    if let Some((mut world, mut camera, size, trace, _, _, _)) =
+        streaming_world(game, options, policy)?
     {
+        if trace {
+            world = world.with_object_audit();
+        }
         camera.resize(size);
         let timing = world.prepare(&camera, size)?;
         let mut out = io::stdout().lock();
@@ -1149,16 +1153,32 @@ fn inspect_world(game: &Path, options: &[OsString], policy: Policy) -> Result<()
                 report.id,
                 report.source.as_deref().unwrap_or("unavailable")
             )?;
-            let (walls, portals, scenery) = report.original_object_counts;
-            writeln!(
-                out,
-                "{} surfaces ({} facades), original {walls} walls / {scenery} scenery / {portals} portals, retained {} / {} / {}",
-                report.surfaces,
-                report.facades,
-                report.wall_count,
-                report.scenery_count,
-                report.portal_count
-            )?;
+            if report.object_list_failed {
+                writeln!(
+                    out,
+                    "{} surfaces ({} facades), original object counts unavailable (see diagnostics)",
+                    report.surfaces, report.facades
+                )?;
+            } else {
+                let (walls, portals, scenery) = report.original_object_counts;
+                writeln!(
+                    out,
+                    "{} surfaces ({} facades), original {walls} walls / {scenery} scenery / {portals} portals, retained {} / {} / {}",
+                    report.surfaces,
+                    report.facades,
+                    report.wall_count,
+                    report.scenery_count,
+                    report.portal_count
+                )?;
+                writeln!(
+                    out,
+                    "  Not imported: {} walls / {} scenery / {} portals; {} imported rasters rejected",
+                    walls - report.wall_count,
+                    scenery - report.scenery_count,
+                    portals - report.portal_count,
+                    report.object_raster_rejections
+                )?;
+            }
             if let Some((submitted, culled)) = world.object_visibility(report.id, &camera, size) {
                 writeln!(
                     out,
@@ -1178,6 +1198,9 @@ fn inspect_world(game: &Path, options: &[OsString], policy: Policy) -> Result<()
                     "  Prepared object-owned lights: {}",
                     report.object_lights
                 )?;
+            }
+            for record in &report.object_audit {
+                writeln!(out, "  Raster {record}")?;
             }
             for diagnostic in &report.diagnostics {
                 writeln!(out, "  {diagnostic}")?;
@@ -1275,6 +1298,7 @@ fn streaming_world(
     let mut hour = None;
     let mut animation_ms = None;
     let mut fidget = false;
+    let mut walking = false;
     let mut probes = Vec::new();
     let mut renderer = RenderBackend::Cpu;
     let mut options = rest;
@@ -1290,6 +1314,10 @@ fn streaming_world(
             }
             [flag, rest @ ..] if flag == "--fidget" => {
                 fidget = true;
+                rest
+            }
+            [flag, rest @ ..] if flag == "--walk" => {
+                walking = true;
                 rest
             }
             [flag, elapsed, rest @ ..] if flag == "--animation-ms" => {
@@ -1331,6 +1359,9 @@ fn streaming_world(
     }
     if fidget {
         world = world.with_fidget_preview();
+    }
+    if walking {
+        world = world.with_walk_preview(animation_ms.is_some())?;
     }
     for (tile, nocturnal) in probes {
         world.add_light_probe(tile, nocturnal)?;

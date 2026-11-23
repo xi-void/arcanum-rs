@@ -523,6 +523,7 @@ fn compare_world_tick(
     tick: Duration,
 ) -> (Vec<[u8; 3]>, Preparation) {
     world.prepare(camera, size).unwrap();
+    world.update_walk(tick);
     let background = [32, 43, 58];
     let mut cpu = vec![background; (size.0 * size.1) as usize];
     blit_modulated(
@@ -935,5 +936,98 @@ fn original_rabbit_fidget_is_finite_pivoted_and_matches_cpu() {
     assert_eq!(
         (after.sector_reads, after.vfs_reads, after.art.decodes),
         (before.sector_reads, before.vfs_reads, before.art.decodes)
+    );
+}
+
+#[test]
+#[ignore = "requires installed Arcanum data and a hardware GPU adapter"]
+fn original_rabbit_walk_matches_cpu_and_keeps_shadow_and_art_warm() {
+    use crate::{
+        content::world::{SectorRegion, WorldStream},
+        sector::Coordinates,
+    };
+    let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+    let backend = test_backend();
+    let context = instance(backend);
+    let adapter = hardware_adapter(&context, backend, None).unwrap();
+    let mut gpu = Compositor::new(&adapter, TextureFormat::Rgba8Unorm, false).unwrap();
+    let sector = Coordinates { x: 6, y: 12 };
+    let region = SectorRegion {
+        first: sector,
+        last: sector,
+    };
+    let center = (420, 814);
+    let size = (320, 220);
+    let mut camera = region.camera(center).unwrap();
+    let mut world = WorldStream::new(
+        Vfs::from_game(game, Policy::Ce).unwrap(),
+        "k'na tha".into(),
+        region,
+        center,
+    )
+    .unwrap()
+    .with_lighting(12)
+    .unwrap()
+    .with_walk_preview(true)
+    .unwrap();
+    world.add_light_probe((420, 815), false).unwrap();
+    let time = |ms| Duration::from_millis(ms);
+    let (first, _) = compare_world_tick(&mut gpu, &mut world, &camera, size, time(0));
+    let warm = world.stats();
+    let moved = world.update_walk(time(246)).unwrap();
+    assert_eq!(moved.tile, (420, 815));
+    let draws: Vec<_> = world.visible_assets_at(&camera, size, time(246)).collect();
+    let mobile_index = draws
+        .iter()
+        .position(|draw| draw.asset.source.virtual_path == "art/monster/bun/bunuwxab.art")
+        .unwrap();
+    let rabbit = &draws[mobile_index];
+    assert_eq!(
+        rabbit.sprite.anchor,
+        (size.0 as i32 / 2 + 43, size.1 as i32 / 2 + 22)
+    );
+    let shadows: Vec<_> = draws
+        .iter()
+        .enumerate()
+        .filter(|(_, draw)| matches!(draw.modulation, Modulation::Shadow(_)))
+        .collect();
+    assert!(!shadows.is_empty());
+    for (i, shadow) in shadows {
+        assert!(i < mobile_index);
+        assert_eq!(shadow.sprite.anchor, rabbit.sprite.anchor);
+    }
+    let (middle, _) = compare_world_tick(&mut gpu, &mut world, &camera, size, time(246));
+    let (turn, _) = compare_world_tick(&mut gpu, &mut world, &camera, size, time(697));
+    let (stop, _) = compare_world_tick(&mut gpu, &mut world, &camera, size, time(943));
+    assert_ne!(first, middle);
+    assert_ne!(middle, turn);
+    assert_ne!(turn, stop);
+    assert_eq!(world.animation_delay(&camera, size, time(943)), None);
+    let before = world.dynamic_light(0).unwrap();
+    let mut shifted = before;
+    shifted.tile = (421, 817);
+    world.set_dynamic_light(0, shifted).unwrap();
+    compare_world_tick(&mut gpu, &mut world, &camera, size, time(246));
+    world.set_dynamic_light(0, before).unwrap();
+    assert_eq!(
+        compare_world_tick(&mut gpu, &mut world, &camera, size, time(246)).0,
+        middle
+    );
+    for step in 0..=23 {
+        compare_world_tick(&mut gpu, &mut world, &camera, size, time(step * 41));
+    }
+    for step in 0..=23 {
+        let (_, stats) = compare_world_tick(&mut gpu, &mut world, &camera, size, time(step * 41));
+        assert_eq!(stats.uploaded, 0, "warm walk frame {step}");
+    }
+    camera.pan((200, 120), size);
+    compare_world_tick(&mut gpu, &mut world, &camera, (321, 201), time(697));
+    camera.reset(size);
+    let (restored, _) = compare_world_tick(&mut gpu, &mut world, &camera, size, time(943));
+    assert_eq!(restored, stop);
+    let hot = world.stats();
+    assert_eq!(
+        (hot.sector_reads, hot.vfs_reads, hot.art.decodes),
+        (warm.sector_reads, warm.vfs_reads, warm.art.decodes)
     );
 }

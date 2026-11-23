@@ -135,3 +135,164 @@ In the separate Wayland trace the slowest observed frame was the first
 1536 × 864 configure. It took 76.73 ms in total, including 44.34 ms
 of sector preparation. The trace records each stage independently.
 The Milestone 38 outlier remains unattributed.
+
+## Milestone 51 generic reconstruction audit
+
+### Invariant and current boundary
+
+The streamed `art world --sectors` path resolves the winning sector
+through the VFS. The floor parser reads the light list, all 4,096 floor
+words and their tile/facade identities. The object parser walks the
+roof-list framing, sector metadata and each version-119 record in field
+bitmap order, ending exactly at the footer count. The static importer
+joins each record to its original prototype, applies serialized overrides,
+resolves ART through the original MES tables and VFS, and builds a
+world-positioned raster. Sector assembly sorts accepted rasters by the
+shared world keys. The viewport only selects intersecting rasters. CPU
+and GPU consume the same draws and clipping geometry.
+
+For a decoded list, each categorized static record enters the import,
+gets an explicit unsupported reason, or contributes to the framing-only
+count if it lacks placement or ART. Accepted objects either produce
+rasters or get a projection/overhang rejection. Culling is counted
+separately from rejection. If record framing fails, the worker can
+still present the floor. The object counts then read **unavailable**
+with the exact parser error, since a variable-length record without a
+trusted boundary cannot be skipped. This is the main obstacle to
+general world coverage. Current object-list schemas are bounded to
+walls, portals and scenery. Roofs are framed but their rendering and
+CE's party-dependent visibility effects are outside this pipeline.
+
+Use `art world-inspect … --sectors … --trace` for provenance per
+accepted static raster. It prints the record's original position, byte
+span, identity, prototype source, stored and effective ART, resolved
+resource and provider, direction, frame, selected palette, offsets,
+effective pivot and render order. The ordinary summary includes
+decoded, imported, rejected, submitted and clipped counts. The
+provenance allocation is limited to opt-in headless inspection.
+
+The legacy Bates showcase commands select fixed rooms or record lists.
+Those selectors do not participate in streamed loading. Original MES
+lookup, directional wall/portal rules and authored frame state are
+shared across locations. The supported flame and mobile appearances
+remain deliberately bounded. In particular, the mobile module selects
+three Bates and one K'na Tha standalone `.mob` paths by map and sector.
+It loads their identities, prototypes and starting positions from
+the originals. The rabbit walk is an opt-in relative route. Tulla's
+test exercises static reconstruction and does not imply general
+mobile discovery, saved-world diffs or gameplay visibility.
+
+### K'na Tha entrance and adjoining passage
+
+Map 5067 in the winning `rules/maplist.mes` is K'na Tha. The dark
+rectangle is the nine-by-nine **STD indoor stone floor** at
+X=402–410, Y=778–786, in sector (6,12), ID 805306374. The sample
+at (406,782) is `0x028a0400` and resolves to
+`art/tile/stdbse0c.art`. Eight original variants cover those
+81 cells. At (405,788), the approach uses `0x065901c0` and
+`art/tile/ts1bse0a.art`. The sector has no facade IDs in its floor
+array. Its roof empty marker is 1 at byte 16,484. Sector (6,13)
+also has an empty roof list. The second adjoining stone corridor
+runs from X=394–398 and Y=826–858, spanning the two sectors.
+
+The source is `modules/Arcanum.dat` in both cases. In the first
+sector the record stream starts at byte 17,044. Record 558 is a
+91-byte portal at bytes `67710..67801`, followed immediately by
+wall record 559. Its bitmap `[00000003,00000000,00000003]` has
+current ART and location in word zero and portal flags and lock
+difficulty in word two. CE `sub_40A8A0` in `obj.c` declares
+both subtype fields as INT32. Their stored values are `0x11`
+(locked and always locked) and 100. Rejecting the lock bit at
+byte 67,780 had removed all 653 static records from the scene,
+including walls parsed before the error. The generic reader now
+consumes the verified difficulty word without applying gameplay
+lock mechanics.
+
+The instance specifies tile (395,826) and ART `0x33483c11`.
+The winning loose version-119 portal prototype 2029 supplies
+offset (0,0), scale 100, object flags `0x4000` and neutral
+blit parameters. Its prototype ART `0x30003411`, flags `0x09`
+and difficulty zero are overridden. The stored door means
+frame 0, direction 7 mirrored and requested palette 1. It
+resolves through portal name row 105 to `art/portal/dg2e3au0.art`
+in `Arcanum2.dat`. The resource falls back to its available
+palette zero. The effective pivot is (39,111) and the leaf
+follows the same-tile opening at record 557.
+
+At the northern entrance, wall 201 and portal 202 share
+(406,786). The portal's `0x3348dc11` is the same resource at
+frame 3 and mirrored direction 3, with pivot (−1,62). CE
+`portal.c` verifies frame 3 as the open endpoint for this
+direction. Along X=402, Y=779–785, the seven records 92, 107,
+121, 130, 142, 157 and 169 use wall pieces 9–15. CE
+`build_wall_file_name` resolves those pieces to `w3l/w3a/w3r`
+and `w4l/w4a/w4b/w4r`. Structure 36 selects DG2 from the
+original wall table. All seven resources decode and draw via
+the existing wall pivot, palette and ordering path. Their
+irregular window openings are in the original pixels.
+
+The continuation sector separately rejected scenery record 720
+at byte 82,710. Its extra common bit 26 is CE's `OBJ_F_HP_PTS`,
+another verified INT32. The record spans `82640..82743` and
+stores HP 25 at (434,885), prototype 4038. Skipping those four
+bytes as a typed field restores the adjoining list without
+interpreting hit points or guessing record boundaries.
+
+CE draws roofs after objects in `gamelib_draw_game`. Roofs use a
+separate four-by-four tile grid. CE's `roof_recalc` and
+`wallcheck_recalc` update fades around party/view state, and
+`object_draw` consults roof coverage and translucent wall flags.
+Those rules cannot explain the missing objects at the two audited
+K'na Tha roof-empty sectors. The loss was already present in the
+native import counts, before visibility, sorting or drawing.
+
+### Independent Tulla verification
+
+The winning map list names **Tulla Interior** as map 5031 and
+supplies (507,221). The winning `maps/tulla interior/startloc.txt`
+supplies (477,178). The installed test discovers the entry by
+name, reads the start file through VFS and divides both sets of
+coordinates by 64 to select the bounded (7,2)–(7,3) region.
+Neither selection nor loading uses a Tulla-specific code path.
+
+| Map and sector | Original walls / scenery / portals | Imported walls / scenery / portals | Unsupported | Raster rejected |
+| --- | ---: | ---: | ---: | ---: |
+| Bates Mansion 67108865 | 268 / 81 / 19 | 268 / 81 / 19 | 0 | 0 |
+| K'na Tha 805306374 | 251 / 400 / 2 | 251 / 400 / 2 | 0 | 0 |
+| K'na Tha 872415238 | 373 / 447 / 4 | 373 / 447 / 4 | 0 | 0 |
+| Tulla 134217735 | 356 / 51 / 5 | 331 / 50 / 5 | 26 | 0 |
+| Tulla 201326599 | 695 / 53 / 5 | 650 / 53 / 5 | 45 | 0 |
+
+Both Tulla records have 4,096 submitted-or-culled surface cells,
+including 407 and 1,111 embedded facades. The viewport centered
+on (507,221) submits 119 object rasters, and its native capture
+shows the carpeted crossing, round pillars, banners, planters
+and doors. Tulla's 71 unsupported instances comprise 68 wall
+pieces numbered 41–45, two walls with the unsupported flag combination
+`0x404000` (cover and invulnerability) at records 338 and 339 in sector 201326599, and one
+additive scenery record 65 at (470,157) with subtype flags
+`0xb0` in 134217735. The trace lists each occurrence and
+reason. There are no unknown serialized categories in the
+two decoded Tulla object lists. The separate roof lists also
+contain 91 and 214 non-invalid entries. The native screenshots
+show the interior surfaces and static objects without CE's
+roof pass. Standalone mobiles and roof and wall fading remain
+separate coverage limitations.
+
+The before/after K'na Tha views use the original floor,
+shared camera and fixed animation tick. CPU and Vulkan
+comparisons also cover the reconstructed southern passage,
+the rabbit at 246 ms and Tulla. No matching-camera CE image of
+these positions was available, so the comparison establishes
+agreement with the serialized locations and CE rules above.
+It does not establish original gameplay lighting or visibility
+parity.
+
+The audit adds an asset-free portal boundary test and installed
+regressions for the two K'na Tha lists and metadata-discovered Tulla.
+Formatting, Clippy, debug and release builds, 196 portable tests with
+all features, 36 installed-data checks, 10 tests on each of Vulkan and
+OpenGL, and both 119/119 schematic audits passed. The fixed-time rabbit
+retains the same tile, offset, facing and frame after the surrounding
+objects are restored. The Tulla entrance at the authored start tile
+also matches on CPU and Vulkan.

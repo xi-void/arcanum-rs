@@ -504,6 +504,32 @@ impl InteractiveWorld {
         self.cache.set_dynamic(slot, state)
     }
 
+    /// Start at the current epoch and report whether the viewport needs redraw.
+    pub fn start_walk(&mut self, camera: &Camera, size: (u32, u32), elapsed: Duration) -> bool {
+        if !self.cache.start_walk(elapsed) {
+            return false;
+        }
+        let viewport = Viewport::new(camera.position(), size);
+        let source = self
+            .cache
+            .walk_subject
+            .as_ref()
+            .expect("starting walk subject")
+            .0;
+        self.cache.ordered[source]
+            .visible_at(&viewport, elapsed, self.cache.fidget)
+            .is_some()
+            || self.cache.walk_delay(&viewport, elapsed).is_some()
+    }
+
+    pub fn reset_walk(&mut self) -> bool {
+        self.cache.reset_walk()
+    }
+
+    pub fn update_walk(&mut self, elapsed: Duration) -> Option<WalkStatus> {
+        self.cache.update_walk(elapsed)
+    }
+
     pub fn start_fidget(&mut self, elapsed: Duration) -> bool {
         self.cache.start_fidget(elapsed)
     }

@@ -177,8 +177,12 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
         let category = reader.u32("object category")?;
         let valid = match category {
             WALL => [u32::MAX, 0xf, 0x1f],
-            SCENERY => [0x80c4_7f0f, 1, 5],
-            PORTAL => [0x0004_0f0f, 0, 1],
+            // OBJ_F_HP_PTS (common bit 26) is an INT32. Its instance
+            // value does not select artwork in the static renderer.
+            SCENERY => [0x84c4_7f0f, 1, 5],
+            // Flags and lock difficulty are both serialized as INT32.
+            // Difficulty is framing only in the read-only renderer.
+            PORTAL => [0x0004_0f0f, 0, 3],
             _ => {
                 return Err(reader.error(format!(
                     "unsupported object category {category} at record {index}"
@@ -463,26 +467,44 @@ impl<'a> Reader<'a> {
     }
 
     fn array(&mut self, width: usize) -> Result<(), Error> {
-        if self.present()? {
-            let actual = self.u32("array element width")?;
-            if actual as usize != width {
-                return Err(self.error(format!("array element width {actual}; expected {width}")));
-            }
-            let count = self.count("array element count")?;
-            self.take(4, "opaque array header word")?;
-            self.take_product(count, width, "array elements")?;
-            let words = self.count("array bitmap word count")?;
-            let bitmap = self.take_product(words, 4, "array index bitmap")?;
-            if bitmap
-                .iter()
-                .map(|byte| byte.count_ones() as usize)
-                .sum::<usize>()
-                != count
-            {
-                return Err(self.error("array element count and bitmap disagree"));
-            }
+        self.sparse_array(width).map(|_| ())
+    }
+
+    fn sparse_array(&mut self, width: usize) -> Result<(&'a [u8], &'a [u8]), Error> {
+        if !self.present()? {
+            return Ok((&[], &[]));
         }
-        Ok(())
+        let actual = self.u32("array element width")?;
+        if actual as usize != width {
+            return Err(self.error(format!("array element width {actual}; expected {width}")));
+        }
+        let count = self.count("array element count")?;
+        self.take(4, "opaque array header word")?;
+        let values = self.take_product(count, width, "array elements")?;
+        let words = self.count("array bitmap word count")?;
+        let bitmap = self.take_product(words, 4, "array index bitmap")?;
+        if bitmap
+            .iter()
+            .map(|byte| byte.count_ones() as usize)
+            .sum::<usize>()
+            != count
+        {
+            return Err(self.error("array element count and bitmap disagree"));
+        }
+        Ok((values, bitmap))
+    }
+
+    fn dexterity(&mut self) -> Result<Option<i32>, Error> {
+        let (values, bitmap) = self.sparse_array(4)?;
+        let Some(first) = bitmap.first() else {
+            return Ok(None);
+        };
+        // STAT_DEXTERITY is logical index 1. Index 0 is the only possible
+        // preceding packed element, even if the bitmap has multiple words.
+        Ok((first & 2 != 0).then(|| {
+            let index = usize::from(first & 1) * 4;
+            i32::from_le_bytes(values[index..index + 4].try_into().unwrap())
+        }))
     }
 }
 
@@ -498,6 +520,7 @@ pub struct Mobile {
     pub art: u32,
     pub tile: (u32, u32),
     pub fields: AppearanceFields,
+    pub dexterity: Option<i32>,
 }
 
 pub fn decode_mobile(input: &[u8]) -> Result<Mobile, Error> {
@@ -530,7 +553,12 @@ pub fn decode_mobile(input: &[u8]) -> Result<Mobile, Error> {
             fields.read(&mut reader, index, NPC)?;
         }
     }
-    if (bitmap[2] & !3 != 0 || bitmap[3] != 0 || bitmap[4] != 0) && reader.offset == input.len() {
+    let dexterity = if bitmap[2] & 4 != 0 {
+        reader.dexterity()?
+    } else {
+        None
+    };
+    if (bitmap[2] & !7 != 0 || bitmap[3] != 0 || bitmap[4] != 0) && reader.offset == input.len() {
         return Err(reader.error("missing mobile subtype data"));
     }
     Ok(Mobile {
@@ -543,6 +571,7 @@ pub fn decode_mobile(input: &[u8]) -> Result<Mobile, Error> {
             .tile
             .ok_or_else(|| reader.error("missing mobile location"))?,
         fields: fields.appearance,
+        dexterity,
     })
 }
 
@@ -550,6 +579,20 @@ pub fn decode_npc_prototype_appearance(
     input: &[u8],
     id: SerializedPrototypeId,
 ) -> Result<AppearanceFields, Error> {
+    Ok(npc_prototype_fields(input, id)?.0)
+}
+
+pub fn decode_npc_prototype_dexterity(
+    input: &[u8],
+    id: SerializedPrototypeId,
+) -> Result<Option<i32>, Error> {
+    npc_prototype_fields(input, id)?.1.dexterity()
+}
+
+fn npc_prototype_fields(
+    input: &[u8],
+    id: SerializedPrototypeId,
+) -> Result<(AppearanceFields, Reader<'_>), Error> {
     let mut reader = Reader { input, offset: 0 };
     if input.len() > MAX_PROTOTYPE_BYTES {
         return Err(reader.error("NPC prototype exceeds input limit"));
@@ -566,5 +609,5 @@ pub fn decode_npc_prototype_appearance(
     for index in (0..36).chain([64, 65]) {
         fields.read(&mut reader, index, NPC)?;
     }
-    Ok(fields.appearance)
+    Ok((fields.appearance, reader))
 }

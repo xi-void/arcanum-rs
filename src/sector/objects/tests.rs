@@ -250,3 +250,60 @@ fn mobile_appearance_uses_permanent_identity_and_bounds_checked_fields() {
     record[56] = 3;
     assert!(decode_mobile(&record).is_err());
 }
+
+#[test]
+fn mobile_dexterity_uses_the_sparse_logical_index_and_rejects_truncation() {
+    let mut record = vec![0; 78];
+    record[0..4].copy_from_slice(&119u32.to_le_bytes());
+    record[4] = 1;
+    record[12..16].copy_from_slice(&28344u32.to_le_bytes());
+    record[28] = 2;
+    record[52..56].copy_from_slice(&16u32.to_le_bytes());
+    record[56..58].copy_from_slice(&3u16.to_le_bytes());
+    record[58] = 3;
+    record[66] = 4;
+    record.extend(0xc480_1810u32.to_le_bytes());
+    record.push(1);
+    record.extend(420u32.to_le_bytes());
+    record.extend(814u32.to_le_bytes());
+    record.push(1);
+    for word in [4u32, 2, 0, 9, 17, 1, 3] {
+        record.extend(word.to_le_bytes());
+    }
+    assert_eq!(decode_mobile(&record).unwrap().dexterity, Some(17));
+    let bitmap = record.len() - 4;
+    record[bitmap] = 5; // Indices 0 and 2. Index 1 inherits from the prototype.
+    assert_eq!(decode_mobile(&record).unwrap().dexterity, None);
+    assert!(decode_mobile(&record[..record.len() - 1]).is_err());
+    record[bitmap] = 2; // One set bit cannot describe two serialized entries.
+    assert!(decode_mobile(&record).is_err());
+}
+
+#[test]
+fn portal_lock_difficulty_preserves_the_next_record_boundary() {
+    let mut data = 0x3348_3c11u32.to_le_bytes().to_vec();
+    data.push(1);
+    for word in [395u32, 826, 0x11, 100] {
+        data.extend(word.to_le_bytes());
+    }
+    let portal = instance(PORTAL, [3, 0, 3], &data);
+    let mut bytes = sector_header(0xaa0004);
+    let portal_start = bytes.len();
+    bytes.extend_from_slice(&portal);
+    let wall_start = bytes.len();
+    bytes.extend(wall());
+    bytes.extend(2u32.to_le_bytes());
+    let list = decode(&bytes).unwrap();
+    assert_eq!(list.portals[0].span, portal_start..wall_start);
+    assert_eq!(list.portals[0].fields.portal_flags, Some(0x11));
+    assert_eq!(list.walls[0].span.start, wall_start);
+    assert!(list.walls[0].index > list.portals[0].index);
+
+    let mut truncated = bytes[..wall_start - 1].to_vec();
+    truncated.extend(1u32.to_le_bytes());
+    assert!(decode(&truncated).is_err());
+
+    let mut unknown = bytes;
+    unknown[portal_start + 66] = 5; // An unrelated subtype bit stays unsupported.
+    assert!(decode(&unknown).is_err());
+}

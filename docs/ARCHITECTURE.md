@@ -189,6 +189,9 @@ aptitude formula, script interpreter, slot rules or serialized state.
   surfaces, embedded facades, supported objects and lights. It resolves ART
   and constructs globally positioned rasters. Floor parsing can still
   produce a reported floor-only result when object import is unsupported.
+  Object-list failures retain the floor and report unavailable object
+  counts. Headless inspection can trace accepted rasters to records
+  without retaining that provenance during interactive rendering.
   Missing sectors remain explicit and are distinct from original black ART.
 - [Prefetch](../src/content/world/prefetch.rs) queues demand work ahead of
   speculative work. Its worker owns its preparation state and publishes one
@@ -211,18 +214,26 @@ aptitude formula, script interpreter, slot rules or serialized state.
   prepared frame. Window acquisition, submission and presentation stay in
   the corresponding [viewer](../src/viewer.rs) backend.
 - The viewer uses one monotonic scene clock, or an explicit fixed timestamp
-  for captures. Visible looping flames and finite rabbit fidgets contribute
-  independent next-frame deadlines. Input and visible sector completions
-  may request redraws. Dynamic-light changes update affected light and shadow
+  for captures. Visible looping flames, finite rabbit fidgets and the
+  rabbit walk contribute next-frame deadlines. Input and visible sector
+  completions may request redraws. Dynamic-light changes update affected light and shadow
   state from prepared masks while leaving clock progress and ART frames
   intact. An unchanged view with no visible animation has no periodic
   presentation.
 - Original content support is bounded to the verified floor/facade forms,
-  static object and portal appearances, mobile poses and rabbit fidget,
-  original static and object-owned light masks, the supported dynamic-light
+  static object and portal appearances, mobile poses, the rabbit fidget and
+  walk, original static and object-owned light masks, the supported dynamic-light
   operations and the verified mobile shadow case. Gameplay state, broad
   critter animation, unknown ART and object variants, and generalized shadow
   casting remain outside the rendering contract.
+
+The diagnostic walk applies the original incoming frame offsets to
+world tile coordinates before projection. The sector cache keeps the
+authored route and frames with the source sector. A sampled moving
+draw replaces the standing sprite in the shared depth order. Only
+the moving receiver's point tint and its caster anchor change. CPU
+and GPU consume the same draw and shadow commands. See [original
+walking playback](CRITTER_FIDGET.md#original-walking-playback).
 
 See the [Milestone 50 audit](ARCHITECTURE_AUDIT.md#milestone-50-stabilization-audit)
 and [matched regression workload](PERFORMANCE_BASELINE.md#milestone-50-consolidation).

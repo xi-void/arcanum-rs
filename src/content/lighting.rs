@@ -331,7 +331,11 @@ pub(super) fn nocturnal_active(hour: u8, outdoors: bool) -> bool {
     !outdoors || !(6..18).contains(&hour)
 }
 
-pub(super) fn point(lights: &[&StaticLight], pos: Point, mut color: Rgb) -> Rgb {
+pub(super) fn point<'a>(
+    lights: impl IntoIterator<Item = &'a StaticLight>,
+    pos: Point,
+    mut color: Rgb,
+) -> Rgb {
     for light in lights {
         light.apply(&mut color, (i64::from(pos.0), i64::from(pos.1)));
     }
@@ -804,7 +808,7 @@ mod tests {
         };
         let ambient = [1, 2, 3];
         let lights = [&front, &behind];
-        assert_eq!(point(&lights, (0, 0), ambient), [101, 2, 3]);
+        assert_eq!(point(lights, (0, 0), ambient), [101, 2, 3]);
         let face = WallFace::from_rotation(7);
         assert_eq!(
             face.columns(&lights, (9, 8), (40, 0), 0, 4, ambient),

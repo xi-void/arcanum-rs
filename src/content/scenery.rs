@@ -401,6 +401,7 @@ pub struct RoomOverview {
     pub outside_floor_walls: usize,
     pub outside_floor_scenery: usize,
     pub object_issue: Option<String>,
+    pub object_list_failed: bool,
 }
 
 pub struct CulledPortal {
@@ -591,6 +592,7 @@ fn load_overview_timed(
                 outside_floor_walls: 0,
                 outside_floor_scenery: 0,
                 object_issue: Some(error),
+                object_list_failed: true,
             });
         }
         Err(error) => return Err(error.into()),
@@ -769,6 +771,7 @@ fn load_overview_timed(
         issues,
         culled_portals,
         sector_object_counts: counts,
+        object_list_failed: false,
         object_issue: (partial && framing_only != (0, 0)).then(|| {
             format!(
                 "{} portals lack a stored ART ID or location, {} scenery records lack an instance location",
@@ -821,6 +824,15 @@ pub(super) enum ObjectLight {
     Additive,
 }
 
+pub(super) struct ObjectAuditSource<'a> {
+    pub record: &'a StaticRecord,
+    pub prototype: &'a Source,
+    pub stored_art: Option<u32>,
+    pub rotation: u8,
+    pub frame: u8,
+    pub offset: (i32, i32),
+}
+
 type SharedObject<'a> = (
     DrawOrder,
     SpriteDraw<'a>,
@@ -830,6 +842,37 @@ type SharedObject<'a> = (
 );
 
 impl Room {
+    pub(super) fn audit_sources(&self) -> BTreeMap<usize, ObjectAuditSource<'_>> {
+        self.walls
+            .iter()
+            .map(|wall| ObjectAuditSource {
+                record: &wall.record,
+                prototype: &wall.prototype_source,
+                stored_art: Some(wall.record.art_id),
+                rotation: wall.orientation.rotation,
+                frame: 0,
+                offset: wall.placement.pixel_offset,
+            })
+            .chain(self.portals.iter().map(|portal| ObjectAuditSource {
+                record: &portal.record,
+                prototype: &portal.prototype_source,
+                stored_art: Some(portal.record.art_id),
+                rotation: portal.art.rotation,
+                frame: portal.art.frame,
+                offset: portal.placement.pixel_offset,
+            }))
+            .chain(self.scenery.iter().map(|scenery| ObjectAuditSource {
+                record: &scenery.record,
+                prototype: &scenery.prototype_source,
+                stored_art: scenery.stored_art_id,
+                rotation: scenery.art.rotation,
+                frame: scenery.art.frame,
+                offset: scenery.appearance.offset,
+            }))
+            .map(|source| (source.record.index, source))
+            .collect()
+    }
+
     pub(super) fn shared_objects(&self) -> Option<Vec<SharedObject<'_>>> {
         let center = self.floor.center;
         let mut objects =

@@ -1,5 +1,8 @@
 //! Render-only import of verified base-map mobile records.
 
+mod walk;
+pub(super) use walk::{Step as WalkStep, Walk};
+
 use super::{
     art::{FrameCache, FrameLoop, LoadedFrame, Reflection},
     load_mes, read_bounded,
@@ -33,8 +36,12 @@ const BATES_RECORDS: [&str; 3] = [
 ];
 
 const RABBIT_MAP: &str = "k'na tha";
-const RABBIT_SECTOR: u64 = 805_306_374;
+pub(super) const RABBIT_SECTOR: u64 = 805_306_374;
 const RABBIT_RECORDS: [&str; 1] = ["g_5f490f51_d2d1_4e9d_ad68_07de7a74d824.mob"];
+
+pub(super) fn supports_walk(map: &str, sector: u64) -> bool {
+    map.eq_ignore_ascii_case(RABBIT_MAP) && sector == RABBIT_SECTOR
+}
 
 pub(super) fn supports(map: &str, sector: u64) -> bool {
     !records(map, sector).is_empty()
@@ -145,7 +152,7 @@ impl Pose {
             },
         )?;
         if asset.decoded.rotation_count != 8 {
-            return Err("expected eight stored standing critter directions".into());
+            return Err("expected eight stored critter directions".into());
         }
         Ok(asset)
     }
@@ -155,6 +162,7 @@ impl Pose {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct Caster {
     pub tile: (u32, u32),
     pub anchor: (i32, i32),
@@ -167,6 +175,7 @@ pub(super) struct MobileFrame {
     pub diagnostic: String,
     pub casts_shadow: bool,
     pub fidget: Option<Arc<DirectionalFidget>>,
+    pub walk: Option<Arc<Walk>>,
 }
 
 /// Stored stand frames. Each directional sequence shares the fire clock,
@@ -232,7 +241,11 @@ pub(super) struct MobileShadows {
 
 impl MobileShadows {
     pub fn frame(&self, mask: shadow::Mask) -> Arc<LoadedFrame> {
-        Arc::clone(&self.frames[usize::from(mask.direction) * 7 + usize::from(mask.frame)])
+        Arc::clone(self.asset(mask))
+    }
+
+    pub fn asset(&self, mask: shadow::Mask) -> &Arc<LoadedFrame> {
+        &self.frames[usize::from(mask.direction) * 7 + usize::from(mask.frame)]
     }
 
     fn load(
@@ -271,6 +284,7 @@ pub(super) fn prepare(
     sector: u64,
     reference: (u32, u32),
     lighting: bool,
+    walking: bool,
 ) -> PreparedMobiles {
     let mut result = PreparedMobiles::default();
     let mut prototypes = BTreeMap::new();
@@ -294,6 +308,7 @@ pub(super) fn prepare(
             &path,
             (sector, reference),
             names.as_ref().map(|names| &names.mes),
+            walking && names.is_some(),
         ) {
             Ok(frame) => result.frames.push(frame),
             Err(error) => result.issues.push(format!("{name}: {error}")),
@@ -325,10 +340,11 @@ pub(super) fn prepare(
 fn load(
     vfs: &mut Vfs,
     cache: &mut FrameCache,
-    prototypes: &mut BTreeMap<SerializedPrototypeId, AppearanceFields>,
+    prototypes: &mut BTreeMap<SerializedPrototypeId, (AppearanceFields, Option<i32>)>,
     path: &str,
     (sector, reference): (u64, (u32, u32)),
     monster_names: Option<&Mes>,
+    walking: bool,
 ) -> Result<MobileFrame, Box<dyn Error>> {
     let start = std::time::Instant::now();
     let (_, bytes) = read_bounded(vfs, path, MAX_PROTOTYPE_BYTES)?;
@@ -336,14 +352,17 @@ fn load(
     if super::world::tile_sector_id(mobile.tile) != sector {
         return Err("mobile placement falls outside the audited sector".into());
     }
-    let defaults = match prototypes.entry(mobile.prototype) {
+    let (defaults, dexterity) = match prototypes.entry(mobile.prototype) {
         std::collections::btree_map::Entry::Occupied(entry) => *entry.get(),
         std::collections::btree_map::Entry::Vacant(entry) => {
             let (_, bytes) = read_static_prototype(vfs, mobile.prototype)?;
-            *entry.insert(objects::decode_npc_prototype_appearance(
-                &bytes,
-                mobile.prototype,
-            )?)
+            let appearance = objects::decode_npc_prototype_appearance(&bytes, mobile.prototype)?;
+            let dexterity = if walking {
+                objects::decode_npc_prototype_dexterity(&bytes, mobile.prototype)?
+            } else {
+                None
+            };
+            *entry.insert((appearance, dexterity))
         }
     };
     let f = mobile.fields;
@@ -412,7 +431,7 @@ fn load(
             format!("{diagnostic}; critter flags {critter:#x}/{flags2:#x}, spell flags {spell:#x}");
         let start = Instant::now();
         let sequence = if critter & 0x60 == 0 && spell & 0x10000 == 0 {
-            DirectionalFidget::load(vfs, cache, pose, &asset)
+            DirectionalFidget::load(vfs, cache, pose.clone(), &asset)
         } else {
             Err("stunned, paralyzed or stoned mobile cannot fidget".into())
         };
@@ -437,16 +456,60 @@ fn load(
     } else {
         (None, diagnostic)
     };
+    let caster = Caster {
+        tile: mobile.tile,
+        anchor,
+    };
+    let (walk, diagnostic) = if walking {
+        let start = Instant::now();
+        let movement = if fidget.is_some()
+            && offset == (0, 0)
+            && critter == 0x2008
+            && f.spell_flags.or(defaults.spell_flags).unwrap_or_default() == 0
+            && f.critter_flags2
+                .or(defaults.critter_flags2)
+                .unwrap_or_default()
+                == 0
+        {
+            mobile
+                .dexterity
+                .or(dexterity)
+                .ok_or_else(|| "missing walk Dexterity".into())
+                .and_then(|dx| Walk::load(vfs, cache, &pose, caster, reference, dx))
+        } else {
+            Err("unsupported initial mobile state for walking".into())
+        };
+        match movement {
+            Ok(walk) => {
+                let last = walk.steps.last().unwrap();
+                let count = walk.steps.len() - 1;
+                let frames = walk.frames().count();
+                let pixel_bytes: usize = walk
+                    .frames()
+                    .map(|frame| frame.decoded.frame.pixels.len() * 4)
+                    .sum();
+                let diagnostic = format!(
+                    "{diagnostic}; walk {frames} directional frames ({pixel_bytes} RGBA bytes), {count} steps at {:?}, stops at {:?} in {:?}, prepared in {:?}",
+                    walk.period,
+                    last.tile,
+                    walk.deadline(count),
+                    start.elapsed(),
+                );
+                (Some(Arc::new(walk)), diagnostic)
+            }
+            Err(error) => (None, format!("{diagnostic}; walk unavailable: {error}")),
+        }
+    } else {
+        (None, diagnostic)
+    };
     Ok(MobileFrame {
-        caster: Caster {
-            tile: mobile.tile,
-            anchor,
-        },
+        caster,
         offset,
         asset,
         diagnostic,
         casts_shadow,
         fidget,
+        walk,
     })
 }
 
@@ -512,7 +575,7 @@ fn installed_mobile_poses_and_shadow_bank_share_decoded_resources() {
     let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
     let mut vfs = Vfs::from_game(game, crate::vfs::Policy::Ce).unwrap();
     let mut cache = FrameCache::default();
-    let prepared = prepare(&mut vfs, &mut cache, MAP, SECTOR, (80, 81), true);
+    let prepared = prepare(&mut vfs, &mut cache, MAP, SECTOR, (80, 81), true, false);
     assert_eq!(prepared.frames.len(), 3, "{:?}", prepared.issues);
     let original = &prepared.frames[0];
     let reflected = &prepared.frames[2];
@@ -565,6 +628,7 @@ fn installed_standing_rabbit_supplies_authored_fidget_frames() {
         RABBIT_SECTOR,
         (420, 814),
         true,
+        true,
     );
     let [rabbit] = prepared.frames.as_slice() else {
         panic!("{:?}", prepared.issues)
@@ -574,6 +638,29 @@ fn installed_standing_rabbit_supplies_authored_fidget_frames() {
         ((420, 814), (0, 0))
     );
     assert!(rabbit.casts_shadow);
+    let walk = rabbit.walk.as_ref().expect(&rabbit.diagnostic);
+    assert_eq!(walk.period, Duration::from_millis(41));
+    assert_eq!(walk.deadline(23), Duration::from_millis(943));
+    let first = walk.asset(walk.steps[0]).unwrap();
+    let turned = walk.asset(walk.steps[17]).unwrap();
+    assert_eq!(first.source.virtual_path, "art/monster/bun/bunuwxab.art");
+    assert_eq!(
+        (first.decoded.frame_count, first.decoded.frames_per_second),
+        (6, 8)
+    );
+    assert_eq!(
+        (first.decoded.stored_rotation, first.decoded.stored_palette),
+        (5, 1)
+    );
+    assert_eq!(
+        (first.decoded.frame.hotspot, first.decoded.frame.offset),
+        ((23, 29), (9, 4))
+    );
+    assert_eq!(
+        (turned.decoded.frame.hotspot, turned.decoded.frame.offset),
+        ((13, 26), (-7, 4))
+    );
+    assert_eq!(walk.steps.last().unwrap().tile, (421, 817));
     let poses = rabbit.fidget.as_ref().expect(&rabbit.diagnostic);
     let stand = poses.sequence(None);
     assert_eq!(poses.original_direction, 3);
