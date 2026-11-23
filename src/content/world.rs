@@ -23,6 +23,7 @@ use std::{
 };
 
 mod prefetch;
+pub use lighting::DynamicLightState;
 pub use prefetch::{InteractiveWorld, PrefetchStats};
 
 const MAX_SECTORS: usize = 12;
@@ -133,6 +134,7 @@ pub struct StreamStats {
     /// Entry data in the active and cached light grids, excluding tree overhead.
     pub light_grid_payload_bytes: usize,
     pub draw_lighting_bytes: usize,
+    pub active_dynamic_lights: usize,
     pub art: FrameCacheStats,
 }
 
@@ -145,6 +147,27 @@ pub struct PrepareTiming {
     pub art_decode: Duration,
     pub ordering: Duration,
     pub shading: Duration,
+}
+
+#[derive(Debug, Default)]
+pub struct LightUpdate {
+    pub grid: Duration,
+    pub shading: Duration,
+    pub receivers: usize,
+}
+
+struct DynamicLight {
+    mask: StaticLight,
+    state: DynamicLightState,
+    nocturnal: bool,
+}
+
+fn tile_sector_id((x, y): (u32, u32)) -> u64 {
+    u64::from(x >> 6) | (u64::from(y >> 6) << 26)
+}
+
+fn overlaps(a: RasterBounds, b: RasterBounds) -> bool {
+    a.min.0 < b.max.0 && b.min.0 < a.max.0 && a.min.1 < b.max.1 && b.min.1 < a.max.1
 }
 
 /// One ordered, clipped draw with its shared decoded texture identity.
@@ -377,6 +400,35 @@ fn within_overhang(bounds: RasterBounds, (x, y): (i32, i32)) -> bool {
         && bounds.max.1 <= y + OVERHANG
 }
 
+fn light_receiver(raster: &Raster, reference: (u32, u32)) -> Option<RasterBounds> {
+    let point = |x: i32, y: i32| RasterBounds {
+        min: (i64::from(x), i64::from(y)),
+        max: (i64::from(x) + 1, i64::from(y) + 1),
+    };
+    let (x, y) = raster.anchor;
+    if !raster.key.0 {
+        return Some(RasterBounds {
+            min: (i64::from(x) - 40, i64::from(y) - 39),
+            max: (i64::from(x) + 41, i64::from(y) + 2),
+        });
+    }
+    let tile = (raster.key.1.2, raster.key.1.1);
+    match raster.object_light {
+        ObjectLight::Point => Some(point(x, y)),
+        ObjectLight::Portal(rotation) => {
+            let (tile, dx) = lighting::portal_sample(tile, rotation);
+            let (x, y) = project_world_tile(tile, reference)?;
+            Some(point(x.checked_add(dx)?, y.checked_sub(10)?))
+        }
+        ObjectLight::Wall(rotation) => Some(WallFace::from_rotation(rotation).receiver(
+            project_world_tile(tile, reference)?,
+            raster.bounds.min.0,
+            raster.frame.decoded.frame.width as usize,
+        )),
+        ObjectLight::Unlit | ObjectLight::Additive => None,
+    }
+}
+
 enum PreparedShade {
     Tint(Modulation<'static>),
     Columns(Box<[[u8; 3]]>),
@@ -412,6 +464,9 @@ struct SectorCache {
     ambient: Option<(Ambient, (u32, u32))>,
     lights: LightGrid,
     shades: Vec<PreparedShade>,
+    dynamic: Vec<DynamicLight>,
+    dynamic_grid: LightGrid,
+    hour: u8,
 }
 
 impl SectorCache {
@@ -485,81 +540,181 @@ impl SectorCache {
                 .enumerate()
                 .filter_map(|(index, raster)| raster.animation.is_some().then_some(index)),
         );
-        let Some((ambient, reference)) = self.ambient else {
+        if self.ambient.is_none() {
             return Duration::ZERO;
-        };
+        }
         let start = Instant::now();
         self.lights.clear();
-        self.shades.clear();
-        let mut emitters = Vec::new();
-        // SectorList and light list construction both prepend in CE.
-        for id in required.iter().rev() {
-            let sector = &self.entries[id].0;
-            self.lights.merge(&sector.lights);
-            emitters.extend(sector.emitters.iter().rev());
+        for id in self.active.iter().rev() {
+            self.lights.merge(&self.entries[id].0.lights);
         }
-        let ambient_at = |(x, y): (u32, u32)| {
-            let id = u64::from(x >> 6) | (u64::from(y >> 6) << 26);
-            if self.entries.get(&id).is_some_and(|(sector, _)| {
-                self.active.contains(&id)
-                    && sector.outdoor_rows[(y & 63) as usize] & (1 << (x & 63)) != 0
-            }) {
+        self.refresh_dynamic_grid();
+        self.refresh_shades(None);
+        start.elapsed()
+    }
+
+    fn outdoor(&self, tile: (u32, u32)) -> bool {
+        let id = tile_sector_id(tile);
+        self.active.contains(&id)
+            && self.entries[&id].0.outdoor_rows[(tile.1 & 63) as usize] & (1 << (tile.0 & 63)) != 0
+    }
+
+    fn light_active(&self, source: &DynamicLight) -> bool {
+        source.state.active
+            && self.active.contains(&tile_sector_id(source.state.tile))
+            && self.entries[&tile_sector_id(source.state.tile)]
+                .0
+                .report
+                .source
+                .is_some()
+            && (!source.nocturnal
+                || lighting::nocturnal_active(self.hour, self.outdoor(source.state.tile)))
+    }
+
+    fn refresh_dynamic_grid(&mut self) {
+        // The dynamic grid contains only the footprints of the bounded probes.
+        let mut grid = LightGrid::default();
+        for source in self.dynamic.iter().filter(|light| self.light_active(light)) {
+            grid.insert_light(&source.mask);
+        }
+        self.dynamic_grid = grid;
+    }
+
+    fn set_dynamic(
+        &mut self,
+        slot: usize,
+        state: DynamicLightState,
+    ) -> Result<LightUpdate, &'static str> {
+        let (_, reference) = self.ambient.ok_or("enable world lighting first")?;
+        let source = self.dynamic.get(slot).ok_or("unknown dynamic light slot")?;
+        if state == source.state {
+            return Ok(LightUpdate::default());
+        }
+        let old = self.light_active(source).then(|| source.mask.bounds());
+        let source = &mut self.dynamic[slot];
+        source.mask.place(state, reference)?;
+        source.state = state;
+        let source = &self.dynamic[slot];
+        let new = self.light_active(source).then(|| source.mask.bounds());
+        if old.is_none() && new.is_none() {
+            return Ok(LightUpdate::default());
+        }
+        let start = Instant::now();
+        self.refresh_dynamic_grid();
+        let grid = start.elapsed();
+        let start = Instant::now();
+        let receivers = self.refresh_shades(Some([old, new]));
+        Ok(LightUpdate {
+            grid,
+            shading: start.elapsed(),
+            receivers,
+        })
+    }
+
+    fn refresh_shades(&mut self, dirty: Option<[Option<RasterBounds>; 2]>) -> usize {
+        let Some((ambient, reference)) = self.ambient else {
+            return 0;
+        };
+        let mut shades = std::mem::take(&mut self.shades);
+        let mut emitters = Vec::new();
+        // CE adds object lights at the head of the owning sector's list.
+        for id in self.active.iter().rev() {
+            emitters.extend(
+                self.dynamic
+                    .iter()
+                    .rev()
+                    .filter(|light| {
+                        tile_sector_id(light.state.tile) == *id && self.light_active(light)
+                    })
+                    .map(|light| &light.mask),
+            );
+            emitters.extend(self.entries[id].0.emitters.iter().rev());
+        }
+        let ambient_at = |tile| {
+            if self.outdoor(tile) {
                 ambient.outdoor
             } else {
                 ambient.indoor
             }
         };
-        self.shades.reserve(self.ordered.len());
-        for raster in &self.ordered {
-            let tile = (raster.key.1.2, raster.key.1.1);
-            let base = ambient_at(tile);
-            let shade = if !raster.key.0 {
-                let (x, y) = raster.anchor;
-                PreparedShade::Tint(Modulation::floor(self.lights.surface((x, y - 19), base)))
-            } else {
-                match raster.object_light {
-                    ObjectLight::Point => {
-                        PreparedShade::uniform(lighting::point(&emitters, raster.anchor, base))
-                    }
-                    ObjectLight::Portal(rotation) => {
-                        let (sample_tile, offset) = lighting::portal_sample(tile, rotation);
-                        let color = project_world_tile(sample_tile, reference)
-                            .and_then(|(x, y)| Some((x.checked_add(offset)?, y.checked_sub(10)?)))
-                            .map_or(base, |sample| {
-                                lighting::point(&emitters, sample, ambient_at(sample_tile))
-                            });
-                        PreparedShade::uniform(color)
-                    }
-                    ObjectLight::Wall(rotation) => {
-                        let face = WallFace::from_rotation(rotation);
-                        let base = if face.exterior() {
-                            ambient.outdoor
-                        } else {
-                            base
-                        };
-                        let center =
-                            project_world_tile(tile, reference).expect("prepared wall tile");
-                        let colors = face.columns(
-                            &emitters,
-                            tile,
-                            center,
-                            raster.bounds.min.0,
-                            raster.frame.decoded.frame.width as usize,
-                            base,
-                        );
-                        if colors.iter().all(|&color| color == colors[0]) {
-                            PreparedShade::uniform(colors[0])
-                        } else {
-                            PreparedShade::Columns(colors.into_boxed_slice())
-                        }
-                    }
-                    ObjectLight::Unlit => PreparedShade::Tint(Modulation::Unlit),
-                    ObjectLight::Additive => PreparedShade::Tint(Modulation::Additive),
+        let mut updated = 0;
+        if let Some(dirty) = dirty {
+            for (index, raster) in self.ordered.iter().enumerate() {
+                let receiver = light_receiver(raster, reference);
+                if receiver.is_some_and(|r| dirty.iter().flatten().any(|&d| overlaps(r, d))) {
+                    shades[index] = self.shade(raster, reference, ambient, &emitters, &ambient_at);
+                    updated += 1;
                 }
-            };
-            self.shades.push(shade);
+            }
+        } else {
+            shades.clear();
+            shades.extend(
+                self.ordered
+                    .iter()
+                    .map(|raster| self.shade(raster, reference, ambient, &emitters, &ambient_at)),
+            );
+            updated = shades.len();
         }
-        start.elapsed()
+        self.shades = shades;
+        updated
+    }
+
+    fn shade(
+        &self,
+        raster: &Raster,
+        reference: (u32, u32),
+        ambient: Ambient,
+        emitters: &[&StaticLight],
+        ambient_at: &impl Fn((u32, u32)) -> [u8; 3],
+    ) -> PreparedShade {
+        let tile = (raster.key.1.2, raster.key.1.1);
+        let base = ambient_at(tile);
+        if !raster.key.0 {
+            let (x, y) = raster.anchor;
+            return PreparedShade::Tint(Modulation::floor(self.lights.surface(
+                &self.dynamic_grid,
+                (x, y - 19),
+                base,
+            )));
+        }
+        match raster.object_light {
+            ObjectLight::Point => {
+                PreparedShade::uniform(lighting::point(emitters, raster.anchor, base))
+            }
+            ObjectLight::Portal(rotation) => {
+                let (sample_tile, offset) = lighting::portal_sample(tile, rotation);
+                let color = project_world_tile(sample_tile, reference)
+                    .and_then(|(x, y)| Some((x.checked_add(offset)?, y.checked_sub(10)?)))
+                    .map_or(base, |sample| {
+                        lighting::point(emitters, sample, ambient_at(sample_tile))
+                    });
+                PreparedShade::uniform(color)
+            }
+            ObjectLight::Wall(rotation) => {
+                let face = WallFace::from_rotation(rotation);
+                let base = if face.exterior() {
+                    ambient.outdoor
+                } else {
+                    base
+                };
+                let center = project_world_tile(tile, reference).expect("prepared wall tile");
+                let colors = face.columns(
+                    emitters,
+                    tile,
+                    center,
+                    raster.bounds.min.0,
+                    raster.frame.decoded.frame.width as usize,
+                    base,
+                );
+                if colors.iter().all(|&color| color == colors[0]) {
+                    PreparedShade::uniform(colors[0])
+                } else {
+                    PreparedShade::Columns(colors.into_boxed_slice())
+                }
+            }
+            ObjectLight::Unlit => PreparedShade::Tint(Modulation::Unlit),
+            ObjectLight::Additive => PreparedShade::Tint(Modulation::Additive),
+        }
     }
 
     fn stats(&self, (reads, art): (u64, FrameCacheStats)) -> StreamStats {
@@ -578,7 +733,12 @@ impl SectorCache {
                     .sum::<usize>())
                 * size_of::<Raster>(),
             art,
-            light_samples: self.lights.samples(),
+            light_samples: self.lights.samples() + self.dynamic_grid.samples(),
+            active_dynamic_lights: self
+                .dynamic
+                .iter()
+                .filter(|light| self.light_active(light))
+                .count(),
             draw_lighting_bytes: self.shades.capacity() * size_of::<PreparedShade>()
                 + self
                     .shades
@@ -589,6 +749,7 @@ impl SectorCache {
                     })
                     .sum::<usize>(),
             light_grid_payload_bytes: self.lights.payload_bytes()
+                + self.dynamic_grid.payload_bytes()
                 + self
                     .entries
                     .values()
@@ -699,7 +860,99 @@ impl WorldStream {
         let names = load_mes(&mut self.loader.vfs, "art/light/light.mes")?;
         self.loader.lighting = Some((ambient, names));
         self.cache.ambient = Some((ambient, self.loader.reference));
+        self.cache.hour = hour;
         Ok(self)
+    }
+
+    /// Prepare a diagnostic emitter using the original court brazier or torch.
+    /// The caller chooses the placement independently of the source record.
+    pub fn add_light_probe(
+        &mut self,
+        tile: (u32, u32),
+        nocturnal: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::sector::{LightRecord, objects};
+        if !self.cache.entries.is_empty() || self.cache.dynamic.len() == 2 {
+            return Err("prepare at most two light probes before sector loading".into());
+        }
+        if self.region.camera(tile).is_none() {
+            return Err("light probe is outside the world region".into());
+        }
+        let (ambient, names) = self
+            .loader
+            .lighting
+            .as_ref()
+            .ok_or("light probes require --lighting")?;
+        let (_, bytes) = super::sector::read_base_sector(
+            &mut self.loader.vfs,
+            "k'na tha",
+            Coordinates { x: 12, y: 12 },
+        )?;
+        let scenery = objects::decode(&bytes)?.scenery;
+        let index = if nocturnal { 38 } else { 103 };
+        let fields = scenery
+            .iter()
+            .find(|record| record.index == index && record.prototype.0 == 4040)
+            .ok_or("missing verified probe template scenery")?
+            .fields;
+        let flags = fields.light_flags.ok_or("missing probe light flags")?;
+        if flags & !0x0800_0080 != 0
+            || fields
+                .scenery_flags
+                .is_none_or(|f| (f & 4 != 0) != nocturnal)
+        {
+            return Err("unsupported probe template light state".into());
+        }
+        let offset = (
+            fields.offset_x.ok_or("missing probe X offset")?,
+            fields.offset_y.ok_or("missing probe Y offset")?,
+        );
+        let [blue, green, red, _] = fields
+            .light_color
+            .ok_or("missing probe tint")?
+            .to_le_bytes();
+        let record = LightRecord {
+            owner: 0,
+            tile,
+            offset,
+            flags: 0,
+            art_id: fields.light_art.ok_or("missing probe light ART")?,
+            rgb: [red, green, blue],
+        };
+        let mask = lighting::prepare_dynamic(
+            &mut self.loader.vfs,
+            &mut self.loader.frames,
+            &names.mes,
+            record,
+            self.loader.reference,
+            *ambient,
+        )?;
+        self.cache.dynamic.push(DynamicLight {
+            mask,
+            state: DynamicLightState {
+                tile,
+                offset,
+                active: true,
+            },
+            nocturnal,
+        });
+        self.loader.frames.finish_sector();
+        Ok(())
+    }
+
+    pub fn dynamic_light(&self, slot: usize) -> Option<DynamicLightState> {
+        self.cache.dynamic.get(slot).map(|light| light.state)
+    }
+
+    pub fn set_dynamic_light(
+        &mut self,
+        slot: usize,
+        state: DynamicLightState,
+    ) -> Result<LightUpdate, &'static str> {
+        if self.region.camera(state.tile).is_none() {
+            return Err("light position is outside the world region");
+        }
+        self.cache.set_dynamic(slot, state)
     }
 
     /// Synchronous inspection and controlled benchmarking. The viewer uses into_interactive.
@@ -1028,6 +1281,209 @@ mod tests {
         assert_eq!(cache.animation_delay(&camera, view, tick), None);
         cache.select(&[0, 2], 2, empty);
         assert!(retained.upgrade().is_none());
+    }
+
+    #[test]
+    fn moving_and_toggling_reuses_rasters_and_replaces_the_old_footprint() {
+        use crate::{
+            art::{DecodedFrame, SpriteFrame},
+            content::Source,
+            vfs::{Policy, Storage},
+        };
+        let mount_id = Vfs::new(Policy::Ordered).mount_directory(".").unwrap();
+        let frame = |pixels| {
+            Arc::new(LoadedFrame {
+                source: Source {
+                    virtual_path: "fixture.art".into(),
+                    mount_id,
+                    mount_path: ".".into(),
+                    loose_path: None,
+                    storage: Storage::Loose,
+                    mod_id: None,
+                },
+                decoded: DecodedFrame {
+                    frame: pixels,
+                    frame_count: 1,
+                    rotation_count: 1,
+                    stored_rotation: 0,
+                    stored_palette: 0,
+                    palette_key: [0; 3],
+                    frames_per_second: 8,
+                    action_frame: 0,
+                    ignored_trailing_bytes: 0,
+                },
+                input_bytes: 0,
+            })
+        };
+        let mask = frame(SpriteFrame {
+            width: 1,
+            height: 1,
+            hotspot: (0, 0),
+            offset: (0, 0),
+            pixels: vec![[255; 4]],
+        });
+        let floor = frame(crate::isometric::synthetic_floor());
+        let reference = (63, 32);
+        let from = DynamicLightState {
+            tile: reference,
+            offset: (0, 0),
+            active: true,
+        };
+        let to = DynamicLightState {
+            tile: (64, 32),
+            ..from
+        };
+        let flame_frames: Vec<_> = [100, 200]
+            .into_iter()
+            .map(|red| {
+                frame(SpriteFrame {
+                    width: 1,
+                    height: 1,
+                    hotspot: (0, 0),
+                    offset: (0, 0),
+                    pixels: vec![[red, 10, 10, 255]],
+                })
+            })
+            .collect();
+        let clip = Arc::new(FrameLoop::new(flame_frames, 11).unwrap());
+        let mut flame = Raster::new(
+            (true, (true, reference.1, reference.0, 0, 0, 10, None)),
+            &clip.frames[0],
+            (0, 0),
+        );
+        flame.object_light = ObjectLight::Additive;
+        flame.set_animation(&clip, 0);
+        let sample_time = Duration::from_millis(95);
+        let camera = Camera::rectangle(reference, (0, 0), (128, 64)).unwrap();
+        let size = (64, 64);
+        let check_animation = |cache: &SectorCache| {
+            assert_eq!(
+                cache.animation_delay(&camera, size, sample_time),
+                Some(Duration::from_millis(85))
+            );
+            let current = cache
+                .visible_assets(&camera, size, sample_time)
+                .find(|draw| matches!(draw.modulation, Modulation::Additive))
+                .unwrap();
+            assert!(Arc::ptr_eq(current.asset, &clip.frames[1]));
+        };
+        let mut cache = SectorCache {
+            ambient: Some((
+                Ambient {
+                    indoor: [10; 3],
+                    outdoor: [10; 3],
+                },
+                reference,
+            )),
+            hour: 12,
+            ..Default::default()
+        };
+        cache.dynamic.push(DynamicLight {
+            mask: StaticLight::new(
+                mask.clone(),
+                from.tile,
+                from.offset,
+                reference,
+                [60, 20, 10],
+                false,
+            )
+            .unwrap(),
+            state: from,
+            nocturnal: false,
+        });
+        cache.select(&[0, 1], 2, |id| {
+            let mut sector = CachedSector::missing(id, String::new());
+            sector.report.source = Some("synthetic base sector".into());
+            let tile = (reference.0 + id as u32, reference.1);
+            let (x, y) = project_world_tile(tile, reference).unwrap();
+            sector.draws.push(Raster::new(
+                (false, (false, tile.1, tile.0, 0, 0, 0, None)),
+                &floor,
+                (x, y + 19),
+            ));
+            if id == 0 {
+                sector.draws.push(flame.clone());
+                sector.lights.insert_light(
+                    &StaticLight::new(
+                        mask.clone(),
+                        from.tile,
+                        from.offset,
+                        reference,
+                        [200, 30, 20],
+                        false,
+                    )
+                    .unwrap(),
+                );
+                sector.outdoor_rows[32] = 1 << 63;
+            }
+            sector
+        });
+        let original_geometry = cache.ordered.as_ptr();
+        let centers = |cache: &SectorCache| {
+            cache
+                .shades
+                .iter()
+                .zip(&cache.ordered)
+                .filter(|(_, raster)| !raster.key.0)
+                .map(|(shade, _)| {
+                    let Modulation::Floor(nodes) = shade.modulation() else {
+                        assert!(matches!(
+                            shade.modulation(),
+                            Modulation::Uniform([10, 10, 10])
+                        ));
+                        return [10; 3];
+                    };
+                    nodes[4]
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(centers(&cache), [[255, 60, 40], [10; 3]]);
+        check_animation(&cache);
+        let moved = cache.set_dynamic(0, to).unwrap();
+        check_animation(&cache);
+        assert_eq!(moved.receivers, 2);
+        assert_eq!(centers(&cache), [[210, 40, 30], [70, 30, 20]]);
+        assert_eq!(cache.ordered.as_ptr(), original_geometry);
+        let moved_shades = centers(&cache);
+        cache.refresh_shades(None);
+        assert_eq!(centers(&cache), moved_shades);
+        assert_eq!(cache.set_dynamic(0, to).unwrap().receivers, 0);
+
+        let mut camera = Camera::rectangle(reference, (0, 0), (128, 64)).unwrap();
+        let size = (64, 64);
+        let snapshot = |c: &Camera| {
+            let mut pixels = vec![[0; 3]; 64 * 64];
+            crate::compositor::blit_modulated(
+                &mut pixels,
+                size,
+                64,
+                cache.visible_modulated(c, size, Duration::ZERO),
+            )
+            .unwrap();
+            pixels
+        };
+        let original = snapshot(&camera);
+        camera.pan((-24, 12), size);
+        assert_ne!(snapshot(&camera), original);
+        camera.reset(size);
+        assert_eq!(snapshot(&camera), original);
+
+        cache
+            .set_dynamic(
+                0,
+                DynamicLightState {
+                    active: false,
+                    ..to
+                },
+            )
+            .unwrap();
+        assert_eq!(centers(&cache), [[210, 40, 30], [10; 3]]);
+        check_animation(&cache);
+        cache.dynamic[0].nocturnal = true;
+        assert_eq!(cache.set_dynamic(0, from).unwrap().receivers, 0);
+        assert_eq!(centers(&cache), [[210, 40, 30], [10; 3]]);
+        cache.set_dynamic(0, to).unwrap(); // Indoors stays eligible by day.
+        assert_eq!(centers(&cache), moved_shades);
     }
 
     #[test]

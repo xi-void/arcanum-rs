@@ -7,6 +7,7 @@ use super::{
 };
 use crate::{
     art::SpriteFrame,
+    camera::RasterBounds,
     isometric::project_world_tile,
     mes::Mes,
     resource_path::normalize,
@@ -140,8 +141,8 @@ impl LightGrid {
         self.0.len() * (size_of::<Point>() + size_of::<Sample>())
     }
 
-    pub fn surface(&self, (x, y): Point, ambient: Rgb) -> [Rgb; 9] {
-        if self.0.is_empty() {
+    pub fn surface(&self, dynamic: &Self, (x, y): Point, ambient: Rgb) -> [Rgb; 9] {
+        if self.0.is_empty() && dynamic.0.is_empty() {
             return [ambient; 9];
         }
         std::array::from_fn(|i| {
@@ -150,16 +151,28 @@ impl LightGrid {
                 x.checked_add((i % 3) as i32 * 40 - 40),
                 y.checked_add((i / 3) as i32 * 20 - 20),
             );
-            if let (Some(x), Some(y)) = point
-                && let Some(sample) = self.0.get(&(x, y))
-            {
-                add(&mut color, sample.add);
-                for (channel, shade) in color.iter_mut().zip(sample.subtract) {
+            if let (Some(x), Some(y)) = point {
+                let point = (x, y);
+                let fixed = self.0.get(&point).copied().unwrap_or_default();
+                let moving = dynamic.0.get(&point).copied().unwrap_or_default();
+                add(&mut color, fixed.add);
+                add(&mut color, moving.add);
+                for (channel, shade) in color.iter_mut().zip(fixed.subtract) {
                     *channel = channel.saturating_sub(shade);
                 }
             }
             color
         })
+    }
+
+    pub fn insert_light(&mut self, light: &StaticLight) {
+        self.insert_mask(
+            &light.art.decoded.frame,
+            light.art.decoded.palette_key,
+            light.origin,
+            light.tint,
+            light.dark,
+        );
     }
 
     fn insert_mask(
@@ -217,6 +230,44 @@ pub(super) struct StaticLight {
 }
 
 impl StaticLight {
+    pub fn new(
+        art: Arc<LoadedFrame>,
+        tile: (u32, u32),
+        offset: Point,
+        reference: (u32, u32),
+        tint: Rgb,
+        dark: bool,
+    ) -> Result<Self, &'static str> {
+        let origin = mask_origin(tile, offset, reference, &art.decoded.frame)?;
+        Ok(Self {
+            tile,
+            origin,
+            art,
+            tint,
+            dark,
+        })
+    }
+
+    pub fn bounds(&self) -> RasterBounds {
+        let (x, y) = (i64::from(self.origin.0), i64::from(self.origin.1));
+        let mask = &self.art.decoded.frame;
+        RasterBounds {
+            min: (x, y),
+            max: (x + i64::from(mask.width), y + i64::from(mask.height)),
+        }
+    }
+
+    pub fn place(
+        &mut self,
+        state: DynamicLightState,
+        reference: (u32, u32),
+    ) -> Result<(), &'static str> {
+        let origin = mask_origin(state.tile, state.offset, reference, &self.art.decoded.frame)?;
+        self.tile = state.tile;
+        self.origin = origin;
+        Ok(())
+    }
+
     fn intersects(&self, left: i64, top: i64, right: i64, bottom: i64) -> bool {
         let (x, y) = (i64::from(self.origin.0), i64::from(self.origin.1));
         let frame = &self.art.decoded.frame;
@@ -251,6 +302,18 @@ impl StaticLight {
             }
         }
     }
+}
+
+/// World-space position and switch state of a prepared primary light.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DynamicLightState {
+    pub tile: (u32, u32),
+    pub offset: (i32, i32),
+    pub active: bool,
+}
+
+pub(super) fn nocturnal_active(hour: u8, outdoors: bool) -> bool {
+    !outdoors || !(6..18).contains(&hour)
 }
 
 pub(super) fn point(lights: &[&StaticLight], pos: Point, mut color: Rgb) -> Rgb {
@@ -301,6 +364,29 @@ impl WallFace {
         }
     }
 
+    fn sampling(self, center: Point, left: i64) -> (i64, i64) {
+        let (dx, dy, direction) = match self {
+            Self::NorthWest => (0, -20, 1),
+            Self::NorthEast => (0, 19, -1),
+            Self::SouthEast => (-40, 0, 1),
+            Self::SouthWest => (-40, 0, -1),
+        };
+        (
+            i64::from(center.1) + dy + (left - i64::from(center.0) - dx) * direction,
+            direction,
+        )
+    }
+
+    pub fn receiver(self, center: Point, left: i64, width: usize) -> RasterBounds {
+        let (start_y, direction) = self.sampling(center, left);
+        let padded_width = width.next_multiple_of(2);
+        let end_y = start_y + (padded_width / 2 - 1) as i64 * direction;
+        RasterBounds {
+            min: (left, start_y.min(end_y)),
+            max: (left + padded_width as i64, start_y.max(end_y) + 1),
+        }
+    }
+
     pub fn columns(
         self,
         lights: &[&StaticLight],
@@ -312,13 +398,7 @@ impl WallFace {
     ) -> Vec<Rgb> {
         // CE's wall plane is a half-slope line beginning at the raster's
         // effective left edge, including the directional/mirrored hotspot.
-        let (dx, dy, direction) = match self {
-            Self::NorthWest => (0, -20, 1),
-            Self::NorthEast => (0, 19, -1),
-            Self::SouthEast => (-40, 0, 1),
-            Self::SouthWest => (-40, 0, -1),
-        };
-        let start_y = i64::from(center.1) + dy + (left - i64::from(center.0) - dx) * direction;
+        let (start_y, direction) = self.sampling(center, left);
         let padded_width = width.next_multiple_of(2);
         let mut colors = vec![ambient; padded_width];
         let end_y = start_y + (padded_width / 2 - 1) as i64 * direction;
@@ -447,15 +527,39 @@ pub(super) fn prepare(
 
 impl LightImport {
     fn insert(&mut self, light: StaticLight) {
-        self.grid.insert_mask(
-            &light.art.decoded.frame,
-            light.art.decoded.palette_key,
-            light.origin,
-            light.tint,
-            light.dark,
-        );
+        self.grid.insert_light(&light);
         self.sources.push(light);
     }
+}
+
+pub(super) fn prepare_dynamic(
+    vfs: &mut vfs::Vfs,
+    frames: &mut FrameCache,
+    names: &Mes,
+    record: LightRecord,
+    reference: (u32, u32),
+    ambient: Ambient,
+) -> Result<StaticLight, Box<dyn StdError>> {
+    let sector = Coordinates {
+        x: record.tile.0 >> 6,
+        y: record.tile.1 >> 6,
+    };
+    let mask = import_one(
+        vfs,
+        frames,
+        names,
+        record,
+        PlacementContext {
+            sector,
+            reference,
+            ambient,
+        },
+    )?
+    .ok_or("expected a valid dynamic light mask")?;
+    if mask.art.decoded.frame_count != 1 {
+        return Err("animated dynamic masks are outside the positional preview".into());
+    }
+    Ok(mask)
 }
 
 fn import_one(
@@ -485,8 +589,6 @@ fn import_one(
     if (record.tile.0 >> 6, record.tile.1 >> 6) != (sector.x, sector.y) {
         return Err("light location does not belong to its base sector".into());
     }
-    let (x, y) =
-        project_world_tile(record.tile, reference).ok_or("light tile projection overflow")?;
     let name = names
         .get(((record.art_id >> 19) & 511) as i32)
         .ok_or("missing light ART name")?;
@@ -495,7 +597,28 @@ fn import_one(
         return Err("light ART name must be a basename".into());
     }
     let art = frames.load(vfs, &format!("art/light/{name}.art"), 0, 0, false)?;
-    let mask = &art.decoded.frame;
+    let tint = match record.flags & 0x18 {
+        8 => ambient.indoor,
+        16 => ambient.outdoor,
+        _ => record.rgb,
+    };
+    Ok(Some(StaticLight::new(
+        art,
+        record.tile,
+        record.offset,
+        reference,
+        tint,
+        record.flags & 2 != 0,
+    )?))
+}
+
+fn mask_origin(
+    tile: (u32, u32),
+    offset: Point,
+    reference: (u32, u32),
+    mask: &SpriteFrame,
+) -> Result<Point, &'static str> {
+    let (x, y) = project_world_tile(tile, reference).ok_or("light tile projection overflow")?;
     let bounds = |origin: i32, offset: i32, hot: i32, size: u32| {
         let local = i64::from(offset) - i64::from(hot);
         let end = local + i64::from(size);
@@ -508,25 +631,22 @@ fn import_one(
             .and_then(|left| i32::try_from(left as i64 + i64::from(size) + 40).map(|_| left))
             .map_err(|_| "light mask bounds overflow")
     };
-    let left = bounds(x, record.offset.0, mask.hotspot.0, mask.width)?;
-    let top = bounds(y, record.offset.1, mask.hotspot.1, mask.height)?;
-    let tint = match record.flags & 0x18 {
-        8 => ambient.indoor,
-        16 => ambient.outdoor,
-        _ => record.rgb,
-    };
-    Ok(Some(StaticLight {
-        tile: record.tile,
-        origin: (left, top),
-        art,
-        tint,
-        dark: record.flags & 2 != 0,
-    }))
+    let left = bounds(x, offset.0, mask.hotspot.0, mask.width)?;
+    let top = bounds(y, offset.1, mask.hotspot.1, mask.height)?;
+    Ok((left, top))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nocturnal_rule_uses_six_and_eighteen_with_indoor_exemption() {
+        for hour in 0..24 {
+            assert!(nocturnal_active(hour, false));
+            assert_eq!(nocturnal_active(hour, true), !(6..18).contains(&hour));
+        }
+    }
 
     #[test]
     fn ambient_interpolates_per_channel_with_truncated_signed_steps() {
@@ -571,16 +691,28 @@ mod tests {
         let mut merged = LightGrid::default();
         merged.merge(&west);
         merged.merge(&east);
-        assert_eq!(merged.surface((0, 0), ambient)[4], [255, 180, 140]);
+        assert_eq!(
+            merged.surface(&LightGrid::default(), (0, 0), ambient)[4],
+            [255, 180, 140]
+        );
         merged.clear();
         merged.merge(&east);
         merged.merge(&west);
-        assert_eq!(merged.surface((0, 0), ambient)[4], [255, 180, 140]);
+        assert_eq!(
+            merged.surface(&LightGrid::default(), (0, 0), ambient)[4],
+            [255, 180, 140]
+        );
         merged.clear();
         merged.merge(&east);
         drop(west);
-        assert_eq!(merged.surface((0, 0), ambient)[4], [255, 140, 140]);
-        assert_eq!(merged.surface((-80, -40), ambient), [ambient; 9]);
+        assert_eq!(
+            merged.surface(&LightGrid::default(), (0, 0), ambient)[4],
+            [255, 140, 140]
+        );
+        assert_eq!(
+            merged.surface(&LightGrid::default(), (-80, -40), ambient),
+            [ambient; 9]
+        );
     }
 
     #[test]
