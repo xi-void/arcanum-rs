@@ -5,6 +5,7 @@ pub mod effects;
 pub mod items;
 pub mod schematics;
 pub mod sector;
+pub mod wall;
 
 use crate::mes::{self, Encoding, Mes};
 use crate::mod_id::ModId;

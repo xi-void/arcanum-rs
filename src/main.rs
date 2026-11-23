@@ -45,6 +45,8 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] art sector-audit <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art sector-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector-facade <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
+  arcanum-rs [--ordered] art sector-wall-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs [--ordered] art sector-wall <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs art floor-demo                    (requires --features windowed)
   arcanum-rs [--ordered] art floor <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
@@ -110,9 +112,15 @@ fn main() -> ExitCode {
         (Some("art"), [_, action, game, options @ ..]) if action == "sector-audit" => {
             report_sector_audit(Path::new(game), options, policy)
         }
+        (Some("art"), [_, action, game, options @ ..]) if action == "sector-wall-inspect" => {
+            inspect_demo_wall(Path::new(game), options, policy)
+        }
         #[cfg(feature = "windowed")]
         (Some("art"), [_, action, game, options @ ..])
-            if action == "sector" || action == "sector-wide" || action == "sector-facade" =>
+            if action == "sector"
+                || action == "sector-wide"
+                || action == "sector-facade"
+                || action == "sector-wall" =>
         {
             show_sector_floor(Path::new(game), options, policy, action)
         }
@@ -154,6 +162,7 @@ fn main() -> ExitCode {
                 || action == "floor-demo"
                 || action == "sector"
                 || action == "sector-wide"
+                || action == "sector-wall"
                 || action == "sector-facade" =>
         {
             Err("sprite presentation requires a build with --features windowed".into())
@@ -881,7 +890,20 @@ fn show_sector_floor(
     };
 
     let mut vfs = inspection_vfs(game, options, policy)?;
-    let patch = if action == "sector-facade" {
+    let wall = if action == "sector-wall" {
+        Some(load_demo_wall(&mut vfs)?)
+    } else {
+        None
+    };
+    let patch = if wall.is_some() {
+        load_facade_region(
+            &mut vfs,
+            DEMO_MAP,
+            DEMO_SECTOR,
+            content::wall::DEMO_ORIGIN,
+            WIDE_SIDE,
+        )?
+    } else if action == "sector-facade" {
         load_facade_region(&mut vfs, DEMO_MAP, DEMO_SECTOR, FACADE_ORIGIN, WIDE_SIDE)?
     } else if action == "sector-wide" {
         load_region(&mut vfs, DEMO_MAP, DEMO_SECTOR, WIDE_ORIGIN, WIDE_SIDE)?
@@ -929,8 +951,7 @@ fn show_sector_floor(
             )?;
         }
     }
-    drop(out);
-    let layers: Vec<_> = patch
+    let mut layers: Vec<_> = patch
         .draws()
         .map(|draw| viewer::Layer {
             frame: draw.frame,
@@ -938,8 +959,21 @@ fn show_sector_floor(
             relative_anchor: (draw.anchor.0 as i16, draw.anchor.1 as i16),
         })
         .collect();
+    if let Some(wall) = &wall {
+        report_wall(&mut out, wall)?;
+        let draw = wall
+            .draw(patch.center)
+            .ok_or("wall anchor exceeds the drawable range")?;
+        layers.push(viewer::Layer {
+            frame: draw.frame,
+            relative_anchor: (i16::try_from(draw.anchor.0)?, i16::try_from(draw.anchor.1)?),
+        });
+    }
+    drop(out);
     Ok(viewer::show_layers(
-        if action == "sector-facade" {
+        if wall.is_some() {
+            "Arcanum-RS | Bates Mansion wall"
+        } else if action == "sector-facade" {
             "Arcanum-RS | Bates Mansion facade"
         } else {
             "Arcanum-RS | Bates Mansion floor"
@@ -947,6 +981,84 @@ fn show_sector_floor(
         .into(),
         &layers,
     )?)
+}
+
+fn load_demo_wall(vfs: &mut Vfs) -> Result<content::wall::ImportedWall, Box<dyn Error>> {
+    let sector = content::sector::DEMO_SECTOR;
+    content::wall::load(
+        vfs,
+        content::sector::DEMO_MAP,
+        sector,
+        content::wall::DEMO_RECORD,
+    )
+}
+
+fn inspect_demo_wall(
+    game: &Path,
+    options: &[OsString],
+    policy: Policy,
+) -> Result<(), Box<dyn Error>> {
+    let mut vfs = inspection_vfs(game, options, policy)?;
+    report_wall(&mut io::stdout().lock(), &load_demo_wall(&mut vfs)?)
+}
+
+fn report_wall(
+    out: &mut impl Write,
+    wall: &content::wall::ImportedWall,
+) -> Result<(), Box<dyn Error>> {
+    let (walls, portals, scenery) = wall.object_counts;
+    let record = &wall.record;
+    writeln!(
+        out,
+        "Sector: {} from {}",
+        wall.sector_source.virtual_path, wall.sector_source
+    )?;
+    writeln!(
+        out,
+        "Object list byte {}: {walls} walls, {portals} portals, {scenery} scenery records",
+        wall.object_list_offset
+    )?;
+    writeln!(
+        out,
+        "Record {}: Wall (type 0), bytes {:?}",
+        record.index, record.span
+    )?;
+    writeln!(
+        out,
+        "Current ART: {:#010x} {:?}",
+        record.art_id,
+        arcanum_rs::wall::WallArtId(record.art_id).fields()?
+    )?;
+    writeln!(
+        out,
+        "World tile {:?}, serialized tile {:?}, offsets {:?}, scale {}%",
+        wall.placement.tile, record.stored_tile, wall.placement.pixel_offset, wall.scale
+    )?;
+    writeln!(
+        out,
+        "Object flags {:#x}, wall flags {:#x}; stored overrides {:?}",
+        wall.flags, wall.wall_flags, record.fields
+    )?;
+    writeln!(
+        out,
+        "Prototype {}: {} from {}",
+        record.prototype.0, wall.prototype_source.virtual_path, wall.prototype_source
+    )?;
+    writeln!(
+        out,
+        "Structure table from {}; wall names from {}",
+        wall.structure_source, wall.names_source
+    )?;
+    report_art(out, &wall.artwork, 0)?;
+    writeln!(
+        out,
+        "Effective wall pivot: {:?}; original palette slot zero, without lighting",
+        (
+            i64::from(wall.artwork.decoded.frame.hotspot.0) - 40,
+            i64::from(wall.artwork.decoded.frame.hotspot.1) + 20
+        )
+    )?;
+    Ok(())
 }
 
 fn report_sector_audit(

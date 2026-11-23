@@ -333,3 +333,102 @@ fn bates_facades_match_independent_unlit_compositions() {
         assert_eq!(hash, expected_rgb, "facade {number}");
     }
 }
+
+#[test]
+#[ignore = "requires installed Arcanum data"]
+fn bates_wall_uses_inherited_appearance_and_matches_the_independent_scene() {
+    use arcanum_rs::{
+        compositor::sprite_origin,
+        content::{
+            sector::{WIDE_SIDE, load_facade_region},
+            wall,
+        },
+        prototype::SerializedPrototypeId,
+    };
+
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    let wall = wall::load(&mut vfs, DEMO_MAP, DEMO_SECTOR, wall::DEMO_RECORD).unwrap();
+    assert_eq!(
+        wall.sector_source.mount_path,
+        game.join("modules/Arcanum.dat").canonicalize().unwrap()
+    );
+    assert_eq!(wall.object_list_offset, 18428);
+    assert_eq!(wall.object_counts, (268, 19, 81));
+    assert_eq!(wall.record.span, 23024..23107);
+    assert_eq!(wall.record.prototype, SerializedPrototypeId(1021));
+    assert_eq!(wall.record.art_id, 0x1030_0900);
+    assert_eq!(wall.record.fields.scale, None);
+    assert_eq!(wall.record.fields.offset_x, None);
+    assert_eq!(wall.placement.tile, (98, 79));
+    assert_eq!(wall.placement.pixel_offset, (0, 0));
+    assert_eq!(wall.scale, 100);
+    assert_eq!(wall.flags, 0x4000);
+    assert_eq!(
+        wall.prototype_source.virtual_path,
+        "proto/001021 - wall.pro"
+    );
+    assert_eq!(wall.artwork.source.virtual_path, "art/wall/in4bseu1.art");
+    assert_eq!(
+        wall.artwork.source.mount_path,
+        game.join("Arcanum2.dat").canonicalize().unwrap()
+    );
+    assert_eq!(wall.artwork.decoded.frame_count, 1);
+    let frame = &wall.artwork.decoded.frame;
+    assert_eq!(
+        (frame.width, frame.height, frame.hotspot, frame.offset),
+        (40, 154, (39, 132), (0, 0))
+    );
+    assert_eq!(
+        frame.pixels.iter().filter(|pixel| pixel[3] != 0).count(),
+        5368
+    );
+
+    let patch = load_facade_region(
+        &mut vfs,
+        DEMO_MAP,
+        DEMO_SECTOR,
+        wall::DEMO_ORIGIN,
+        WIDE_SIDE,
+    )
+    .unwrap();
+    assert_eq!(patch.center, (102, 82));
+    assert_eq!(
+        patch
+            .tiles()
+            .iter()
+            .filter(|tile| tile.facade.is_some())
+            .count(),
+        15
+    );
+    let wall_draw = wall.draw(patch.center).unwrap();
+    assert_eq!(wall_draw.anchor, (80, -160));
+    assert_eq!(sprite_origin(frame, wall_draw.anchor), (41, -292));
+    let draws = |center: (i32, i32)| {
+        patch
+            .draws()
+            .chain([wall_draw])
+            .map(move |draw| SpriteDraw {
+                frame: draw.frame,
+                anchor: (draw.anchor.0 + center.0, draw.anchor.1 + center.1),
+            })
+    };
+    let mut full = vec![[32, 43, 58]; 800 * 600];
+    blit_ordered(&mut full, (800, 600), 800, draws((400, 300))).unwrap();
+    let hash = full
+        .as_flattened()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, &byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+    // Python reference independently decoded source indices and applied CE's
+    // 78x40 tile origin, rotation-one hotspot correction and object pass.
+    assert_eq!(hash, 0x8c25_7375_1663_9a09);
+
+    let mut cropped = vec![[32, 43, 58]; 400 * 400];
+    blit_ordered(&mut cropped, (400, 400), 400, draws((200, 200))).unwrap();
+    for (row, actual) in cropped.chunks(400).enumerate() {
+        let start = (row + 100) * 800 + 200;
+        assert_eq!(actual, &full[start..start + 400]);
+    }
+}

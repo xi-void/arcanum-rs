@@ -1,6 +1,7 @@
 //! Base sector floor data and bounded legacy tile references.
 
 use crate::mes::Mes;
+pub mod objects;
 use std::fmt;
 
 pub const SIDE: usize = 64;

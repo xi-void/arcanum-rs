@@ -91,8 +91,10 @@ pub fn decode_frame(input: &[u8], index: usize) -> Result<DecodedFrame, Error> {
             "only 8-bit palette indices are supported",
         ));
     }
-    if word(header, 12) == 0 || [16, 20, 24].into_iter().any(|pos| word(header, pos) != 0) {
-        return Err(Error::Unsupported("expected a palette in slot 0 only"));
+    if word(header, 12) == 0 || [20, 24].into_iter().any(|pos| word(header, pos) != 0) {
+        return Err(Error::Unsupported(
+            "expected palette slot zero with optional slot one",
+        ));
     }
     let count = usize::try_from(word(header, 32))
         .ok()
@@ -103,7 +105,10 @@ pub fn decode_frame(input: &[u8], index: usize) -> Result<DecodedFrame, Error> {
     }
 
     let palette = section(input, HEADER_BYTES, PALETTE_BYTES, "palette")?;
-    let table_start = HEADER_BYTES + PALETTE_BYTES;
+    let mut table_start = HEADER_BYTES + PALETTE_BYTES;
+    if word(header, 16) != 0 {
+        table_start += section(input, table_start, PALETTE_BYTES, "palette slot one")?.len();
+    }
     let table = section(input, table_start, count * FRAME_BYTES, "frame table")?;
     let mut payload_offset = table_start + table.len();
     let mut selected = None;

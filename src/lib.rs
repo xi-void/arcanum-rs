@@ -14,3 +14,4 @@ pub mod resource_path;
 pub mod runtime;
 pub mod sector;
 pub mod vfs;
+pub mod wall;

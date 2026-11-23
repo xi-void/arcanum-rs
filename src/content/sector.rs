@@ -226,6 +226,18 @@ fn load_floor_and_names(
     map: &str,
     coordinates: Coordinates,
 ) -> Result<(Source, sector::Floor, LoadedMes), Box<dyn Error>> {
+    let (source, bytes) = read_base_sector(vfs, map, coordinates)?;
+    let floor = sector::decode_floor(&bytes)
+        .map_err(|error| format!("{} from {source}: {error}", source.virtual_path))?;
+    let names = load_mes(vfs, "art/tile/tilename.mes")?;
+    Ok((source, floor, names))
+}
+
+pub(super) fn read_base_sector(
+    vfs: &mut Vfs,
+    map: &str,
+    coordinates: Coordinates,
+) -> Result<(Source, Vec<u8>), Box<dyn Error>> {
     if map.is_empty() || matches!(map, "." | "..") || map.contains(['/', '\\']) {
         return Err("expected a single map directory name".into());
     }
@@ -233,12 +245,7 @@ fn load_floor_and_names(
         .id()
         .ok_or("sector coordinates exceed 26 bits")?;
     let path = format!("maps/{map}/{id}.sec");
-    let (source, bytes) = read_bounded(vfs, &path, sector::MAX_INPUT_BYTES)?;
-    let floor = sector::decode_floor(&bytes)
-        .map_err(|error| format!("{} from {source}: {error}", source.virtual_path))?;
-    drop(bytes);
-    let names = load_mes(vfs, "art/tile/tilename.mes")?;
-    Ok((source, floor, names))
+    Ok(read_bounded(vfs, &path, sector::MAX_INPUT_BYTES)?)
 }
 
 // Floor rectangles keep their origin. A mirrored frame reverses only the
