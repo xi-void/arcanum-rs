@@ -803,3 +803,97 @@ fn original_mobile_shadow_tracks_probe_without_reloading_art() {
         (cold.sector_reads, cold.vfs_reads, cold.art.decodes)
     );
 }
+
+#[test]
+#[ignore = "requires installed Arcanum data and a hardware GPU adapter"]
+fn original_rabbit_fidget_is_finite_pivoted_and_matches_cpu() {
+    use crate::{
+        content::world::{SectorRegion, WorldStream},
+        sector::Coordinates,
+    };
+    let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+    let backend = test_backend();
+    let context = instance(backend);
+    let adapter = hardware_adapter(&context, backend, None).unwrap();
+    let mut gpu = Compositor::new(&adapter, TextureFormat::Rgba8Unorm, false).unwrap();
+    let sector = Coordinates { x: 6, y: 12 };
+    let region = SectorRegion {
+        first: sector,
+        last: sector,
+    };
+    let center = (420, 814);
+    let size = (1280, 720);
+    let mut camera = region.camera(center).unwrap();
+    camera.resize(size);
+    let mut world = WorldStream::new(
+        Vfs::from_game(&game, Policy::Ce).unwrap(),
+        "k'na tha".into(),
+        region,
+        center,
+    )
+    .unwrap()
+    .with_lighting(12)
+    .unwrap();
+    world.add_light_probe((419, 814), false).unwrap();
+    let (standing, _) = compare_world_tick(&mut gpu, &mut world, &camera, size, Duration::ZERO);
+    assert_eq!(world.animation_delay(&camera, size, Duration::ZERO), None);
+    assert!(world.start_fidget(Duration::ZERO));
+    let before = world.stats();
+    let tick = Duration::from_millis(300);
+    let (fidget, _) = compare_world_tick(&mut gpu, &mut world, &camera, size, tick);
+    assert_ne!(fidget, standing);
+    let anchor = (
+        size.0 as i32 / 2 - camera.position().0,
+        size.1 as i32 / 2 - camera.position().1,
+    );
+    {
+        let mut draws = world.visible_assets_at(&camera, size, tick);
+        assert!(
+            draws.any(|draw| matches!(draw.modulation, Modulation::Shadow(_))
+                && draw.sprite.anchor == anchor)
+        );
+        let rabbit = draws
+            .find(|draw| draw.asset.source.virtual_path == "art/monster/bun/bunuwxaa.art")
+            .unwrap();
+        assert_eq!(rabbit.sprite.anchor, anchor);
+    }
+    assert_eq!(world.turn_fidget(1), Some(4));
+    let (turned, _) = compare_world_tick(&mut gpu, &mut world, &camera, size, tick);
+    assert_ne!(turned, fidget);
+    assert_eq!(world.turn_fidget(-1), Some(3));
+    let (restored, warm) = compare_world_tick(&mut gpu, &mut world, &camera, size, tick);
+    assert_eq!(restored, fidget);
+    assert_eq!(warm.uploaded, 0);
+    let state = world.dynamic_light(0).unwrap();
+    world
+        .set_dynamic_light(
+            0,
+            crate::content::world::DynamicLightState {
+                tile: (420, 813),
+                ..state
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        world.animation_delay(&camera, size, tick),
+        Some(Duration::from_millis(100))
+    );
+    compare_world_tick(&mut gpu, &mut world, &camera, size, tick);
+    world.set_dynamic_light(0, state).unwrap();
+    let end = Duration::from_secs(1);
+    let (finished, _) = compare_world_tick(&mut gpu, &mut world, &camera, size, end);
+    assert_eq!(finished, standing);
+    assert_eq!(world.animation_delay(&camera, size, end), None);
+    camera.pan((64, 32), size);
+    compare_world_tick(&mut gpu, &mut world, &camera, (960, 560), tick);
+    camera.reset(size);
+    assert_eq!(
+        fidget,
+        compare_world_tick(&mut gpu, &mut world, &camera, size, tick).0
+    );
+    let after = world.stats();
+    assert_eq!(
+        (after.sector_reads, after.vfs_reads, after.art.decodes),
+        (before.sector_reads, before.vfs_reads, before.art.decodes)
+    );
+}

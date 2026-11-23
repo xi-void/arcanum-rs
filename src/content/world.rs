@@ -5,7 +5,7 @@ use super::{
     art::{FrameCache, FrameCacheStats, FrameLoop, LoadedFrame},
     lighting::{self, Ambient, LightGrid, LightImport, StaticLight, WallFace},
     load_mes,
-    mobile::{self, Caster, MobileShadows},
+    mobile::{self, Caster, DirectionalFidget, FidgetPlayback, MobileShadows},
     scenery::{
         DrawOrder, LoadStages, ObjectLight, RoomOverview, WorldRegion, load_streamed_sector,
     },
@@ -187,13 +187,19 @@ pub struct WorldDraw<'a> {
 type WorldOrder = (bool, DrawOrder);
 
 #[derive(Clone)]
+enum RasterAnimation {
+    Loop(Arc<FrameLoop>, usize),
+    Fidget(Arc<DirectionalFidget>),
+}
+
+#[derive(Clone)]
 struct Raster {
     key: WorldOrder,
     frame: Arc<LoadedFrame>,
     anchor: (i32, i32),
     bounds: RasterBounds,
     object_light: ObjectLight,
-    animation: Option<(Arc<FrameLoop>, usize)>,
+    animation: Option<RasterAnimation>,
 }
 
 impl Raster {
@@ -211,22 +217,42 @@ impl Raster {
         }
     }
 
-    fn set_animation(&mut self, clip: &Arc<FrameLoop>, initial: usize) {
-        // The sector overhang bound must hold for every frame, including
-        // frames that extend farther than the original serialized image.
-        for frame in &clip.frames {
-            let frame = RasterBounds::new(self.frame_draw(frame));
-            self.bounds.min.0 = self.bounds.min.0.min(frame.min.0);
-            self.bounds.min.1 = self.bounds.min.1.min(frame.min.1);
-            self.bounds.max.0 = self.bounds.max.0.max(frame.max.0);
-            self.bounds.max.1 = self.bounds.max.1.max(frame.max.1);
-        }
-        self.animation = Some((Arc::clone(clip), initial));
+    fn include_frame(&mut self, asset: &LoadedFrame) {
+        let frame = RasterBounds::new(self.frame_draw(asset));
+        self.bounds.min.0 = self.bounds.min.0.min(frame.min.0);
+        self.bounds.min.1 = self.bounds.min.1.min(frame.min.1);
+        self.bounds.max.0 = self.bounds.max.0.max(frame.max.0);
+        self.bounds.max.1 = self.bounds.max.1.max(frame.max.1);
     }
 
-    fn asset_at(&self, elapsed: Duration) -> &Arc<LoadedFrame> {
+    fn set_animation(&mut self, clip: &Arc<FrameLoop>, initial: usize) {
+        // The sector overhang must cover all potential frames.
+        for frame in &clip.frames {
+            self.include_frame(frame);
+        }
+        self.animation = Some(RasterAnimation::Loop(Arc::clone(clip), initial));
+    }
+
+    fn set_fidget(&mut self, poses: Arc<DirectionalFidget>) {
+        for frame in poses.frames() {
+            self.include_frame(frame);
+        }
+        self.animation = Some(RasterAnimation::Fidget(poses));
+    }
+
+    fn asset_at(&self, elapsed: Duration, playback: FidgetPlayback) -> &Arc<LoadedFrame> {
         match &self.animation {
-            Some((clip, initial)) => &clip.frames[clip.index(*initial, elapsed)],
+            Some(RasterAnimation::Loop(clip, initial)) => {
+                &clip.frames[clip.index(*initial, elapsed)]
+            }
+            Some(RasterAnimation::Fidget(poses)) => {
+                let clip = poses.sequence(playback.direction);
+                let index = playback
+                    .start
+                    .and_then(|start| clip.one_shot_index(elapsed.saturating_sub(start)))
+                    .unwrap_or(0);
+                &clip.frames[index]
+            }
             None => &self.frame,
         }
     }
@@ -242,12 +268,13 @@ impl Raster {
         &self,
         viewport: &Viewport,
         elapsed: Duration,
+        playback: FidgetPlayback,
     ) -> Option<(&Arc<LoadedFrame>, SpriteDraw<'_>)> {
         let (asset, bounds) = if self.animation.is_some() {
             if !viewport.intersects(self.bounds) {
                 return None;
             }
-            let asset = self.asset_at(elapsed);
+            let asset = self.asset_at(elapsed, playback);
             (asset, RasterBounds::new(self.frame_draw(asset)))
         } else {
             (&self.frame, self.bounds)
@@ -255,22 +282,47 @@ impl Raster {
         Some((asset, viewport.place(self.frame_draw(asset), bounds)?))
     }
 
-    fn next_change(&self, viewport: &Viewport, elapsed: Duration) -> Option<Duration> {
-        let (clip, initial) = self.animation.as_ref()?;
+    fn next_change(
+        &self,
+        viewport: &Viewport,
+        elapsed: Duration,
+        playback: FidgetPlayback,
+    ) -> Option<Duration> {
         if !viewport.intersects(self.bounds) {
             return None;
         }
-        let current = clip.index(*initial, elapsed);
-        let visible = |index| {
-            let frame: &Arc<LoadedFrame> = &clip.frames[index];
-            viewport.intersects(RasterBounds::new(self.frame_draw(frame)))
+        let (clip, current, relative, wait, remaining) = match self.animation.as_ref()? {
+            RasterAnimation::Loop(clip, initial) => (
+                &**clip,
+                clip.index(*initial, elapsed),
+                elapsed,
+                Duration::ZERO,
+                clip.frames.len() - 1,
+            ),
+            RasterAnimation::Fidget(poses) => {
+                let start = playback.start?;
+                let clip = poses.sequence(playback.direction);
+                let relative = elapsed.saturating_sub(start);
+                let current = clip.one_shot_index(relative)?;
+                // The final boundary restores the standing frame.
+                (
+                    clip,
+                    current,
+                    relative,
+                    start.saturating_sub(elapsed),
+                    clip.frames.len() - current,
+                )
+            }
+        };
+        let visible = |index: usize| {
+            viewport.intersects(RasterBounds::new(self.frame_draw(&clip.frames[index])))
         };
         if visible(current) {
-            return Some(clip.delay(elapsed, 1));
+            return Some(wait.saturating_add(clip.delay(relative, 1)));
         }
-        (1..clip.frames.len())
+        (1..=remaining)
             .find(|steps| visible((current + steps) % clip.frames.len()))
-            .map(|steps| clip.delay(elapsed, steps))
+            .map(|steps| wait.saturating_add(clip.delay(relative, steps)))
     }
 }
 
@@ -412,6 +464,9 @@ impl CachedSector {
             let key =
                 super::scenery::order(caster.tile, mobile.offset, false, usize::MAX - 3 + index);
             let mut raster = Raster::new((true, key), &mobile.asset, caster.anchor);
+            if let Some(fidget) = mobile.fidget {
+                raster.set_fidget(fidget);
+            }
             let tile =
                 project_world_tile(caster.tile, reference).expect("prepared mobile position");
             if !within_overhang(raster.bounds, tile) {
@@ -509,6 +564,7 @@ struct SectorCache {
     shadows_disabled: bool,
     shadows: Vec<PreparedMask>,
     shadow_error: Option<shadow::Error>,
+    fidget: FidgetPlayback,
 }
 
 impl SectorCache {
@@ -657,6 +713,39 @@ impl SectorCache {
             shadows: start.elapsed(),
             shadow_changed,
         })
+    }
+
+    fn fidget_poses(&self) -> Option<&DirectionalFidget> {
+        self.animated
+            .iter()
+            .find_map(|&index| match &self.ordered[index].animation {
+                Some(RasterAnimation::Fidget(poses)) => Some(&**poses),
+                _ => None,
+            })
+    }
+
+    fn start_fidget(&mut self, elapsed: Duration) -> bool {
+        let Some(poses) = self.fidget_poses() else {
+            return false;
+        };
+        let clip = poses.sequence(self.fidget.direction);
+        if self
+            .fidget
+            .start
+            .is_some_and(|start| clip.one_shot_index(elapsed.saturating_sub(start)).is_some())
+        {
+            return false;
+        }
+        self.fidget.start = Some(elapsed);
+        true
+    }
+
+    fn turn_fidget(&mut self, step: i8) -> Option<u8> {
+        let poses = self.fidget_poses()?;
+        let direction = self.fidget.direction.unwrap_or(poses.original_direction);
+        let direction = (i16::from(direction) + i16::from(step)).rem_euclid(8) as u8;
+        self.fidget.direction = Some(direction);
+        Some(direction)
     }
 
     fn toggle_shadows(&mut self) -> Option<bool> {
@@ -936,7 +1025,7 @@ impl SectorCache {
         let viewport = Viewport::new(camera.position(), size);
         self.animated
             .iter()
-            .filter_map(|&index| self.ordered[index].next_change(&viewport, elapsed))
+            .filter_map(|&index| self.ordered[index].next_change(&viewport, elapsed, self.fidget))
             .min()
     }
 
@@ -957,7 +1046,7 @@ impl SectorCache {
     ) -> impl Iterator<Item = WorldDraw<'_>> {
         range.filter_map(move |index| {
             let raster = &self.ordered[index];
-            let (asset, sprite) = raster.visible_at(&viewport, elapsed)?;
+            let (asset, sprite) = raster.visible_at(&viewport, elapsed, self.fidget)?;
             let modulation = self.shades.get(index).map_or_else(
                 || {
                     if matches!(raster.object_light, ObjectLight::Additive) {
@@ -1155,6 +1244,29 @@ impl WorldStream {
         self.cache.set_dynamic(slot, state)
     }
 
+    /// Start one original fidget at the shared animation epoch for deterministic previews.
+    pub fn with_fidget_preview(mut self) -> Self {
+        self.cache.fidget.start = Some(Duration::ZERO);
+        self
+    }
+
+    pub fn start_fidget(&mut self, elapsed: Duration) -> bool {
+        self.cache.start_fidget(elapsed)
+    }
+
+    pub fn turn_fidget(&mut self, step: i8) -> Option<u8> {
+        self.cache.turn_fidget(step)
+    }
+
+    pub fn animation_delay(
+        &self,
+        camera: &Camera,
+        size: (u32, u32),
+        elapsed: Duration,
+    ) -> Option<Duration> {
+        self.cache.animation_delay(camera, size, elapsed)
+    }
+
     pub fn toggle_shadows(&mut self) -> Option<bool> {
         self.cache.toggle_shadows()
     }
@@ -1218,7 +1330,10 @@ impl WorldStream {
         let mut submitted = 0;
         let mut culled = 0;
         for raster in sector.draws.iter().filter(|raster| raster.key.0) {
-            if raster.visible_at(&viewport, Duration::ZERO).is_some() {
+            if raster
+                .visible_at(&viewport, Duration::ZERO, self.cache.fidget)
+                .is_some()
+            {
                 submitted += 1;
             } else {
                 culled += 1;
@@ -1317,15 +1432,16 @@ impl SectorLoader {
                 });
                 timing.lighting = start.elapsed();
                 let start = Instant::now();
-                let mobiles = (self.map.eq_ignore_ascii_case(mobile::MAP) && id == mobile::SECTOR)
-                    .then(|| {
-                        mobile::prepare(
-                            &mut self.vfs,
-                            &mut self.frames,
-                            self.reference,
-                            self.lighting.is_some(),
-                        )
-                    });
+                let mobiles = mobile::supports(&self.map, id).then(|| {
+                    mobile::prepare(
+                        &mut self.vfs,
+                        &mut self.frames,
+                        &self.map,
+                        id,
+                        self.reference,
+                        self.lighting.is_some(),
+                    )
+                });
                 self.frames.finish_sector();
                 timing.mobiles = start.elapsed();
                 let start = Instant::now();
@@ -1517,6 +1633,45 @@ mod tests {
         assert_eq!(cache.animation_delay(&camera, view, tick), None);
         cache.select(&[0, 2], 2, empty);
         assert!(retained.upgrade().is_none());
+
+        let mut fidget = Raster::new((true, (true, 50, 63, 0, 0, 1, None)), &fixture(0), (0, 0));
+        let poses = Arc::new(DirectionalFidget::fixture(std::array::from_fn(|dir| {
+            FrameLoop::new(vec![fixture(0), fixture(dir as i32 % 2 + 1)], 10).unwrap()
+        })));
+        fidget.set_fidget(poses);
+        let mut flame = Raster::new((true, (true, 50, 63, 0, 0, 2, None)), &fixture(0), (0, 0));
+        flame.set_animation(
+            &Arc::new(FrameLoop::new(vec![fixture(0), fixture(1)], 11).unwrap()),
+            0,
+        );
+        let mut cache = SectorCache::default();
+        cache.select(&[0], 1, |id| {
+            let mut sector = empty(id);
+            sector.draws.extend([fidget.clone(), flame.clone()]);
+            sector
+        });
+        let end = Duration::from_millis(200);
+        assert_eq!(
+            cache.animation_delay(&camera, view, Duration::ZERO),
+            Some(Duration::from_millis(90))
+        );
+        assert!(cache.start_fidget(Duration::ZERO));
+        assert_eq!(
+            cache.animation_delay(&camera, view, Duration::from_millis(91)),
+            Some(Duration::from_millis(9))
+        );
+        assert!(!cache.start_fidget(Duration::from_millis(99)));
+        let elapsed = Duration::from_millis(100);
+        assert_eq!(cache.turn_fidget(1), Some(4));
+        let draw = cache.visible_assets(&camera, view, elapsed).next().unwrap();
+        assert_eq!(draw.sprite.anchor, (4, 2));
+        assert_eq!(draw.sprite.frame.hotspot, (1, 0));
+        let stopped = cache.visible_assets(&camera, view, end).next().unwrap();
+        assert_eq!(stopped.sprite.frame.hotspot, (0, 0));
+        let viewport = Viewport::new(camera.position(), view);
+        assert_eq!(fidget.next_change(&viewport, end, cache.fidget), None);
+        assert_eq!(cache.animation_delay(&away, view, elapsed), None);
+        assert!(cache.start_fidget(end));
     }
 
     #[test]

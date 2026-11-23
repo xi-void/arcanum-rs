@@ -465,11 +465,48 @@ impl ApplicationHandler for Viewer<'_> {
                 ..
             } if event.state.is_pressed() => {
                 if let Key::Character(key) = &event.logical_key
-                    && let ViewContent::Stream { world, trace, .. } = &mut self.content
-                    && Self::update_light_probe(world, key.as_str(), *trace)
+                    && let ViewContent::Stream {
+                        world,
+                        camera,
+                        trace,
+                        animation_ms,
+                        ..
+                    } = &mut self.content
                 {
-                    view.window.request_redraw();
-                    return;
+                    let handled = match key.as_str() {
+                        "f" if animation_ms.is_none() && !event.repeat => {
+                            let sampled = Instant::now();
+                            let elapsed = sampled.duration_since(self.epoch);
+                            if world.start_fidget(elapsed) {
+                                if *trace {
+                                    eprintln!("Fidget started at {}ms", elapsed.as_millis());
+                                }
+                                // Frame zero is already the standing pose. Schedule the
+                                // first visible transition without submitting it twice.
+                                let size = view.window.inner_size();
+                                let deadline = world
+                                    .animation_delay(camera, (size.width, size.height), elapsed)
+                                    .map(|delay| sampled + delay);
+                                self.schedule_animation(event_loop, deadline);
+                            }
+                            return;
+                        }
+                        "," | "." => {
+                            let step = if key.as_str() == "," { -1 } else { 1 };
+                            let turned = world.turn_fidget(step);
+                            if let Some(direction) = turned
+                                && *trace
+                            {
+                                eprintln!("Fidget subject direction {direction}");
+                            }
+                            turned.is_some()
+                        }
+                        _ => Self::update_light_probe(world, key.as_str(), *trace),
+                    };
+                    if handled {
+                        view.window.request_redraw();
+                        return;
+                    }
                 }
                 let size = view.window.inner_size();
                 let viewport = (size.width, size.height);

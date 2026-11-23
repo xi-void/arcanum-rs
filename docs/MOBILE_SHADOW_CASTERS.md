@@ -14,6 +14,8 @@ off. Use **Home** to restore the camera. Probe illumination stays
 enabled when only eligibility changes. Omit `--animation-ms` for live
 fire. The same scene is available with `--renderer cpu`.
 
+[Milestone 49 adds the original K’na Tha fidget using this shadow pass](CRITTER_FIDGET.md).
+
 ## Original records and position
 
 CE's `map.c::map_load_mobile` distinguishes original map object data,
