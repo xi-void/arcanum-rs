@@ -788,6 +788,53 @@ mod tests {
     }
 
     #[test]
+    fn sector_selection_covers_floor_rasters_and_overhang_at_viewport_corners() {
+        let region = SectorRegion {
+            first: Coordinates { x: 0, y: 0 },
+            last: Coordinates { x: 1, y: 1 },
+        };
+        let reference = (63, 63);
+        let frame = crate::isometric::synthetic_floor();
+        for (position, size) in [
+            ((0, 0), (1, 1)),
+            ((-39, 20), (319, 201)),
+            ((63, -33), (1280, 720)),
+            ((-759, 574), (1281, 719)),
+        ] {
+            let required = region.needed(reference, position, size).unwrap();
+            let viewport = Viewport::new(position, size);
+            let mut visible = 0;
+            for y in 0..128 {
+                for x in 0..128 {
+                    let floor = crate::isometric::floor_draw(&frame, x - 63, y - 63).unwrap();
+                    let bounds = RasterBounds::new(floor);
+                    let (cx, cy) = project_world_tile((x as u32, y as u32), reference).unwrap();
+                    let cx = i64::from(cx);
+                    let cy = i64::from(cy);
+                    let overhang = RasterBounds {
+                        min: (cx - OVERHANG, cy - OVERHANG),
+                        max: (cx + OVERHANG, cy + OVERHANG),
+                    };
+                    let id = Coordinates {
+                        x: x as u32 / 64,
+                        y: y as u32 / 64,
+                    }
+                    .id()
+                    .unwrap();
+                    if viewport.place(floor, bounds).is_some() {
+                        visible += 1;
+                        assert!(required.as_slice().contains(&id), "floor ({x}, {y})");
+                    }
+                    if viewport.place(floor, overhang).is_some() {
+                        assert!(required.as_slice().contains(&id), "overhang ({x}, {y})");
+                    }
+                }
+            }
+            assert!(visible > 0);
+        }
+    }
+
+    #[test]
     fn eviction_is_lru_and_keeps_sectors_needed_by_the_current_view() {
         let mut cache = SectorCache::default();
         let fixture = |id| CachedSector::missing(id, "synthetic empty sector".into());

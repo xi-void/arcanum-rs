@@ -491,6 +491,15 @@ impl WindowSurface {
         }
         #[cfg(feature = "gpu")]
         if let Presentation::Gpu(renderer) = &mut self.backend {
+            if trace {
+                eprintln!(
+                    "GPU world camera {:?} schedule {:?} order {:?} shading {:?}",
+                    camera.position(),
+                    prepared.scheduling,
+                    prepared.ordering,
+                    prepared.shading,
+                );
+            }
             renderer.redraw(
                 viewport,
                 world.visible_assets(camera, viewport),

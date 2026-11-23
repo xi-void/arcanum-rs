@@ -181,3 +181,5 @@ tests passed, including the 268-wall audit, VFS smoke check and the
 existing seam tests. Both schematic audits returned 119/119. The optional
 packing test and both offscreen hardware tests passed. Each hardware
 test ran successfully on both Vulkan and GL.
+
+[Milestone 44 GPU world integration and residency measurements](GPU_WORLD_INTEGRATION.md)
