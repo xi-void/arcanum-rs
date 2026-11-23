@@ -1154,6 +1154,12 @@ fn inspect_world(game: &Path, options: &[OsString], policy: Policy) -> Result<()
                 report.scenery_count,
                 report.portal_count
             )?;
+            if let Some((submitted, culled)) = world.object_visibility(report.id, &camera, size) {
+                writeln!(
+                    out,
+                    "  Object rasters: {submitted} submitted, {culled} viewport-culled"
+                )?;
+            }
             for diagnostic in &report.diagnostics {
                 writeln!(out, "  {diagnostic}")?;
             }

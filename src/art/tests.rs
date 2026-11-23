@@ -89,7 +89,7 @@ fn validates_framing_and_rejects_unsupported_layouts() {
     let original = fixture(&[(1, 1, &[1]), (2, 2, &[1; 4])]);
     for (length, section) in [
         (131, "header"),
-        (1155, "palette"),
+        (1155, "palette zero"),
         (1211, "frame table"),
         (original.len() - 1, "frame payload"),
     ] {
@@ -97,7 +97,7 @@ fn validates_framing_and_rejects_unsupported_layouts() {
             matches!(decode_frame(&original[..length], 0), Err(Error::Truncated {section: actual, ..}) if actual == section)
         );
     }
-    for (offset, value) in [(0, 0), (0, 3), (0, 8), (0, 25), (8, 16), (12, 0), (20, 1)] {
+    for (offset, value) in [(0, 3), (0, 8), (0, 25), (8, 16), (12, 0)] {
         let mut bytes = original.clone();
         set_word(&mut bytes, offset, value);
         assert!(matches!(
@@ -228,7 +228,7 @@ fn slot_one_is_framed_without_changing_the_selected_slot_zero_colors() {
     assert!(matches!(
         decode_frame(&double[..slot_one + 9], 0),
         Err(Error::Truncated {
-            section: "palette slot one",
+            section: "alternate palette",
             ..
         })
     ));
@@ -251,5 +251,57 @@ fn selects_palette_one_with_the_original_slot_zero_fallback() {
             .pixels,
         [[0; 4], [20, 20, 20, 255]]
     );
-    assert!(decode_frame_with_palette(&double, 0, 2).is_err());
+    assert_eq!(
+        decode_frame_with_palette(&double, 0, 2)
+            .unwrap()
+            .stored_palette,
+        0
+    );
+}
+
+#[test]
+fn eight_directions_use_direction_major_tables_and_sparse_palettes() {
+    let mut input = fixture(&[(2, 1, &[0, 1][..]); 16]);
+    set_word(&mut input, 0, 0);
+    set_word(&mut input, 32, 2);
+    for number in 0..16 {
+        set_word(
+            &mut input,
+            HEADER_BYTES + PALETTE_BYTES + number * FRAME_BYTES + 12,
+            number as i32,
+        );
+    }
+    // Slot three is stored immediately after zero. Slots one and two are absent.
+    set_word(&mut input, 24, 1);
+    input.splice(1156..1156, [45; PALETTE_BYTES]);
+    let frame = decode_direction(&input, 1, 5, 3).unwrap();
+    assert_eq!(
+        (
+            frame.rotation_count,
+            frame.stored_rotation,
+            frame.stored_palette
+        ),
+        (8, 5, 3)
+    );
+    assert_eq!(frame.frame.hotspot, (11, 4));
+    assert_eq!(frame.frame.offset, (5, -6));
+    assert_eq!(frame.frame.pixels, [[0; 4], [45, 45, 45, 255]]);
+    assert_eq!(
+        decode_direction(&input, 1, 5, 2).unwrap().frame.pixels,
+        [[0; 4], [1, 2, 3, 255]]
+    );
+    assert!(decode_direction(&input, 1, 8, 0).is_err());
+    assert!(decode_direction(&input, 1, 5, 4).is_err());
+    assert!(matches!(
+        decode_frame(&input[..input.len() - 1], 0),
+        Err(Error::Truncated {
+            section: "frame payload",
+            ..
+        })
+    ));
+    let flat = fixture(&[(2, 1, &[0, 1])]);
+    assert_eq!(
+        decode_direction(&flat, 0, 7, 2).unwrap(),
+        decode_frame(&flat, 0).unwrap()
+    );
 }

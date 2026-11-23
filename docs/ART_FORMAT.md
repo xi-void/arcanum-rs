@@ -49,8 +49,10 @@ RGB. Index zero is the transparency key for the ordinary blit. CE also has
 separate blending and hit-test behavior, which this decoder leaves to
 future consumers. [CE source locations](#ce-reference-locations)
 
-The palette is followed by all 28-byte frame records and then their
-consecutive payloads. Each record contains width, height, stored byte
+The palettes are followed by all 28-byte frame records and then their
+consecutive payloads. Eight-direction files store the records and payloads
+in direction-major order, with frame indices increasing within each
+direction. Each record contains width, height, stored byte
 length, hotspot X/Y and movement offset X/Y. A length equal to width ×
 height marks raw indices. Otherwise the payload uses RLE. The high bit of
 the packet control byte selects literal indices. With that bit clear, the
@@ -72,14 +74,15 @@ and archive or mod precedence, including a malformed winning override.
 
 ## Bounds and limitations
 
-- Accepted files use flags exactly `0x01` or `0x09`, 8-bit indices, and
-  palette slot zero with optional slot one. Pixel decoding defaults to
-  slot zero. The connected wall importer can select slot one, falling
-  back to slot zero when the requested slot is absent. The Bates rug facades establish the layout for `0x09`, and the
-  original wall establishes the two-palette layout. Other flag combinations,
-  eight-direction storage, slots two and three, and other bit depths
-  return unsupported-format errors. [Facade evidence](FACADE_IMPORT.md)
-  · [Wall evidence](WALL_OBJECT_IMPORT.md) · [Connected wall palettes](CONNECTED_WALLS.md)
+- Accepted files use flags `0x00` (eight directions), `0x01` or `0x09`
+  (one direction), and 8-bit indices. Palette slot zero is required.
+  Present alternate slots are stored in ascending slot order. A request
+  for a missing palette falls back to slot zero. A single-direction file
+  uses its sole stored direction even when the caller requests another
+  direction. Callers can inspect the stored direction and palette used.
+  Other flag combinations and bit depths return unsupported-format
+  errors. [Facade evidence](FACADE_IMPORT.md) · [Connected wall palettes](CONNECTED_WALLS.md)
+  · [Scenery direction and palette evidence](SCENERY_ART_COVERAGE.md)
 - Input is limited to 32 MiB, with at most 1,024 frames and 4,194,304
   pixels per frame. The decoder checks every frame's dimensions and stored
   span, and validates the selected frame's RLE packet boundaries and
