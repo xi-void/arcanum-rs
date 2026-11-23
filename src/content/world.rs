@@ -146,6 +146,13 @@ pub struct PrepareTiming {
     pub shading: Duration,
 }
 
+/// One ordered, clipped draw with its shared decoded texture identity.
+pub struct WorldDraw<'a> {
+    pub asset: &'a Arc<LoadedFrame>,
+    pub sprite: SpriteDraw<'a>,
+    pub modulation: Modulation<'a>,
+}
+
 type WorldOrder = (bool, DrawOrder);
 
 #[derive(Clone)]
@@ -522,23 +529,36 @@ impl SectorCache {
             .filter_map(move |draw| viewport.place(draw.draw(), draw.bounds))
     }
 
-    fn visible_modulated(
+    fn visible_assets(
         &self,
         camera: &Camera,
         size: (u32, u32),
-    ) -> impl Iterator<Item = (SpriteDraw<'_>, Modulation<'_>)> {
+    ) -> impl Iterator<Item = WorldDraw<'_>> {
         let viewport = Viewport::new(camera.position(), size);
         self.ordered
             .iter()
             .enumerate()
             .filter_map(move |(index, raster)| {
-                let draw = viewport.place(raster.draw(), raster.bounds)?;
-                let shade = self
+                let sprite = viewport.place(raster.draw(), raster.bounds)?;
+                let modulation = self
                     .shades
                     .get(index)
                     .map_or(Modulation::Unlit, PreparedShade::modulation);
-                Some((draw, shade))
+                Some(WorldDraw {
+                    asset: &raster.frame,
+                    sprite,
+                    modulation,
+                })
             })
+    }
+
+    fn visible_modulated(
+        &self,
+        camera: &Camera,
+        size: (u32, u32),
+    ) -> impl Iterator<Item = (SpriteDraw<'_>, Modulation<'_>)> {
+        self.visible_assets(camera, size)
+            .map(|draw| (draw.sprite, draw.modulation))
     }
 }
 
@@ -661,6 +681,14 @@ impl WorldStream {
         size: (u32, u32),
     ) -> impl Iterator<Item = SpriteDraw<'_>> {
         self.cache.visible(camera, size)
+    }
+
+    pub fn visible_assets(
+        &self,
+        camera: &Camera,
+        size: (u32, u32),
+    ) -> impl Iterator<Item = WorldDraw<'_>> {
+        self.cache.visible_assets(camera, size)
     }
 
     pub fn visible_modulated(

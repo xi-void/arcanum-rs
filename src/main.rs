@@ -48,7 +48,7 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] art sector-wall-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art world-inspect <game-directory> [--view <local-x> <local-y> <side> <center-x> <center-y> <width> <height>] [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art world <game-directory> [--view <local-x> <local-y> <side> <center-x> <center-y> <width> <height>] [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
-  arcanum-rs [--ordered] art world <game-directory> --sectors <map> <min-x> <min-y> <max-x> <max-y> <world-x> <world-y> <width> <height> [--trace] [--lighting <hour>] [--mods …]
+  arcanum-rs [--ordered] art world <game-directory> --sectors <map> <min-x> <min-y> <max-x> <max-y> <world-x> <world-y> <width> <height> [--trace] [--lighting <hour>] [--renderer cpu|vulkan|gles] [--mods …]
   arcanum-rs [--ordered] art sector-room-wide-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art sector-room-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector-room-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
@@ -1071,13 +1071,16 @@ fn show_room(
 
 #[cfg(feature = "windowed")]
 fn show_world(game: &Path, options: &[OsString], policy: Policy) -> Result<(), Box<dyn Error>> {
-    if let Some((world, camera, size, trace, map)) = streaming_world(game, options, policy)? {
+    if let Some((world, camera, size, trace, map, renderer)) =
+        streaming_world(game, options, policy)?
+    {
         return viewer::show_stream(
             format!("Arcanum-RS | {map} world"),
             world,
             camera,
             size,
             trace,
+            renderer,
         )
         .map_err(Into::into);
     }
@@ -1133,7 +1136,7 @@ fn show_world(game: &Path, options: &[OsString], policy: Policy) -> Result<(), B
 }
 
 fn inspect_world(game: &Path, options: &[OsString], policy: Policy) -> Result<(), Box<dyn Error>> {
-    if let Some((mut world, mut camera, size, _, _)) = streaming_world(game, options, policy)? {
+    if let Some((mut world, mut camera, size, _, _, _)) = streaming_world(game, options, policy)? {
         camera.resize(size);
         let timing = world.prepare(&camera, size)?;
         let mut out = io::stdout().lock();
@@ -1186,12 +1189,21 @@ fn inspect_world(game: &Path, options: &[OsString], policy: Policy) -> Result<()
     report_room_overview(&mut io::stdout().lock(), &overview)
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum RenderBackend {
+    #[default]
+    Cpu,
+    Vulkan,
+    Gles,
+}
+
 type StreamPreview = (
     content::world::WorldStream,
     arcanum_rs::camera::Camera,
     (u32, u32),
     bool,
     String,
+    RenderBackend,
 );
 
 fn streaming_world(
@@ -1249,21 +1261,41 @@ fn streaming_world(
     let camera = region
         .camera(reference)
         .ok_or("invalid sector rectangle or world camera position")?;
-    let trace = rest.first().is_some_and(|flag| flag == "--trace");
-    let rest = &rest[usize::from(trace)..];
-    let (hour, options) = match rest {
-        [flag, hour, options @ ..] if flag == "--lighting" => {
-            (Some(parse_view_number(hour, "lighting hour")?), options)
-        }
-        [flag] if flag == "--lighting" => return Err("expected an hour after --lighting".into()),
-        _ => (None, rest),
-    };
+    let mut trace = false;
+    let mut hour = None;
+    let mut renderer = RenderBackend::Cpu;
+    let mut options = rest;
+    loop {
+        options = match options {
+            [flag, rest @ ..] if flag == "--trace" => {
+                trace = true;
+                rest
+            }
+            [flag, hour_arg, rest @ ..] if flag == "--lighting" => {
+                hour = Some(parse_view_number(hour_arg, "lighting hour")?);
+                rest
+            }
+            [flag, backend, rest @ ..] if flag == "--renderer" => {
+                renderer = match backend.to_str() {
+                    Some("cpu") => RenderBackend::Cpu,
+                    Some("vulkan") => RenderBackend::Vulkan,
+                    Some("gles") => RenderBackend::Gles,
+                    _ => return Err("expected renderer cpu, vulkan or gles".into()),
+                };
+                rest
+            }
+            [flag] if flag == "--renderer" || flag == "--lighting" => {
+                return Err(format!("missing value after {}", flag.to_string_lossy()).into());
+            }
+            _ => break,
+        };
+    }
     let vfs = inspection_vfs(game, options, policy)?;
     let mut world = WorldStream::new(vfs, map.to_owned(), region, reference)?;
     if let Some(hour) = hour {
         world = world.with_lighting(hour)?;
     }
-    Ok(Some((world, camera, size, trace, map.to_owned())))
+    Ok(Some((world, camera, size, trace, map.to_owned(), renderer)))
 }
 
 fn world_options<'a>(
