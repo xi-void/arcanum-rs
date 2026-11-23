@@ -221,3 +221,32 @@ fn portal_retains_current_art_and_optional_appearance_fields() {
         assert!(decode(&sector(&record[..end])).is_err(), "prefix {end}");
     }
 }
+
+#[test]
+fn mobile_appearance_uses_permanent_identity_and_bounds_checked_fields() {
+    let mut record = vec![0; 78];
+    record[0..4].copy_from_slice(&119u32.to_le_bytes());
+    record[4] = 1;
+    record[12..16].copy_from_slice(&17088u32.to_le_bytes());
+    record[28] = 2;
+    record[52..56].copy_from_slice(&16u32.to_le_bytes());
+    record[56..58].copy_from_slice(&4u16.to_le_bytes());
+    record[58] = 0x07;
+    record[66] = 1;
+    record.extend(0x2880_2820u32.to_le_bytes());
+    record.push(1);
+    record.extend(80u32.to_le_bytes());
+    record.extend(81u32.to_le_bytes());
+    record.extend((-5i32).to_le_bytes());
+    record.extend(1u32.to_le_bytes()); // OCF_IS_CONCEALED override.
+    let imported = decode_mobile(&record).unwrap();
+    assert_eq!(imported.tile, (80, 81));
+    assert_eq!(imported.art, 0x2880_2820);
+    assert_eq!(imported.fields.offset_x, Some(-5));
+    assert_eq!(imported.fields.critter_flags, Some(1));
+    for end in [4, 55, 77, 85, 98] {
+        assert!(decode_mobile(&record[..end]).is_err(), "prefix {end}");
+    }
+    record[56] = 3;
+    assert!(decode_mobile(&record).is_err());
+}

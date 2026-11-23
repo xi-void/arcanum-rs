@@ -480,6 +480,14 @@ impl InteractiveWorld {
         self.cache.set_dynamic(slot, state)
     }
 
+    pub fn toggle_shadows(&mut self) -> Option<bool> {
+        self.cache.toggle_shadows()
+    }
+
+    pub fn toggle_probe_shadow(&mut self, slot: usize) -> Option<(bool, bool)> {
+        self.cache.toggle_probe_shadow(slot)
+    }
+
     pub fn animation_delay(
         &self,
         camera: &Camera,

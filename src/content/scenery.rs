@@ -496,6 +496,7 @@ pub struct LoadStages {
     pub object_import: std::time::Duration,
     pub rasters: std::time::Duration,
     pub lighting: std::time::Duration,
+    pub mobiles: std::time::Duration,
 }
 
 #[derive(Clone, Copy)]
@@ -798,7 +799,7 @@ fn matched_opening(wall: Option<(usize, u32)>, raw_portal: u32) -> Result<usize,
 
 pub(super) type DrawOrder = (bool, u32, u32, i64, i64, usize, Option<usize>);
 
-fn order(tile: (u32, u32), offset: (i32, i32), flat: bool, index: usize) -> DrawOrder {
+pub(super) fn order(tile: (u32, u32), offset: (i32, i32), flat: bool, index: usize) -> DrawOrder {
     // CE uses truncation toward zero for half-pixels in the within-tile key.
     // Normal flat objects retain insertion order within a tile.
     let horizontal = (i64::from(offset.0) - 40) / 2;

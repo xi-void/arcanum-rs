@@ -227,6 +227,7 @@ pub(super) struct StaticLight {
     art: Arc<LoadedFrame>,
     tint: Rgb,
     dark: bool,
+    flags: u32,
 }
 
 impl StaticLight {
@@ -245,6 +246,20 @@ impl StaticLight {
             art,
             tint,
             dark,
+            flags: if dark { 2 } else { 0 },
+        })
+    }
+
+    pub fn shadow_candidate(&self) -> Option<crate::shadow::Candidate> {
+        let hotspot = self.art.decoded.frame.hotspot;
+        Some(crate::shadow::Candidate {
+            center: (
+                self.origin.0.checked_add(hotspot.0)?,
+                self.origin.1.checked_add(hotspot.1)?,
+            ),
+            tint: self.tint,
+            flags: self.flags,
+            owned_by_caster: false,
         })
     }
 
@@ -602,14 +617,16 @@ fn import_one(
         16 => ambient.outdoor,
         _ => record.rgb,
     };
-    Ok(Some(StaticLight::new(
+    let mut light = StaticLight::new(
         art,
         record.tile,
         record.offset,
         reference,
         tint,
         record.flags & 2 != 0,
-    )?))
+    )?;
+    light.flags = record.flags;
+    Ok(Some(light))
 }
 
 fn mask_origin(
@@ -774,6 +791,7 @@ mod tests {
             art: Arc::clone(&art),
             tint: [255; 3],
             dark: false,
+            flags: 0,
         };
         let behind = StaticLight {
             tile: (9, 7),

@@ -7,6 +7,7 @@ use std::{fmt, ops::Range};
 const WALL: u32 = 0;
 const PORTAL: u32 = 1;
 const SCENERY: u32 = 3;
+const NPC: u32 = 16;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AppearanceFields {
@@ -24,6 +25,7 @@ pub struct AppearanceFields {
     pub wall_flags: Option<u32>,
     pub scenery_flags: Option<u32>,
     pub portal_flags: Option<u32>,
+    pub critter_flags: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -384,6 +386,7 @@ impl Fields {
                     13 => self.appearance.light_art = Some(value),
                     14 => self.appearance.light_color = Some(value),
                     18 => self.appearance.flags = Some(value),
+                    64 if category == NPC => self.appearance.critter_flags = Some(value),
                     64 if category == WALL => self.appearance.wall_flags = Some(value),
                     64 if category == SCENERY => self.appearance.scenery_flags = Some(value),
                     64 if category == PORTAL => self.appearance.portal_flags = Some(value),
@@ -482,24 +485,82 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-pub(crate) fn fixture_npc_prototype_appearance(
+/// The render-relevant prefix of a standalone original mobile. The
+/// remaining fields belong to gameplay and are not interpreted here.
+#[derive(Debug)]
+pub struct Mobile {
+    pub identity: [u8; 24],
+    pub prototype: SerializedPrototypeId,
+    pub art: u32,
+    pub tile: (u32, u32),
+    pub fields: AppearanceFields,
+}
+
+pub fn decode_mobile(input: &[u8]) -> Result<Mobile, Error> {
+    let mut reader = Reader { input, offset: 0 };
+    if input.len() > MAX_PROTOTYPE_BYTES || reader.u32("mobile version")? != 119 {
+        return Err(reader.error("expected bounded version 119 mobile"));
+    }
+    let prototype = reader.fixed::<24>("mobile prototype identity")?;
+    let id = u32::from_le_bytes(prototype[8..12].try_into().unwrap());
+    if prototype[..2] != [1, 0] || !(1..=i32::MAX as u32).contains(&id) {
+        return Err(reader.error("unsupported mobile prototype identity"));
+    }
+    let identity = reader.fixed::<24>("mobile identity")?;
+    if identity[..2] != [2, 0] || reader.u32("mobile object type")? != NPC {
+        return Err(reader.error("expected original permanent NPC mobile"));
+    }
+    let count = u16::from_le_bytes(reader.fixed("mobile field count")?);
+    let mut bitmap = [0u32; 5];
+    for word in &mut bitmap {
+        *word = reader.u32("mobile field bitmap")?;
+    }
+    if bitmap.iter().map(|x| x.count_ones()).sum::<u32>() != u32::from(count)
+        || bitmap[1] & !0xf != 0
+    {
+        return Err(reader.error("invalid mobile field bitmap"));
+    }
+    let mut fields = Fields::default();
+    for index in 0..=64 {
+        if bitmap[index / 32] & (1 << (index % 32)) != 0 {
+            fields.read(&mut reader, index, NPC)?;
+        }
+    }
+    if (bitmap[2] & !1 != 0 || bitmap[3] != 0 || bitmap[4] != 0) && reader.offset == input.len() {
+        return Err(reader.error("missing mobile subtype data"));
+    }
+    Ok(Mobile {
+        identity,
+        prototype: SerializedPrototypeId(id),
+        art: fields
+            .art_id
+            .ok_or_else(|| reader.error("missing mobile current ART"))?,
+        tile: fields
+            .tile
+            .ok_or_else(|| reader.error("missing mobile location"))?,
+        fields: fields.appearance,
+    })
+}
+
+pub fn decode_npc_prototype_appearance(
     input: &[u8],
     id: SerializedPrototypeId,
 ) -> Result<AppearanceFields, Error> {
     let mut reader = Reader { input, offset: 0 };
+    if input.len() > MAX_PROTOTYPE_BYTES {
+        return Err(reader.error("NPC prototype exceeds input limit"));
+    }
     let header = decode_header(input).map_err(|error| Error {
         offset: error.offset,
         message: error.to_string(),
     })?;
-    if header.object_type != 16 || header.id != id {
-        return Err(reader.error("fixture NPC prototype type or identity mismatch"));
+    if header.object_type != NPC || header.id != id {
+        return Err(reader.error("NPC prototype type or identity mismatch"));
     }
     reader.take(HEADER_SIZE + 20, "NPC prototype header and change bitmap")?;
     let mut fields = Fields::default();
-    // The audited case imports only the common appearance prefix.
-    for index in 0..=18 {
-        fields.read(&mut reader, index, 16)?;
+    for index in (0..36).chain([64]) {
+        fields.read(&mut reader, index, NPC)?;
     }
     Ok(fields.appearance)
 }

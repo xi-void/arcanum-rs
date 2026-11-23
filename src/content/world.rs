@@ -5,6 +5,7 @@ use super::{
     art::{FrameCache, FrameCacheStats, FrameLoop, LoadedFrame},
     lighting::{self, Ambient, LightGrid, LightImport, StaticLight, WallFace},
     load_mes,
+    mobile::{self, Caster, MobileShadows},
     scenery::{
         DrawOrder, LoadStages, ObjectLight, RoomOverview, WorldRegion, load_streamed_sector,
     },
@@ -15,6 +16,7 @@ use crate::{
     compositor::{Modulation, SpriteDraw},
     isometric::project_world_tile,
     sector::{Coordinates, SIDE},
+    shadow,
     vfs::Vfs,
 };
 use std::{
@@ -156,15 +158,18 @@ pub struct LightUpdate {
     pub grid: Duration,
     pub shading: Duration,
     pub receivers: usize,
+    pub shadows: Duration,
+    pub shadow_changed: bool,
 }
 
 struct DynamicLight {
     mask: StaticLight,
     state: DynamicLightState,
     nocturnal: bool,
+    shadow_excluded: bool,
 }
 
-fn tile_sector_id((x, y): (u32, u32)) -> u64 {
+pub(super) fn tile_sector_id((x, y): (u32, u32)) -> u64 {
     u64::from(x >> 6) | (u64::from(y >> 6) << 26)
 }
 
@@ -275,6 +280,8 @@ struct CachedSector {
     lights: LightGrid,
     emitters: Vec<StaticLight>,
     outdoor_rows: [u64; 64],
+    casters: Vec<Caster>,
+    mobile_shadows: Option<MobileShadows>,
 }
 
 impl CachedSector {
@@ -297,6 +304,8 @@ impl CachedSector {
             lights: LightGrid::default(),
             emitters: Vec::new(),
             outdoor_rows: [0; 64],
+            casters: Vec::new(),
+            mobile_shadows: None,
         }
     }
 
@@ -390,6 +399,34 @@ impl CachedSector {
             lights: lights.grid,
             emitters: lights.sources,
             outdoor_rows: room.floor.outdoor_rows,
+            casters: Vec::new(),
+            mobile_shadows: None,
+        }
+    }
+
+    fn add_mobiles(&mut self, mobiles: mobile::PreparedMobiles, reference: (u32, u32)) {
+        self.mobile_shadows = mobiles.shadows;
+        self.report.diagnostics.extend(mobiles.issues);
+        for (index, mobile) in mobiles.frames.into_iter().enumerate() {
+            let caster = mobile.caster;
+            let key =
+                super::scenery::order(caster.tile, mobile.offset, false, usize::MAX - 3 + index);
+            let mut raster = Raster::new((true, key), &mobile.asset, caster.anchor);
+            let tile =
+                project_world_tile(caster.tile, reference).expect("prepared mobile position");
+            if !within_overhang(raster.bounds, tile) {
+                self.report.diagnostics.push(format!(
+                    "{}; mobile exceeds sector overhang",
+                    mobile.diagnostic
+                ));
+                continue;
+            }
+            self.report.diagnostics.push(mobile.diagnostic);
+            raster.object_light = ObjectLight::Point;
+            self.draws.push(raster);
+            if mobile.casts_shadow {
+                self.casters.push(caster);
+            }
         }
     }
 }
@@ -469,6 +506,9 @@ struct SectorCache {
     dynamic: Vec<DynamicLight>,
     dynamic_grid: LightGrid,
     hour: u8,
+    shadows_disabled: bool,
+    shadows: Vec<PreparedMask>,
+    shadow_error: Option<shadow::Error>,
 }
 
 impl SectorCache {
@@ -552,6 +592,7 @@ impl SectorCache {
         }
         self.refresh_dynamic_grid();
         self.refresh_shades(None);
+        self.refresh_shadows();
         start.elapsed()
     }
 
@@ -606,11 +647,132 @@ impl SectorCache {
         let grid = start.elapsed();
         let start = Instant::now();
         let receivers = self.refresh_shades(Some([old, new]));
+        let shading = start.elapsed();
+        let start = Instant::now();
+        let shadow_changed = self.refresh_shadows();
         Ok(LightUpdate {
             grid,
-            shading: start.elapsed(),
+            shading,
             receivers,
+            shadows: start.elapsed(),
+            shadow_changed,
         })
+    }
+
+    fn toggle_shadows(&mut self) -> Option<bool> {
+        if !self
+            .active
+            .iter()
+            .any(|id| self.entries[id].0.mobile_shadows.is_some())
+        {
+            return None;
+        }
+        self.shadows_disabled = !self.shadows_disabled;
+        self.refresh_shadows();
+        Some(!self.shadows_disabled)
+    }
+
+    fn toggle_probe_shadow(&mut self, slot: usize) -> Option<(bool, bool)> {
+        let light = self.dynamic.get_mut(slot)?;
+        light.shadow_excluded = !light.shadow_excluded;
+        let eligible = !light.shadow_excluded;
+        Some((eligible, self.refresh_shadows()))
+    }
+
+    fn shadow_candidates(&self) -> impl Iterator<Item = shadow::Candidate> {
+        self.active.iter().rev().flat_map(move |id| {
+            let probes = self
+                .dynamic
+                .iter()
+                .rev()
+                .filter(move |light| {
+                    tile_sector_id(light.state.tile) == *id && self.light_active(light)
+                })
+                .filter_map(|light| {
+                    let mut candidate = light.mask.shadow_candidate()?;
+                    if light.shadow_excluded {
+                        candidate.flags |= 0x40;
+                    }
+                    Some(candidate)
+                });
+            probes.chain(
+                self.entries[id]
+                    .0
+                    .emitters
+                    .iter()
+                    .rev()
+                    .filter_map(StaticLight::shadow_candidate),
+            )
+        })
+    }
+
+    fn refresh_shadows(&mut self) -> bool {
+        let Some((ambient, _)) = self.ambient else {
+            return false;
+        };
+        let mut prepared = std::mem::take(&mut self.shadows);
+        let mut count = 0;
+        let mut changed = false;
+        let mut error = None;
+        if !self.shadows_disabled {
+            for id in &self.active {
+                let sector = &self.entries[id].0;
+                let Some(resources) = &sector.mobile_shadows else {
+                    continue;
+                };
+                let lookup = resources.lookup.lookup();
+                for caster in &sector.casters {
+                    let base = if self.outdoor(caster.tile) {
+                        ambient.outdoor
+                    } else {
+                        ambient.indoor
+                    };
+                    let masks = shadow::select(
+                        &lookup,
+                        caster.anchor,
+                        base,
+                        0,
+                        true,
+                        self.shadow_candidates(),
+                    )
+                    .unwrap_or_else(|invalid| {
+                        error = Some(invalid);
+                        shadow::select(&lookup, caster.anchor, base, 0, false, [])
+                            .expect("ambient shadow selection")
+                    });
+                    for mask in masks {
+                        let frame = resources.frame(mask);
+                        let draw = PreparedMask {
+                            anchor: caster.anchor,
+                            frame,
+                            mask,
+                        };
+                        if let Some(old) = prepared.get_mut(count) {
+                            changed |= old.anchor != draw.anchor
+                                || old.mask != draw.mask
+                                || !Arc::ptr_eq(&old.frame, &draw.frame);
+                            *old = draw;
+                        } else {
+                            changed = true;
+                            prepared.push(draw);
+                        }
+                        count += 1;
+                    }
+                }
+            }
+        }
+        changed |= prepared.len() != count;
+        prepared.truncate(count);
+        self.shadows = prepared;
+        if error != self.shadow_error {
+            if let Some(error) = error {
+                eprintln!(
+                    "Original directional shadow lookup rejected a sample: {error}; using ambient mask for the affected caster"
+                );
+            }
+            self.shadow_error = error;
+        }
+        changed
     }
 
     fn refresh_shades(&mut self, dirty: Option<[Option<RasterBounds>; 2]>) -> usize {
@@ -784,11 +946,7 @@ impl SectorCache {
         size: (u32, u32),
         elapsed: Duration,
     ) -> impl Iterator<Item = WorldDraw<'_>> {
-        self.visible_rasters(
-            0..self.ordered.len(),
-            Viewport::new(camera.position(), size),
-            elapsed,
-        )
+        self.visible_with_shadows(camera, size, elapsed, &self.shadows)
     }
 
     fn visible_rasters(
@@ -826,9 +984,12 @@ impl SectorCache {
         shadows: &'a [PreparedMask],
     ) -> impl Iterator<Item = WorldDraw<'a>> {
         let viewport = Viewport::new(camera.position(), size);
-        let split = self
-            .ordered
-            .partition_point(|raster| !raster.key.0 || !raster.key.1.0);
+        let split = if shadows.is_empty() {
+            self.ordered.len()
+        } else {
+            self.ordered
+                .partition_point(|raster| !raster.key.0 || !raster.key.1.0)
+        };
         self.visible_rasters(0..split, viewport, elapsed)
             .chain(shadows.iter().filter_map(move |draw| {
                 let sprite = SpriteDraw {
@@ -973,6 +1134,7 @@ impl WorldStream {
                 active: true,
             },
             nocturnal,
+            shadow_excluded: false,
         });
         self.loader.frames.finish_sector();
         Ok(())
@@ -993,6 +1155,14 @@ impl WorldStream {
         self.cache.set_dynamic(slot, state)
     }
 
+    pub fn toggle_shadows(&mut self) -> Option<bool> {
+        self.cache.toggle_shadows()
+    }
+
+    pub fn toggle_probe_shadow(&mut self, slot: usize) -> Option<(bool, bool)> {
+        self.cache.toggle_probe_shadow(slot)
+    }
+
     /// Synchronous inspection and controlled benchmarking. The viewer uses into_interactive.
     pub fn prepare(&mut self, camera: &Camera, size: (u32, u32)) -> Result<PrepareTiming, String> {
         let required = self
@@ -1009,6 +1179,7 @@ impl WorldStream {
             stages.object_import += slice.object_import;
             stages.rasters += slice.rasters;
             stages.lighting += slice.lighting;
+            stages.mobiles += slice.mobiles;
             sector
         });
         timing.stages = stages;
@@ -1144,10 +1315,24 @@ impl SectorLoader {
                         *ambient,
                     )
                 });
-                self.frames.finish_sector();
                 timing.lighting = start.elapsed();
                 let start = Instant::now();
-                let cached = CachedSector::from_room(id, room, self.reference, lights);
+                let mobiles = (self.map.eq_ignore_ascii_case(mobile::MAP) && id == mobile::SECTOR)
+                    .then(|| {
+                        mobile::prepare(
+                            &mut self.vfs,
+                            &mut self.frames,
+                            self.reference,
+                            self.lighting.is_some(),
+                        )
+                    });
+                self.frames.finish_sector();
+                timing.mobiles = start.elapsed();
+                let start = Instant::now();
+                let mut cached = CachedSector::from_room(id, room, self.reference, lights);
+                if let Some(mobiles) = mobiles {
+                    cached.add_mobiles(mobiles, self.reference);
+                }
                 timing.rasters = start.elapsed();
                 cached
             }
@@ -1450,6 +1635,7 @@ mod tests {
             .unwrap(),
             state: from,
             nocturnal: false,
+            shadow_excluded: false,
         });
         cache.select(&[0, 1], 2, |id| {
             let mut sector = CachedSector::missing(id, String::new());
@@ -1505,6 +1691,16 @@ mod tests {
         assert_eq!(centers(&cache), [[210, 40, 30], [70, 30, 20]]);
         assert_eq!(cache.ordered.as_ptr(), original_geometry);
         let moved_shades = centers(&cache);
+        assert_eq!(cache.toggle_probe_shadow(0), Some((false, false)));
+        assert!(cache.dynamic[0].state.active);
+        assert!(
+            cache
+                .shadow_candidates()
+                .any(|candidate| candidate.flags & 0x40 != 0)
+        );
+        assert_eq!(centers(&cache), moved_shades);
+        check_animation(&cache);
+        assert_eq!(cache.toggle_probe_shadow(0), Some((true, false)));
         cache.refresh_shades(None);
         assert_eq!(centers(&cache), moved_shades);
         assert_eq!(cache.set_dynamic(0, to).unwrap().receivers, 0);

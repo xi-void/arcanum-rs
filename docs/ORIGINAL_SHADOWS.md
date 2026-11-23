@@ -1,5 +1,7 @@
 # Original isometric shadows
 
+[Milestone 48 ties these masks to original mobile sprites and light state](MOBILE_SHADOW_CASTERS.md).
+
 ## Source behavior
 
 CE's `light.c::shadow_apply` selects a sprite shadow from the caster's

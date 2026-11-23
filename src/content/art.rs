@@ -82,7 +82,14 @@ pub struct FrameCacheStats {
     pub decode_time: Duration,
 }
 
-type FrameKey = (String, usize, u8, bool, u8);
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Reflection {
+    None,
+    Rows,
+    Critter,
+}
+
+type FrameKey = (String, usize, u8, Reflection, u8);
 
 /// Scope this cache to one immutable set of VFS mounts.
 #[derive(Default)]
@@ -130,8 +137,25 @@ impl FrameCache {
         mirror: bool,
         rotation: u8,
     ) -> Result<Arc<LoadedFrame>, Box<dyn StdError>> {
+        let reflection = if mirror {
+            Reflection::Rows
+        } else {
+            Reflection::None
+        };
+        self.load_with_reflection(vfs, path, index, palette, rotation, reflection)
+    }
+
+    pub(super) fn load_with_reflection(
+        &mut self,
+        vfs: &mut Vfs,
+        path: &str,
+        index: usize,
+        palette: u8,
+        rotation: u8,
+        reflection: Reflection,
+    ) -> Result<Arc<LoadedFrame>, Box<dyn StdError>> {
         self.clock += 1;
-        let mut key = (path.to_owned(), index, palette, mirror, rotation);
+        let mut key = (path.to_owned(), index, palette, reflection, rotation);
         if rotation != 0 && rotation < 8 {
             key.4 = 0;
             if !self
@@ -179,8 +203,19 @@ impl FrameCache {
             Ok(frame) => frame,
             Err(error) => return Err(self.reject(key, error.to_string())),
         };
-        if mirror {
-            mirror_rows(&mut frame.decoded.frame);
+        if reflection != Reflection::None {
+            let frame = &mut frame.decoded.frame;
+            if reflection == Reflection::Critter {
+                frame.hotspot.0 = (frame.width as i32 - 1)
+                    .checked_sub(frame.hotspot.0)
+                    .ok_or("reflected critter hotspot overflow")?;
+                frame.offset.0 = frame
+                    .offset
+                    .0
+                    .checked_neg()
+                    .ok_or("reflected critter offset overflow")?;
+            }
+            mirror_rows(frame);
         }
         let bytes = frame.decoded.frame.pixels.capacity() * size_of::<[u8; 4]>();
         while self.stats.pixel_bytes + bytes > FRAME_CACHE_BYTES

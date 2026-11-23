@@ -271,6 +271,28 @@ impl Viewer<'_> {
     }
 
     fn update_light_probe(world: &mut InteractiveWorld, key: &str, trace: bool) -> bool {
+        if key == "s" {
+            let Some(enabled) = world.toggle_shadows() else {
+                return false;
+            };
+            if trace {
+                eprintln!("Mobile shadows enabled: {enabled}");
+            }
+            return true;
+        }
+        if key == "3" {
+            let start = Instant::now();
+            let Some((eligible, changed)) = world.toggle_probe_shadow(0) else {
+                return false;
+            };
+            if trace {
+                eprintln!(
+                    "Probe 0 directional shadow eligible: {eligible}, changed: {changed}, shadow update {:?}",
+                    start.elapsed()
+                );
+            }
+            return changed;
+        }
         let (slot, motion) = match key {
             "i" => (0, Some((0, -1))),
             "k" => (0, Some((0, 1))),
@@ -309,7 +331,7 @@ impl Viewer<'_> {
                 after.art.decodes - before.art.decodes
             );
         }
-        update.receivers != 0
+        update.receivers != 0 || update.shadow_changed
     }
 
     fn open(&self, event_loop: &ActiveEventLoop) -> Result<WindowSurface, String> {

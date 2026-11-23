@@ -241,7 +241,7 @@ pub(crate) fn bates_fixture(
     assert_eq!(caster, (80, 81));
     assert_eq!((word(&mobile, 91), word(&mobile, 95)), (0, 0));
     let proto = read("proto/017088 - npc.pro");
-    let fields = sector::objects::fixture_npc_prototype_appearance(
+    let fields = sector::objects::decode_npc_prototype_appearance(
         &proto,
         crate::prototype::SerializedPrototypeId(17088),
     )
