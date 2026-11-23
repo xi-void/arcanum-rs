@@ -38,14 +38,15 @@ offset (0, 0), 100% scale, object flags `0x4000`, portal flags
 | 150 | (94, 90) | `0x32103c11` | in4e4au0.art | 7 / 0 / 1 | Drawn |
 | 152 | (95, 90) | `0x32203c11` | in4e4bu0.art | 7 / 0 / 1 | Drawn |
 | 184 | (98, 93) | `0x32100c00` | in4e4au0.art | 1 / 0 / 0 | Drawn |
-| 186 | (110, 93) | `0x3178ec00` | gb1e4au0.art | 5 / 3 / 0 | Open appearance, unsupported |
+| 186 | (110, 93) | `0x3178ec00` | gb1e4au0.art | 5 / 3 / 0 | Open, drawn at viewport edge |
 | 191 | (98, 94) | `0x32200c00` | in4e4bu0.art | 1 / 0 / 0 | Drawn |
-| 193 | (110, 94) | `0x3198ec00` | gb1e4bu0.art | 5 / 3 / 0 | Open appearance, unsupported |
+| 193 | (110, 94) | `0x3198ec00` | gb1e4bu0.art | 5 / 3 / 0 | Open, drawn at viewport edge |
 | 244 | (103, 98) | `0x32103c11` | in4e4au0.art | 7 / 0 / 1 | Drawn |
 | 246 | (104, 98) | `0x32203c11` | in4e4bu0.art | 7 / 0 / 1 | Drawn |
 
-The rendered files resolve under `art/portal` in `Arcanum2.dat`.
-The visible leaves use four frame variants across two files.
+The closed files resolve under `art/portal` in `Arcanum2.dat`.
+The default world view draws six closed leaves and two open leaves.
+The 11 remaining closed leaves are reported as culled.
 The cache key contains the VFS path, frame, palette and mirror.
 The static staircases use the existing scenery path.
 
@@ -69,8 +70,10 @@ filename convention. CE's `portal.c` identifies frame 0 as
 closed. The rotation-5 leaves above store the open animation's
 frame 3. The native preview draws the verified undamaged
 closed-door variants for rotation 1 / palette 0 and rotation
-7 / palette 1. Windows, open and damaged appearances and
-non-default scaling or blending produce explicit diagnostics.
+7 / palette 1 and the verified fully-open variant at frame 3,
+rotation 5, palette 0, with mirroring disabled. Other nonzero
+frames, windows, damaged appearances, and non-default scaling
+or blending produce explicit diagnostics.
 
 The portal ART uses one stored direction and seven frames.
 TIG's `tig_art_frame_data` uses the same directional hotspot
@@ -130,11 +133,61 @@ original closed state, orientation and pivot. CE's lighting,
 actors and foreground wall fading account for visible
 differences in the registered views. The replay uses the
 base sector. The supplied capture provides no same-door
-verification for the two unsupported open leaves, 186/193.
+verification for the two open leaves, 186/193.
 The source capture, registered comparisons and measurements
 are under `target/visual-checks/milestone-36/`.
 
-## Release measurements
+## Milestone 37 entrance pair
+
+Records 186 and 193 occupy (110, 93) and (110, 94), directly
+after wall records 185 and 192. Their spans are 34891–34974 and
+35516–35599 (half-open) in sector `67108865.sec`. The effective
+ART words are the stored instance words `0x3178ec00` and
+`0x3198ec00`. The prototype's ART word remains `0x30003411`.
+Each instance overrides only current ART and location. It
+inherits the same offsets, scale, colors and flags as the
+closed leaves. The raw flags describe the object and prototype
+properties. The stored frame supplies its visual state.
+
+| Record | VFS winner | Frame 0 dimensions / hotspot | Frame 3 dimensions / hotspot | Frame 3 opaque / transparent texels |
+|---|---|---|---|---|
+| 186 | `Arcanum2.dat`, `art/portal/gb1e4au0.art` | 33 × 95 / (26, 79) | 20 × 81 / (26, 80) | 1,209 / 411 |
+| 193 | `Arcanum5.dat`, `art/portal/gb1e4bu0.art` | 34 × 94 / (36, 82) | 41 × 80 / (40, 68) | 158 / 3,122 |
+
+An independent read of the winning ART payloads found seven
+frames, one stored direction, palette slots 0 and 1, and zero
+movement offsets on frames 0 and 3. Frame 3 is RLE compressed
+in both files and treats index zero as transparent. The frame 3
+pair shows different silhouettes because the leaves swing
+differently in these authored frames. No change to either
+pivot or depth rule is needed. CE normalizes direction 5 to 4
+for its opening sequence and stops at frame 3. The shared pivot
+rule leaves the rotation-5 hotspot unchanged. Raster origins
+in the default 1280 × 720 frame are (654, 660) and (680, 692).
+Both leaves draw directly after their same-tile wall before
+existing object ordering continues. The reprojection
+close-up changes only the shared center.
+
+`world-inspect` now reports drawn and culled portal states and
+unsupported records across the selected sector. The closed-only
+fixtures remain available. Wayland captured the default
+1280 × 720 overview, a recentered entrance at 960 × 640, a
+close-up and a 500 × 300 resized view. The overview and both
+entrance sizes submitted zero additional buffers during their
+three-second idle checks. The two 1280 × 720 Wayland overviews
+from Milestones 36 and 37 differ at 1,061 pixels. Every changed
+pixel lies in the entrance area, X 654–717 and Y 659–719.
+The rest of the images match exactly. These captures and source
+diagnostics are under `target/visual-checks/milestone-37/`.
+
+The supplied CE hallway capture provides an exact closed-door
+comparison. The available CE screenshots do not show the same
+open entrance pair. The open leaves were checked against the
+original bytes and CE's frame, pivot and insertion rules.
+There is no gameplay screenshot basis for comparing their
+open-state lighting or wall fading.
+
+## Milestone 36 release measurements
 
 On the Milestone 35 Linux host with an i5-6300U, an optimized
 warm-cache probe pinned to one logical CPU took the median of
@@ -153,3 +206,27 @@ buffers and include clear, compose and pack.
 The same-run frame ranges overlap. Wayland submission is outside
 these measurements. Portal frames are decoded during scene
 loading and reused across redraws.
+
+
+## Milestone 37 release measurements
+
+With the same pinned i5-6300U setup and 1280 × 720 dimensions,
+a rerun of the Milestone 36 binary took 7.102 ms for full-frame
+clear, compose and pack. A paired comparison in the current
+binary alternated between the same draw list with the two
+open leaves withheld and with them included. One warm-up pair
+preceded seven batches of 100 frames per variant.
+
+| Variant | Median | Batch min–max |
+|---|---:|---:|
+| Same-run closed-only control | 6.845 ms | 6.753–6.995 ms |
+| Open and closed | 6.901 ms | 6.732–6.996 ms |
+| Two open-leaf blits alone | 2.9 µs | 2.5–4.0 µs |
+
+The full-frame ranges overlap. These measurements exclude
+presentation and loading. The decoded open frames are cached
+by the existing path/frame/palette/mirror key.
+
+The Rust CI workflow runs formatting, Clippy, portable tests
+and headless and windowed builds on GitHub. Installed-data
+verification remains local.

@@ -826,11 +826,11 @@ fn bates_room_overview_reuses_the_original_room_inside_the_larger_sector_scene()
 
 #[test]
 #[ignore = "requires installed Arcanum data"]
-fn bates_world_preserves_original_closed_portal_geometry_and_wall_order() {
+fn bates_world_preserves_original_portal_states_geometry_and_wall_order() {
     use arcanum_rs::{
         compositor::{blit_ordered, sprite_origin},
         content::{
-            portal::Kind,
+            portal::{Kind, PortalState},
             scenery::{WorldRegion, load_world},
         },
     };
@@ -844,19 +844,22 @@ fn bates_world_preserves_original_closed_portal_geometry_and_wall_order() {
             .iter()
             .map(|p| p.record.index)
             .collect::<Vec<_>>(),
-        [150, 152, 184, 191, 244, 246]
+        [150, 152, 184, 186, 191, 193, 244, 246]
     );
+    assert_eq!(world.sector_object_counts.1, 19);
+    assert_eq!(world.culled_portals.len(), 11);
     assert!(
         world
             .issues
             .iter()
-            .any(|i| i.record == 186 && i.reason.contains("frame: 3"))
+            .all(|issue| issue.category != arcanum_rs::sector::objects::StaticCategory::Portal)
     );
     assert_eq!(room.walls.len(), 96);
     assert_eq!(room.scenery.len(), 24);
     let leaf = &room.portals[0];
     let other = &room.portals[1];
     assert_eq!(leaf.art.kind, Kind::Door);
+    assert_eq!(leaf.state, PortalState::Closed);
     assert_eq!(leaf.record.span, 31758..31841);
     assert_eq!(leaf.record.art_id, 0x3210_3c11);
     assert_eq!(leaf.prototype_art_id, 0x3000_3411);
@@ -867,7 +870,7 @@ fn bates_world_preserves_original_closed_portal_geometry_and_wall_order() {
     assert_eq!(leaf.artwork.source.virtual_path, "art/portal/in4e4au0.art");
     assert_eq!(leaf.art.pivot(&leaf.artwork.decoded.frame), (42, 99));
     assert_eq!(other.art.pivot(&other.artwork.decoded.frame), (33, 103));
-    assert!(Arc::ptr_eq(&leaf.artwork, &room.portals[4].artwork));
+    assert!(Arc::ptr_eq(&leaf.artwork, &room.portals[6].artwork));
     assert!(!Arc::ptr_eq(&leaf.artwork, &room.portals[2].artwork));
     let draw = leaf.draw(room.floor.center).unwrap();
     assert_eq!(sprite_origin(draw.frame, draw.anchor), (518, -99));
@@ -887,6 +890,68 @@ fn bates_world_preserves_original_closed_portal_geometry_and_wall_order() {
         .unwrap();
     assert!(std::ptr::eq(draws[index - 1].frame, wall_draw.frame));
     assert_eq!(draws[index - 1].anchor, wall_draw.anchor);
+    for (index, (id, wall, tile, raw, path, archive, pivot, origin)) in [3, 5].into_iter().zip([
+        (
+            186,
+            185,
+            (110, 93),
+            0x3178_ec00,
+            "gb1e4au0.art",
+            "Arcanum2.dat",
+            (26, 80),
+            (14, 300),
+        ),
+        (
+            193,
+            192,
+            (110, 94),
+            0x3198_ec00,
+            "gb1e4bu0.art",
+            "Arcanum5.dat",
+            (40, 68),
+            (40, 332),
+        ),
+    ]) {
+        let open = &room.portals[index];
+        assert_eq!(open.record.index, id);
+        assert_eq!(open.record.art_id, raw);
+        assert_eq!(open.state, PortalState::Open);
+        assert_eq!(open.paired_wall_index, wall);
+        assert_eq!(open.placement.tile, tile);
+        assert_eq!(
+            (
+                open.art.frame,
+                open.art.rotation,
+                open.art.palette,
+                open.art.mirror_x
+            ),
+            (3, 5, 0, false)
+        );
+        assert_eq!(open.appearance.offset, (0, 0));
+        assert_eq!(
+            open.artwork.source.virtual_path,
+            format!("art/portal/{path}")
+        );
+        assert!(open.artwork.source.mount_path.ends_with(archive));
+        let draw = open.draw(room.floor.center).unwrap();
+        assert_eq!(open.art.pivot(draw.frame), pivot);
+        assert_eq!(sprite_origin(draw.frame, draw.anchor), origin);
+        assert!(draw.frame.pixels.iter().any(|p| p[3] == 0));
+        assert!(draw.frame.pixels.iter().any(|p| p[3] == 255));
+        let wall_draw = room
+            .walls
+            .iter()
+            .find(|w| w.record.index == wall)
+            .unwrap()
+            .draw(room.floor.center)
+            .unwrap();
+        let index = draws
+            .iter()
+            .position(|d| std::ptr::eq(d.frame, draw.frame) && d.anchor == draw.anchor)
+            .unwrap();
+        assert!(std::ptr::eq(draws[index - 1].frame, wall_draw.frame));
+        assert_eq!(draws[index - 1].anchor, wall_draw.anchor);
+    }
     let clip = |dimensions: (u32, u32), position: (i32, i32)| {
         let stride = dimensions.0 as usize;
         let mut pixels = vec![[32, 43, 58]; stride * dimensions.1 as usize];
@@ -909,5 +974,10 @@ fn bates_world_preserves_original_closed_portal_geometry_and_wall_order() {
     for (row, value) in part.chunks(140).enumerate() {
         let start = (255 + row) * 1280 + 1140;
         assert_eq!(value, &full[start..start + 140]);
+    }
+    let clipped_open = clip((100, 80), (630, 640));
+    for (row, value) in clipped_open.chunks(100).enumerate() {
+        let start = (640 + row) * 1280 + 630;
+        assert_eq!(value, &full[start..start + 100]);
     }
 }

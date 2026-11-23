@@ -29,6 +29,13 @@ pub enum Kind {
     Door,
 }
 
+/// Verified visual state of a stored door frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortalState {
+    Closed,
+    Open,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PortalArt {
     pub kind: Kind,
@@ -76,18 +83,17 @@ impl PortalArt {
         Ok(format!("art/portal/{name}"))
     }
 
-    fn validate_closed(self) -> Result<(), Box<dyn Error>> {
-        if self.kind != Kind::Door
-            || self.damaged
-            || self.frame != 0
-            || !matches!(
-                (self.rotation, self.palette, self.mirror_x),
-                (1, 0, false) | (7, 1, true)
-            )
-        {
-            return Err(format!("unsupported static portal appearance {self:?}").into());
+    pub fn visual_state(self) -> Result<PortalState, Box<dyn Error>> {
+        if self.kind == Kind::Door && !self.damaged {
+            match (self.frame, self.rotation, self.palette, self.mirror_x) {
+                (0, 1, 0, false) | (0, 7, 1, true) => return Ok(PortalState::Closed),
+                // Rotation 5 uses the 1–3 opening sequence. Only its fully open
+                // endpoint with the observed palette and orientation is verified.
+                (3, 5, 0, false) => return Ok(PortalState::Open),
+                _ => {}
+            }
         }
-        Ok(())
+        Err(format!("unsupported static portal appearance {self:?}").into())
     }
 
     pub fn pivot(self, frame: &SpriteFrame) -> (i64, i64) {
@@ -159,6 +165,7 @@ pub struct ImportedPortal {
     pub names_source: Source,
     pub artwork: Arc<art::LoadedFrame>,
     pub art: PortalArt,
+    pub state: PortalState,
     pub appearance: PortalAppearance,
     pub placement: Placement,
     /// The same-tile wall that precedes this leaf in the supported room pass.
@@ -199,7 +206,7 @@ impl PortalImport {
             return Err("expected a portal record".into());
         }
         let art = PortalArt::decode(record.art_id)?;
-        art.validate_closed()?;
+        let state = art.visual_state()?;
         let (prototype_source, prototype) = match self.prototypes.entry(record.prototype) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
@@ -244,6 +251,7 @@ impl PortalImport {
             names_source: self.names.source.clone(),
             artwork: Arc::clone(artwork),
             art,
+            state,
             appearance,
             placement,
             paired_wall_index,
@@ -264,7 +272,7 @@ mod tests {
             (66, 0, 7, 1)
         );
         assert!(door.mirror_x);
-        door.validate_closed().unwrap();
+        assert_eq!(door.visual_state().unwrap(), PortalState::Closed);
         let names =
             Mes::parse_text("{66}{IN4E4aU0.ART 2008}\n{1067}{TestWindow.ART 2008}").unwrap();
         assert_eq!(
@@ -278,10 +286,24 @@ mod tests {
             window.resource_path(&names).unwrap(),
             "art/portal/testwindow.art"
         );
-        assert!(window.validate_closed().is_err());
+        assert!(window.visual_state().is_err());
         let open = PortalArt::decode(0x3178_ec00).unwrap();
         assert_eq!((open.frame, open.rotation), (3, 5));
-        assert!(open.validate_closed().is_err());
+        assert_eq!(open.visual_state().unwrap(), PortalState::Open);
+        for unsupported in [
+            0x3178_6c00,
+            0x3178_ac00,
+            0x3178_ec01,
+            0x3178_cc00,
+            0x3178_fc11,
+        ] {
+            assert!(
+                PortalArt::decode(unsupported)
+                    .unwrap()
+                    .visual_state()
+                    .is_err()
+            );
+        }
         assert!(
             PortalArt::decode(0x3210_3e11)
                 .unwrap()
