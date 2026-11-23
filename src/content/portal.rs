@@ -183,7 +183,6 @@ impl ImportedPortal {
 pub(super) struct PortalImport {
     names: LoadedMes,
     prototypes: BTreeMap<SerializedPrototypeId, (Source, PortalPrototype)>,
-    frames: BTreeMap<(String, u8, u8, bool), Arc<art::LoadedFrame>>,
 }
 
 impl PortalImport {
@@ -191,13 +190,13 @@ impl PortalImport {
         Ok(Self {
             names: load_mes(vfs, "art/portal/portal.mes")?,
             prototypes: BTreeMap::new(),
-            frames: BTreeMap::new(),
         })
     }
 
     pub(super) fn resolve(
         &mut self,
         vfs: &mut Vfs,
+        frames: &mut art::FrameCache,
         sector: Coordinates,
         record: StaticRecord,
         paired_wall_index: usize,
@@ -218,28 +217,17 @@ impl PortalImport {
         };
         let appearance = PortalAppearance::resolve(record.fields, prototype.appearance)?;
         let path = art.resource_path(&self.names.mes)?;
-        let artwork = match self
-            .frames
-            .entry((path.clone(), art.frame, art.palette, art.mirror_x))
-        {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => {
-                let mut artwork = art::read_art(vfs, &path)?
-                    .decode_with_palette(usize::from(art.frame), art.palette)?;
-                let frame = &mut artwork.decoded.frame;
-                if frame.width > 512 || frame.height > 512 {
-                    return Err(
-                        format!("portal frame exceeds 512 pixels per axis in {path}").into(),
-                    );
-                }
-                if art.mirror_x {
-                    for row in frame.pixels.chunks_exact_mut(frame.width as usize) {
-                        row.reverse();
-                    }
-                }
-                entry.insert(Arc::new(artwork))
-            }
-        };
+        let artwork = frames.load(
+            vfs,
+            &path,
+            usize::from(art.frame),
+            art.palette,
+            art.mirror_x,
+        )?;
+        let frame = &artwork.decoded.frame;
+        if frame.width > 512 || frame.height > 512 {
+            return Err(format!("portal frame exceeds 512 pixels per axis in {path}").into());
+        }
         let placement = Placement {
             tile: record.world_tile(sector).ok_or("invalid portal tile")?,
             pixel_offset: appearance.offset,
@@ -249,7 +237,7 @@ impl PortalImport {
             prototype_source: prototype_source.clone(),
             prototype_art_id: prototype.art_id,
             names_source: self.names.source.clone(),
-            artwork: Arc::clone(artwork),
+            artwork,
             art,
             state,
             appearance,

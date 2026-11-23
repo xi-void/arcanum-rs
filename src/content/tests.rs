@@ -1079,11 +1079,12 @@ fn open_portal_uses_frame_three_and_rejects_a_shorter_replacement() {
     let mut vfs = Vfs::new(Policy::Ordered);
     vfs.mount_directory(&fixture.0).unwrap();
     let mut importer = portal::PortalImport::new(&mut vfs).unwrap();
+    let mut frames = art::FrameCache::default();
     let door = importer
-        .resolve(&mut vfs, sector, make_record(1), 0)
+        .resolve(&mut vfs, &mut frames, sector, make_record(1), 0)
         .unwrap();
     let another = importer
-        .resolve(&mut vfs, sector, make_record(3), 2)
+        .resolve(&mut vfs, &mut frames, sector, make_record(3), 2)
         .unwrap();
     assert_eq!(door.state, portal::PortalState::Open);
     assert_eq!(door.record.art_id, 0x3178_ec00);
@@ -1099,12 +1100,173 @@ fn open_portal_uses_frame_three_and_rejects_a_shorter_replacement() {
     replacement.write(door_path, &make_art(3));
     vfs.mount_directory(&replacement.0).unwrap();
     let mut importer = portal::PortalImport::new(&mut vfs).unwrap();
+    let mut frames = art::FrameCache::default();
     let err = importer
-        .resolve(&mut vfs, sector, make_record(1), 0)
+        .resolve(&mut vfs, &mut frames, sector, make_record(1), 0)
         .err()
         .unwrap();
     assert!(
         err.to_string()
             .contains("ART frame 3 is out of range for 3 frames")
     );
+}
+
+#[test]
+fn streams_original_layout_from_two_synthetic_adjacent_sectors() {
+    use super::world::{SectorRegion, WorldStream};
+    use crate::{compositor::blit_ordered, isometric::synthetic_floor, sector::Coordinates};
+
+    let fixture = Fixture::new();
+    fixture.write("art/tile/tilename.mes", b"{300}{foo}{301}{bar}");
+    fixture.write("art/wall/structure.mes", b"{0}{In40 Gb11 wd1 gb1}");
+    fixture.write("art/wall/wallname.mes", b"{0}{In40}");
+    fixture.write("art/scenery/scenery.mes", b"{0}{Test.ART}");
+    let write_art =
+        |path: &str, rgb: [u8; 3], size: (u32, u32), hotspot: (u32, u32), pixels: &[u8]| {
+            let mut art = vec![0; 1184];
+            for (offset, word) in [
+                (0, 1_u32),
+                (8, 8),
+                (12, 1),
+                (32, 1),
+                (1156, size.0),
+                (1160, size.1),
+                (1164, pixels.len() as u32),
+                (1168, hotspot.0),
+                (1172, hotspot.1),
+            ] {
+                art[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+            }
+            art[136..139].copy_from_slice(&[rgb[2], rgb[1], rgb[0]]);
+            art.extend(pixels);
+            fixture.write(path, &art);
+        };
+    let mask: Vec<_> = synthetic_floor()
+        .pixels
+        .iter()
+        .map(|pixel| u8::from(pixel[3] != 0))
+        .collect();
+    for (stem, rgb) in [("foo", [220, 20, 30]), ("bar", [10, 120, 210])] {
+        write_art(
+            &format!("art/tile/{stem}bse0a.art"),
+            rgb,
+            (78, 40),
+            (39, 39),
+            &mask,
+        );
+    }
+
+    let mut prototype = vec![0; 68];
+    prototype[0] = 119;
+    prototype[4..6].copy_from_slice(&(-1i16).to_le_bytes());
+    prototype[28] = 1;
+    prototype[36] = 20;
+    for slot in (0..36).chain(64..69) {
+        match slot {
+            1 | 5..=7 | 15..=17 | 30 | 31 | 34 | 35 | 67 | 68 => prototype.push(0),
+            _ => {
+                let value: u32 = match slot {
+                    9 => 0x00ff_ffff,
+                    10 => 255,
+                    11 => 100,
+                    _ => 0,
+                };
+                prototype.extend(value.to_le_bytes());
+            }
+        }
+    }
+    fixture.write("proto/000020 - wall.pro", &prototype);
+    write_art(
+        "art/wall/in4bseu0.art",
+        [255, 255, 0],
+        (2, 1),
+        (39, 132),
+        &[1, 1],
+    );
+    write_art(
+        "art/wall/in4bseu1.art",
+        [255, 255, 255],
+        (2, 1),
+        (39, 132),
+        &[1, 0],
+    );
+    for id in 0_u32..=1 {
+        let mut bytes = 0_u32.to_le_bytes().to_vec();
+        for cell in 0..4096 {
+            let variant = u32::from(id == 1 && cell / 64 % 2 == 0);
+            bytes.extend(((variant << 22) | (variant << 16)).to_le_bytes());
+        }
+        for marker in [1_u32, 0xaa0000] {
+            bytes.extend(marker.to_le_bytes());
+        }
+        // Two overlapping walls, one per owner sector. The seam draw
+        // order must use the full X coordinate because both are record 0.
+        let mut header = [0; 70];
+        header[0] = 119;
+        header[4] = 1;
+        header[12] = 20;
+        header[56] = 4;
+        header[58] = 15;
+        bytes.extend(header);
+        bytes.extend((0x1000_0800_u32 | (id << 8)).to_le_bytes());
+        bytes.push(1);
+        bytes.extend((if id == 0 { 63_u32 } else { 0 }).to_le_bytes());
+        bytes.extend(32_u32.to_le_bytes());
+        bytes.extend((if id == 0 { -40_i32 } else { 0 }).to_le_bytes());
+        bytes.extend((if id == 0 { 170_i32 } else { 150 }).to_le_bytes());
+        bytes.extend(1_u32.to_le_bytes());
+        fixture.write(&format!("maps/synthetic/{id}.sec"), &bytes);
+    }
+
+    let region = SectorRegion {
+        first: Coordinates { x: 0, y: 0 },
+        last: Coordinates { x: 3, y: 0 },
+    };
+    let size = (160, 100);
+    let center = (32, 32);
+    let mut camera = region.camera(center).unwrap();
+    let mut vfs = Vfs::new(Policy::Ordered);
+    vfs.mount_directory(&fixture.0).unwrap();
+    let mut world = WorldStream::new(vfs, "synthetic".into(), region, center).unwrap();
+    let render = |world: &WorldStream, camera: &_| {
+        let mut pixels = vec![[0; 3]; 160 * 100];
+        blit_ordered(&mut pixels, size, 160, world.visible(camera, size)).unwrap();
+        pixels
+    };
+    world.prepare(&camera, size).unwrap();
+    assert_eq!(world.stats().active_sectors, 1);
+    let home = render(&world, &camera);
+
+    camera.pan((-1260, 630), size);
+    world.prepare(&camera, size).unwrap();
+    assert_eq!(world.reports().map(|r| r.id).collect::<Vec<_>>(), [0, 1]);
+    assert_eq!(world.stats().art.decodes, 4);
+    assert!(world.stats().art.hits > 0);
+    let seam = render(&world, &camera);
+    assert_eq!(
+        seam[58 * 160 + 61..58 * 160 + 63],
+        [[255, 255, 255], [255, 255, 0]]
+    );
+    assert!(seam.contains(&[220, 20, 30]));
+    assert!(seam.contains(&[10, 120, 210]));
+    assert!(seam.iter().all(|pixel| *pixel != [0; 3]));
+    let warm_reads = world.stats().vfs_reads;
+
+    camera.reset(size);
+    world.prepare(&camera, size).unwrap();
+    assert_eq!(render(&world, &camera), home);
+    assert_eq!(world.stats().vfs_reads, warm_reads);
+    camera.pan((-1260, 630), size);
+    world.prepare(&camera, size).unwrap();
+    assert_eq!(render(&world, &camera), seam);
+    assert_eq!(world.stats().vfs_reads, warm_reads);
+
+    camera.pan((-2560, 1280), size);
+    world.prepare(&camera, size).unwrap();
+    let missing = world.reports().find(|report| report.id == 2).unwrap();
+    assert_eq!(missing.surfaces, 0);
+    assert!(missing.diagnostics[0].contains("maps/synthetic/2.sec"));
+    let reads = world.stats().sector_reads;
+    world.prepare(&camera, size).unwrap();
+    assert_eq!(world.stats().sector_reads, reads);
 }

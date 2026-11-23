@@ -21,9 +21,20 @@ impl Camera {
         if !(1..=64).contains(&side) {
             return None;
         }
-        let axis = |first: u32, center: u32| {
-            let last = first.checked_add(u32::from(side) - 1)?;
-            if first.abs_diff(center) > 63 || last.abs_diff(center) > 63 {
+        let extent = u32::from(side) - 1;
+        for (first, center) in [(first_tile.0, reference.0), (first_tile.1, reference.1)] {
+            if first.abs_diff(center) > 63 || first.checked_add(extent)?.abs_diff(center) > 63 {
+                return None;
+            }
+        }
+        Self::rectangle(reference, first_tile, (extent + 1, extent + 1))
+    }
+
+    /// Camera for a bounded rectangular region of original world tiles.
+    pub fn rectangle(reference: (u32, u32), first: (u32, u32), size: (u32, u32)) -> Option<Self> {
+        let axis = |first: u32, center: u32, size: u32| {
+            let last = first.checked_add(size.checked_sub(1)?)?;
+            if first.abs_diff(center) > 2047 || last.abs_diff(center) > 2047 || size > 2048 {
                 return None;
             }
             Some((
@@ -35,8 +46,8 @@ impl Camera {
             position: (0, 0),
             at_home: true,
             axes: [
-                axis(first_tile.0, reference.0)?,
-                axis(first_tile.1, reference.1)?,
+                axis(first.0, reference.0, size.0)?,
+                axis(first.1, reference.1, size.1)?,
             ],
         })
     }
@@ -103,7 +114,7 @@ pub struct CacheStats {
 
 struct Raster<'a> {
     draw: SpriteDraw<'a>,
-    bounds: (i64, i64, i64, i64),
+    bounds: RasterBounds,
 }
 
 /// Prepared scene order and conservative raster rectangles. The scene borrows
@@ -123,15 +134,9 @@ impl<'a> CameraScene<'a> {
                 if frames.insert(std::ptr::from_ref(draw.frame)) {
                     pixel_bytes += draw.frame.pixels.capacity() * size_of::<[u8; 4]>();
                 }
-                let (x, y) = sprite_origin(draw.frame, draw.anchor);
                 Raster {
                     draw,
-                    bounds: (
-                        x,
-                        y,
-                        x + i64::from(draw.frame.width),
-                        y + i64::from(draw.frame.height),
-                    ),
+                    bounds: RasterBounds::new(draw),
                 }
             })
             .collect();
@@ -152,25 +157,66 @@ impl<'a> CameraScene<'a> {
         camera: &Camera,
         viewport: (u32, u32),
     ) -> impl Iterator<Item = SpriteDraw<'a>> + '_ {
-        let (x, y) = camera.position();
-        let (width, height) = viewport;
+        let viewport = Viewport::new(camera.position(), viewport);
+        self.rasters
+            .iter()
+            .filter_map(move |raster| viewport.place(raster.draw, raster.bounds))
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RasterBounds {
+    pub(crate) min: (i64, i64),
+    pub(crate) max: (i64, i64),
+}
+
+impl RasterBounds {
+    pub(crate) fn new(draw: SpriteDraw<'_>) -> Self {
+        let (x, y) = sprite_origin(draw.frame, draw.anchor);
+        Self {
+            min: (x, y),
+            max: (
+                x + i64::from(draw.frame.width),
+                y + i64::from(draw.frame.height),
+            ),
+        }
+    }
+}
+
+pub(crate) struct Viewport(RasterBounds);
+
+impl Viewport {
+    pub(crate) fn new((x, y): (i32, i32), (width, height): (u32, u32)) -> Self {
         let left = i64::from(x) - i64::from(width / 2);
         let top = i64::from(y) - i64::from(height / 2);
-        let right = left + i64::from(width);
-        let bottom = top + i64::from(height);
-        self.rasters.iter().filter_map(move |raster| {
-            let (x0, y0, x1, y1) = raster.bounds;
-            if width == 0 || height == 0 || x0 >= right || x1 <= left || y0 >= bottom || y1 <= top {
-                return None;
-            }
-            let (x, y) = raster.draw.anchor;
-            Some(SpriteDraw {
-                frame: raster.draw.frame,
-                anchor: (
-                    i32::try_from(i64::from(x) - left).ok()?,
-                    i32::try_from(i64::from(y) - top).ok()?,
-                ),
-            })
+        Self(RasterBounds {
+            min: (left, top),
+            max: (left + i64::from(width), top + i64::from(height)),
+        })
+    }
+
+    pub(crate) fn place<'a>(
+        &self,
+        draw: SpriteDraw<'a>,
+        bounds: RasterBounds,
+    ) -> Option<SpriteDraw<'a>> {
+        let (left, top) = self.0.min;
+        let (right, bottom) = self.0.max;
+        if left == right
+            || top == bottom
+            || bounds.min.0 >= right
+            || bounds.max.0 <= left
+            || bounds.min.1 >= bottom
+            || bounds.max.1 <= top
+        {
+            return None;
+        }
+        Some(SpriteDraw {
+            frame: draw.frame,
+            anchor: (
+                i32::try_from(i64::from(draw.anchor.0) - left).ok()?,
+                i32::try_from(i64::from(draw.anchor.1) - top).ok()?,
+            ),
         })
     }
 }

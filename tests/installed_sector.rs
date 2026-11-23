@@ -1091,6 +1091,27 @@ fn bates_camera_selects_loaded_art_across_the_sector_and_round_trips() {
         pixels
     };
     let initial = render(&camera, viewport);
+    let mut streamed_bates = arcanum_rs::content::world::WorldStream::new(
+        Vfs::from_game(&game, Policy::Ce).unwrap(),
+        region.map.into(),
+        arcanum_rs::content::world::SectorRegion {
+            first: region.sector,
+            last: region.sector,
+        },
+        region.center,
+    )
+    .unwrap();
+    streamed_bates.prepare(&camera, viewport).unwrap();
+    assert_eq!(streamed_bates.reports().next().unwrap().wall_count, 268);
+    let mut streamed_pixels = vec![[32, 43, 58]; 320 * 200];
+    blit_ordered(
+        &mut streamed_pixels,
+        viewport,
+        320,
+        streamed_bates.visible(&camera, viewport),
+    )
+    .unwrap();
+    assert_eq!(streamed_pixels, initial);
     for delta in [(512, -64), (-432, 416), (-10000, -10000), (10000, 10000)] {
         camera.pan(delta, viewport);
         let (x, y) = camera.position();
@@ -1251,4 +1272,64 @@ fn assert_stock_wall_variants(
         ids.insert(id);
     }
     assert_eq!(ids.len(), 73);
+}
+
+#[test]
+#[ignore = "requires installed Arcanum data"]
+fn kna_tha_streams_both_original_sides_of_a_populated_boundary() {
+    use arcanum_rs::{
+        content::world::{SectorRegion, WorldStream},
+        sector::Coordinates,
+    };
+
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    let region = SectorRegion {
+        first: Coordinates { x: 5, y: 14 },
+        last: Coordinates { x: 8, y: 14 },
+    };
+    let center = (341, 928);
+    let size = (1280, 720);
+    let mut camera = region.camera(center).unwrap();
+    let mut world = WorldStream::new(vfs, "k'na tha".into(), region, center).unwrap();
+    let render = |world: &WorldStream, camera: &_| {
+        let mut output = vec![[0; 3]; 1280 * 720];
+        blit_ordered(&mut output, size, 1280, world.visible(camera, size)).unwrap();
+        output
+    };
+    world.prepare(&camera, size).unwrap();
+    assert_eq!(
+        world.reports().map(|report| report.id).collect::<Vec<_>>(),
+        [939524101]
+    );
+    let initial = render(&world, &camera);
+    let initial_decodes = world.stats().art.decodes;
+    camera.pan((-1532, 934), size); // 2Y−X=3400, the X=383.5 boundary.
+    assert_eq!(camera.position(), (-1532, 934));
+    world.prepare(&camera, size).unwrap();
+    assert_eq!(
+        world
+            .reports()
+            .map(|r| (r.id, r.surfaces, r.wall_count, r.scenery_count))
+            .collect::<Vec<_>>(),
+        [(939524101, 4096, 28, 386), (939524102, 4096, 64, 426)]
+    );
+    let reads = world.stats().vfs_reads;
+    let decodes = world.stats().art.decodes;
+    assert_eq!(decodes - initial_decodes, 3);
+    let seam = render(&world, &camera);
+    camera.pan((-32, 0), size);
+    world.prepare(&camera, size).unwrap();
+    let crossing = render(&world, &camera);
+    for (a, b) in seam.chunks(1280).zip(crossing.chunks(1280)) {
+        assert_eq!(&a[..1248], &b[32..]);
+    }
+    camera.pan((-736, 384), size);
+    world.prepare(&camera, size).unwrap();
+    assert_eq!(world.stats().sector_reads, 2);
+    camera.reset(size);
+    world.prepare(&camera, size).unwrap();
+    assert_eq!(render(&world, &camera), initial);
+    assert_eq!(world.stats().vfs_reads, reads);
+    assert_eq!(world.stats().art.decodes, decodes);
 }

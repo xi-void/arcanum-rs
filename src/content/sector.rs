@@ -2,7 +2,6 @@
 
 use super::{LoadedMes, Source, art, load_mes, read_bounded};
 use crate::{
-    art::SpriteFrame,
     compositor::SpriteDraw,
     facade::FacadeId,
     isometric::floor_draw,
@@ -10,7 +9,7 @@ use crate::{
     vfs::Vfs,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::error::Error;
+use std::{error::Error, sync::Arc};
 
 pub const PATCH_SIDE: u8 = 5;
 pub const WIDE_SIDE: u8 = 9;
@@ -44,8 +43,9 @@ pub struct FloorPatch {
     pub tile_offset: usize,
     pub center: (u32, u32),
     tiles: Vec<PatchTile>,
-    frames: BTreeMap<String, BTreeMap<usize, art::LoadedFrame>>,
-    flipped: BTreeMap<String, SpriteFrame>,
+    frames: BTreeMap<String, BTreeMap<usize, Arc<art::LoadedFrame>>>,
+    flipped: BTreeMap<String, Arc<art::LoadedFrame>>,
+    pub surface_issues: Vec<String>,
 }
 
 impl FloorPatch {
@@ -54,7 +54,9 @@ impl FloorPatch {
     }
 
     pub fn artwork(&self) -> impl Iterator<Item = &art::LoadedFrame> {
-        self.frames.values().flat_map(|frames| frames.values())
+        self.frames
+            .values()
+            .flat_map(|frames| frames.values().map(Arc::as_ref))
     }
 
     pub fn flipped_frame_count(&self) -> usize {
@@ -64,15 +66,22 @@ impl FloorPatch {
     /// Surface draws in serialized row order, relative to the patch center.
     /// A baked facade piece occupies its own cell in this pass.
     pub fn draws(&self) -> impl Iterator<Item = SpriteDraw<'_>> {
-        self.tiles.iter().map(|tile| SpriteDraw {
-            frame: if tile.flip_x {
+        self.shared_draws().map(|(_, frame, anchor)| SpriteDraw {
+            frame: &frame.decoded.frame,
+            anchor,
+        })
+    }
+
+    pub(super) fn shared_draws(
+        &self,
+    ) -> impl Iterator<Item = ((u32, u32), &Arc<art::LoadedFrame>, (i32, i32))> {
+        self.tiles.iter().map(|tile| {
+            let frame = if tile.flip_x {
                 &self.flipped[&tile.artwork]
             } else {
                 &self.frames[&tile.artwork][&tile.frame_index()]
-                    .decoded
-                    .frame
-            },
-            anchor: tile.anchor,
+            };
+            (tile.world, frame, tile.anchor)
         })
     }
 }
@@ -96,7 +105,7 @@ pub fn load_region(
     origin: (u8, u8),
     side: u8,
 ) -> Result<FloorPatch, Box<dyn Error>> {
-    load_surface(vfs, map, coordinates, origin, side, false, None)
+    load_surface(vfs, map, coordinates, origin, side, false)
 }
 
 /// Import a bounded region containing floor tiles and baked facade pieces.
@@ -108,18 +117,7 @@ pub fn load_facade_region(
     origin: (u8, u8),
     side: u8,
 ) -> Result<FloorPatch, Box<dyn Error>> {
-    load_surface(vfs, map, coordinates, origin, side, true, None)
-}
-
-pub(super) fn load_centered_facade_region(
-    vfs: &mut Vfs,
-    map: &str,
-    coordinates: Coordinates,
-    origin: (u8, u8),
-    side: u8,
-    center: (u32, u32),
-) -> Result<FloorPatch, Box<dyn Error>> {
-    load_surface(vfs, map, coordinates, origin, side, true, Some(center))
+    load_surface(vfs, map, coordinates, origin, side, true)
 }
 
 fn load_surface(
@@ -129,7 +127,43 @@ fn load_surface(
     origin: (u8, u8),
     side: u8,
     include_facades: bool,
-    center: Option<(u32, u32)>,
+) -> Result<FloorPatch, Box<dyn Error>> {
+    let (source, bytes) = read_base_sector(vfs, map, coordinates)?;
+    resolve_surface(
+        vfs,
+        &mut art::FrameCache::default(),
+        (source, &bytes),
+        coordinates,
+        SurfaceView {
+            origin,
+            side,
+            include_facades,
+            center: None,
+            partial: false,
+        },
+    )
+}
+
+pub(super) struct SurfaceView {
+    pub origin: (u8, u8),
+    pub side: u8,
+    pub include_facades: bool,
+    pub center: Option<(u32, u32)>,
+    pub partial: bool,
+}
+
+pub(super) fn resolve_surface(
+    vfs: &mut Vfs,
+    cache: &mut art::FrameCache,
+    (source, bytes): (Source, &[u8]),
+    coordinates: Coordinates,
+    SurfaceView {
+        origin,
+        side,
+        include_facades,
+        center,
+        partial,
+    }: SurfaceView,
 ) -> Result<FloorPatch, Box<dyn Error>> {
     let max_side = if include_facades {
         MAX_FACADE_SIDE
@@ -143,7 +177,9 @@ fn load_surface(
     if origin.0 > limit || origin.1 > limit {
         return Err("floor patch crosses the sector boundary".into());
     }
-    let (source, floor, names) = load_floor_and_names(vfs, map, coordinates)?;
+    let floor = sector::decode_floor(bytes)
+        .map_err(|err| format!("{} from {source}: {err}", source.virtual_path))?;
+    let names = load_mes(vfs, "art/tile/tilename.mes")?;
     let midpoint = (origin.0 + side / 2, origin.1 + side / 2);
     let center = center.unwrap_or_else(|| {
         coordinates
@@ -155,6 +191,8 @@ fn load_surface(
     }
     let mut tiles = Vec::with_capacity(usize::from(side).pow(2));
     let mut facade_names: Option<LoadedMes> = None;
+    let mut surface_issues = Vec::new();
+    let mut resolved = BTreeMap::new();
     for y in origin.1..origin.1 + side {
         for x in origin.0..origin.0 + side {
             let world = coordinates
@@ -162,26 +200,40 @@ fn load_surface(
                 .expect("validated sector and local tile");
             let id = floor.tile(x, y).expect("validated local tile");
             let facade = FacadeId::from_raw(id.0).filter(|_| include_facades);
-            let (artwork, flip_x) = if let Some(facade) = facade {
-                if facade_names.is_none() {
-                    facade_names = Some(load_mes(vfs, "art/facade/facadename.mes")?);
+            let value = resolved.entry(id).or_insert_with(|| {
+                if let Some(facade) = facade {
+                    if facade_names.is_none() {
+                        match load_mes(vfs, "art/facade/facadename.mes") {
+                            Ok(names) => facade_names = Some(names),
+                            Err(error) => return Err(error.to_string()),
+                        }
+                    }
+                    facade
+                        .artwork_path(&facade_names.as_ref().unwrap().mes)
+                        .map(|path| (path, false))
+                        .map_err(|e| e.to_string())
+                } else {
+                    id.resolve(&names.mes)
+                        .map(|tile| (tile.path, tile.fields.flip_x))
+                        .map_err(|e| e.to_string())
                 }
-                let names = facade_names.as_ref().expect("facade names loaded");
-                let path = facade.artwork_path(&names.mes).map_err(|error| {
-                    format!(
-                        "{} tile ({x}, {y}) art {:#010x}: {error} in {} from {}",
-                        source.virtual_path, id.0, names.source.virtual_path, names.source
-                    )
-                })?;
-                (path, false)
-            } else {
-                let resolved = id.resolve(&names.mes).map_err(|error| {
-                    format!(
+            });
+            let (artwork, flip_x) = match value {
+                Ok((path, flip)) => (path.clone(), *flip),
+                Err(error) if partial => {
+                    let message = format!("tile ART {:#010x}: {error}", id.0);
+                    if !surface_issues.contains(&message) {
+                        surface_issues.push(message);
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    return Err(format!(
                         "{} tile ({x}, {y}) art {:#010x}: {error}",
                         source.virtual_path, id.0
                     )
-                })?;
-                (resolved.path, resolved.fields.flip_x)
+                    .into());
+                }
             };
             tiles.push(PatchTile {
                 world,
@@ -193,19 +245,17 @@ fn load_surface(
             });
         }
     }
-    let mut requests = BTreeMap::<_, BTreeSet<_>>::new();
+    let mut requests = BTreeSet::new();
     for tile in &tiles {
-        requests
-            .entry(tile.artwork.as_str())
-            .or_default()
-            .insert(tile.frame_index());
+        requests.insert((tile.artwork.as_str(), tile.frame_index(), false));
+        if tile.flip_x {
+            requests.insert((tile.artwork.as_str(), tile.frame_index(), true));
+        }
     }
-    let mut frames = BTreeMap::new();
-    for (path, indices) in requests {
-        let resource = art::read_art(vfs, path)?;
-        let mut decoded = BTreeMap::new();
-        for index in indices {
-            let frame = resource.decode(index)?;
+    let mut frames: BTreeMap<String, BTreeMap<usize, Arc<art::LoadedFrame>>> = BTreeMap::new();
+    let mut flipped = BTreeMap::new();
+    for (path, index, mirror) in requests {
+        let result = cache.load(vfs, path, index, 0, mirror).and_then(|frame| {
             if floor_draw(&frame.decoded.frame, 0, 0).is_none() {
                 return Err(format!(
                     "{path} frame {index} from {} requires a 78 × 40 surface with hotspot (39, 39)",
@@ -213,24 +263,39 @@ fn load_surface(
                 )
                 .into());
             }
-            decoded.insert(index, frame);
+            Ok(frame)
+        });
+        match result {
+            Ok(frame) if mirror => {
+                flipped.insert(path.to_owned(), frame);
+            }
+            Ok(frame) => {
+                frames
+                    .entry(path.to_owned())
+                    .or_default()
+                    .insert(index, frame);
+            }
+            Err(error) if partial => surface_issues.push(error.to_string()),
+            Err(error) => return Err(error),
         }
-        frames.insert(path.to_owned(), decoded);
     }
-    let mut flipped = BTreeMap::new();
-    for tile in &mut tiles {
-        let frame = &frames[&tile.artwork][&tile.frame_index()].decoded.frame;
+    tiles.retain_mut(|tile| {
+        let Some(frame) = frames
+            .get(&tile.artwork)
+            .and_then(|frames| frames.get(&tile.frame_index()))
+        else {
+            return false;
+        };
+        if tile.flip_x && !flipped.contains_key(&tile.artwork) {
+            return false;
+        }
         let x = (i64::from(tile.world.0) - i64::from(center.0)) as i32;
         let y = (i64::from(tile.world.1) - i64::from(center.1)) as i32;
-        tile.anchor = floor_draw(frame, x, y)
+        tile.anchor = floor_draw(&frame.decoded.frame, x, y)
             .expect("validated surface frame and bounded region")
             .anchor;
-        if tile.flip_x {
-            flipped
-                .entry(tile.artwork.clone())
-                .or_insert_with(|| mirror_rows(frame));
-        }
-    }
+        true
+    });
     Ok(FloorPatch {
         source,
         names_source: names.source,
@@ -241,6 +306,7 @@ fn load_surface(
         tiles,
         frames,
         flipped,
+        surface_issues,
     })
 }
 
@@ -298,13 +364,6 @@ pub(super) fn read_static_prototype(
 
 // Floor rectangles keep their origin. A mirrored frame reverses only the
 // pixels within each row, including its transparent edge.
-fn mirror_rows(frame: &SpriteFrame) -> SpriteFrame {
-    let mut pixels = frame.pixels.clone();
-    for row in pixels.chunks_exact_mut(frame.width as usize) {
-        row.reverse();
-    }
-    SpriteFrame { pixels, ..*frame }
-}
 
 pub struct AuditEntry {
     pub id: TileArtId,
@@ -372,7 +431,8 @@ pub fn audit_floor(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::art::mirror_rows;
+    use crate::art::SpriteFrame;
 
     #[test]
     fn mirrors_individual_rows_without_changing_anchor_or_alpha_values() {
@@ -390,7 +450,11 @@ mod tests {
                 [5, 0, 0, 255],
             ],
         };
-        let flipped = mirror_rows(&frame);
+        let mut flipped = SpriteFrame {
+            pixels: frame.pixels.clone(),
+            ..frame
+        };
+        mirror_rows(&mut flipped);
         assert_eq!(
             flipped.pixels,
             [
@@ -404,6 +468,7 @@ mod tests {
         );
         assert_eq!(flipped.hotspot, frame.hotspot);
         assert_eq!(flipped.offset, frame.offset);
-        assert_eq!(mirror_rows(&flipped), frame);
+        mirror_rows(&mut flipped);
+        assert_eq!(flipped, frame);
     }
 }

@@ -164,16 +164,16 @@ pub(super) fn resolve_scenery(
         return Ok(Vec::new());
     }
     let mut importer = SceneryImport::new(vfs)?;
+    let mut frames = art::FrameCache::default();
     selected
         .into_iter()
-        .map(|record| importer.resolve(vfs, coordinates, record))
+        .map(|record| importer.resolve(vfs, &mut frames, coordinates, record))
         .collect()
 }
 
 struct SceneryImport {
     names: LoadedMes,
     prototypes: BTreeMap<SerializedPrototypeId, (Source, AppearanceFields)>,
-    frames: BTreeMap<(String, u8, u8), Arc<art::LoadedFrame>>,
 }
 
 impl SceneryImport {
@@ -181,13 +181,13 @@ impl SceneryImport {
         Ok(Self {
             names: load_mes(vfs, NAMES)?,
             prototypes: BTreeMap::new(),
-            frames: BTreeMap::new(),
         })
     }
 
     fn resolve(
         &mut self,
         vfs: &mut Vfs,
+        frames: &mut art::FrameCache,
         coordinates: Coordinates,
         record: StaticRecord,
     ) -> Result<ImportedScenery, Box<dyn Error>> {
@@ -205,20 +205,11 @@ impl SceneryImport {
             .map_err(|err| format!("scenery record {index}: {err}"))?;
         let art = SceneryArt::decode(record.art_id)?;
         let path = art.resource_path(&self.names.mes)?;
-        let artwork = match self.frames.entry((path.clone(), art.frame, art.palette)) {
-            Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => {
-                let frame = art::read_art(vfs, &path)?
-                    .decode_with_palette(usize::from(art.frame), art.palette)?;
-                let sprite = &frame.decoded.frame;
-                if sprite.width > 512 || sprite.height > 512 {
-                    return Err(
-                        format!("scenery frame exceeds 512 pixels per axis in {path}").into(),
-                    );
-                }
-                e.insert(Arc::new(frame))
-            }
-        };
+        let artwork = frames.load(vfs, &path, usize::from(art.frame), art.palette, false)?;
+        let frame = &artwork.decoded.frame;
+        if frame.width > 512 || frame.height > 512 {
+            return Err(format!("scenery frame exceeds 512 pixels per axis in {path}").into());
+        }
         let tile = record
             .world_tile(coordinates)
             .ok_or("invalid scenery world tile")?;
@@ -226,7 +217,7 @@ impl SceneryImport {
             record,
             prototype_source: source.clone(),
             names_source: self.names.source.clone(),
-            artwork: Arc::clone(artwork),
+            artwork,
             art,
             tile,
             appearance,
@@ -277,6 +268,7 @@ pub struct RoomOverview {
     pub sector_object_counts: (usize, usize, usize),
     pub outside_floor_walls: usize,
     pub outside_floor_scenery: usize,
+    pub object_issue: Option<String>,
 }
 
 pub struct CulledPortal {
@@ -300,7 +292,12 @@ pub const OVERVIEW_SIZE: (u32, u32) = (1280, 720);
 /// Import a contiguous 25 × 25 surface and select visible static rasters from
 /// the same original sector. Raster intersection retains overhanging objects.
 pub fn load_room_overview(vfs: &mut Vfs) -> Result<RoomOverview, Box<dyn Error>> {
-    load_overview(vfs, WorldRegion::BATES_MANSION, false, true)
+    load_overview(
+        vfs,
+        &mut art::FrameCache::default(),
+        WorldRegion::BATES_MANSION,
+        LoadMode::RoomPreview,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -326,7 +323,12 @@ impl WorldRegion<'static> {
 
 /// Import supported surfaces and static objects into one draw pass.
 pub fn load_world(vfs: &mut Vfs, region: WorldRegion<'_>) -> Result<RoomOverview, Box<dyn Error>> {
-    load_overview(vfs, region, true, true)
+    load_overview(
+        vfs,
+        &mut art::FrameCache::default(),
+        region,
+        LoadMode::WorldPreview,
+    )
 }
 
 /// Load and retain the region and supported sector objects for subsequent panning.
@@ -334,15 +336,41 @@ pub fn load_navigation_world(
     vfs: &mut Vfs,
     region: WorldRegion<'_>,
 ) -> Result<RoomOverview, Box<dyn Error>> {
-    load_overview(vfs, region, true, false)
+    load_overview(
+        vfs,
+        &mut art::FrameCache::default(),
+        region,
+        LoadMode::Navigation,
+    )
+}
+
+pub(super) fn load_streamed_sector(
+    vfs: &mut Vfs,
+    frames: &mut art::FrameCache,
+    region: WorldRegion<'_>,
+) -> Result<RoomOverview, Box<dyn Error>> {
+    let result = load_overview(vfs, frames, region, LoadMode::Streamed);
+    frames.finish_sector();
+    result
+}
+
+#[derive(Clone, Copy)]
+enum LoadMode {
+    RoomPreview,
+    WorldPreview,
+    Navigation,
+    Streamed,
 }
 
 fn load_overview(
     vfs: &mut Vfs,
+    frames: &mut art::FrameCache,
     region: WorldRegion<'_>,
-    include_portals: bool,
-    initial_view_only: bool,
+    mode: LoadMode,
 ) -> Result<RoomOverview, Box<dyn Error>> {
+    let include_portals = !matches!(mode, LoadMode::RoomPreview);
+    let initial_view_only = matches!(mode, LoadMode::RoomPreview | LoadMode::WorldPreview);
+    let partial = matches!(mode, LoadMode::Streamed);
     let WorldRegion {
         map,
         sector: coordinates,
@@ -356,16 +384,57 @@ fn load_overview(
         return Err("invalid world preview viewport".into());
     }
     let (source, bytes) = sector::read_base_sector(vfs, map, coordinates)?;
-    let objects =
-        decode(&bytes).map_err(|err| format!("{} from {source}: {err}", source.virtual_path))?;
-    if objects.count > 512 {
-        return Err("room overview exceeds 512 original object records".into());
-    }
-    let floor = sector::load_centered_facade_region(vfs, map, coordinates, origin, side, center)?;
+    let floor = sector::resolve_surface(
+        vfs,
+        frames,
+        (source.clone(), &bytes),
+        coordinates,
+        sector::SurfaceView {
+            origin,
+            side,
+            include_facades: true,
+            center: Some(center),
+            partial,
+        },
+    )?;
+    let objects = decode(&bytes)
+        .map_err(|err| format!("{} from {source}: {err}", source.virtual_path))
+        .and_then(|objects| {
+            let limit = if partial { 1024 } else { 512 };
+            if objects.count > limit {
+                Err(format!("sector exceeds {limit} original object records"))
+            } else {
+                Ok(objects)
+            }
+        });
+    let objects = match objects {
+        Ok(objects) => objects,
+        Err(error) if partial => {
+            return Ok(RoomOverview {
+                room: Room {
+                    floor,
+                    walls: Vec::new(),
+                    scenery: Vec::new(),
+                    portals: Vec::new(),
+                },
+                issues: Vec::new(),
+                culled_portals: Vec::new(),
+                sector_object_counts: (0, 0, 0),
+                outside_floor_walls: 0,
+                outside_floor_scenery: 0,
+                object_issue: Some(error),
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
     let counts = (
         objects.walls.len(),
         objects.portal_count,
         objects.scenery_count,
+    );
+    let framing_only = (
+        counts.1 - objects.portals.len(),
+        counts.2 - objects.scenery.len(),
     );
     let mut walls = Vec::new();
     let mut scenery = Vec::new();
@@ -388,10 +457,22 @@ fn load_overview(
     }
     let mut wall_import = wall::WallImport::new(vfs, &source, objects.start, counts)?;
     let mut scenery_import = SceneryImport::new(vfs)?;
+    let first = coordinates
+        .world_tile(origin.0, origin.1)
+        .ok_or("invalid floor origin")?;
+    let inside_floor = |tile: (u32, u32)| {
+        tile.0
+            .checked_sub(first.0)
+            .is_some_and(|x| x < u32::from(side))
+            && tile
+                .1
+                .checked_sub(first.1)
+                .is_some_and(|y| y < u32::from(side))
+    };
     let mut report = |record, category, tile, art_id, reason| {
         // Unresolved artwork has no reliable bounds. Report records on
         // the selected floor or with a tile anchor near the overview.
-        let on_floor = floor.tiles().iter().any(|cell| cell.world == tile);
+        let on_floor = inside_floor(tile);
         let near_view = project_world_tile(tile, center).is_some_and(|(x, y)| {
             x.abs_diff(0) < width / 2 + 128 && y.abs_diff(0) < height / 2 + 128
         });
@@ -420,31 +501,33 @@ fn load_overview(
             .ok_or("invalid overview object tile")?;
         let (index, category, art_id) = (record.index, record.category, record.art_id);
         let result = match category {
-            StaticCategory::Wall => wall_import.resolve(vfs, coordinates, record).map(|wall| {
-                if !initial_view_only
-                    || wall
-                        .draw(center)
-                        .is_some_and(|draw| intersects_viewport(draw, viewport))
-                {
-                    walls.push(wall);
-                }
-            }),
-            StaticCategory::Scenery => {
-                scenery_import
-                    .resolve(vfs, coordinates, record)
-                    .map(|prop| {
+            StaticCategory::Wall => {
+                wall_import
+                    .resolve(vfs, frames, coordinates, record)
+                    .map(|wall| {
                         if !initial_view_only
-                            || prop
+                            || wall
                                 .draw(center)
                                 .is_some_and(|draw| intersects_viewport(draw, viewport))
                         {
-                            scenery.push(prop);
+                            walls.push(wall);
                         }
                     })
             }
+            StaticCategory::Scenery => scenery_import
+                .resolve(vfs, frames, coordinates, record)
+                .map(|prop| {
+                    if !initial_view_only
+                        || prop
+                            .draw(center)
+                            .is_some_and(|draw| intersects_viewport(draw, viewport))
+                    {
+                        scenery.push(prop);
+                    }
+                }),
             StaticCategory::Portal => match &mut portal_import {
                 Some(importer) => matched_opening(openings.get(&tile).copied().flatten(), art_id)
-                    .and_then(|wall| importer.resolve(vfs, coordinates, record, wall))
+                    .and_then(|wall| importer.resolve(vfs, frames, coordinates, record, wall))
                     .map(|leaf| {
                         if !initial_view_only
                             || leaf
@@ -470,7 +553,7 @@ fn load_overview(
         }
     }
     issues.sort_unstable_by_key(|issue| issue.record);
-    let outside = |tile| !floor.tiles().iter().any(|cell| cell.world == tile);
+    let outside = |tile: (u32, u32)| !inside_floor(tile);
     Ok(RoomOverview {
         outside_floor_walls: walls
             .iter()
@@ -486,6 +569,12 @@ fn load_overview(
         issues,
         culled_portals,
         sector_object_counts: counts,
+        object_issue: (partial && framing_only != (0, 0)).then(|| {
+            format!(
+                "{} portals and {} scenery records lack a stored ART ID or location",
+                framing_only.0, framing_only.1
+            )
+        }),
     })
 }
 
@@ -508,7 +597,7 @@ fn matched_opening(wall: Option<(usize, u32)>, raw_portal: u32) -> Result<usize,
     Ok(index)
 }
 
-type DrawOrder = (bool, u32, u32, i64, i64, usize, Option<usize>);
+pub(super) type DrawOrder = (bool, u32, u32, i64, i64, usize, Option<usize>);
 
 fn order(tile: (u32, u32), offset: (i32, i32), flat: bool, index: usize) -> DrawOrder {
     // CE uses truncation toward zero for half-pixels in the within-tile key.
@@ -523,9 +612,10 @@ fn order(tile: (u32, u32), offset: (i32, i32), flat: bool, index: usize) -> Draw
     (!flat, tile.1, tile.0, depth, across, index, None)
 }
 
+type SharedObject<'a> = (DrawOrder, SpriteDraw<'a>, &'a Arc<art::LoadedFrame>);
+
 impl Room {
-    /// Ordered base surface followed by flat and upright object draws.
-    pub fn draws(&self) -> Option<impl Iterator<Item = SpriteDraw<'_>>> {
+    pub(super) fn shared_objects(&self) -> Option<Vec<SharedObject<'_>>> {
         let center = self.floor.center;
         let mut objects =
             Vec::with_capacity(self.walls.len() + self.scenery.len() + self.portals.len());
@@ -541,7 +631,7 @@ impl Room {
                 wall.record.index,
                 None,
             );
-            objects.push((key, wall.draw(center)?));
+            objects.push((key, wall.draw(center)?, &wall.artwork));
         }
         for scenery in &self.scenery {
             let key = order(
@@ -550,7 +640,7 @@ impl Room {
                 scenery.appearance.flags & FLAT != 0,
                 scenery.record.index,
             );
-            objects.push((key, scenery.draw(center)?));
+            objects.push((key, scenery.draw(center)?, &scenery.artwork));
         }
         for portal in &self.portals {
             let (x, y) = portal.placement.tile;
@@ -564,13 +654,19 @@ impl Room {
                 portal.paired_wall_index,
                 Some(portal.record.index),
             );
-            objects.push((key, portal.draw(center)?));
+            objects.push((key, portal.draw(center)?, &portal.artwork));
         }
-        objects.sort_unstable_by_key(|(key, _)| *key);
+        Some(objects)
+    }
+
+    /// Ordered base surface followed by flat and upright object draws.
+    pub fn draws(&self) -> Option<impl Iterator<Item = SpriteDraw<'_>>> {
+        let mut objects = self.shared_objects()?;
+        objects.sort_unstable_by_key(|(key, _, _)| *key);
         Some(
             self.floor
                 .draws()
-                .chain(objects.into_iter().map(|(_, draw)| draw)),
+                .chain(objects.into_iter().map(|(_, draw, _)| draw)),
         )
     }
 }

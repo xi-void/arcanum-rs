@@ -3,8 +3,13 @@
 use arcanum_rs::art::SpriteFrame;
 use arcanum_rs::camera::{Camera, CameraScene};
 use arcanum_rs::compositor::{SpriteDraw, blit_ordered};
+use arcanum_rs::content::world::WorldStream;
 use softbuffer::{Context, Surface};
-use std::{num::NonZeroU32, rc::Rc};
+use std::{
+    num::NonZeroU32,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize, Size};
 use winit::event::WindowEvent;
@@ -124,8 +129,33 @@ pub fn show_camera(
     )
 }
 
+pub fn show_stream(
+    title: String,
+    world: WorldStream,
+    camera: Camera,
+    size: (u32, u32),
+    trace: bool,
+) -> Result<(), String> {
+    show_content(
+        title,
+        ViewContent::Stream {
+            world: Box::new(world),
+            camera,
+            shift: false,
+            trace,
+        },
+        PhysicalSize::<u32>::from(size).into(),
+    )
+}
+
 enum ViewContent<'a> {
     Fixed(&'a [Layer<'a>]),
+    Stream {
+        world: Box<WorldStream>,
+        camera: Camera,
+        shift: bool,
+        trace: bool,
+    },
     World {
         scene: &'a CameraScene<'a>,
         camera: Camera,
@@ -149,6 +179,9 @@ fn show_content(title: String, content: ViewContent<'_>, size: Size) -> Result<(
     event_loop
         .run_app(&mut app)
         .map_err(|error| format!("window event loop failed: {error}"))?;
+    if let ViewContent::Stream { world, .. } = &app.content {
+        eprintln!("World cache {:?}", world.stats());
+    }
     app.failure.map_or(Ok(()), Err)
 }
 
@@ -222,12 +255,16 @@ impl ApplicationHandler for Viewer<'_> {
                 view.window.request_redraw();
             }
             WindowEvent::ModifiersChanged(modifiers) => {
-                if let ViewContent::World { shift, .. } = &mut self.content {
+                if let ViewContent::World { shift, .. } | ViewContent::Stream { shift, .. } =
+                    &mut self.content
+                {
                     *shift = modifiers.state().shift_key();
                 }
             }
             WindowEvent::Focused(false) => {
-                if let ViewContent::World { shift, .. } = &mut self.content {
+                if let ViewContent::World { shift, .. } | ViewContent::Stream { shift, .. } =
+                    &mut self.content
+                {
                     *shift = false;
                 }
             }
@@ -236,7 +273,9 @@ impl ApplicationHandler for Viewer<'_> {
                 is_synthetic: false,
                 ..
             } if event.state.is_pressed() => {
-                if let ViewContent::World { camera, shift, .. } = &mut self.content {
+                if let ViewContent::World { camera, shift, .. }
+                | ViewContent::Stream { camera, shift, .. } = &mut self.content
+                {
                     let size = view.window.inner_size();
                     let viewport = (size.width, size.height);
                     let step = if *shift { 64 } else { 16 };
@@ -269,7 +308,7 @@ impl ApplicationHandler for Viewer<'_> {
                                 center.1 + i32::from(layer.relative_anchor.1),
                             ),
                         });
-                        view.redraw(size, draws)
+                        view.redraw(size, draws).map(|_| ())
                     }
                     ViewContent::World { scene, camera, .. } => {
                         let viewport = (size.width, size.height);
@@ -277,7 +316,14 @@ impl ApplicationHandler for Viewer<'_> {
                             camera.resize(viewport);
                         }
                         view.redraw(size, scene.visible(camera, viewport))
+                            .map(|_| ())
                     }
+                    ViewContent::Stream {
+                        world,
+                        camera,
+                        trace,
+                        ..
+                    } => view.redraw_stream(size, world, camera, *trace),
                 };
                 if let Err(error) = result {
                     self.fail(event_loop, error);
@@ -288,17 +334,79 @@ impl ApplicationHandler for Viewer<'_> {
     }
 }
 
+#[derive(Default)]
+struct FrameTiming {
+    composition: Duration,
+    packing: Duration,
+    submission: Duration,
+}
+
 impl WindowSurface {
+    fn redraw_stream(
+        &mut self,
+        size: PhysicalSize<u32>,
+        world: &mut WorldStream,
+        camera: &mut Camera,
+        trace: bool,
+    ) -> Result<(), String> {
+        let viewport = (size.width, size.height);
+        if size.width == 0 || size.height == 0 {
+            return Ok(());
+        }
+        camera.resize(viewport);
+        let before = world.stats().sector_reads;
+        let prepared = world.prepare(camera, viewport)?;
+        if world.stats().sector_reads != before {
+            for sector in world.reports() {
+                let note = sector.diagnostics.first().map_or("", String::as_str);
+                eprintln!(
+                    "Sector {}: {} surfaces, {} walls, {} scenery, {} portals, {} diagnostics {note}",
+                    sector.id,
+                    sector.surfaces,
+                    sector.wall_count,
+                    sector.scenery_count,
+                    sector.portal_count,
+                    sector.diagnostics.len()
+                );
+            }
+        }
+        let frame = self.redraw(size, world.visible(camera, viewport))?;
+        if trace
+            || prepared.load
+                + prepared.ordering
+                + frame.composition
+                + frame.packing
+                + frame.submission
+                > Duration::from_millis(30)
+        {
+            eprintln!(
+                "Frame {:?} {}x{} load {:?} (ART read {:?}, ART decode {:?}) order {:?} compose {:?} pack {:?} submit {:?}",
+                camera.position(),
+                size.width,
+                size.height,
+                prepared.load,
+                prepared.art_read,
+                prepared.art_decode,
+                prepared.ordering,
+                frame.composition,
+                frame.packing,
+                frame.submission
+            );
+        }
+        Ok(())
+    }
+
     fn redraw<'a>(
         &mut self,
         size: PhysicalSize<u32>,
         draws: impl IntoIterator<Item = SpriteDraw<'a>>,
-    ) -> Result<(), String> {
+    ) -> Result<FrameTiming, String> {
         let (Some(width), Some(height)) =
             (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
         else {
-            return Ok(());
+            return Ok(FrameTiming::default());
         };
+        let start = Instant::now();
         let count = (width.get() as usize)
             .checked_mul(height.get() as usize)
             .filter(|&count| count <= MAX_SURFACE_PIXELS)
@@ -323,6 +431,8 @@ impl WindowSurface {
         )
         .map_err(|error| format!("cannot composite sprite: {error}"))?;
 
+        let composition = start.elapsed();
+        let start = Instant::now();
         self.surface
             .resize(width, height)
             .map_err(|error| format!("cannot resize sprite surface: {error}"))?;
@@ -339,9 +449,16 @@ impl WindowSurface {
         for (output, &[r, g, b]) in buffer.iter_mut().zip(&self.pixels) {
             *output = u32::from_be_bytes([0, r, g, b]);
         }
+        let packing = start.elapsed();
+        let start = Instant::now();
         self.window.pre_present_notify();
         buffer
             .present()
-            .map_err(|error| format!("cannot present sprite: {error}"))
+            .map_err(|error| format!("cannot present sprite: {error}"))?;
+        Ok(FrameTiming {
+            composition,
+            packing,
+            submission: start.elapsed(),
+        })
     }
 }

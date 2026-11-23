@@ -118,9 +118,10 @@ pub(super) fn resolve_many(
             list.scenery_count,
         ),
     )?;
+    let mut frames = art::FrameCache::default();
     let mut walls = Vec::with_capacity(records.len());
     for record in records {
-        walls.push(import.resolve(vfs, coordinates, record)?);
+        walls.push(import.resolve(vfs, &mut frames, coordinates, record)?);
     }
     walls.sort_by_key(|wall| {
         (
@@ -139,7 +140,6 @@ pub(super) struct WallImport {
     structure: LoadedMes,
     names: LoadedMes,
     prototypes: BTreeMap<SerializedPrototypeId, (Source, AppearanceFields)>,
-    artwork: BTreeMap<(String, u8, bool), Arc<art::LoadedFrame>>,
 }
 
 impl WallImport {
@@ -156,13 +156,13 @@ impl WallImport {
             structure: load_mes(vfs, "art/wall/structure.mes")?,
             names: load_mes(vfs, "art/wall/wallname.mes")?,
             prototypes: BTreeMap::new(),
-            artwork: BTreeMap::new(),
         })
     }
 
     pub(super) fn resolve(
         &mut self,
         vfs: &mut Vfs,
+        frames: &mut art::FrameCache,
         coordinates: Coordinates,
         record: StaticRecord,
     ) -> Result<ImportedWall, Box<dyn Error>> {
@@ -216,30 +216,14 @@ impl WallImport {
                     art_id.0
                 )
             })?;
-        let mirror = orientation.mirror_x();
-        let artwork = match self
-            .artwork
-            .entry((path.clone(), orientation.palette, mirror))
-        {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => {
-                let mut frame =
-                    art::read_art(vfs, &path)?.decode_with_palette(0, orientation.palette)?;
-                if frame.decoded.frame_count != 1 {
-                    return Err(format!("expected one static wall frame in {path}").into());
-                }
-                let sprite = &mut frame.decoded.frame;
-                if sprite.width > 512 || sprite.height > 512 {
-                    return Err(format!("wall frame exceeds 512 pixels per axis in {path}").into());
-                }
-                if mirror {
-                    for row in sprite.pixels.chunks_exact_mut(sprite.width as usize) {
-                        row.reverse();
-                    }
-                }
-                entry.insert(Arc::new(frame))
-            }
-        };
+        let artwork = frames.load(vfs, &path, 0, orientation.palette, orientation.mirror_x())?;
+        let frame = &artwork.decoded.frame;
+        if frame.width > 512 || frame.height > 512 {
+            return Err(format!("wall frame exceeds 512 pixels per axis in {path}").into());
+        }
+        if artwork.decoded.frame_count != 1 {
+            return Err(format!("expected one static wall frame in {path}").into());
+        }
         let placement = Placement {
             tile: record
                 .world_tile(coordinates)
@@ -254,7 +238,7 @@ impl WallImport {
             prototype_source: prototype_source.clone(),
             structure_source: self.structure.source.clone(),
             names_source: self.names.source.clone(),
-            artwork: Arc::clone(artwork),
+            artwork,
             orientation,
             placement,
             scale,
