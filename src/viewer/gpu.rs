@@ -87,6 +87,7 @@ impl WindowRenderer {
         &mut self,
         size: (u32, u32),
         zoom: u8,
+        background: [u8; 3],
         draws: impl IntoIterator<Item = WorldDraw<'a>>,
         window: &Window,
         trace: bool,
@@ -128,8 +129,7 @@ impl WindowRenderer {
             .compositor
             .device
             .create_command_encoder(&CommandEncoderDescriptor::default());
-        self.compositor
-            .encode(&mut encoder, &target, super::BACKGROUND)?;
+        self.compositor.encode(&mut encoder, &target, background)?;
         let commands = encoder.finish();
         self.compositor.check_health()?;
         let encode = begin.elapsed();

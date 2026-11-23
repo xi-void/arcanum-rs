@@ -1557,7 +1557,8 @@ fn original_static_light_masks_modulate_the_scene_without_moving_rasters() {
         let report = world.reports().next().unwrap();
         assert_eq!(report.light_counts, Some(expected_counts));
         if map == "k'na tha" {
-            assert_eq!(report.object_lights, 3);
+            // Three fire masks and nineteen outdoor darkness masks.
+            assert_eq!(report.object_lights, 22);
         }
         if map == DEMO_MAP {
             assert_eq!(report.wall_count, 268);

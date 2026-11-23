@@ -255,6 +255,8 @@ pub struct InteractiveWorld {
     player_started: bool,
     transition: Option<(Destination, u8)>,
     pending_use: Option<WorldOrder>,
+    route_goal: Option<((u32, u32), bool)>,
+    wait_for_door: Option<Duration>,
     notice: Option<String>,
 }
 
@@ -297,6 +299,8 @@ impl InteractiveWorld {
             player_started: false,
             transition: None,
             pending_use: None,
+            route_goal: None,
+            wait_for_door: None,
             notice: None,
         })
     }
@@ -524,7 +528,9 @@ impl InteractiveWorld {
     }
 
     pub fn player_moving(&self) -> bool {
-        self.pending_use.is_some() || self.cache.player.as_ref().is_some_and(Player::moving)
+        self.pending_use.is_some()
+            || self.wait_for_door.is_some()
+            || self.cache.player.as_ref().is_some_and(Player::moving)
     }
 
     pub fn start_player(&mut self) -> Result<(), String> {
@@ -570,24 +576,58 @@ impl InteractiveWorld {
             }
             return;
         }
-        let Some(player) = &mut self.cache.player else {
-            return;
-        };
         let tile = crate::isometric::world_tile_at_pixel(point, self.reference);
-        let entries = &self.cache.entries;
-        let states = &self.cache.door_states;
-        let steps = tile.and_then(|tile| {
-            player.destination(tile, run, |tile| {
-                SectorCache::player_cell(entries, states, tile)
-            })
-        });
+        if let Some(tile) = tile {
+            self.route_to(tile, run);
+        }
+    }
+
+    pub fn update_hover(
+        &mut self,
+        cursor: Option<(u32, u32)>,
+        viewport: (u32, u32),
+        camera: &Camera,
+        elapsed: Duration,
+    ) -> bool {
+        let target = cursor
+            .filter(|&(x, y)| x < viewport.0 && y < viewport.1)
+            .and_then(|(x, y)| {
+                let (cx, cy) = camera.position();
+                let point = (
+                    i64::from(cx) + i64::from(x) - i64::from(viewport.0 / 2),
+                    i64::from(cy) + i64::from(y) - i64::from(viewport.1 / 2),
+                );
+                let key = self.cache.pick(point, self.reference, elapsed)?;
+                (!matches!(
+                    self.cache.target(key)?.action,
+                    interaction::Action::Unsupported(_)
+                ))
+                .then_some(key)
+            });
+        std::mem::replace(&mut self.cache.hover, target) != target
+    }
+
+    fn route_to(&mut self, tile: (u32, u32), run: bool) {
+        let result = self.cache.plan_route(tile, run);
         if self.trace {
-            eprintln!("Player target {tile:?}: {steps:?} steps, running {run}");
+            eprintln!("Player target {tile:?}: {result:?}, running {run}");
+        }
+        match result {
+            Ok((_, key)) => {
+                self.pending_use = key;
+                self.route_goal = key.map(|_| (tile, run));
+            }
+            Err(reason) => {
+                self.route_goal = None;
+                self.notice = Some(reason);
+            }
         }
     }
 
     pub fn cancel_player_route(&mut self) {
         self.pending_use = None;
+        self.route_goal = None;
+        self.wait_for_door = None;
         if let Some(player) = &mut self.cache.player {
             player.cancel_route();
         }
@@ -618,6 +658,15 @@ impl InteractiveWorld {
     ) -> bool {
         if !self.player_started {
             return false;
+        }
+        if input != (0, 0) {
+            self.cancel_player_route();
+        }
+        if self.wait_for_door.is_some_and(|deadline| now >= deadline) {
+            self.wait_for_door = None;
+            if let Some((tile, run)) = self.route_goal.take() {
+                self.route_to(tile, run);
+            }
         }
         let before = self.cache.player.as_ref().map(|p| {
             let pose = p.sample(now);
@@ -663,11 +712,21 @@ impl InteractiveWorld {
                 Some(Ok(Some(dst))) => self.transition = Some((dst, facing)),
                 Some(Err(error)) => {
                     self.notice = Some(error);
+                    self.route_goal = None;
                 }
                 None => {
                     self.notice = Some("object is unavailable".into());
+                    self.route_goal = None;
                 }
-                Some(Ok(None)) => {}
+                Some(Ok(None)) => {
+                    if let Some((tile, run)) = self.route_goal {
+                        if let Some(delay) = self.cache.door_opening_delay(key, now) {
+                            self.wait_for_door = Some(now + delay);
+                        } else {
+                            self.route_to(tile, run);
+                        }
+                    }
+                }
             }
             return true;
         }
@@ -747,6 +806,86 @@ impl InteractiveWorld {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires the installed original game"]
+    fn click_route_opens_original_door_and_waits_before_crossing() {
+        let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+        let from = (103, 98);
+        let to = (103, 97);
+        let sector = Coordinates { x: 1, y: 1 };
+        let region = SectorRegion {
+            first: sector,
+            last: sector,
+        };
+        let mut camera = region.camera(from).unwrap();
+        let size = (1280, 720);
+        let mut world = WorldStream::new(
+            Vfs::from_game(game, crate::vfs::Policy::Ce).unwrap(),
+            "bates mansion lev 1".into(),
+            region,
+            from,
+        )
+        .unwrap()
+        .with_player()
+        .unwrap();
+        world.prepare(&camera, size).unwrap();
+        let mut world = world.into_interactive(|| {}, false).unwrap();
+        world.start_player().unwrap();
+
+        world.route_to(to, false);
+        let door = world.pending_use.unwrap();
+        assert_eq!(door.1.6, Some(244));
+        world.cancel_player_route();
+        assert!(!world.player_moving());
+        let now = Duration::ZERO;
+        let point = (-42..0)
+            .flat_map(|x| (-100..0).map(move |y| (x, y)))
+            .find(|&point| world.cache.pick(point, from, now) == Some(door))
+            .expect("the original door has an unobscured opaque texel");
+        for zoom in 1u32..=3 {
+            let viewport = (size.0.div_ceil(zoom), size.1.div_ceil(zoom));
+            let screen = (
+                (point.0 + i64::from(viewport.0 / 2)) as u32 * zoom,
+                (point.1 + i64::from(viewport.1 / 2)) as u32 * zoom,
+            );
+            assert!(world.update_hover(
+                Some((screen.0 / zoom, screen.1 / zoom)),
+                viewport,
+                &camera,
+                now
+            ));
+            assert_eq!(world.cache.hover, Some(door));
+            assert_eq!(
+                world
+                    .visible_assets_at(&camera, viewport, now)
+                    .filter(|draw| matches!(
+                        draw.modulation,
+                        Modulation::AdditiveTint([200, 200, 200])
+                    ))
+                    .count(),
+                1
+            );
+            assert!(world.update_hover(None, viewport, &camera, now));
+        }
+        world.route_to(to, false);
+        world.move_player((0, 0), false, Duration::ZERO, &mut camera);
+        let deadline = world
+            .wait_for_door
+            .expect("opened, waiting for the last frame");
+        let early = deadline - Duration::from_millis(1);
+        world.move_player((0, 0), false, early, &mut camera);
+        assert_eq!(camera.position(), (0, 0));
+        world.move_player((0, 0), false, deadline, &mut camera);
+        world.move_player(
+            (0, 0),
+            false,
+            deadline + Duration::from_secs(1),
+            &mut camera,
+        );
+        assert_eq!(world.cache.player.as_ref().unwrap().tile(), to);
+        assert!(!world.player_moving());
+    }
     use std::sync::mpsc;
 
     const TIMEOUT: Duration = Duration::from_secs(3);

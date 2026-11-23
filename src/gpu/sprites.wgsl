@@ -50,6 +50,7 @@ fn fs(input: Output) -> @location(0) vec4<f32> {
     let texel = vec4<u32>(round(textureLoad(sprite, vec2<i32>(p), 0) * 255.));
     if texel.a == 0u { discard; }
     var color = texel.rgb;
+    var alpha = texel.a;
     switch input.shade.x {
         case 1u: { color = color * rgb(input.shade.y) / 255u; }
         case 2u: {
@@ -63,7 +64,18 @@ fn fs(input: Output) -> @location(0) vec4<f32> {
             color = color * tint / 255u;
         }
         case 3u: { color = color * rgb(columns[input.shade.y + p.x]) / 255u; }
+        case 4u: {
+            var tint = input.shade.y;
+            if input.shade.w != 0u { tint = columns[tint + p.x]; }
+            color = color * rgb(tint) / 255u;
+            let size = textureDimensions(sprite);
+            let c = input.shade.z;
+            let left = (c & 255u) * (size.y - p.y) + (c >> 24u) * p.y;
+            let right = ((c >> 8u) & 255u) * (size.y - p.y) + ((c >> 16u) & 255u) * p.y;
+            let opacity = (left * (size.x - p.x) + right * p.x) / (size.x * size.y);
+            alpha = alpha * opacity / 255u;
+        }
         default: {}
     }
-    return vec4<f32>(vec4(color, texel.a)) / 255.;
+    return vec4<f32>(vec4(color, alpha)) / 255.;
 }

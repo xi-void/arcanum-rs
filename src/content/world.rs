@@ -23,7 +23,7 @@ use crate::{
     vfs::Vfs,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ops::Range,
     sync::Arc,
     time::{Duration, Instant},
@@ -227,6 +227,7 @@ struct Raster {
     bounds: RasterBounds,
     object_light: ObjectLight,
     animation: Option<RasterAnimation>,
+    click_through: bool,
 }
 
 impl Raster {
@@ -237,6 +238,7 @@ impl Raster {
             anchor,
             object_light: ObjectLight::Unlit,
             animation: None,
+            click_through: false,
             bounds: RasterBounds::new(SpriteDraw {
                 frame: &frame.decoded.frame,
                 anchor,
@@ -366,6 +368,8 @@ struct CachedSector {
     interactions: BTreeMap<WorldOrder, interaction::Target>,
     doors_at: BTreeMap<(u32, u32), Vec<WorldOrder>>,
     roofs: BTreeMap<(u32, u32), roof::Cell>,
+    roof_shades: Option<[u8; 3]>,
+    wall_tiles: BTreeMap<(u32, u32), Vec<roof::wallcheck::Wall<WorldOrder>>>,
 }
 
 impl CachedSector {
@@ -400,6 +404,8 @@ impl CachedSector {
             interactions: BTreeMap::new(),
             doors_at: BTreeMap::new(),
             roofs: BTreeMap::new(),
+            roof_shades: None,
+            wall_tiles: BTreeMap::new(),
         }
     }
 
@@ -478,6 +484,12 @@ impl CachedSector {
             })
             .collect();
         let audit_sources = audit.then(|| room.audit_sources());
+        let click_through: BTreeSet<_> = room
+            .scenery
+            .iter()
+            .filter(|object| object.appearance.flags & 0x800 != 0)
+            .map(|object| object.record.index)
+            .collect();
         if let Some(objects) = room.shared_objects() {
             for (key, draw, frame, light, animation) in objects {
                 let tile =
@@ -493,6 +505,7 @@ impl CachedSector {
                     .filter(|raster| within_overhang(raster.bounds, tile))
                 {
                     raster.object_light = light;
+                    raster.click_through = key.6.is_none() && click_through.contains(&key.5);
                     if let Some(sources) = &audit_sources {
                         let source = &sources[&key.6.unwrap_or(key.5)];
                         let record = source.record;
@@ -544,6 +557,8 @@ impl CachedSector {
             interactions: BTreeMap::new(),
             doors_at: BTreeMap::new(),
             roofs: BTreeMap::new(),
+            roof_shades: None,
+            wall_tiles: BTreeMap::new(),
         }
     }
 
@@ -700,6 +715,9 @@ struct SectorCache {
     jumps: super::jumps::Jumps,
     door_states: DoorStates,
     roof_state: Option<roof::State>,
+    hover: Option<WorldOrder>,
+    faded_roofs: BTreeSet<(u32, u32)>,
+    faded_walls: BTreeMap<WorldOrder, u8>,
 }
 
 struct MovingDraw {
@@ -829,7 +847,35 @@ impl SectorCache {
                 let (sector, _) = self.entries.get(&tile_sector_id(tile))?;
                 Some(sector.roofs.get(&tile).copied())
             });
+            self.faded_roofs.clear();
+            self.faded_walls.clear();
+            let selected = roof::wallcheck::select(player.tile(), |tile| {
+                self.entries
+                    .get(&tile_sector_id(tile))
+                    .and_then(|(sector, _)| sector.wall_tiles.get(&tile))
+                    .map_or(&[], Vec::as_slice)
+            });
+            for (key, (tile, side)) in selected {
+                self.faded_roofs.insert(roof::cell_center(tile));
+                self.faded_walls.insert(key, side);
+            }
         }
+    }
+
+    fn roof_faded_at(&self, tile: (u32, u32)) -> bool {
+        let tile = roof::cell_center(tile);
+        let Some(cell) = self
+            .entries
+            .get(&tile_sector_id(tile))
+            .and_then(|(sector, _)| sector.roofs.get(&tile))
+        else {
+            return false;
+        };
+        (self.faded_roofs.contains(&tile) || cell.authored_fade())
+            && self
+                .roof_state
+                .as_ref()
+                .is_none_or(|state| !state.filled(tile, *cell))
     }
 
     fn roof_covered(&self, tile: (u32, u32)) -> bool {
@@ -858,7 +904,28 @@ impl SectorCache {
                 .and_then(|(sector, _)| sector.roofs.get(&tile))
                 .is_some_and(|&cell| !state.filled(tile, cell));
         }
-        !raster.key.0 || !self.roof_covered((raster.key.1.2, raster.key.1.1))
+        let tile = (raster.key.1.2, raster.key.1.1);
+        !raster.key.0
+            || (!self.roof_covered(tile)
+                && !(matches!(raster.object_light, ObjectLight::Wall(0 | 1 | 6 | 7))
+                    && self.faded_walls.contains_key(&raster.key)
+                    && self.roof_faded_at(tile)))
+    }
+
+    fn fade(&self, raster: &Raster) -> Option<[u8; 4]> {
+        if matches!(raster.object_light, ObjectLight::Roof) {
+            let tile = (raster.key.1.3 as u32, raster.key.1.2);
+            let sector = &self.entries.get(&tile_sector_id(tile))?.0;
+            return sector
+                .roofs
+                .get(&tile)?
+                .opacity(self.faded_roofs.contains(&tile), sector.roof_shades?);
+        }
+        Some(match self.faded_walls.get(&raster.key)? {
+            1 => [128, 255, 255, 128],
+            2 => [255, 128, 128, 255],
+            _ => [64; 4],
+        })
     }
 
     fn light_active(&self, source: &DynamicLight) -> bool {
@@ -1474,7 +1541,7 @@ impl SectorCache {
             if !self.raster_revealed(raster) {
                 return None;
             }
-            let modulation = self.shades.get(index).map_or_else(
+            let mut modulation = self.shades.get(index).map_or_else(
                 || {
                     if matches!(raster.object_light, ObjectLight::Additive) {
                         Modulation::Additive
@@ -1484,6 +1551,18 @@ impl SectorCache {
                 },
                 PreparedShade::modulation,
             );
+            if let Some(corners) = self.fade(raster) {
+                let (color, columns) = match modulation {
+                    Modulation::Uniform(color) => (color, &[][..]),
+                    Modulation::Columns(columns) => ([255; 3], columns),
+                    _ => ([255; 3], &[][..]),
+                };
+                modulation = Modulation::Fade {
+                    corners,
+                    color,
+                    columns,
+                };
+            }
             Some(WorldDraw {
                 asset,
                 sprite,
@@ -1618,6 +1697,23 @@ impl SectorCache {
                 .partition_point(|raster| !raster.key.0 || !raster.key.1.0)
         };
         let player = self.player_draw(viewport, elapsed);
+        let hover = self.hover.and_then(|key| {
+            let index = self
+                .ordered
+                .binary_search_by_key(&key, |raster| raster.key)
+                .ok()?;
+            let mut draw = self
+                .visible_rasters(index..index + 1, viewport, elapsed)
+                .next()?;
+            draw.modulation = Modulation::AdditiveTint([200; 3]);
+            Some(draw)
+        });
+        let roof_start = if hover.is_some() {
+            self.ordered
+                .partition_point(|raster| raster.key < roof_key((0, 0)))
+        } else {
+            self.ordered.len()
+        };
         let insertion = player.as_ref().map_or_else(
             || {
                 self.walking
@@ -1653,7 +1749,9 @@ impl SectorCache {
             .chain(self.visible_rasters(split..insertion, viewport, elapsed))
             .chain(moving)
             .chain(player.map(|(_, draw)| draw))
-            .chain(self.visible_rasters(insertion..self.ordered.len(), viewport, elapsed))
+            .chain(self.visible_rasters(insertion..roof_start, viewport, elapsed))
+            .chain(hover)
+            .chain(self.visible_rasters(roof_start..self.ordered.len(), viewport, elapsed))
     }
 
     fn visible_modulated(
@@ -2165,6 +2263,23 @@ impl SectorLoader {
                 let start = Instant::now();
                 let mut cached =
                     CachedSector::from_room(id, room, self.reference, lights, self.audit);
+                if self.playing {
+                    for raster in &cached.draws {
+                        if let ObjectLight::Wall(rotation) = raster.object_light {
+                            cached
+                                .wall_tiles
+                                .entry((raster.key.1.2, raster.key.1.1))
+                                .or_default()
+                                .push(roof::wallcheck::Wall {
+                                    key: raster.key,
+                                    rotation,
+                                });
+                        }
+                    }
+                    for walls in cached.wall_tiles.values_mut() {
+                        walls.sort_unstable_by_key(|wall| wall.key);
+                    }
+                }
                 for (&key, target) in &interactions {
                     if let interaction::Action::Travel(dst) = target.action {
                         cached.report.diagnostics.push(format!(
@@ -2180,6 +2295,7 @@ impl SectorLoader {
                 cached.interactions = interactions;
                 cached.report.diagnostics.extend(roofs.issues);
                 cached.roofs = roofs.cells;
+                cached.roof_shades = roofs.shades;
                 for roof in roofs.rasters {
                     // CE's separate pass is globally ordered by roof row, then column.
                     let key = roof_key(roof.tile);
@@ -2216,6 +2332,107 @@ impl SectorLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires the installed original game"]
+    fn original_new_game_entry_and_crash_site_content() {
+        let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+        let mut vfs = Vfs::from_game(game, crate::vfs::Policy::Ce).unwrap();
+        let catalog = super::super::maps::Catalog::load(&mut vfs).unwrap();
+        let map = catalog.new_game().unwrap();
+        let files = map.files(&mut vfs).unwrap();
+        let center = files.center(None).unwrap();
+        assert_eq!((map.id, center), (5000, (92958, 82592)));
+        let region = files.region_at(center);
+        let camera = region.camera(center).unwrap();
+        let mut world = WorldStream::new(vfs, map.directory.clone(), region, center)
+            .unwrap()
+            .with_starting_lighting()
+            .unwrap()
+            .with_player()
+            .unwrap();
+        let size = (1280, 720);
+        world.prepare(&camera, size).unwrap();
+        world.validate_arrival(center).unwrap();
+        let assets = |path: &'static str| {
+            world
+                .cache
+                .ordered
+                .iter()
+                .filter(move |r| r.frame.source.virtual_path.ends_with(path))
+        };
+        assert!(assets("campfire.art").any(|r| r.animation.is_some()));
+        let wreck = assets("small_plane_crashed.art").next().unwrap();
+        let tile = (wreck.key.1.2, wreck.key.1.1);
+        assert!(!collision::can_stand(SectorCache::collision_cell(
+            &world.cache.entries,
+            tile
+        )));
+        let cave = assets("cave_entrance-clickable.art").next().unwrap();
+        let target = world
+            .cache
+            .target(cave.key)
+            .expect("original cave entrance has a Use event");
+        assert_eq!(target.tile, (92910, 82598));
+        let interaction::Action::Travel(dst) = &target.action else {
+            if let interaction::Action::Unsupported(reason) = &target.action {
+                panic!("{reason}");
+            }
+            panic!("cave entrance is not a travel target");
+        };
+        assert_eq!(dst.map, Some(5078));
+        assert_eq!(dst.tile, (2087, 2018));
+        let entry = (92913, 82598);
+        let cell =
+            |tile| SectorCache::player_cell(&world.cache.entries, &world.cache.door_states, tile);
+        let walk = super::super::player::path::find_with(center, entry, |tile, direction| {
+            collision::step(tile, direction, cell).map(|tile| (tile, 0))
+        })
+        .expect("original collision permits a path from the new-game tile to the cave");
+        let mut at = center;
+        for (index, direction) in walk.into_iter().enumerate() {
+            at = collision::step(at, direction, cell).unwrap();
+            if (index + 1).is_multiple_of(6) || at == entry {
+                eprintln!("Crash Site route waypoint {at:?}");
+            }
+        }
+        assert_eq!(at, entry);
+        let mut vfs = Vfs::from_game(
+            std::env::var_os("ARCANUM_GAME_DIR").unwrap(),
+            crate::vfs::Policy::Ce,
+        )
+        .unwrap();
+        let map = catalog.find("5078").unwrap();
+        let files = map.files(&mut vfs).unwrap();
+        let region = files.region_at(dst.tile);
+        let camera = region.camera(dst.tile).unwrap();
+        let mut cave = WorldStream::new(vfs, map.directory.clone(), region, dst.tile)
+            .unwrap()
+            .with_starting_lighting()
+            .unwrap()
+            .with_player()
+            .unwrap();
+        cave.prepare(&camera, size).unwrap();
+        cave.validate_arrival(dst.tile).unwrap();
+        let exit = cave
+            .cache
+            .ordered
+            .iter()
+            .find(|r| r.frame.source.virtual_path.ends_with("/cave_entrance.art"))
+            .unwrap();
+        let target = cave
+            .cache
+            .target(exit.key)
+            .expect("the cave exit has a Use event");
+        let interaction::Action::Travel(back) = &target.action else {
+            if let interaction::Action::Unsupported(reason) = &target.action {
+                panic!("{reason}");
+            }
+            panic!("cave exit is not a travel target");
+        };
+        assert_eq!(back.map, Some(5000));
+        eprintln!("original cave return {back:?}");
+    }
 
     #[test]
     #[ignore = "requires the installed original game"]
@@ -2453,10 +2670,15 @@ mod tests {
         assert!(changed > 0, "shadows must change composed pixels");
         play.toggle_shadows();
         let player = play.cache.player.take();
+        // Match visibility state for this lighting comparison. The diagnostic
+        // viewer has no player tile from which to select wall runs.
+        let fades = std::mem::take(&mut play.cache.faded_walls);
+        assert!(!fades.is_empty(), "Bates interior should select wall fades");
         assert!(
             frame(&play) == frame(&world),
             "the lit world must compose identically at the same camera and frame tick"
         );
+        play.cache.faded_walls = fades;
         play.cache.player = player;
         let base = frame(&play);
         play.cache.player_shadows = None;

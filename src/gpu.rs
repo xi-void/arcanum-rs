@@ -27,7 +27,7 @@ enum Blend {
 impl Blend {
     fn for_modulation(modulation: Modulation<'_>) -> Self {
         match modulation {
-            Modulation::Additive => Self::Add,
+            Modulation::Additive | Modulation::AdditiveTint(_) => Self::Add,
             Modulation::Shadow(_) => Self::Subtract,
             _ => Self::SourceOver,
         }
@@ -590,7 +590,9 @@ fn instance_data(draw: &WorldDraw<'_>, columns: &mut Vec<u32>) -> Result<Instanc
     match draw.modulation {
         Modulation::Unlit | Modulation::Additive => {}
         Modulation::Shadow(gray) => data.shade = [1, pack([gray; 3]), 0, 0],
-        Modulation::Uniform(rgb) => data.shade = [1, pack(rgb), 0, 0],
+        Modulation::Uniform(rgb) | Modulation::AdditiveTint(rgb) => {
+            data.shade = [1, pack(rgb), 0, 0]
+        }
         Modulation::Floor(nodes) => {
             if (frame.width, frame.height) != (78, 40) {
                 return Err("floor modulation requires a 78 × 40 sprite".into());
@@ -599,6 +601,23 @@ fn instance_data(draw: &WorldDraw<'_>, columns: &mut Vec<u32>) -> Result<Instanc
             data.shade = [2, 0, nodes[8], 0];
             data.nodes_a.copy_from_slice(&nodes[..4]);
             data.nodes_b.copy_from_slice(&nodes[4..8]);
+        }
+        Modulation::Fade {
+            corners,
+            color,
+            columns: colors,
+        } => {
+            data.shade = [4, pack(color), u32::from_le_bytes(corners), 0];
+            if !colors.is_empty() {
+                if colors.len() != frame.width as usize
+                    || columns.len() + colors.len() > MAX_COLUMNS
+                {
+                    return Err("invalid GPU fade column modulation".into());
+                }
+                data.shade[1] = columns.len() as u32;
+                data.shade[3] = 1;
+                columns.extend(colors.iter().copied().map(pack));
+            }
         }
         Modulation::Columns(colors) => {
             if colors.len() != frame.width as usize || columns.len() + colors.len() > MAX_COLUMNS {

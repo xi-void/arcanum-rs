@@ -89,12 +89,18 @@ pub struct ImportedScenery {
 
 impl ImportedScenery {
     pub(super) fn order(&self) -> DrawOrder {
-        order(
+        let mut key = order(
             self.tile,
             self.appearance.offset,
             self.appearance.flags & FLAT != 0,
             self.record.index,
-        )
+        );
+        if self.appearance.scenery_flags & 0x200 != 0 {
+            // CE inserts OSCF_UNDER_ALL at the head of its tile's flat list.
+            key.3 = -1;
+            key.4 = -(self.record.index as i64);
+        }
+        key
     }
 
     pub fn draw(&self, center: (u32, u32)) -> Option<SpriteDraw<'_>> {
@@ -151,15 +157,16 @@ impl SceneryAppearance {
         );
         let additive = effects && blend == (Some(0x10), Some(0x00ff_ffff), Some(255));
         let (object_mask, scenery_mask) = if additive {
-            // IS_FIRE and SOUND_MEDIUM leave the stored additive draw intact.
-            (0x0010_0000, 0x90)
+            // IS_FIRE and sound size leave the stored additive draw intact.
+            (0x0010_0000, 0xd0)
         } else {
             (0, 0)
         };
         // Physical interaction bits and the respawnable marker leave this base draw intact.
         if scale != 100
             || flags & !(0x0040_4c30 | FLAT | object_mask) != 0
-            || scenery_flags & !(0x21 | scenery_mask) != 0
+            || scenery_flags & !(0x221 | scenery_mask) != 0
+            || scenery_flags & 0x200 != 0 && flags & FLAT == 0
             || (!additive && blend != (Some(0), Some(0x00ff_ffff), Some(255)))
         {
             return Err(format!("unsupported scenery appearance: scale {scale}, flags {flags:#x}, subtype flags {scenery_flags:#x}, blend {blend:?}").into());

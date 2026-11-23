@@ -38,12 +38,20 @@ pub enum Modulation<'a> {
     Unlit,
     /// Original indexed additive ART. Nonzero alpha selects a palette color.
     Additive,
+    /// Original hover pass adds a color-modulated copy of the indexed sprite.
+    AdditiveTint([u8; 3]),
     /// Original indexed shadow ART subtracted after grayscale multiplication.
     Shadow(u8),
     Uniform([u8; 3]),
     Floor([[u8; 3]; 9]),
     /// Screen-oriented multipliers, one per sprite column.
     Columns(&'a [[u8; 3]]),
+    /// Opacity corners in clockwise order, starting in the top left.
+    Fade {
+        corners: [u8; 4],
+        color: [u8; 3],
+        columns: &'a [[u8; 3]],
+    },
 }
 
 impl Modulation<'_> {
@@ -101,6 +109,14 @@ pub fn blit_modulated<'a>(
                 position,
                 |_| |rgb, _| rgb,
             )?,
+            Modulation::AdditiveTint(color) => blit_with::<ADD, _>(
+                destination,
+                dimensions,
+                stride,
+                draw.frame,
+                position,
+                |_| move |rgb, _| multiply(rgb, color),
+            )?,
             Modulation::Shadow(gray) => blit_with::<SUBTRACT, _>(
                 destination,
                 dimensions,
@@ -134,6 +150,33 @@ pub fn blit_modulated<'a>(
                         )
                     }
                 })?;
+            }
+            Modulation::Fade {
+                corners,
+                color,
+                columns,
+            } => {
+                if !columns.is_empty() && columns.len() != draw.frame.width as usize {
+                    return Err(Error::SpriteLayout);
+                }
+                let w = draw.frame.width;
+                let h = draw.frame.height;
+                blit_with_alpha::<OVER, _>(
+                    destination,
+                    dimensions,
+                    stride,
+                    draw.frame,
+                    position,
+                    |_| |rgb, x| multiply(rgb, columns.get(x).copied().unwrap_or(color)),
+                    |alpha, x, y| {
+                        let (x, y) = (x as u32, y as u32);
+                        let [tl, tr, br, bl] = corners.map(u32::from);
+                        let left = tl * (h - y) + bl * y;
+                        let right = tr * (h - y) + br * y;
+                        let opacity = (left * (w - x) + right * x) / (w * h);
+                        (u32::from(alpha) * opacity / 255) as u8
+                    },
+                )?;
             }
             Modulation::Columns(colors) => {
                 if colors.len() != draw.frame.width as usize {
@@ -208,6 +251,26 @@ fn blit_with<const BLEND: u8, S: Fn([u8; 3], usize) -> [u8; 3]>(
     position: (i64, i64),
     shade_row: impl Fn(usize) -> S,
 ) -> Result<(), Error> {
+    blit_with_alpha::<BLEND, _>(
+        destination,
+        dimensions,
+        stride,
+        frame,
+        position,
+        shade_row,
+        |alpha, _, _| alpha,
+    )
+}
+
+fn blit_with_alpha<const BLEND: u8, S: Fn([u8; 3], usize) -> [u8; 3]>(
+    destination: &mut [[u8; 3]],
+    dimensions: (u32, u32),
+    stride: usize,
+    frame: &SpriteFrame,
+    position: (i64, i64),
+    shade_row: impl Fn(usize) -> S,
+    alpha_at: impl Fn(u8, usize, usize) -> u8,
+) -> Result<(), Error> {
     let (width, height) = dimensions;
     if width == 0 || height == 0 || stride < width as usize {
         return Err(Error::DestinationLayout);
@@ -256,7 +319,7 @@ fn blit_with<const BLEND: u8, S: Fn([u8; 3], usize) -> [u8; 3]>(
                 }
                 continue;
             }
-            match alpha {
+            match alpha_at(alpha, source_x + column, source_y + row) {
                 0 => {}
                 255 => *dest = shade([r, g, b], source_x + column),
                 alpha => {

@@ -69,16 +69,7 @@ impl DoorStates {
             .get(&door.id)
             .map_or(door.originally_open, |change| change.open);
         if open {
-            door.unlock.clone()?;
-            if door.flags & 0x02 != 0 {
-                return Err("door is jammed".into());
-            }
-            if door.flags & 0x04 != 0 {
-                return Err("door is magically held".into());
-            }
-            if locked(door.flags, hour) {
-                return Err("door is locked".into());
-            }
+            door.may_open(hour).map_err(str::to_owned)?;
         }
         self.0.insert(
             door.id,
@@ -102,6 +93,20 @@ fn locked(flags: u32, hour: u8) -> bool {
 }
 
 impl Door {
+    fn may_open(&self, hour: u8) -> Result<(), &str> {
+        self.unlock.as_ref().map_err(String::as_str)?;
+        if self.flags & 0x02 != 0 {
+            return Err("door is jammed");
+        }
+        if self.flags & 0x04 != 0 {
+            return Err("door is magically held");
+        }
+        if locked(self.flags, hour) {
+            return Err("door is locked");
+        }
+        Ok(())
+    }
+
     fn index(&self, change: Change, tick: Duration) -> usize {
         let step = (tick.saturating_sub(change.started).as_millis() / self.period.as_millis())
             .min(2) as usize;
@@ -221,6 +226,106 @@ fn use_action(vfs: &mut Vfs, script: i32) -> Action {
 }
 
 impl SectorCache {
+    /// The planning edge may open a single portal. Movement still uses
+    /// the real collision grid and never executes that edge while it is closed.
+    fn planned_edge(
+        &self,
+        tile: Tile,
+        direction: u8,
+    ) -> Option<(Tile, Option<(WorldOrder, &Door)>)> {
+        let cell = |tile| Self::player_cell(&self.entries, &self.door_states, tile);
+        if let Some(next) = collision::step(tile, direction, cell) {
+            return Some((next, None));
+        }
+        if direction & 1 == 0 {
+            return None;
+        }
+        let next = neighbor(tile, direction)?;
+        for (door_tile, edge) in [(tile, direction), (next, (direction + 4) % 8)] {
+            let (sector, _) = self.entries.get(&tile_sector_id(door_tile))?;
+            for &key in sector.doors_at.get(&door_tile).into_iter().flatten() {
+                let Action::Door(door) = &sector.interactions[&key].action else {
+                    continue;
+                };
+                if door.direction == edge
+                    && !self
+                        .door_states
+                        .0
+                        .get(&door.id)
+                        .map_or(door.originally_open, |change| change.open)
+                    && collision::step(tile, direction, |at| {
+                        let current = cell(at)?;
+                        Some(if at == door_tile {
+                            current.portal_state(door.direction, false, true)
+                        } else {
+                            current
+                        })
+                    })
+                    .is_some()
+                {
+                    return Some((next, Some((key, door))));
+                }
+            }
+        }
+        None
+    }
+
+    pub(super) fn plan_route(
+        &mut self,
+        goal: Tile,
+        run: bool,
+    ) -> Result<(usize, Option<WorldOrder>), String> {
+        let origin = self
+            .player
+            .as_ref()
+            .ok_or("no active player")?
+            .route_origin();
+        let find = |allow_locked: bool| {
+            super::super::player::path::find_with(origin, goal, |tile, direction| {
+                let (next, door) = self.planned_edge(tile, direction)?;
+                if !allow_locked && let Some((_, door)) = door {
+                    door.may_open(self.hour).ok()?;
+                }
+                Some((next, if door.is_some() { 20 } else { 0 }))
+            })
+        };
+        if let Some(mut route) = find(false) {
+            let count = route.len();
+            let mut tile = origin;
+            let mut pending = None;
+            for (index, &direction) in route.iter().enumerate() {
+                let (next, door) = self.planned_edge(tile, direction).expect("planned edge");
+                if let Some((key, _)) = door {
+                    pending = Some(key);
+                    route.truncate(index);
+                    break;
+                }
+                tile = next;
+            }
+            self.player
+                .as_mut()
+                .expect("active player")
+                .follow_route(route, run);
+            return Ok((count, pending));
+        }
+        let mut tile = origin;
+        for direction in find(true).into_iter().flatten() {
+            let (next, door) = self.planned_edge(tile, direction).expect("planned edge");
+            if let Some((_, door)) = door {
+                door.may_open(self.hour).map_err(str::to_owned)?;
+            }
+            tile = next;
+        }
+        Err("cannot reach the destination".into())
+    }
+
+    pub(super) fn door_opening_delay(&self, key: WorldOrder, tick: Duration) -> Option<Duration> {
+        let Action::Door(door) = &self.target(key)?.action else {
+            return None;
+        };
+        let change = self.door_states.0.get(&door.id)?;
+        (change.started + 2 * door.period).checked_sub(tick)
+    }
     pub(super) fn target(&self, key: WorldOrder) -> Option<&Target> {
         let tile = (key.1.2, key.1.1);
         self.entries
@@ -273,6 +378,7 @@ impl SectorCache {
             .rev()
             .filter(|raster| {
                 raster.key.0
+                    && !raster.click_through
                     && !matches!(raster.object_light, ObjectLight::Roof)
                     && self.raster_revealed(raster)
             })

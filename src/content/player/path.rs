@@ -25,6 +25,16 @@ pub(super) fn find(
     if !collision::can_stand(cell(target)) {
         return None;
     }
+    find_with(from, target, |tile, direction| {
+        collision::step(tile, direction, &cell).map(|to| (to, 0))
+    })
+}
+
+pub(in crate::content) fn find_with(
+    from: Tile,
+    target: Tile,
+    step: impl Fn(Tile, u8) -> Option<(Tile, u64)>,
+) -> Option<VecDeque<u8>> {
     let mut nodes = BTreeMap::from([(from, (0, None))]);
     let mut open = BinaryHeap::from([Reverse((estimate(from, target), 0, from))]);
     while let Some(Reverse((_, cost, tile))) = open.pop() {
@@ -41,10 +51,11 @@ pub(super) fn find(
             return Some(path);
         }
         for direction in 0..8 {
-            let Some(to) = collision::step(tile, direction, &cell) else {
+            let Some((to, extra)) = step(tile, direction) else {
                 continue;
             };
             let next = cost
+                + extra
                 + if direction & 1 == 0 {
                     DIAGONAL
                 } else {

@@ -14,6 +14,7 @@ pub struct Map {
     pub name: String,
     pub directory: String,
     pub map_list_center: (u32, u32),
+    start_map: bool,
 }
 
 pub struct MapFiles {
@@ -50,12 +51,28 @@ impl Catalog {
                 name: name.into(),
                 directory,
                 map_list_center: (x, y),
+                start_map: fields.any(|field| {
+                    field.split_once(':').is_some_and(|(key, value)| {
+                        key.trim().eq_ignore_ascii_case("type")
+                            && value.trim().eq_ignore_ascii_case("START_MAP")
+                    })
+                }),
             });
         }
         Ok(Self {
             source: table.source,
             maps,
         })
+    }
+
+    /// CE's new-game action resolves MAP_TYPE_START_MAP from MapList.mes.
+    pub fn new_game(&self) -> Result<&Map, String> {
+        let mut starts = self.maps.iter().filter(|map| map.start_map);
+        let start = starts.next().ok_or("original map list has no START_MAP")?;
+        if starts.next().is_some() {
+            return Err("original map list has multiple START_MAP entries".into());
+        }
+        Ok(start)
     }
 
     pub fn find(&self, input: &str) -> Result<&Map, String> {
@@ -241,7 +258,7 @@ mod tests {
         fs::write(
             base.join("rules/maplist.mes"),
             concat!(
-                "{5031}{Tulla Interior, 96, 96, Area: 11}",
+                "{5031}{Tulla Interior, 96, 96, Type: START_MAP, Area: 11}",
                 "{5032}{Tulla Interior - Battle, 100, 100}",
                 "{5067}{K'na Tha, 20, 30}",
                 "{5120}{Other Keep, 1, 2}",
@@ -260,6 +277,7 @@ mod tests {
         vfs.mount_directory(&base).unwrap();
         vfs.mount_directory(&patch).unwrap();
         let catalog = Catalog::load(&mut vfs).unwrap();
+        assert_eq!(catalog.new_game().unwrap().id, 5031);
         assert_eq!(catalog.find("TULLA").unwrap().id, 5031);
         assert_eq!(
             catalog.find("5032").unwrap().name,
