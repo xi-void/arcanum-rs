@@ -1,4 +1,4 @@
-//! Framing for the base-sector object records exercised by the wall importer.
+//! Framing for the base-sector object records exercised by the static renderer.
 
 use super::{Coordinates, MAX_INPUT_BYTES, SIDE, decode_floor};
 use crate::prototype::{HEADER_SIZE, MAX_PROTOTYPE_BYTES, SerializedPrototypeId, decode_header};
@@ -9,7 +9,7 @@ const PORTAL: u32 = 1;
 const SCENERY: u32 = 3;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct WallFields {
+pub struct AppearanceFields {
     pub offset_x: Option<i32>,
     pub offset_y: Option<i32>,
     pub scale: Option<i32>,
@@ -18,20 +18,22 @@ pub struct WallFields {
     pub blit_color: Option<u32>,
     pub alpha: Option<u32>,
     pub wall_flags: Option<u32>,
+    pub scenery_flags: Option<u32>,
 }
 
 #[derive(Debug)]
-pub struct WallRecord {
+pub struct StaticRecord {
+    pub category: StaticCategory,
     pub index: usize,
     pub span: Range<usize>,
     pub prototype: SerializedPrototypeId,
     pub instance_id: [u8; 24],
     pub art_id: u32,
     pub stored_tile: (u32, u32),
-    pub fields: WallFields,
+    pub fields: AppearanceFields,
 }
 
-impl WallRecord {
+impl StaticRecord {
     /// Base sector loads replace the upper bits of both stored coordinates
     /// with the supplying sector's world origin.
     pub fn world_tile(&self, sector: Coordinates) -> Option<(u32, u32)> {
@@ -42,11 +44,20 @@ impl WallRecord {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaticCategory {
+    Wall,
+    Scenery,
+    Portal,
+}
+
 #[derive(Debug)]
 pub struct ObjectList {
     pub start: usize,
     pub count: usize,
-    pub walls: Vec<WallRecord>,
+    pub walls: Vec<StaticRecord>,
+    pub scenery: Vec<StaticRecord>,
+    pub portals: Vec<StaticRecord>,
     pub scenery_count: usize,
     pub portal_count: usize,
 }
@@ -114,6 +125,8 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
         start,
         count,
         walls: Vec::new(),
+        scenery: Vec::new(),
+        portals: Vec::new(),
         scenery_count: 0,
         portal_count: 0,
     };
@@ -141,9 +154,7 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
         let category = reader.u32("object category")?;
         let valid = match category {
             WALL => [u32::MAX, 0xf, 0x1f],
-            // These observed records are framed so the reader can continue.
-            // Their fields are never interpreted as world entities.
-            SCENERY => [0x80c4_710f, 1, 5],
+            SCENERY => [0x80c4_7f0f, 1, 5],
             PORTAL => [3, 0, 0],
             _ => {
                 return Err(reader.error(format!(
@@ -178,23 +189,40 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
                 }
             }
         }
-        match category {
-            WALL => list.walls.push(WallRecord {
-                index,
-                span: start..reader.offset,
-                prototype: SerializedPrototypeId(proto_id),
-                instance_id,
-                art_id: fields
-                    .art_id
-                    .ok_or_else(|| reader.error("wall has no stored current ART ID"))?,
-                stored_tile: fields
-                    .tile
-                    .ok_or_else(|| reader.error("wall has no stored location"))?,
-                fields: fields.wall,
-            }),
-            SCENERY => list.scenery_count += 1,
-            PORTAL => list.portal_count += 1,
+        let category = match category {
+            WALL => StaticCategory::Wall,
+            SCENERY => {
+                list.scenery_count += 1;
+                StaticCategory::Scenery
+            }
+            PORTAL => {
+                list.portal_count += 1;
+                StaticCategory::Portal
+            }
             _ => unreachable!("already validated category"),
+        };
+        // Framing-only instances contribute to the category count.
+        if category != StaticCategory::Wall && (fields.art_id.is_none() || fields.tile.is_none()) {
+            continue;
+        }
+        let record = StaticRecord {
+            category,
+            index,
+            span: start..reader.offset,
+            prototype: SerializedPrototypeId(proto_id),
+            instance_id,
+            art_id: fields
+                .art_id
+                .ok_or_else(|| reader.error("missing current ART ID"))?,
+            stored_tile: fields
+                .tile
+                .ok_or_else(|| reader.error("missing object location"))?,
+            fields: fields.appearance,
+        };
+        match category {
+            StaticCategory::Wall => list.walls.push(record),
+            StaticCategory::Scenery => list.scenery.push(record),
+            StaticCategory::Portal => list.portals.push(record),
         }
     }
     if reader.offset != count_offset {
@@ -203,36 +231,58 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
     Ok(list)
 }
 
-/// Read inherited appearance fields from a complete version 119 wall prototype.
-pub fn decode_wall_prototype(input: &[u8], id: SerializedPrototypeId) -> Result<WallFields, Error> {
+/// Read inherited appearance fields from a complete version 119 static prototype.
+pub fn decode_wall_prototype(
+    input: &[u8],
+    id: SerializedPrototypeId,
+) -> Result<AppearanceFields, Error> {
+    decode_static_prototype(input, id, WALL, 69)
+}
+
+pub fn decode_scenery_prototype(
+    input: &[u8],
+    id: SerializedPrototypeId,
+) -> Result<AppearanceFields, Error> {
+    decode_static_prototype(input, id, SCENERY, 70)
+}
+
+fn decode_static_prototype(
+    input: &[u8],
+    id: SerializedPrototypeId,
+    category: u32,
+    end: usize,
+) -> Result<AppearanceFields, Error> {
     let mut reader = Reader { input, offset: 0 };
     if input.len() > MAX_PROTOTYPE_BYTES {
-        return Err(reader.error("wall prototype exceeds the input limit"));
+        return Err(reader.error("static prototype exceeds the input limit"));
     }
     let header = decode_header(input).map_err(|error| Error {
         offset: error.offset,
         message: error.to_string(),
     })?;
-    if header.object_type != WALL || header.id != id {
-        return Err(reader.error("wall prototype type or identity mismatch"));
+    if header.object_type != category || header.id != id {
+        return Err(reader.error("static prototype type or identity mismatch"));
     }
-    reader.take(HEADER_SIZE + 12, "wall prototype header and change bitmap")?;
+    reader.take(
+        HEADER_SIZE + 12,
+        "static prototype header and change bitmap",
+    )?;
     let mut fields = Fields::default();
     // Unlike instances, prototypes serialize every declared slot.
-    for index in (0..36).chain(64..69) {
-        fields.read(&mut reader, index, WALL)?;
+    for index in (0..36).chain(64..end) {
+        fields.read(&mut reader, index, category)?;
     }
     if reader.offset != input.len() {
-        return Err(reader.error("trailing data after wall prototype"));
+        return Err(reader.error("trailing data after static prototype"));
     }
-    Ok(fields.wall)
+    Ok(fields.appearance)
 }
 
 #[derive(Default)]
 struct Fields {
     art_id: Option<u32>,
     tile: Option<(u32, u32)>,
-    wall: WallFields,
+    appearance: AppearanceFields,
 }
 
 impl Fields {
@@ -249,20 +299,28 @@ impl Fields {
             5..=7 | 15..=17 | 30 | 34 => reader.array(4)?,
             31 => reader.array(12)?,
             35 => reader.array(8)?,
+            65 if category == SCENERY => {
+                if reader.present()? {
+                    reader.take(24, "scenery reference identity")?;
+                }
+            }
+            68 if category == SCENERY => reader.array(4)?,
+            69 if category == SCENERY => reader.array(8)?,
             67 if category == WALL => reader.array(4)?,
             68 if category == WALL => reader.array(8)?,
             _ => {
                 let value = reader.u32(field)?;
-                if category == WALL {
+                if category != PORTAL {
                     match index {
-                        2 => self.wall.offset_x = Some(value as i32),
-                        3 => self.wall.offset_y = Some(value as i32),
-                        8 => self.wall.blit_flags = Some(value),
-                        9 => self.wall.blit_color = Some(value),
-                        10 => self.wall.alpha = Some(value),
-                        11 => self.wall.scale = Some(value as i32),
-                        18 => self.wall.flags = Some(value),
-                        64 => self.wall.wall_flags = Some(value),
+                        2 => self.appearance.offset_x = Some(value as i32),
+                        3 => self.appearance.offset_y = Some(value as i32),
+                        8 => self.appearance.blit_flags = Some(value),
+                        9 => self.appearance.blit_color = Some(value),
+                        10 => self.appearance.alpha = Some(value),
+                        11 => self.appearance.scale = Some(value as i32),
+                        18 => self.appearance.flags = Some(value),
+                        64 if category == WALL => self.appearance.wall_flags = Some(value),
+                        64 if category == SCENERY => self.appearance.scenery_flags = Some(value),
                         _ => {}
                     }
                 }

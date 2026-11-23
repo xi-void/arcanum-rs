@@ -46,6 +46,10 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] art sector-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector-facade <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector-wall-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs [--ordered] art sector-room-wide-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs [--ordered] art sector-room-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
+  arcanum-rs [--ordered] art sector-room-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
+  arcanum-rs [--ordered] art sector-room <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector-walls-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art sector-walls <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector-wall <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
@@ -120,6 +124,23 @@ fn main() -> ExitCode {
         (Some("art"), [_, action, game, options @ ..]) if action == "sector-walls-inspect" => {
             inspect_connected_walls(Path::new(game), options, policy)
         }
+        (Some("art"), [_, action, game, options @ ..]) if action == "sector-room-inspect" => {
+            inspect_room(Path::new(game), options, policy)
+        }
+        (Some("art"), [_, action, game, options @ ..]) if action == "sector-room-wide-inspect" => {
+            inspect_room_overview(Path::new(game), options, policy)
+        }
+        #[cfg(feature = "windowed")]
+        (Some("art"), [_, action, game, options @ ..])
+            if action == "sector-room" || action == "sector-room-wide" =>
+        {
+            show_room(
+                Path::new(game),
+                options,
+                policy,
+                action == "sector-room-wide",
+            )
+        }
         #[cfg(feature = "windowed")]
         (Some("art"), [_, action, game, options @ ..])
             if action == "sector"
@@ -170,6 +191,8 @@ fn main() -> ExitCode {
                 || action == "sector-wide"
                 || action == "sector-wall"
                 || action == "sector-walls"
+                || action == "sector-room"
+                || action == "sector-room-wide"
                 || action == "sector-facade" =>
         {
             Err("sprite presentation requires a build with --features windowed".into())
@@ -1004,6 +1027,137 @@ fn show_sector_floor(
         .into(),
         &layers,
     )?)
+}
+
+#[cfg(feature = "windowed")]
+fn show_room(
+    game: &Path,
+    options: &[OsString],
+    policy: Policy,
+    wide: bool,
+) -> Result<(), Box<dyn Error>> {
+    let mut vfs = inspection_vfs(game, options, policy)?;
+    let room = if wide {
+        let overview = content::scenery::load_room_overview(&mut vfs)?;
+        report_room_overview(&mut io::stdout().lock(), &overview)?;
+        overview.room
+    } else {
+        let room = content::scenery::load_room(&mut vfs)?;
+        report_room(&mut io::stdout().lock(), &room)?;
+        room
+    };
+    drop(vfs);
+    let layers = room
+        .draws()
+        .ok_or("room anchor exceeds the drawable range")?
+        .map(|draw| {
+            Ok(viewer::Layer {
+                frame: draw.frame,
+                relative_anchor: (i16::try_from(draw.anchor.0)?, i16::try_from(draw.anchor.1)?),
+            })
+        })
+        .collect::<Result<Vec<_>, std::num::TryFromIntError>>()?;
+    if wide {
+        Ok(viewer::show_layers_at_size(
+            "Arcanum-RS | Bates Mansion Level 1 overview".into(),
+            &layers,
+            content::scenery::OVERVIEW_SIZE,
+        )?)
+    } else {
+        Ok(viewer::show_layers(
+            "Arcanum-RS | Bates Mansion room".into(),
+            &layers,
+        )?)
+    }
+}
+
+fn inspect_room(game: &Path, options: &[OsString], policy: Policy) -> Result<(), Box<dyn Error>> {
+    let room = content::scenery::load_room(&mut inspection_vfs(game, options, policy)?)?;
+    report_room(&mut io::stdout().lock(), &room)
+}
+
+fn inspect_room_overview(
+    game: &Path,
+    options: &[OsString],
+    policy: Policy,
+) -> Result<(), Box<dyn Error>> {
+    let mut vfs = inspection_vfs(game, options, policy)?;
+    let overview = content::scenery::load_room_overview(&mut vfs)?;
+    report_room_overview(&mut io::stdout().lock(), &overview)
+}
+
+fn report_room_overview(
+    out: &mut impl Write,
+    overview: &content::scenery::RoomOverview,
+) -> Result<(), Box<dyn Error>> {
+    let room = &overview.room;
+    let (walls, portals, scenery) = overview.sector_object_counts;
+    writeln!(
+        out,
+        "Base sector contains {walls} walls, {portals} portals and {scenery} scenery records"
+    )?;
+    writeln!(
+        out,
+        "Raster intersects preview outside the floor patch: {} walls, {} scenery",
+        overview.outside_floor_walls, overview.outside_floor_scenery
+    )?;
+    report_room(out, room)?;
+    for issue in &overview.issues {
+        writeln!(
+            out,
+            "Skipped record {} {:?} at {:?} ART {:#010x}: {}",
+            issue.record, issue.category, issue.tile, issue.art_id, issue.reason
+        )?;
+    }
+    Ok(())
+}
+
+fn report_room(out: &mut impl Write, room: &content::scenery::Room) -> Result<(), Box<dyn Error>> {
+    let floor = &room.floor;
+    writeln!(
+        out,
+        "Sector {} from {}",
+        floor.source.virtual_path, floor.source
+    )?;
+    writeln!(
+        out,
+        "Center {:?}, {} surfaces, {} walls, {} scenery records",
+        floor.center,
+        floor.tiles().len(),
+        room.walls.len(),
+        room.scenery.len()
+    )?;
+    for scenery in &room.scenery {
+        let record = &scenery.record;
+        let art = &scenery.artwork;
+        let fields = &scenery.appearance;
+        let draw = scenery
+            .draw(floor.center)
+            .ok_or("room anchor exceeds the drawable range")?;
+        let top_left = arcanum_rs::compositor::sprite_origin(draw.frame, draw.anchor);
+        writeln!(
+            out,
+            "Record {} Scenery (type 3), bytes {:?}, tile {:?}, prototype {} from {}, ART {:#010x}: {} from {}, rotation {}, frame {}, palette {}, offset {:?}, scale {}%, hotspot {:?}, relative raster origin {:?}, object flags {:#x}, scenery flags {:#x}",
+            record.index,
+            record.span,
+            scenery.tile,
+            record.prototype.0,
+            scenery.prototype_source,
+            record.art_id,
+            art.source.virtual_path,
+            art.source,
+            scenery.art.rotation,
+            scenery.art.frame,
+            scenery.art.palette,
+            fields.offset,
+            fields.scale,
+            draw.frame.hotspot,
+            top_left,
+            fields.flags,
+            fields.scenery_flags
+        )?;
+    }
+    Ok(())
 }
 
 fn load_demo_wall(vfs: &mut Vfs) -> Result<content::wall::ImportedWall, Box<dyn Error>> {

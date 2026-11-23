@@ -5,7 +5,7 @@ use arcanum_rs::compositor::{SpriteDraw, blit_ordered};
 use softbuffer::{Context, Surface};
 use std::{num::NonZeroU32, rc::Rc};
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalSize, PhysicalSize, Size};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle};
 use winit::window::{Window, WindowId};
@@ -90,12 +90,25 @@ pub fn show(title: String, frame: SpriteFrame) -> Result<(), String> {
 }
 
 pub fn show_layers(title: String, layers: &[Layer<'_>]) -> Result<(), String> {
+    show_layers_with_size(title, layers, LogicalSize::new(640, 480).into())
+}
+
+pub fn show_layers_at_size(
+    title: String,
+    layers: &[Layer<'_>],
+    size: (u32, u32),
+) -> Result<(), String> {
+    show_layers_with_size(title, layers, PhysicalSize::<u32>::from(size).into())
+}
+
+fn show_layers_with_size(title: String, layers: &[Layer<'_>], size: Size) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|error| format!("cannot open display: {error}"))?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let context = Context::new(event_loop.owned_display_handle())
         .map_err(|error| format!("cannot initialize software presentation: {error}"))?;
     let mut app = Viewer {
         title,
+        size,
         context,
         view: None,
         layers,
@@ -109,6 +122,7 @@ pub fn show_layers(title: String, layers: &[Layer<'_>]) -> Result<(), String> {
 
 struct Viewer<'a> {
     title: String,
+    size: Size,
     context: Context<OwnedDisplayHandle>,
     view: Option<WindowSurface>,
     layers: &'a [Layer<'a>],
@@ -125,7 +139,7 @@ impl Viewer<'_> {
     fn open(&self, event_loop: &ActiveEventLoop) -> Result<WindowSurface, String> {
         let attributes = Window::default_attributes()
             .with_title(&self.title)
-            .with_inner_size(LogicalSize::new(640, 480));
+            .with_inner_size(self.size);
         let window = Rc::new(
             event_loop
                 .create_window(attributes)

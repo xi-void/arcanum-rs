@@ -3,6 +3,7 @@
 pub mod art;
 pub mod effects;
 pub mod items;
+pub mod scenery;
 pub mod schematics;
 pub mod sector;
 pub mod wall;

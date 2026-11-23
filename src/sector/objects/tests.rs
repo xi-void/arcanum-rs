@@ -140,3 +140,32 @@ fn rejects_unsupported_types_and_fields_and_invalid_record_boundaries() {
     bad[0] = 118;
     assert!(wrap(&bad).contains("unsupported object version"));
 }
+
+#[test]
+fn retains_scenery_placements_and_rejects_a_truncated_override() {
+    let art = 0x4120_0380_u32;
+    let mut data = art.to_le_bytes().to_vec();
+    data.push(1);
+    for field in [103i32, 80, -9, 0, 100, 0x30, 0x20] {
+        data.extend(field.to_le_bytes());
+    }
+    let record = instance(3, [0x40_80f, 0, 1], &data);
+    let sector = |record: &[u8]| {
+        let mut bytes = sector_header(0xaa0000);
+        bytes.extend(record);
+        bytes.extend(1u32.to_le_bytes());
+        bytes
+    };
+    let list = decode(&sector(&record)).unwrap();
+    let scene = &list.scenery[0];
+    assert_eq!(scene.category, StaticCategory::Scenery);
+    assert_eq!(scene.art_id, art);
+    assert_eq!(scene.stored_tile, (103, 80));
+    assert_eq!(scene.fields.offset_x, Some(-9));
+    assert_eq!(scene.fields.offset_y, Some(0));
+    assert_eq!(scene.fields.scale, Some(100));
+    assert_eq!(scene.fields.flags, Some(0x30));
+    assert_eq!(scene.fields.scenery_flags, Some(0x20));
+    assert!(decode(&sector(&record[..record.len() - 1])).is_err());
+    assert!(decode(&sector(&instance(3, [1 << 28, 0, 0], &[0; 4]))).is_err());
+}

@@ -1,6 +1,6 @@
 //! Native placement and the verified legacy wall artwork selection.
 
-use crate::{art::SpriteFrame, compositor::SpriteDraw, isometric::project_tile, mes::Mes};
+use crate::{art::SpriteFrame, compositor::SpriteDraw, isometric::project_world_tile, mes::Mes};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,20 +59,24 @@ impl WallArtId {
         })
     }
 
-    /// Resolve the undamaged interior facings and pieces used by the verified run.
+    /// Resolve the undamaged interior and exterior facings verified in the Bates sector.
     pub fn resolve(self, structures: &Mes, names: &Mes) -> Result<String, Error> {
         let fields = self.fields()?;
         if !matches!(
             (fields.rotation, fields.palette, fields.flags),
-            (1, 0, 0) | (7, 1, 1)
+            (1 | 5, 0, 0) | (7, 1, 1)
         ) || fields.damage != 0
             || self.0 & 0x40 != 0
         {
             return Err(Error::Unsupported(fields));
         }
         let piece = match fields.piece {
-            0 => "bse",
+            0 | 2 => "bse",
+            1 => "lfc",
+            21..=23 => ["d3l", "d3a", "d3r"][(fields.piece - 21) as usize],
+            24..=27 => ["d4l", "d4a", "d4b", "d4r"][(fields.piece - 24) as usize],
             28..=33 => ["d6l", "d6a", "d6b", "d6c", "d6d", "d6r"][(fields.piece - 28) as usize],
+            34..=36 => ["p3l", "p3a", "p3r"][(fields.piece - 34) as usize],
             37..=40 => ["p4l", "p4a", "p4b", "p4r"][(fields.piece - 37) as usize],
             _ => return Err(Error::Unsupported(fields)),
         };
@@ -87,9 +91,9 @@ impl WallArtId {
             })
             .ok_or(Error::MissingStructure(id))?
             .1;
-        let interior = entry
+        let facing = entry
             .split_ascii_whitespace()
-            .next()
+            .nth(usize::from(fields.rotation == 5))
             .and_then(|word| word.get(..3))
             .filter(|stem| stem.bytes().all(|ch| ch.is_ascii_alphanumeric()))
             .ok_or(Error::InvalidStructure(id))?;
@@ -98,14 +102,14 @@ impl WallArtId {
                 key >= 0
                     && value
                         .get(..3)
-                        .is_some_and(|stem| stem.eq_ignore_ascii_case(interior))
+                        .is_some_and(|stem| stem.eq_ignore_ascii_case(facing))
             })
         {
-            return Err(Error::MissingWallName(interior.into()));
+            return Err(Error::MissingWallName(facing.into()));
         }
         Ok(format!(
             "art/wall/{}{piece}u{}.art",
-            interior.to_ascii_lowercase(),
+            facing.to_ascii_lowercase(),
             fields.variation
         ))
     }
@@ -163,8 +167,7 @@ impl Placement {
         center: (u32, u32),
         pivot: (i64, i64),
     ) -> Option<SpriteDraw<'_>> {
-        let delta = |tile, center| i32::try_from(i64::from(tile) - i64::from(center)).ok();
-        let (x, y) = project_tile(delta(self.tile.0, center.0)?, delta(self.tile.1, center.1)?)?;
+        let (x, y) = project_world_tile(self.tile, center)?;
         // Keep the ART hotspot intact and express the effective pivot as an anchor shift.
         let anchor = (
             i32::try_from(

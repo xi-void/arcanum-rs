@@ -596,3 +596,230 @@ fn bates_connected_wall_run_matches_original_order_palette_and_shared_coordinate
         assert_eq!(actual, &full[start..start + 400]);
     }
 }
+
+#[test]
+#[ignore = "requires installed Arcanum data"]
+fn bates_room_imports_original_scenery_and_composes_shared_geometry() {
+    use arcanum_rs::{
+        compositor::{blit_ordered, sprite_origin},
+        content::{scenery::load_room, sector::load_facade_region},
+        sector::objects::StaticCategory,
+    };
+
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    let mut room = load_room(&mut vfs).unwrap();
+    assert_eq!(room.floor.center, (101, 81));
+    assert_eq!(room.floor.tiles().len(), 81);
+    assert_eq!(
+        room.floor
+            .tiles()
+            .iter()
+            .filter(|tile| tile.facade.is_some())
+            .count(),
+        15
+    );
+    let expected = [
+        (
+            35,
+            (100, 78),
+            4032,
+            0x4010_01c0,
+            "candlestand1.art",
+            (-88, -161),
+        ),
+        (
+            40,
+            (104, 78),
+            4041,
+            0x4058_0400,
+            "painting02_r.art",
+            (-270, -110),
+        ),
+        (
+            53,
+            (98, 79),
+            4041,
+            0x4040_0400,
+            "painting01_l.art",
+            (34, -217),
+        ),
+        (
+            61,
+            (103, 80),
+            4039,
+            0x4120_0380,
+            "couch_flip.art",
+            (-158, -58),
+        ),
+        (70, (101, 81), 4037, 0x4020_0300, "gc_table.art", (-30, -66)),
+        (78, (100, 82), 4039, 0x4118_0380, "couch.art", (22, -72)),
+        (
+            100,
+            (98, 85),
+            4032,
+            0x4018_01c0,
+            "candlestand2.art",
+            (256, -62),
+        ),
+    ];
+    assert_eq!(room.scenery.len(), expected.len());
+    for (s, (record, tile, prototype, art, name, origin)) in room.scenery.iter().zip(expected) {
+        assert_eq!(s.record.index, record);
+        assert_eq!(s.record.category, StaticCategory::Scenery);
+        assert_eq!(s.tile, tile);
+        assert_eq!(s.record.prototype.0, prototype);
+        assert_eq!(s.record.art_id, art);
+        assert_eq!(s.appearance.scale, 100);
+        assert_eq!((s.art.rotation, s.art.frame, s.art.palette), (0, 0, 0));
+        assert_eq!(s.artwork.source.virtual_path, format!("art/scenery/{name}"));
+        let draw = s.draw(room.floor.center).unwrap();
+        assert_eq!(sprite_origin(draw.frame, draw.anchor), origin);
+        let shifted = s.draw((102, 81)).unwrap();
+        assert_eq!(
+            sprite_origin(shifted.frame, shifted.anchor),
+            (origin.0 + 40, origin.1 - 20)
+        );
+    }
+
+    let draws = room.draws().unwrap().collect::<Vec<_>>();
+    // Records 34 and 35 share a tile. The stand's offset puts it after the wall.
+    assert!(std::ptr::eq(
+        draws[85].frame,
+        &room.walls[4].artwork.decoded.frame
+    ));
+    assert!(std::ptr::eq(
+        draws[86].frame,
+        &room.scenery[0].artwork.decoded.frame
+    ));
+    let render = |width, height| {
+        let mut pixels = vec![[32, 43, 58]; width as usize * height as usize];
+        blit_ordered(
+            &mut pixels,
+            (width, height),
+            width as usize,
+            draws.iter().copied().map(|mut draw| {
+                draw.anchor.0 += (width / 2) as i32;
+                draw.anchor.1 += (height / 2) as i32;
+                draw
+            }),
+        )
+        .unwrap();
+        pixels
+    };
+    let full = render(800, 600);
+    let clipped = render(400, 400);
+    let wall = draws[85];
+    let stand = draws[86];
+    let pixel_at = |draw: arcanum_rs::compositor::SpriteDraw<'_>, x: usize, y: usize| {
+        let (left, top) = sprite_origin(draw.frame, draw.anchor);
+        let dx = (x as i64 - 400 - left) as u64;
+        let dy = (y as i64 - 300 - top) as u64;
+        if dx >= u64::from(draw.frame.width) || dy >= u64::from(draw.frame.height) {
+            return None;
+        }
+        Some(draw.frame.pixels[(dy * u64::from(draw.frame.width) + dx) as usize])
+    };
+    let (mut opaque_overlap, mut transparent_overlap) = (0, 0);
+    for y in 135..220 {
+        for x in 311..350 {
+            let (Some([wr, wg, wb, 255]), Some([sr, sg, sb, alpha])) =
+                (pixel_at(wall, x, y), pixel_at(stand, x, y))
+            else {
+                continue;
+            };
+            if alpha == 255 {
+                assert_eq!(full[y * 800 + x], [sr, sg, sb]);
+                opaque_overlap += 1;
+            } else if alpha == 0 {
+                assert_eq!(full[y * 800 + x], [wr, wg, wb]);
+                transparent_overlap += 1;
+            }
+        }
+    }
+    assert!(opaque_overlap > 0 && transparent_overlap > 0);
+
+    for (row, actual) in clipped.chunks(400).enumerate() {
+        let start = (row + 100) * 800 + 200;
+        assert_eq!(actual, &full[start..start + 400]);
+    }
+
+    // Narrowing the floor about the same center must keep independently
+    // selected scenery draws, including objects whose tiles are now outside it.
+    room.floor = load_facade_region(&mut vfs, DEMO_MAP, DEMO_SECTOR, (35, 15), 5).unwrap();
+    assert_eq!(room.floor.center, (101, 81));
+    let outside = &room.scenery[6];
+    assert!(
+        room.floor
+            .tiles()
+            .iter()
+            .all(|tile| tile.world != outside.tile)
+    );
+    let expected = outside.draw(room.floor.center).unwrap();
+    assert!(room.draws().unwrap().any(|draw| {
+        std::ptr::eq(draw.frame, expected.frame) && draw.anchor == expected.anchor
+    }));
+}
+
+#[test]
+#[ignore = "requires installed Arcanum data"]
+fn bates_room_overview_reuses_the_original_room_inside_the_larger_sector_scene() {
+    use arcanum_rs::content::scenery::{load_room, load_room_overview};
+    use arcanum_rs::sector::objects::StaticCategory;
+
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    let small = load_room(&mut vfs).unwrap();
+    let overview = load_room_overview(&mut vfs).unwrap();
+    let wide = &overview.room;
+    assert_eq!(overview.sector_object_counts, (268, 19, 81));
+    assert_eq!(wide.floor.tiles().len(), 25 * 25);
+    assert_eq!(wide.floor.center, (101, 83));
+    assert_eq!(wide.floor.source, small.floor.source);
+    assert!(overview.outside_floor_walls > 0);
+    assert!(overview.outside_floor_scenery > 0);
+    assert!(
+        overview
+            .issues
+            .iter()
+            .any(|issue| issue.category == StaticCategory::Portal)
+    );
+    for tile in small.floor.tiles() {
+        let other = wide
+            .floor
+            .tiles()
+            .iter()
+            .find(|other| other.world == tile.world)
+            .unwrap();
+        assert_eq!(other.id, tile.id);
+        assert_eq!(other.frame_index(), tile.frame_index());
+    }
+    let shifted = |small: arcanum_rs::compositor::SpriteDraw<'_>,
+                   wide: arcanum_rs::compositor::SpriteDraw<'_>| {
+        assert_eq!(wide.anchor, (small.anchor.0 - 80, small.anchor.1 - 40));
+        assert_eq!(wide.frame, small.frame);
+    };
+    for wall in &small.walls {
+        let same = wide
+            .walls
+            .iter()
+            .find(|other| other.record.index == wall.record.index)
+            .unwrap();
+        shifted(
+            wall.draw(small.floor.center).unwrap(),
+            same.draw(wide.floor.center).unwrap(),
+        );
+    }
+    for prop in &small.scenery {
+        let same = wide
+            .scenery
+            .iter()
+            .find(|other| other.record.index == prop.record.index)
+            .unwrap();
+        shifted(
+            prop.draw(small.floor.center).unwrap(),
+            same.draw(wide.floor.center).unwrap(),
+        );
+    }
+    assert!(wide.walls.iter().any(|wall| wall.orientation.rotation == 5));
+}
