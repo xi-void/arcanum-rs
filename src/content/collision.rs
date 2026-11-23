@@ -18,10 +18,27 @@ type Tile = (u32, u32);
 const INACTIVE: u32 = 0x3; // OF_DESTROYED | OF_OFF
 const NO_BLOCK: u32 = 0x400;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Cell {
     blocked: bool,
     edges: u8,
+    portals: [u16; 4],
+}
+
+impl Cell {
+    pub(super) fn portal_state(mut self, direction: u8, was_open: bool, open: bool) -> Self {
+        let count = &mut self.portals[usize::from(direction / 2)];
+        match (was_open, open) {
+            (false, true) => *count = count.saturating_sub(1),
+            (true, false) => *count = count.saturating_add(1),
+            _ => {}
+        }
+        self
+    }
+
+    fn blocks_edge(self, direction: u8) -> bool {
+        self.edges & (1 << direction) != 0 || self.portals[usize::from(direction / 2)] != 0
+    }
 }
 
 pub(super) struct Collision {
@@ -134,7 +151,7 @@ impl Collision {
             // CE's portal_is_open uses the current ART frame, not the lock flags.
             StaticCategory::Portal if art >> 28 == 3 => {
                 if (art >> 14) & 31 == 0 && art & 0x200 == 0 {
-                    cell.edges |= edge;
+                    cell.portals[((art >> 11) & 7) as usize / 2] += 1;
                 }
             }
             StaticCategory::Scenery => {
@@ -142,6 +159,10 @@ impl Collision {
             }
             _ => cell.blocked = true,
         }
+    }
+
+    pub(super) fn occupy(&mut self, tile: Tile) {
+        self.cells[index(tile)].blocked = true;
     }
 
     pub(super) fn cell(&self, tile: Tile) -> Cell {
@@ -189,9 +210,9 @@ pub(super) fn step(tile: Tile, direction: u8, cell: impl Fn(Tile) -> Option<Cell
         let source = cell(from)?;
         let target = cell(to)?;
         (!target.blocked
-            && source.edges & (1 << direction) == 0
-            && target.edges & (1 << ((direction + 4) % 8)) == 0)
-            .then_some(to)
+            && !source.blocks_edge(direction)
+            && !target.blocks_edge((direction + 4) % 8))
+        .then_some(to)
     };
     if direction & 1 != 0 {
         return cardinal(tile, direction);
@@ -251,6 +272,7 @@ mod tests {
             Some(Cell {
                 blocked: false,
                 edges: if tile == b { 1 << 1 } else { 0 },
+                portals: [0; 4],
             })
         };
         assert_eq!(step(a, 5, blocked), None);
@@ -288,6 +310,6 @@ mod tests {
             0x3000_0000 | (5 << 11),
             fields,
         );
-        assert_eq!(collision.cell(tile).edges, 1 << 5);
+        assert_eq!(collision.cell(tile).portals, [0, 0, 1, 0]);
     }
 }

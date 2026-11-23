@@ -174,6 +174,7 @@ pub(super) struct MobileFrame {
     pub asset: Arc<LoadedFrame>,
     pub diagnostic: String,
     pub casts_shadow: bool,
+    pub blocking: bool,
     pub fidget: Option<Arc<DirectionalFidget>>,
     pub walk: Option<Arc<Walk>>,
 }
@@ -508,6 +509,7 @@ fn load(
         asset,
         diagnostic,
         casts_shadow,
+        blocking: flags & 0x400 == 0,
         fidget,
         walk,
     })

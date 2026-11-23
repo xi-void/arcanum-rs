@@ -253,6 +253,9 @@ pub struct InteractiveWorld {
     view_hold: Duration,
     trace: bool,
     player_started: bool,
+    transition: Option<(Destination, u8)>,
+    pending_use: Option<WorldOrder>,
+    notice: Option<String>,
 }
 
 impl InteractiveWorld {
@@ -292,6 +295,9 @@ impl InteractiveWorld {
             view_hold: Duration::ZERO,
             trace,
             player_started: false,
+            transition: None,
+            pending_use: None,
+            notice: None,
         })
     }
 
@@ -518,7 +524,7 @@ impl InteractiveWorld {
     }
 
     pub fn player_moving(&self) -> bool {
-        self.cache.player.as_ref().is_some_and(Player::moving)
+        self.pending_use.is_some() || self.cache.player.as_ref().is_some_and(Player::moving)
     }
 
     pub fn start_player(&mut self) -> Result<(), String> {
@@ -526,21 +532,11 @@ impl InteractiveWorld {
             return Ok(());
         }
         if let Some(player) = &self.cache.player {
-            let tile = player.tile();
-            let cell = SectorCache::collision_cell(&self.cache.entries, tile);
-            if !collision::can_stand(cell) {
-                let sector = self.cache.entries.get(&tile_sector_id(tile));
-                let detail = if cell.is_none() {
-                    sector
-                        .and_then(|(sector, _)| sector.report.diagnostics.first())
-                        .map_or("original collision data is unavailable", String::as_str)
-                } else {
-                    "original terrain or an object blocks this tile"
-                };
-                return Err(format!(
-                    "cannot spawn player at {tile:?}: {detail}; choose another starting tile with --center X Y"
-                ));
-            }
+            self.cache
+                .validate_arrival(player.tile())
+                .map_err(|error| {
+                    format!("{error}; choose another starting tile with --center X Y")
+                })?;
         }
         self.player_started = true;
         Ok(())
@@ -552,6 +548,7 @@ impl InteractiveWorld {
         size: (u32, u32),
         presented: &Camera,
         run: bool,
+        elapsed: Duration,
     ) {
         if !self.player_started || screen.0 >= size.0 || screen.1 >= size.1 {
             return;
@@ -561,14 +558,28 @@ impl InteractiveWorld {
             i64::from(x) + i64::from(screen.0) - i64::from(size.0 / 2),
             i64::from(y) + i64::from(screen.1) - i64::from(size.1 / 2),
         );
+        self.cancel_player_route();
+        if let Some(key) = self.cache.pick(point, elapsed) {
+            let steps = self.cache.approach(key, run);
+            self.pending_use = steps.map(|_| key);
+            if steps.is_none() {
+                self.notice = Some("cannot reach the object".into());
+            }
+            if self.trace {
+                eprintln!("Use target {key:?}: {steps:?} steps");
+            }
+            return;
+        }
         let Some(player) = &mut self.cache.player else {
             return;
         };
         let tile = crate::isometric::world_tile_at_pixel(point, self.reference);
-        player.cancel_route();
         let entries = &self.cache.entries;
+        let states = &self.cache.door_states;
         let steps = tile.and_then(|tile| {
-            player.destination(tile, run, |tile| SectorCache::collision_cell(entries, tile))
+            player.destination(tile, run, |tile| {
+                SectorCache::player_cell(entries, states, tile)
+            })
         });
         if self.trace {
             eprintln!("Player target {tile:?}: {steps:?} steps, running {run}");
@@ -576,9 +587,26 @@ impl InteractiveWorld {
     }
 
     pub fn cancel_player_route(&mut self) {
+        self.pending_use = None;
         if let Some(player) = &mut self.cache.player {
             player.cancel_route();
         }
+    }
+
+    pub fn take_notice(&mut self) -> Option<String> {
+        self.notice.take()
+    }
+
+    pub fn take_door_states(&mut self) -> DoorStates {
+        std::mem::take(&mut self.cache.door_states)
+    }
+
+    pub fn restore_door_states(&mut self, states: DoorStates) {
+        self.cache.door_states = states;
+    }
+
+    pub fn take_transition(&mut self) -> Option<(Destination, u8)> {
+        self.transition.take()
     }
 
     pub fn move_player(
@@ -593,7 +621,7 @@ impl InteractiveWorld {
         }
         let before = self.cache.player.as_ref().map(|p| {
             let pose = p.sample(now);
-            (pose.anchor, Arc::as_ptr(pose.asset), p.tile())
+            (pose.anchor, Arc::as_ptr(pose.asset), p.tile(), p.facing())
         });
         let Some(anchor) = self.cache.update_player(input, run, now) else {
             return false;
@@ -602,17 +630,43 @@ impl InteractiveWorld {
         let previous_camera = camera.position();
         camera.follow(anchor);
         let changed = previous_camera != anchor
-            || before.is_some_and(|(previous, asset, tile)| {
+            || before.is_some_and(|(previous, asset, tile, _)| {
                 previous != anchor || asset != Arc::as_ptr(pose.asset) || tile != pose.tile
             });
-        if self.trace
-            && let Some((_, _, tile)) = before
-            && tile != self.cache.player.as_ref().unwrap().tile()
+        let player = self.cache.player.as_ref().unwrap();
+        if let Some((_, _, tile, facing)) = before
+            && tile != player.tile()
         {
-            eprintln!(
-                "Player entered tile {:?}, camera {anchor:?}, ART {}",
-                pose.tile, pose.asset.source.virtual_path
-            );
+            self.transition = self
+                .cache
+                .jumps
+                .get(&player.tile())
+                .copied()
+                .map(|dst| (dst, facing));
+            if self.trace {
+                eprintln!(
+                    "Player entered tile {:?}, camera {anchor:?}, ART {}",
+                    player.tile(),
+                    pose.asset.source.virtual_path
+                );
+            }
+        }
+        if self.transition.is_none()
+            && !player.moving()
+            && let Some(key) = self.pending_use.take()
+        {
+            let facing = player.facing();
+            match self.cache.use_target(key, now) {
+                Some(Ok(Some(dst))) => self.transition = Some((dst, facing)),
+                Some(Err(error)) => {
+                    self.notice = Some(error);
+                }
+                None => {
+                    self.notice = Some("object is unavailable".into());
+                }
+                Some(Ok(None)) => {}
+            }
+            return true;
         }
         changed
     }

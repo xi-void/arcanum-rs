@@ -179,6 +179,25 @@ impl Map {
 }
 
 impl MapFiles {
+    /// Large maps use a local streaming rectangle around the arrival point.
+    pub fn region_at(&self, center: (u32, u32)) -> SectorRegion {
+        if self.region.camera(center).is_some() {
+            return self.region;
+        }
+        let x = center.0 / 64;
+        let y = center.1 / 64;
+        SectorRegion {
+            first: Coordinates {
+                x: self.region.first.x.max(x.saturating_sub(15)),
+                y: self.region.first.y.max(y.saturating_sub(15)),
+            },
+            last: Coordinates {
+                x: self.region.last.x.min(x.saturating_add(15)),
+                y: self.region.last.y.min(y.saturating_add(15)),
+            },
+        }
+    }
+
     pub fn center(&self, center: Option<(u32, u32)>) -> Result<(u32, u32), String> {
         // CE map_open_in_game overrides the map_open startloc.txt value
         // with the map-list entry before setting the camera origin.

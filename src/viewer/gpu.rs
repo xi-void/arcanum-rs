@@ -86,6 +86,7 @@ impl WindowRenderer {
     pub fn redraw<'a>(
         &mut self,
         size: (u32, u32),
+        zoom: u8,
         draws: impl IntoIterator<Item = WorldDraw<'a>>,
         window: &Window,
         trace: bool,
@@ -120,7 +121,7 @@ impl WindowRenderer {
             Err(error) => return Err(format!("cannot acquire GPU frame: {error}")),
         };
         let acquire = start.elapsed();
-        let stats = self.compositor.prepare(size, draws)?;
+        let stats = self.compositor.prepare_scaled(size, zoom, draws)?;
         let begin = Instant::now();
         let target = frame.texture.create_view(&TextureViewDescriptor::default());
         let mut encoder = self

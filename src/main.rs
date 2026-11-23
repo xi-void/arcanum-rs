@@ -1103,6 +1103,43 @@ fn show_world(
         streaming_world(game, options, policy, playing)?
     {
         let world = if playing { world.with_player()? } else { world };
+        let hour = world.lighting_hour();
+        let mount_options = options
+            .iter()
+            .position(|arg| arg == "--mods")
+            .map_or(&[][..], |index| &options[index..]);
+        let travel: Option<viewer::TravelLoader<'_>> = if playing {
+            Some(Box::new(move |current, dst, facing, viewport| {
+                let load = || -> Result<_, Box<dyn Error>> {
+                    let mut vfs = inspection_vfs(game, mount_options, policy)?;
+                    let catalog = content::maps::Catalog::load(&mut vfs)?;
+                    let id = dst.map.map(|id| id.to_string());
+                    let map = catalog.find(id.as_deref().unwrap_or(current))?;
+                    let files = map.files(&mut vfs)?;
+                    let center = files.center(Some(dst.tile))?;
+                    let region = files.region_at(center);
+                    let mut camera = region.camera(center).ok_or("invalid destination bounds")?;
+                    camera.follow((0, 0));
+                    let mut world = content::world::WorldStream::new(
+                        vfs,
+                        map.directory.clone(),
+                        region,
+                        center,
+                    )?;
+                    if let Some(hour) = hour {
+                        world = world.with_lighting(hour)?;
+                    }
+                    world = world.with_player()?;
+                    world.set_arrival_facing(facing);
+                    world.prepare(&camera, viewport)?;
+                    world.validate_arrival(center)?;
+                    Ok((map.directory.clone(), world, camera))
+                };
+                load().map_err(|error| error.to_string())
+            }))
+        } else {
+            None
+        };
         let mode = if playing { "play" } else { "world" };
         return viewer::show_stream(
             format!("Arcanum-RS | {map} {mode}"),
@@ -1114,6 +1151,7 @@ fn show_world(
                 renderer,
                 animation_ms,
                 explore,
+                travel: travel.map(|loader| (map, loader)),
             },
         )
         .map_err(Into::into);
@@ -1493,7 +1531,15 @@ fn streaming_world(
         let map = catalog.find(name)?;
         let files = map.files(&mut vfs)?;
         let center = files.center(center_override)?;
-        (map.directory.clone(), files.region, center)
+        (
+            map.directory.clone(),
+            if playing {
+                files.region_at(center)
+            } else {
+                files.region
+            },
+            center,
+        )
     };
     let camera = region
         .camera(reference)

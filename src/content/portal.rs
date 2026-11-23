@@ -169,9 +169,25 @@ pub struct ImportedPortal {
     pub placement: Placement,
     /// The same-tile wall that precedes this leaf in the supported room pass.
     pub paired_wall_index: usize,
+    pub(super) use_script: i32,
+    pub(super) unlock_script: i32,
 }
 
 impl ImportedPortal {
+    pub(super) fn order(&self) -> super::scenery::DrawOrder {
+        let (x, y) = self.placement.tile;
+        let (depth, across) = crate::wall::opening_order_key(self.art.rotation);
+        (
+            true,
+            y,
+            x,
+            i64::from(depth),
+            i64::from(across),
+            self.paired_wall_index,
+            Some(self.record.index),
+        )
+    }
+
     pub fn draw(&self, center: (u32, u32)) -> Option<SpriteDraw<'_>> {
         let frame = &self.artwork.decoded.frame;
         self.placement
@@ -236,6 +252,16 @@ impl PortalImport {
             pixel_offset: appearance.offset,
         };
         Ok(ImportedPortal {
+            unlock_script: record
+                .fields
+                .unlock_script
+                .or(prototype.appearance.unlock_script)
+                .unwrap_or(0),
+            use_script: record
+                .fields
+                .use_script
+                .or(prototype.appearance.use_script)
+                .unwrap_or(0),
             record,
             prototype_source: prototype_source.clone(),
             prototype_art_id: prototype.art_id,

@@ -175,6 +175,14 @@ impl Player {
         })
     }
 
+    pub(super) fn facing(&self) -> u8 {
+        self.facing
+    }
+
+    pub(super) fn set_facing(&mut self, facing: u8) {
+        self.facing = facing;
+    }
+
     pub(super) fn tile(&self) -> Tile {
         self.tile
     }
@@ -195,6 +203,23 @@ impl Player {
         self.route = path.unwrap_or_default();
         self.route_runs = run;
         count
+    }
+
+    pub(super) fn destination_near(
+        &mut self,
+        candidates: &[Tile],
+        run: bool,
+        cell: impl Fn(Tile) -> Option<super::collision::Cell>,
+    ) -> Option<usize> {
+        let from = self.step.map_or(self.tile, |step| step.to);
+        let choice = candidates
+            .iter()
+            .filter_map(|&tile| path::find(from, tile, &cell))
+            .min_by_key(VecDeque::len);
+        let length = choice.as_ref().map(VecDeque::len);
+        self.route = choice.unwrap_or_default();
+        self.route_runs = run;
+        length
     }
 
     pub(super) fn cancel_route(&mut self) {

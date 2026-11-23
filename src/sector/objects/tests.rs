@@ -126,7 +126,7 @@ fn rejects_unsupported_types_and_fields_and_invalid_record_boundaries() {
         decode(&bytes).unwrap_err().message
     };
     assert!(wrap(&instance(16, [0; 3], &[])).contains("unsupported object category"));
-    assert!(wrap(&instance(1, [1 << 20, 0, 0], &[0; 4])).contains("unsupported object fields"));
+    assert!(wrap(&instance(1, [0, 1 << 5, 0], &[0; 4])).contains("unsupported object fields"));
     let mut bad = wall();
     bad[56] = 1;
     assert!(wrap(&bad).contains("field count and bitmap disagree"));
@@ -167,7 +167,9 @@ fn retains_scenery_placements_and_rejects_a_truncated_override() {
     assert_eq!(scene.fields.flags, Some(0x30));
     assert_eq!(scene.fields.scenery_flags, Some(0x20));
     assert!(decode(&sector(&record[..record.len() - 1])).is_err());
-    assert!(decode(&sector(&instance(3, [1 << 28, 0, 0], &[0; 4]))).is_err());
+    // Material is a CE INT32 field. Reserved common bits still fail.
+    assert!(decode(&sector(&instance(3, [1 << 28, 0, 0], &[0; 4]))).is_ok());
+    assert!(decode(&sector(&instance(3, [0, 1 << 4, 0], &[0; 4]))).is_err());
 }
 
 #[test]
@@ -304,7 +306,7 @@ fn portal_lock_difficulty_preserves_the_next_record_boundary() {
     assert!(decode(&truncated).is_err());
 
     let mut unknown = bytes;
-    unknown[portal_start + 66] = 5; // An unrelated subtype bit stays unsupported.
+    unknown[portal_start + 67] = 1; // A bit after the eight defined portal fields.
     assert!(decode(&unknown).is_err());
 }
 
