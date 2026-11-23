@@ -14,7 +14,7 @@ use std::error::Error;
 
 pub const PATCH_SIDE: u8 = 5;
 pub const WIDE_SIDE: u8 = 9;
-const MAX_FACADE_SIDE: u8 = 25;
+const MAX_FACADE_SIDE: u8 = sector::SIDE as u8;
 pub const WIDE_ORIGIN: (u8, u8) = (20, 13);
 pub const DEMO_MAP: &str = "bates mansion lev 1";
 pub const DEMO_SECTOR: Coordinates = Coordinates { x: 1, y: 1 };

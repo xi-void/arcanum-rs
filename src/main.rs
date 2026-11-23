@@ -133,7 +133,7 @@ fn main() -> ExitCode {
             inspect_room_overview(Path::new(game), options, policy)
         }
         (Some("art"), [_, action, game, options @ ..]) if action == "world-inspect" => {
-            load_world_preview(Path::new(game), options, policy).map(|_| ())
+            inspect_world(Path::new(game), options, policy)
         }
         #[cfg(feature = "windowed")]
         (Some("art"), [_, action, game, options @ ..]) if action == "world" => {
@@ -1070,27 +1070,69 @@ fn show_room(
 
 #[cfg(feature = "windowed")]
 fn show_world(game: &Path, options: &[OsString], policy: Policy) -> Result<(), Box<dyn Error>> {
-    let (room, region) = load_world_preview(game, options, policy)?;
-    present_room(
-        &room,
-        "Arcanum-RS | Bates Mansion world",
-        Some(region.viewport),
+    use arcanum_rs::camera::{Camera, CameraScene};
+    use content::scenery::{WorldRegion, load_navigation_world};
+    let default = WorldRegion {
+        origin: (0, 0),
+        side: arcanum_rs::sector::SIDE as u8,
+        ..WorldRegion::BATES_MANSION
+    };
+    let (region, options) = world_options(default, options)?;
+    let mut vfs = inspection_vfs(game, options, policy)?;
+    let world = load_navigation_world(&mut vfs, region)?;
+    drop(vfs);
+    let first = region
+        .sector
+        .world_tile(region.origin.0, region.origin.1)
+        .ok_or("invalid camera floor origin")?;
+    let camera = Camera::new(region.center, first, region.side).ok_or("invalid camera region")?;
+    let room = &world.room;
+    let scene = CameraScene::new(
+        room.draws()
+            .ok_or("world anchor exceeds the drawable range")?,
+    );
+    let cache = scene.cache();
+    println!(
+        "Navigation: {} from {}; {} tiles, {} walls, {} scenery, {} portals, {} unsupported records",
+        room.floor.source.virtual_path,
+        room.floor.source,
+        room.floor.tiles().len(),
+        room.walls.len(),
+        room.scenery.len(),
+        room.portals.len(),
+        world.issues.len(),
+    );
+    println!(
+        "Reference tile {:?}; {} cached rasters ({} RGBA bytes), {} reused draw references",
+        region.center, cache.rasters, cache.pixel_bytes, cache.repeated_references,
+    );
+    for issue in &world.issues {
+        println!(
+            "Skipped record {} {:?} at {:?}: {}",
+            issue.record, issue.category, issue.tile, issue.reason
+        );
+    }
+    viewer::show_camera(
+        "Arcanum-RS | Bates Mansion world".into(),
+        &scene,
+        camera,
+        region.viewport,
     )
+    .map_err(Into::into)
 }
 
-fn load_world_preview(
-    game: &Path,
-    options: &[OsString],
-    policy: Policy,
-) -> Result<
-    (
-        content::scenery::Room,
-        content::scenery::WorldRegion<'static>,
-    ),
-    Box<dyn Error>,
-> {
+fn inspect_world(game: &Path, options: &[OsString], policy: Policy) -> Result<(), Box<dyn Error>> {
     use content::scenery::{WorldRegion, load_world};
-    let mut region = WorldRegion::BATES_MANSION;
+    let (region, options) = world_options(WorldRegion::BATES_MANSION, options)?;
+    let mut vfs = inspection_vfs(game, options, policy)?;
+    let overview = load_world(&mut vfs, region)?;
+    report_room_overview(&mut io::stdout().lock(), &overview)
+}
+
+fn world_options<'a>(
+    mut region: content::scenery::WorldRegion<'static>,
+    options: &'a [OsString],
+) -> Result<(content::scenery::WorldRegion<'static>, &'a [OsString]), Box<dyn Error>> {
     let options = match options {
         [
             flag,
@@ -1121,10 +1163,7 @@ fn load_world_preview(
         [flag, ..] if flag == "--view" => return Err("expected seven numbers after --view".into()),
         options => options,
     };
-    let mut vfs = inspection_vfs(game, options, policy)?;
-    let overview = load_world(&mut vfs, region)?;
-    report_room_overview(&mut io::stdout().lock(), &overview)?;
-    Ok((overview.room, region))
+    Ok((region, options))
 }
 
 fn parse_view_number<T: std::str::FromStr>(

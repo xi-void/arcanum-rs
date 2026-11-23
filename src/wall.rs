@@ -64,7 +64,7 @@ impl WallArtId {
         let fields = self.fields()?;
         if !matches!(
             (fields.rotation, fields.palette, fields.flags),
-            (1 | 5, 0, 0) | (7, 1, 1)
+            (1 | 5, 0, 0) | (3 | 7, 1, 1)
         ) || fields.damage != 0
             || self.0 & 0x40 != 0
         {
@@ -73,6 +73,10 @@ impl WallArtId {
         let piece = match fields.piece {
             0 | 2 => "bse",
             1 => "lfc",
+            3 => "bcl",
+            4 => "bcr",
+            5 => "tcl",
+            6 => "tcr",
             21..=23 => ["d3l", "d3a", "d3r"][(fields.piece - 21) as usize],
             24..=27 => ["d4l", "d4a", "d4b", "d4r"][(fields.piece - 24) as usize],
             28..=33 => ["d6l", "d6a", "d6b", "d6c", "d6d", "d6r"][(fields.piece - 28) as usize],
@@ -93,7 +97,7 @@ impl WallArtId {
             .1;
         let facing = entry
             .split_ascii_whitespace()
-            .nth(usize::from(fields.rotation == 5))
+            .nth(usize::from((2..=5).contains(&fields.rotation)))
             .and_then(|word| word.get(..3))
             .filter(|stem| stem.bytes().all(|ch| ch.is_ascii_alphanumeric()))
             .ok_or(Error::InvalidStructure(id))?;

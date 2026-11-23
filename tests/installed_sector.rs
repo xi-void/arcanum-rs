@@ -981,3 +981,274 @@ fn bates_world_preserves_original_portal_states_geometry_and_wall_order() {
         assert_eq!(value, &full[start..start + 100]);
     }
 }
+
+#[test]
+#[ignore = "requires installed Arcanum data"]
+fn bates_camera_selects_loaded_art_across_the_sector_and_round_trips() {
+    use arcanum_rs::{
+        camera::{Camera, CameraScene},
+        compositor::blit_ordered,
+        content::scenery::{WorldRegion, load_navigation_world},
+    };
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    let region = WorldRegion {
+        origin: (0, 0),
+        side: 64,
+        ..WorldRegion::BATES_MANSION
+    };
+    let mut bytes = Vec::new();
+    vfs.copy("maps/bates mansion lev 1/67108865.sec", &mut bytes)
+        .unwrap();
+    let original = arcanum_rs::sector::objects::decode(&bytes).unwrap();
+    let navigation = load_navigation_world(&mut vfs, region).unwrap();
+    drop(vfs);
+
+    let room = &navigation.room;
+    assert_eq!(room.floor.tiles().len(), 4096);
+    assert_stock_wall_variants(room, &original);
+    // The kitchen corner is two same-tile arms, followed by one neighboring
+    // base wall on each side. All four inherit a zero pixel offset.
+    for (index, art_id, tile, pivot, origin, path) in [
+        (
+            0,
+            0x10318800,
+            (78, 78),
+            (-1, 151),
+            (721, -711),
+            "in4tcru0.art",
+        ),
+        (
+            1,
+            0x10317811,
+            (78, 78),
+            (39, 151),
+            (681, -711),
+            "in4tclu0.art",
+        ),
+        (
+            3,
+            0x10303811,
+            (79, 78),
+            (39, 152),
+            (641, -692),
+            "in4bseu0.art",
+        ),
+        (
+            49,
+            0x10300800,
+            (78, 79),
+            (-1, 152),
+            (761, -692),
+            "in4bseu0.art",
+        ),
+    ] {
+        let wall = room
+            .walls
+            .iter()
+            .find(|wall| wall.record.index == index)
+            .unwrap();
+        assert_eq!(wall.record.art_id, art_id);
+        assert_eq!(wall.record.stored_tile, tile);
+        assert_eq!(wall.placement.tile, tile);
+        assert_eq!(
+            (wall.record.fields.offset_x, wall.record.fields.offset_y),
+            (None, None)
+        );
+        assert_eq!(wall.placement.pixel_offset, (0, 0));
+        assert!(wall.artwork.source.virtual_path.ends_with(path));
+        let draw = wall.draw(region.center).unwrap();
+        assert_eq!(wall.orientation.pivot(draw.frame), pivot);
+        assert_eq!(
+            arcanum_rs::compositor::sprite_origin(draw.frame, draw.anchor),
+            origin
+        );
+    }
+    assert_eq!(
+        room.floor
+            .tiles()
+            .iter()
+            .filter(|tile| tile.facade.is_some())
+            .count(),
+        105
+    );
+    assert_eq!(room.portals.len(), 19);
+    let scene = CameraScene::new(room.draws().unwrap());
+    let cache = scene.cache();
+    assert!(cache.repeated_references >= 4096 - cache.rasters);
+    let mut camera = Camera::new(region.center, (64, 64), 64).unwrap();
+    let viewport = (320, 200);
+    let render = |camera: &Camera, viewport: (u32, u32)| {
+        let stride = viewport.0 as usize;
+        let mut pixels = vec![[32, 43, 58]; stride * viewport.1 as usize];
+        blit_ordered(
+            &mut pixels,
+            viewport,
+            stride,
+            scene.visible(camera, viewport),
+        )
+        .unwrap();
+        pixels
+    };
+    let initial = render(&camera, viewport);
+    for delta in [(512, -64), (-432, 416), (-10000, -10000), (10000, 10000)] {
+        camera.pan(delta, viewport);
+        let (x, y) = camera.position();
+        let stride = viewport.0 as usize;
+        let mut reference = vec![[32, 43, 58]; stride * viewport.1 as usize];
+        let all = room.draws().unwrap().map(|mut draw| {
+            draw.anchor.0 += viewport.0 as i32 / 2 - x;
+            draw.anchor.1 += viewport.1 as i32 / 2 - y;
+            draw
+        });
+        blit_ordered(&mut reference, viewport, stride, all).unwrap();
+        assert_eq!(render(&camera, viewport), reference);
+        assert_eq!(scene.cache(), cache);
+    }
+    let resized = (640, 400);
+    camera.resize(resized);
+    camera.reset(resized);
+    let large = render(&camera, resized);
+    for (row, actual) in initial.chunks(320).enumerate() {
+        let start = (row + 100) * 640 + 160;
+        assert_eq!(actual, &large[start..start + 320]);
+    }
+    assert_eq!(render(&camera, viewport), initial);
+
+    let kitchen_view = (1280, 720);
+    camera.pan((720, -460), kitchen_view);
+    assert_eq!(camera.position(), (720, -460));
+    let edge = render(&camera, kitchen_view);
+    camera.pan((0, 64), kitchen_view);
+    assert_eq!(camera.position(), (720, -396));
+    let inset = render(&camera, kitchen_view);
+    assert_eq!(&edge[64 * 1280..], &inset[..656 * 1280]);
+    assert_ne!(edge[145 * 1280 + 636], [0, 0, 0]);
+
+    // The south wall follows Y=110 for 33 tiles and turns at (110, 110).
+    let south: Vec<_> = room
+        .walls
+        .iter()
+        .filter(|wall| wall.placement.tile.1 == 110 && wall.orientation.rotation == 3)
+        .collect();
+    assert_eq!(south.len(), 33);
+    for (x, wall) in (78..=110).zip(&south) {
+        assert_eq!(wall.placement.tile, (x, 110));
+        assert_eq!(wall.orientation.palette, 1);
+        assert!(wall.orientation.mirror_x());
+        assert_eq!(wall.placement.pixel_offset, (0, 0));
+    }
+    let corner = room
+        .walls
+        .iter()
+        .find(|wall| wall.record.index == 366)
+        .unwrap();
+    assert_eq!(corner.record.art_id, 0x1030e900);
+    assert_eq!(corner.placement.tile, (110, 110));
+    assert_eq!(corner.orientation.rotation, 5);
+    assert_eq!(corner.orientation.palette, 0);
+    assert_eq!(south.last().unwrap().record.art_id, 0x10311911);
+
+    camera.reset(kitchen_view);
+    camera.pan((1360, 400), kitchen_view);
+    assert_eq!(camera.position(), (1360, 400));
+    let south_first = render(&camera, kitchen_view);
+    camera.pan((-64, 0), kitchen_view);
+    assert_eq!(camera.position(), (1296, 400));
+    let south_left = render(&camera, kitchen_view);
+    for (first, left) in south_first.chunks(1280).zip(south_left.chunks(1280)) {
+        assert_eq!(&first[..1216], &left[64..]);
+    }
+    let middle = south.iter().find(|wall| wall.record.index == 347).unwrap();
+    let draw = middle.draw(region.center).unwrap();
+    for step in [64, -64] {
+        camera.pan((step, 0), kitchen_view);
+        let (x, y) = camera.position();
+        assert!(scene.visible(&camera, kitchen_view).any(|visible| {
+            std::ptr::eq(visible.frame, draw.frame)
+                && visible.anchor == (draw.anchor.0 + 640 - x, draw.anchor.1 + 360 - y)
+        }));
+    }
+
+    camera.reset(kitchen_view);
+    camera.pan((840, 620), kitchen_view);
+    assert_eq!(camera.position(), (840, 620));
+    let east = render(&camera, kitchen_view);
+    camera.pan((64, 0), kitchen_view);
+    assert_eq!(camera.position(), (904, 620));
+    let east_right = render(&camera, kitchen_view);
+    for (first, right) in east.chunks(1280).zip(east_right.chunks(1280)) {
+        assert_eq!(&first[64..], &right[..1216]);
+    }
+
+    let route = [(0, 0), (720, -460), (832, 624), (1360, 400), (512, -64)];
+    let mut snapshots = Vec::new();
+    for &offset in &route {
+        camera.reset(kitchen_view);
+        camera.pan(offset, kitchen_view);
+        assert_eq!(camera.position(), offset);
+        snapshots.push(render(&camera, kitchen_view));
+    }
+    for (&offset, expected) in route.iter().zip(snapshots).rev() {
+        camera.reset(kitchen_view);
+        camera.pan(offset, kitchen_view);
+        let clipped = (960, 560);
+        camera.resize(clipped);
+        assert_eq!(camera.position(), offset);
+        let smaller = render(&camera, clipped);
+        for (row, pixels) in smaller.chunks(960).enumerate() {
+            let start = (row + 80) * 1280 + 160;
+            assert_eq!(pixels, &expected[start..start + 960]);
+        }
+        camera.resize(kitchen_view);
+        assert_eq!(render(&camera, kitchen_view), expected);
+    }
+}
+
+fn assert_stock_wall_variants(
+    room: &arcanum_rs::content::scenery::Room,
+    original: &arcanum_rs::sector::objects::ObjectList,
+) {
+    use std::collections::BTreeSet;
+
+    // Stock structure 3 names and piece suffixes from CE's wall filename table.
+    let names = [
+        "bse", "lfc", "bse", "bcl", "bcr", "tcl", "tcr", "uec", "lec", "w3l", "w3a", "w3r", "w4l",
+        "w4a", "w4b", "w4r", "w5l", "w5a", "w5b", "w5c", "w5r", "d3l", "d3a", "d3r", "d4l", "d4a",
+        "d4b", "d4r", "d6l", "d6a", "d6b", "d6c", "d6d", "d6r", "p3l", "p3a", "p3r", "p4l", "p4a",
+        "p4b", "p4r",
+    ];
+    assert_eq!(original.walls.len(), 268);
+    assert_eq!(room.walls.len(), original.walls.len());
+    let mut ids = BTreeSet::new();
+    for (stored, wall) in original.walls.iter().zip(&room.walls) {
+        assert_eq!(
+            (wall.record.index, wall.record.art_id),
+            (stored.index, stored.art_id)
+        );
+        assert_eq!(wall.placement.tile, stored.world_tile(DEMO_SECTOR).unwrap());
+        let id = stored.art_id;
+        assert_eq!((id >> 20) & 0xff, 3);
+        let rotation = (id >> 11) & 7;
+        let (family, palette, mirror) = match rotation {
+            1 => ("in4", 0, false),
+            3 => ("gb1", 1, true),
+            5 => ("gb1", 0, false),
+            7 => ("in4", 1, true),
+            _ => panic!("unexpected stock wall rotation {rotation}"),
+        };
+        let suffix = names[((id >> 14) & 63) as usize];
+        let variation = (id >> 8) & 3;
+        assert_eq!(
+            wall.artwork.source.virtual_path,
+            format!("art/wall/{family}{suffix}u{variation}.art")
+        );
+        assert_eq!(
+            (wall.orientation.palette, wall.orientation.mirror_x()),
+            (palette, mirror)
+        );
+        assert_eq!(wall.artwork.decoded.frame_count, 1);
+        ids.insert(id);
+    }
+    assert_eq!(ids.len(), 73);
+}

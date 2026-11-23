@@ -1,6 +1,7 @@
 //! Arcanum resource access, native content and headless gameplay.
 
 pub mod art;
+pub mod camera;
 pub mod compositor;
 pub mod content;
 pub mod dat;

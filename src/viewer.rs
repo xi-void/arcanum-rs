@@ -1,6 +1,7 @@
 //! Optional desktop presentation for the sprite diagnostic.
 
 use arcanum_rs::art::SpriteFrame;
+use arcanum_rs::camera::{Camera, CameraScene};
 use arcanum_rs::compositor::{SpriteDraw, blit_ordered};
 use softbuffer::{Context, Surface};
 use std::{num::NonZeroU32, rc::Rc};
@@ -8,6 +9,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize, Size};
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle};
+use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 const BACKGROUND: [u8; 3] = [32, 43, 58];
@@ -102,6 +104,36 @@ pub fn show_layers_at_size(
 }
 
 fn show_layers_with_size(title: String, layers: &[Layer<'_>], size: Size) -> Result<(), String> {
+    show_content(title, ViewContent::Fixed(layers), size)
+}
+
+pub fn show_camera(
+    title: String,
+    scene: &CameraScene<'_>,
+    camera: Camera,
+    size: (u32, u32),
+) -> Result<(), String> {
+    show_content(
+        title,
+        ViewContent::World {
+            scene,
+            camera,
+            shift: false,
+        },
+        PhysicalSize::<u32>::from(size).into(),
+    )
+}
+
+enum ViewContent<'a> {
+    Fixed(&'a [Layer<'a>]),
+    World {
+        scene: &'a CameraScene<'a>,
+        camera: Camera,
+        shift: bool,
+    },
+}
+
+fn show_content(title: String, content: ViewContent<'_>, size: Size) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|error| format!("cannot open display: {error}"))?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let context = Context::new(event_loop.owned_display_handle())
@@ -111,7 +143,7 @@ fn show_layers_with_size(title: String, layers: &[Layer<'_>], size: Size) -> Res
         size,
         context,
         view: None,
-        layers,
+        content,
         failure: None,
     };
     event_loop
@@ -125,7 +157,7 @@ struct Viewer<'a> {
     size: Size,
     context: Context<OwnedDisplayHandle>,
     view: Option<WindowSurface>,
-    layers: &'a [Layer<'a>],
+    content: ViewContent<'a>,
     failure: Option<String>,
 }
 
@@ -189,8 +221,65 @@ impl ApplicationHandler for Viewer<'_> {
             WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Occluded(false) => {
                 view.window.request_redraw();
             }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                if let ViewContent::World { shift, .. } = &mut self.content {
+                    *shift = modifiers.state().shift_key();
+                }
+            }
+            WindowEvent::Focused(false) => {
+                if let ViewContent::World { shift, .. } = &mut self.content {
+                    *shift = false;
+                }
+            }
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic: false,
+                ..
+            } if event.state.is_pressed() => {
+                if let ViewContent::World { camera, shift, .. } = &mut self.content {
+                    let size = view.window.inner_size();
+                    let viewport = (size.width, size.height);
+                    let step = if *shift { 64 } else { 16 };
+                    let changed = match event.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            event_loop.exit();
+                            return;
+                        }
+                        Key::Named(NamedKey::Home) => camera.reset(viewport),
+                        Key::Named(NamedKey::ArrowLeft) => camera.pan((-step, 0), viewport),
+                        Key::Named(NamedKey::ArrowRight) => camera.pan((step, 0), viewport),
+                        Key::Named(NamedKey::ArrowUp) => camera.pan((0, -step), viewport),
+                        Key::Named(NamedKey::ArrowDown) => camera.pan((0, step), viewport),
+                        _ => false,
+                    };
+                    if changed {
+                        view.window.request_redraw();
+                    }
+                }
+            }
             WindowEvent::RedrawRequested => {
-                if let Err(error) = view.redraw(self.layers) {
+                let size = view.window.inner_size();
+                let result = match &mut self.content {
+                    ViewContent::Fixed(layers) => {
+                        let center = ((size.width / 2) as i32, (size.height / 2) as i32);
+                        let draws = layers.iter().map(|layer| SpriteDraw {
+                            frame: layer.frame,
+                            anchor: (
+                                center.0 + i32::from(layer.relative_anchor.0),
+                                center.1 + i32::from(layer.relative_anchor.1),
+                            ),
+                        });
+                        view.redraw(size, draws)
+                    }
+                    ViewContent::World { scene, camera, .. } => {
+                        let viewport = (size.width, size.height);
+                        if size.width != 0 && size.height != 0 {
+                            camera.resize(viewport);
+                        }
+                        view.redraw(size, scene.visible(camera, viewport))
+                    }
+                };
+                if let Err(error) = result {
                     self.fail(event_loop, error);
                 }
             }
@@ -200,8 +289,11 @@ impl ApplicationHandler for Viewer<'_> {
 }
 
 impl WindowSurface {
-    fn redraw(&mut self, layers: &[Layer<'_>]) -> Result<(), String> {
-        let size = self.window.inner_size();
+    fn redraw<'a>(
+        &mut self,
+        size: PhysicalSize<u32>,
+        draws: impl IntoIterator<Item = SpriteDraw<'a>>,
+    ) -> Result<(), String> {
         let (Some(width), Some(height)) =
             (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
         else {
@@ -223,15 +315,6 @@ impl WindowSurface {
         self.pixels.fill(BACKGROUND);
         self.pixels.resize(count, BACKGROUND);
 
-        // The checked surface area bounds both center coordinates.
-        let center = ((size.width / 2) as i32, (size.height / 2) as i32);
-        let draws = layers.iter().map(|layer| SpriteDraw {
-            frame: layer.frame,
-            anchor: (
-                center.0 + i32::from(layer.relative_anchor.0),
-                center.1 + i32::from(layer.relative_anchor.1),
-            ),
-        });
         blit_ordered(
             &mut self.pixels,
             (size.width, size.height),

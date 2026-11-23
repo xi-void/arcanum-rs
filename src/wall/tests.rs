@@ -2,6 +2,53 @@ use super::*;
 use crate::compositor::{blit_ordered, sprite_origin};
 
 #[test]
+fn resolves_interior_top_corner_arms_with_original_orientation() {
+    let structures = Mes::parse_text("{0}{In40 WoD0 nul nul}").unwrap();
+    let names = Mes::parse_text("{0}{in40}{1}{wod0}").unwrap();
+    let right = WallArtId(0x1001_8800);
+    let left = WallArtId(0x1001_7811);
+    for (id, expected, rotation, palette, mirror) in [
+        (right, "art/wall/in4tcru0.art", 1, 0, false),
+        (left, "art/wall/in4tclu0.art", 7, 1, true),
+    ] {
+        assert_eq!(id.resolve(&structures, &names).unwrap(), expected);
+        let fields = id.fields().unwrap();
+        assert_eq!(
+            (fields.rotation, fields.palette, fields.mirror_x()),
+            (rotation, palette, mirror)
+        );
+    }
+}
+
+#[test]
+fn resolves_exterior_run_and_corner_for_both_facings() {
+    let structures = Mes::parse_text("{0}{In40 Gb11 wd1 gb1}").unwrap();
+    let names = Mes::parse_text("{0}{in40}{1}{gb11}").unwrap();
+    let frame = SpriteFrame {
+        width: 40,
+        height: 154,
+        hotspot: (39, 132),
+        offset: (0, 0),
+        pixels: Vec::new(),
+    };
+    for (id, path, pivot, palette, mirror) in [
+        (0x1000_1811, "gb1bseu0.art", (-1, 132), 1, true),
+        (0x1000_e900, "gb1bclu1.art", (39, 132), 0, false),
+        (0x1001_1911, "gb1bcru1.art", (-1, 132), 1, true),
+    ] {
+        let id = WallArtId(id);
+        assert_eq!(
+            id.resolve(&structures, &names).unwrap(),
+            format!("art/wall/{path}")
+        );
+        let fields = id.fields().unwrap();
+        assert_eq!((fields.palette, fields.mirror_x()), (palette, mirror));
+        assert_eq!(fields.pivot(&frame), pivot);
+        assert_eq!(fields.order_key(), (-2, 38));
+    }
+}
+
+#[test]
 fn resolves_the_interior_variant_and_preserves_the_orientation_bits() {
     let structures = Mes::parse_text("{0}{WoD0 Ext0 nul nul}{7}{In40 Gb11 wd1 gb1}").unwrap();
     let names = Mes::parse_text("{0}{wod0}{1}{in42}").unwrap();
