@@ -480,6 +480,14 @@ impl InteractiveWorld {
         self.cache.set_dynamic(slot, state)
     }
 
+    pub fn start_fidget(&mut self, elapsed: Duration) -> bool {
+        self.cache.start_fidget(elapsed)
+    }
+
+    pub fn turn_fidget(&mut self, step: i8) -> Option<u8> {
+        self.cache.turn_fidget(step)
+    }
+
     pub fn toggle_shadows(&mut self) -> Option<bool> {
         self.cache.toggle_shadows()
     }

@@ -26,6 +26,8 @@ pub struct AppearanceFields {
     pub scenery_flags: Option<u32>,
     pub portal_flags: Option<u32>,
     pub critter_flags: Option<u32>,
+    pub critter_flags2: Option<u32>,
+    pub spell_flags: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -386,7 +388,9 @@ impl Fields {
                     13 => self.appearance.light_art = Some(value),
                     14 => self.appearance.light_color = Some(value),
                     18 => self.appearance.flags = Some(value),
+                    19 => self.appearance.spell_flags = Some(value),
                     64 if category == NPC => self.appearance.critter_flags = Some(value),
+                    65 if category == NPC => self.appearance.critter_flags2 = Some(value),
                     64 if category == WALL => self.appearance.wall_flags = Some(value),
                     64 if category == SCENERY => self.appearance.scenery_flags = Some(value),
                     64 if category == PORTAL => self.appearance.portal_flags = Some(value),
@@ -521,12 +525,12 @@ pub fn decode_mobile(input: &[u8]) -> Result<Mobile, Error> {
         return Err(reader.error("invalid mobile field bitmap"));
     }
     let mut fields = Fields::default();
-    for index in 0..=64 {
+    for index in 0..=65 {
         if bitmap[index / 32] & (1 << (index % 32)) != 0 {
             fields.read(&mut reader, index, NPC)?;
         }
     }
-    if (bitmap[2] & !1 != 0 || bitmap[3] != 0 || bitmap[4] != 0) && reader.offset == input.len() {
+    if (bitmap[2] & !3 != 0 || bitmap[3] != 0 || bitmap[4] != 0) && reader.offset == input.len() {
         return Err(reader.error("missing mobile subtype data"));
     }
     Ok(Mobile {
@@ -559,7 +563,7 @@ pub fn decode_npc_prototype_appearance(
     }
     reader.take(HEADER_SIZE + 20, "NPC prototype header and change bitmap")?;
     let mut fields = Fields::default();
-    for index in (0..36).chain([64]) {
+    for index in (0..36).chain([64, 65]) {
         fields.read(&mut reader, index, NPC)?;
     }
     Ok(fields.appearance)

@@ -264,13 +264,13 @@ pub(super) struct FrameLoop {
 impl FrameLoop {
     pub(super) fn new(frames: Vec<Arc<LoadedFrame>>, fps: u32) -> Result<Self, &'static str> {
         if !(1..=1000).contains(&fps) || !(2..=32).contains(&frames.len()) {
-            return Err("invalid scenery loop length or ART frame rate");
+            return Err("invalid animation length or ART frame rate");
         }
         if frames
             .iter()
             .any(|frame| frame.decoded.frame.offset != (0, 0))
         {
-            return Err("animated scenery with ART movement offsets is unsupported");
+            return Err("stationary animation with ART movement offsets is unsupported");
         }
         Ok(Self {
             frames: frames.into_boxed_slice(),
@@ -281,6 +281,15 @@ impl FrameLoop {
     pub(super) fn index(&self, initial: usize, elapsed: Duration) -> usize {
         let step = elapsed.as_millis() / u128::from(self.period_ms);
         ((step + initial as u128) % self.frames.len() as u128) as usize
+    }
+
+    /// A one-shot sequence returns to its authored standing frame after
+    /// consuming the last frame interval.
+    pub(super) fn one_shot_index(&self, elapsed: Duration) -> Option<usize> {
+        let step = elapsed.as_millis() / u128::from(self.period_ms);
+        usize::try_from(step)
+            .ok()
+            .filter(|&index| index < self.frames.len())
     }
 
     /// Delay to the next boundary, or a later one when intervening frames

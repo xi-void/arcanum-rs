@@ -48,7 +48,7 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] art sector-wall-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art world-inspect <game-directory> [--view <local-x> <local-y> <side> <center-x> <center-y> <width> <height>] [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art world <game-directory> [--view <local-x> <local-y> <side> <center-x> <center-y> <width> <height>] [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
-  arcanum-rs [--ordered] art world <game-directory> --sectors <map> <min-x> <min-y> <max-x> <max-y> <world-x> <world-y> <width> <height> [--trace] [--lighting <hour>] [--animation-ms <elapsed>] [--light-probe X Y | --nocturnal-probe X Y] [--renderer cpu|vulkan|gles] [--mods …]
+  arcanum-rs [--ordered] art world <game-directory> --sectors <map> <min-x> <min-y> <max-x> <max-y> <world-x> <world-y> <width> <height> [--trace] [--lighting <hour>] [--animation-ms <elapsed>] [--fidget] [--light-probe X Y | --nocturnal-probe X Y] [--renderer cpu|vulkan|gles] [--mods …]
   arcanum-rs [--ordered] art sector-room-wide-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art sector-room-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector-room-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
@@ -1274,6 +1274,7 @@ fn streaming_world(
     let mut trace = false;
     let mut hour = None;
     let mut animation_ms = None;
+    let mut fidget = false;
     let mut probes = Vec::new();
     let mut renderer = RenderBackend::Cpu;
     let mut options = rest;
@@ -1285,6 +1286,10 @@ fn streaming_world(
             }
             [flag, hour_arg, rest @ ..] if flag == "--lighting" => {
                 hour = Some(parse_view_number(hour_arg, "lighting hour")?);
+                rest
+            }
+            [flag, rest @ ..] if flag == "--fidget" => {
+                fidget = true;
                 rest
             }
             [flag, elapsed, rest @ ..] if flag == "--animation-ms" => {
@@ -1323,6 +1328,9 @@ fn streaming_world(
     let mut world = WorldStream::new(vfs, map.to_owned(), region, reference)?;
     if let Some(hour) = hour {
         world = world.with_lighting(hour)?;
+    }
+    if fidget {
+        world = world.with_fidget_preview();
     }
     for (tile, nocturnal) in probes {
         world.add_light_probe(tile, nocturnal)?;
