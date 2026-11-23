@@ -31,6 +31,108 @@ pub struct SpriteDraw<'a> {
     pub anchor: (i32, i32),
 }
 
+/// Source-color modulation before source-over. A floor grid covers four
+/// 39 × 20 quadrants of a 78 × 40 sprite, with shared nodes in row order.
+#[derive(Clone, Copy)]
+pub enum Modulation<'a> {
+    Unlit,
+    Uniform([u8; 3]),
+    Floor([[u8; 3]; 9]),
+    /// Screen-oriented multipliers, one per sprite column.
+    Columns(&'a [[u8; 3]]),
+}
+
+impl Modulation<'_> {
+    pub fn floor(nodes: [[u8; 3]; 9]) -> Self {
+        if nodes.iter().all(|&node| node == nodes[0]) {
+            if nodes[0] == [255; 3] {
+                Self::Unlit
+            } else {
+                Self::Uniform(nodes[0])
+            }
+        } else {
+            Self::Floor(nodes)
+        }
+    }
+}
+
+pub(crate) fn multiply(source: [u8; 3], tint: [u8; 3]) -> [u8; 3] {
+    std::array::from_fn(|i| (u16::from(source[i]) * u16::from(tint[i]) / 255) as u8)
+}
+
+// The two half-rows share the middle lattice node. Keep numerators
+// until the pixel lookup so clipping and row setup never round early.
+fn floor_row(nodes: &[[u8; 3]; 9], y: usize) -> [[[i32; 3]; 2]; 2] {
+    let first = y / 20 * 3;
+    let y = (y % 20) as i32;
+    let vertical = |index: usize, channel: usize| {
+        i32::from(nodes[index][channel]) * (20 - y) + i32::from(nodes[index + 3][channel]) * y
+    };
+    std::array::from_fn(|half| {
+        let left = std::array::from_fn(|i| vertical(first + half, i));
+        let right: [i32; 3] = std::array::from_fn(|i| vertical(first + half + 1, i));
+        [
+            left.map(|value| value * 39),
+            std::array::from_fn(|i| right[i] - left[i]),
+        ]
+    })
+}
+
+/// Compose shaded and ordinary sprites in the same ordering and clipping pass.
+pub fn blit_modulated<'a>(
+    destination: &mut [[u8; 3]],
+    dimensions: (u32, u32),
+    stride: usize,
+    draws: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
+) -> Result<(), Error> {
+    for (draw, shading) in draws {
+        let position = sprite_origin(draw.frame, draw.anchor);
+        match shading {
+            Modulation::Unlit => blit(destination, dimensions, stride, draw.frame, position)?,
+            Modulation::Uniform(color) => {
+                blit_with(
+                    destination,
+                    dimensions,
+                    stride,
+                    draw.frame,
+                    position,
+                    |_| move |rgb, _| multiply(rgb, color),
+                )?;
+            }
+            Modulation::Floor(nodes) => {
+                if (draw.frame.width, draw.frame.height) != (78, 40) {
+                    return Err(Error::SpriteLayout);
+                }
+                blit_with(destination, dimensions, stride, draw.frame, position, |y| {
+                    let row = floor_row(&nodes, y);
+                    move |rgb, x| {
+                        let [start, step] = row[usize::from(x >= 39)];
+                        let x = (if x < 39 { x } else { x - 39 }) as i32;
+                        multiply(
+                            rgb,
+                            std::array::from_fn(|i| ((start[i] + step[i] * x) / 780) as u8),
+                        )
+                    }
+                })?;
+            }
+            Modulation::Columns(colors) => {
+                if colors.len() != draw.frame.width as usize {
+                    return Err(Error::SpriteLayout);
+                }
+                blit_with(
+                    destination,
+                    dimensions,
+                    stride,
+                    draw.frame,
+                    position,
+                    |_| |rgb, x| multiply(rgb, colors[x]),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Draw in iterator order, back to front, over the existing RGB pixels.
 /// The destination is not cleared. On error, earlier draws remain applied.
 pub fn blit_ordered<'a>(
@@ -69,6 +171,19 @@ pub fn blit(
     frame: &SpriteFrame,
     position: (i64, i64),
 ) -> Result<(), Error> {
+    blit_with(destination, dimensions, stride, frame, position, |_| {
+        |rgb, _| rgb
+    })
+}
+
+fn blit_with<S: Fn([u8; 3], usize) -> [u8; 3]>(
+    destination: &mut [[u8; 3]],
+    dimensions: (u32, u32),
+    stride: usize,
+    frame: &SpriteFrame,
+    position: (i64, i64),
+    shade_row: impl Fn(usize) -> S,
+) -> Result<(), Error> {
     let (width, height) = dimensions;
     if width == 0 || height == 0 || stride < width as usize {
         return Err(Error::DestinationLayout);
@@ -98,16 +213,17 @@ pub fn blit(
         return Ok(());
     };
     for row in 0..rows {
+        let shade = shade_row(source_y + row);
         let dest_start = (top + row) * stride + left;
         let source_start = (source_y + row) * source_width + source_x;
         let dest_row = &mut destination[dest_start..dest_start + columns];
         let source_row = &frame.pixels[source_start..source_start + columns];
-        for (dest, &[r, g, b, alpha]) in dest_row.iter_mut().zip(source_row) {
-            let color = [r, g, b];
+        for (column, (dest, &[r, g, b, alpha])) in dest_row.iter_mut().zip(source_row).enumerate() {
             match alpha {
                 0 => {}
-                255 => *dest = color,
+                255 => *dest = shade([r, g, b], source_x + column),
                 alpha => {
+                    let color = shade([r, g, b], source_x + column);
                     let alpha = u16::from(alpha);
                     for (dest, source) in dest.iter_mut().zip(color) {
                         let weighted = u16::from(source) * alpha + u16::from(*dest) * (255 - alpha);

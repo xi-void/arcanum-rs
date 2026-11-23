@@ -26,6 +26,29 @@ fn parses_light_framing_then_row_major_ids() {
 }
 
 #[test]
+fn reads_global_light_fields_and_stored_channel_order() {
+    let mut bytes = fixture(1);
+    let words = [0u32, 0, 103, 171, (-19i32) as u32, 7, 16, 0x90580000];
+    for (index, word) in words.into_iter().enumerate() {
+        bytes[4 + index * 4..8 + index * 4].copy_from_slice(&word.to_le_bytes());
+    }
+    bytes[36..40].copy_from_slice(&[254, 163, 213, 7]);
+    let floor = decode_floor(&bytes).unwrap();
+    assert_eq!(
+        floor.lights,
+        [LightRecord {
+            owner: 0,
+            tile: (103, 171),
+            offset: (-19, 7),
+            flags: 16,
+            art_id: 0x90580000,
+            rgb: [254, 213, 163],
+        }]
+    );
+    assert_eq!(floor.tile_offset, 52);
+}
+
+#[test]
 fn checks_sector_input_bounds() {
     assert!(matches!(
         decode_floor(&[0; 3]),

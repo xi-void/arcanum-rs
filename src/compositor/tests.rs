@@ -207,3 +207,82 @@ fn viewport_size_changes_clipping_for_the_same_signed_anchors() {
         [1, 1, 10, 10, 1, 2, 2, 2, 10, 2, 2, 2, 10, 2, 2, 2]
     );
 }
+
+#[test]
+fn floor_modulation_is_clip_stable_and_preserves_transparency() {
+    let mut frame = SpriteFrame {
+        width: 78,
+        height: 40,
+        hotspot: (0, 0),
+        offset: (0, 0),
+        pixels: vec![[200, 180, 80, 255]; 78 * 40],
+    };
+    frame.pixels[0] = [0; 4];
+    let nodes = [
+        [0; 3], [255; 3], [255; 3], [0; 3], [255; 3], [255; 3], [0; 3], [255; 3], [255; 3],
+    ];
+    let draw = SpriteDraw {
+        frame: &frame,
+        anchor: (0, 0),
+    };
+    let bg = [9, 11, 13];
+    let mut full = vec![bg; 78 * 40];
+    blit_modulated(&mut full, (78, 40), 78, [(draw, Modulation::Floor(nodes))]).unwrap();
+    assert_eq!(full[0], bg);
+    assert_eq!(full[13], [66, 60, 26]);
+    assert_eq!(full[39], [200, 180, 80]);
+    let mut cropped = vec![bg; 8 * 8];
+    blit_modulated(
+        &mut cropped,
+        (8, 8),
+        8,
+        [(
+            SpriteDraw {
+                anchor: (-35, -18),
+                ..draw
+            },
+            Modulation::Floor(nodes),
+        )],
+    )
+    .unwrap();
+    for (row, pixels) in cropped.as_chunks::<8>().0.iter().enumerate() {
+        assert_eq!(pixels, &full[(row + 18) * 78 + 35..(row + 18) * 78 + 43]);
+    }
+}
+
+#[test]
+fn wall_columns_follow_screen_raster_clipping_and_keep_alpha() {
+    let frame = frame(
+        4,
+        1,
+        vec![
+            [240, 80, 20, 255],
+            [0; 4],
+            [240, 80, 20, 128],
+            [240, 80, 20, 255],
+        ],
+    );
+    let columns = [[255; 3], [255; 3], [0, 255, 0], [128, 0, 255]];
+    let mut output = [[20, 40, 60]; 3];
+    let draw = SpriteDraw {
+        frame: &frame,
+        anchor: (-1, 0),
+    };
+    blit_modulated(
+        &mut output,
+        (3, 1),
+        3,
+        [(draw, Modulation::Columns(&columns))],
+    )
+    .unwrap();
+    assert_eq!(output, [[20, 40, 60], [10, 60, 30], [120, 0, 20]]);
+    assert_eq!(
+        blit_modulated(
+            &mut output,
+            (3, 1),
+            3,
+            [(draw, Modulation::Columns(&columns[..3]))]
+        ),
+        Err(Error::SpriteLayout)
+    );
+}

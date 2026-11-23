@@ -419,6 +419,7 @@ pub struct LoadStages {
     pub object_parse: std::time::Duration,
     pub object_import: std::time::Duration,
     pub rasters: std::time::Duration,
+    pub lighting: std::time::Duration,
 }
 
 #[derive(Clone, Copy)]
@@ -734,7 +735,20 @@ fn order(tile: (u32, u32), offset: (i32, i32), flat: bool, index: usize) -> Draw
     (!flat, tile.1, tile.0, depth, across, index, None)
 }
 
-type SharedObject<'a> = (DrawOrder, SpriteDraw<'a>, &'a Arc<art::LoadedFrame>);
+#[derive(Clone, Copy)]
+pub(super) enum ObjectLight {
+    Point,
+    Wall(u8),
+    Portal(u8),
+    Unlit,
+}
+
+type SharedObject<'a> = (
+    DrawOrder,
+    SpriteDraw<'a>,
+    &'a Arc<art::LoadedFrame>,
+    ObjectLight,
+);
 
 impl Room {
     pub(super) fn shared_objects(&self) -> Option<Vec<SharedObject<'_>>> {
@@ -753,7 +767,12 @@ impl Room {
                 wall.record.index,
                 None,
             );
-            objects.push((key, wall.draw(center)?, &wall.artwork));
+            objects.push((
+                key,
+                wall.draw(center)?,
+                &wall.artwork,
+                ObjectLight::Wall(wall.orientation.rotation),
+            ));
         }
         for scenery in &self.scenery {
             let key = order(
@@ -762,7 +781,12 @@ impl Room {
                 scenery.appearance.flags & FLAT != 0,
                 scenery.record.index,
             );
-            objects.push((key, scenery.draw(center)?, &scenery.artwork));
+            let light = if scenery.appearance.flags & 0x00100000 != 0 {
+                ObjectLight::Unlit
+            } else {
+                ObjectLight::Point
+            };
+            objects.push((key, scenery.draw(center)?, &scenery.artwork, light));
         }
         for portal in &self.portals {
             let (x, y) = portal.placement.tile;
@@ -776,7 +800,12 @@ impl Room {
                 portal.paired_wall_index,
                 Some(portal.record.index),
             );
-            objects.push((key, portal.draw(center)?, &portal.artwork));
+            objects.push((
+                key,
+                portal.draw(center)?,
+                &portal.artwork,
+                ObjectLight::Portal(portal.art.rotation),
+            ));
         }
         Some(objects)
     }
@@ -784,11 +813,11 @@ impl Room {
     /// Ordered base surface followed by flat and upright object draws.
     pub fn draws(&self) -> Option<impl Iterator<Item = SpriteDraw<'_>>> {
         let mut objects = self.shared_objects()?;
-        objects.sort_unstable_by_key(|(key, _, _)| *key);
+        objects.sort_unstable_by_key(|(key, _, _, _)| *key);
         Some(
             self.floor
                 .draws()
-                .chain(objects.into_iter().map(|(_, draw, _)| draw)),
+                .chain(objects.into_iter().map(|(_, draw, _, _)| draw)),
         )
     }
 }

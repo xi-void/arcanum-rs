@@ -40,8 +40,10 @@ pub struct FloorPatch {
     pub names_source: Source,
     pub facade_names_source: Option<Source>,
     pub light_count: u32,
+    pub lights: Vec<sector::LightRecord>,
     pub tile_offset: usize,
     pub center: (u32, u32),
+    pub(super) outdoor_rows: [u64; 64],
     tiles: Vec<PatchTile>,
     frames: BTreeMap<String, BTreeMap<usize, Arc<art::LoadedFrame>>>,
     flipped: BTreeMap<String, Arc<art::LoadedFrame>>,
@@ -305,13 +307,24 @@ pub(super) fn resolve_surface(
             .anchor;
         true
     });
+    let mut outdoor_rows = [0; 64];
+    for (index, id) in floor.ids().enumerate() {
+        let outdoor = match id.0 >> 28 {
+            0 => id.0 & (1 << 8) != 0,
+            11 => id.0 & (1 << 25) != 0,
+            _ => false,
+        };
+        outdoor_rows[index / 64] |= u64::from(outdoor) << (index % 64);
+    }
     Ok(FloorPatch {
         source,
         names_source: names.source,
         facade_names_source: facade_names.map(|names| names.source),
         light_count: floor.light_count,
+        lights: floor.lights,
         tile_offset: floor.tile_offset,
         center,
+        outdoor_rows,
         tiles,
         frames,
         flipped,

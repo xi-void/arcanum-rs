@@ -2,7 +2,7 @@
 
 use arcanum_rs::art::SpriteFrame;
 use arcanum_rs::camera::{Camera, CameraScene};
-use arcanum_rs::compositor::{SpriteDraw, blit_ordered};
+use arcanum_rs::compositor::{Modulation, SpriteDraw, blit_modulated};
 use arcanum_rs::content::world::{InteractiveWorld, WorldStream};
 use softbuffer::{Context, Surface};
 use std::{
@@ -369,15 +369,21 @@ impl ApplicationHandler for Viewer<'_> {
                                 center.1 + i32::from(layer.relative_anchor.1),
                             ),
                         });
-                        view.redraw(size, draws).map(|_| ())
+                        view.redraw(size, draws.map(|draw| (draw, Modulation::Unlit)))
+                            .map(|_| ())
                     }
                     ViewContent::World { scene, camera, .. } => {
                         let viewport = (size.width, size.height);
                         if size.width != 0 && size.height != 0 {
                             camera.resize(viewport);
                         }
-                        view.redraw(size, scene.visible(camera, viewport))
-                            .map(|_| ())
+                        view.redraw(
+                            size,
+                            scene
+                                .visible(camera, viewport)
+                                .map(|draw| (draw, Modulation::Unlit)),
+                        )
+                        .map(|_| ())
                     }
                     ViewContent::Stream {
                         world,
@@ -432,22 +438,24 @@ impl WindowSurface {
             // the destination. The completion event drives the next redraw.
             return Ok(false);
         }
-        let frame = self.redraw(size, world.visible(camera, viewport))?;
+        let frame = self.redraw(size, world.visible_modulated(camera, viewport))?;
         if trace
             || prepared.scheduling
                 + prepared.ordering
+                + prepared.shading
                 + frame.composition
                 + frame.packing
                 + frame.submission
                 > Duration::from_millis(30)
         {
             eprintln!(
-                "Frame {:?} {}x{} sync load wait 0ns schedule {:?} order {:?} compose {:?} pack {:?} submit {:?}",
+                "Frame {:?} {}x{} sync load wait 0ns schedule {:?} order {:?} shading {:?} compose {:?} pack {:?} submit {:?}",
                 camera.position(),
                 size.width,
                 size.height,
                 prepared.scheduling,
                 prepared.ordering,
+                prepared.shading,
                 frame.composition,
                 frame.packing,
                 frame.submission
@@ -459,7 +467,7 @@ impl WindowSurface {
     fn redraw<'a>(
         &mut self,
         size: PhysicalSize<u32>,
-        draws: impl IntoIterator<Item = SpriteDraw<'a>>,
+        draws: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
     ) -> Result<FrameTiming, String> {
         let (Some(width), Some(height)) =
             (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
@@ -483,7 +491,7 @@ impl WindowSurface {
         self.pixels.fill(BACKGROUND);
         self.pixels.resize(count, BACKGROUND);
 
-        blit_ordered(
+        blit_modulated(
             &mut self.pixels,
             (size.width, size.height),
             size.width as usize,
