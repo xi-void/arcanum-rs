@@ -1,13 +1,17 @@
 //! Optional desktop presentation for the sprite diagnostic.
 
+use crate::RenderBackend;
 use arcanum_rs::art::SpriteFrame;
+
+#[cfg(feature = "gpu")]
+mod gpu;
 use arcanum_rs::camera::{Camera, CameraScene};
 use arcanum_rs::compositor::{Modulation, SpriteDraw, blit_modulated};
 use arcanum_rs::content::world::{InteractiveWorld, WorldStream};
 use softbuffer::{Context, Surface};
 use std::{
     num::NonZeroU32,
-    rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use winit::application::ApplicationHandler;
@@ -135,7 +139,12 @@ pub fn show_stream(
     camera: Camera,
     size: (u32, u32),
     trace: bool,
+    renderer: RenderBackend,
 ) -> Result<(), String> {
+    #[cfg(not(feature = "gpu"))]
+    if renderer != RenderBackend::Cpu {
+        return Err("GPU renderer requires the gpu feature".into());
+    }
     let event_loop = make_loop()?;
     let proxy = event_loop.create_proxy();
     let world = world
@@ -159,6 +168,7 @@ pub fn show_stream(
         },
         PhysicalSize::<u32>::from(size).into(),
         event_loop,
+        renderer,
     )
 }
 
@@ -181,7 +191,7 @@ enum ViewContent<'a> {
 }
 
 fn show_content(title: String, content: ViewContent<'_>, size: Size) -> Result<(), String> {
-    run_content(title, content, size, make_loop()?)
+    run_content(title, content, size, make_loop()?, RenderBackend::Cpu)
 }
 
 fn make_loop() -> Result<EventLoop<()>, String> {
@@ -195,14 +205,18 @@ fn run_content(
     content: ViewContent<'_>,
     size: Size,
     event_loop: EventLoop<()>,
+    renderer: RenderBackend,
 ) -> Result<(), String> {
     event_loop.set_control_flow(ControlFlow::Wait);
-    let context = Context::new(event_loop.owned_display_handle())
+    let context = (renderer == RenderBackend::Cpu)
+        .then(|| Context::new(event_loop.owned_display_handle()))
+        .transpose()
         .map_err(|error| format!("cannot initialize software presentation: {error}"))?;
     let mut app = Viewer {
         title,
         size,
         context,
+        renderer,
         view: None,
         content,
         failure: None,
@@ -219,15 +233,26 @@ fn run_content(
 struct Viewer<'a> {
     title: String,
     size: Size,
-    context: Context<OwnedDisplayHandle>,
+    context: Option<Context<OwnedDisplayHandle>>,
+    renderer: RenderBackend,
     view: Option<WindowSurface>,
     content: ViewContent<'a>,
     failure: Option<String>,
 }
 
 struct WindowSurface {
-    surface: Surface<OwnedDisplayHandle, Rc<Window>>,
-    window: Rc<Window>,
+    backend: Presentation,
+    window: Arc<Window>,
+}
+
+enum Presentation {
+    Cpu(CpuSurface),
+    #[cfg(feature = "gpu")]
+    Gpu(Box<gpu::WindowRenderer>),
+}
+
+struct CpuSurface {
+    surface: Surface<OwnedDisplayHandle, Arc<Window>>,
     pixels: Vec<[u8; 3]>,
 }
 
@@ -236,18 +261,37 @@ impl Viewer<'_> {
         let attributes = Window::default_attributes()
             .with_title(&self.title)
             .with_inner_size(self.size);
-        let window = Rc::new(
+        let window = Arc::new(
             event_loop
                 .create_window(attributes)
                 .map_err(|error| format!("cannot create sprite window: {error}"))?,
         );
-        let surface = Surface::new(&self.context, Rc::clone(&window))
-            .map_err(|error| format!("cannot create sprite surface: {error}"))?;
-        Ok(WindowSurface {
-            surface,
-            window,
-            pixels: Vec::new(),
-        })
+        let backend = match self.renderer {
+            RenderBackend::Cpu => {
+                let surface = Surface::new(
+                    self.context.as_ref().expect("CPU context"),
+                    Arc::clone(&window),
+                )
+                .map_err(|error| format!("cannot create sprite surface: {error}"))?;
+                Presentation::Cpu(CpuSurface {
+                    surface,
+                    pixels: Vec::new(),
+                })
+            }
+            #[cfg(feature = "gpu")]
+            backend => {
+                let trace = matches!(&self.content, ViewContent::Stream { trace: true, .. });
+                Presentation::Gpu(Box::new(gpu::WindowRenderer::new(
+                    Arc::clone(&window),
+                    event_loop.owned_display_handle(),
+                    backend,
+                    trace,
+                )?))
+            }
+            #[cfg(not(feature = "gpu"))]
+            _ => return Err("GPU renderer requires the gpu feature".into()),
+        };
+        Ok(WindowSurface { backend, window })
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: String) {
@@ -279,6 +323,12 @@ impl ApplicationHandler for Viewer<'_> {
     }
 
     fn suspended(&mut self, _: &ActiveEventLoop) {
+        self.view = None;
+    }
+
+    fn exiting(&mut self, _: &ActiveEventLoop) {
+        // Destroy EGL/Vulkan presentation resources while winit's display
+        // and event loop are still alive.
         self.view = None;
     }
 
@@ -416,6 +466,7 @@ struct FrameTiming {
     composition: Duration,
     packing: Duration,
     submission: Duration,
+    host: Duration,
 }
 
 impl WindowSurface {
@@ -438,6 +489,16 @@ impl WindowSurface {
             // the destination. The completion event drives the next redraw.
             return Ok(false);
         }
+        #[cfg(feature = "gpu")]
+        if let Presentation::Gpu(renderer) = &mut self.backend {
+            renderer.redraw(
+                viewport,
+                world.visible_assets(camera, viewport),
+                &self.window,
+                trace,
+            )?;
+            return Ok(true);
+        }
         let frame = self.redraw(size, world.visible_modulated(camera, viewport))?;
         if trace
             || prepared.scheduling
@@ -449,7 +510,7 @@ impl WindowSurface {
                 > Duration::from_millis(30)
         {
             eprintln!(
-                "Frame {:?} {}x{} sync load wait 0ns schedule {:?} order {:?} shading {:?} compose {:?} pack {:?} submit {:?}",
+                "Frame {:?} {}x{} sync load wait 0ns schedule {:?} order {:?} shading {:?} compose {:?} pack {:?} submit {:?} host {:?}",
                 camera.position(),
                 size.width,
                 size.height,
@@ -458,7 +519,8 @@ impl WindowSurface {
                 prepared.shading,
                 frame.composition,
                 frame.packing,
-                frame.submission
+                frame.submission,
+                frame.host
             );
         }
         Ok(true)
@@ -469,12 +531,28 @@ impl WindowSurface {
         size: PhysicalSize<u32>,
         draws: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
     ) -> Result<FrameTiming, String> {
+        match &mut self.backend {
+            Presentation::Cpu(cpu) => cpu.redraw(size, draws, &self.window),
+            #[cfg(feature = "gpu")]
+            Presentation::Gpu(_) => Err("GPU presentation requires a streamed world".into()),
+        }
+    }
+}
+
+impl CpuSurface {
+    fn redraw<'a>(
+        &mut self,
+        size: PhysicalSize<u32>,
+        draws: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
+        window: &Window,
+    ) -> Result<FrameTiming, String> {
         let (Some(width), Some(height)) =
             (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
         else {
             return Ok(FrameTiming::default());
         };
-        let start = Instant::now();
+        let frame_start = Instant::now();
+        let start = frame_start;
         let count = (width.get() as usize)
             .checked_mul(height.get() as usize)
             .filter(|&count| count <= MAX_SURFACE_PIXELS)
@@ -519,7 +597,7 @@ impl WindowSurface {
         }
         let packing = start.elapsed();
         let start = Instant::now();
-        self.window.pre_present_notify();
+        window.pre_present_notify();
         buffer
             .present()
             .map_err(|error| format!("cannot present sprite: {error}"))?;
@@ -527,6 +605,7 @@ impl WindowSurface {
             composition,
             packing,
             submission: start.elapsed(),
+            host: frame_start.elapsed(),
         })
     }
 }

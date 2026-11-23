@@ -228,6 +228,10 @@ cargo run -- art world-inspect "$game"
 cargo run -- art sector-audit "$game"
 ```
 
+The streamed world viewer also supports an experimental hardware backend
+with the optional `gpu` feature. See [GPU renderer](docs/GPU_RENDERER.md)
+for Vulkan, GLES and CPU comparison commands.
+
 The synthetic demos require only a display session. `art overlap` shows
 bread and alignment frames with explicit draw order and independent anchors.
 In `art world`, use the arrow keys to pan, Shift to pan faster, Home to restore

@@ -465,6 +465,14 @@ impl InteractiveWorld {
         self.cache.visible(camera, viewport)
     }
 
+    pub fn visible_assets(
+        &self,
+        camera: &Camera,
+        size: (u32, u32),
+    ) -> impl Iterator<Item = super::WorldDraw<'_>> {
+        self.cache.visible_assets(camera, size)
+    }
+
     pub fn visible_modulated(
         &self,
         camera: &Camera,

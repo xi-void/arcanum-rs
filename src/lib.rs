@@ -6,6 +6,8 @@ pub mod compositor;
 pub mod content;
 pub mod dat;
 pub mod facade;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod isometric;
 pub mod mes;
 mod mod_id;
