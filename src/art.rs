@@ -1,4 +1,4 @@
-//! Bounded decoder for single-direction, palette-indexed legacy ART sprites.
+//! Bounded decoder for palette-indexed legacy ART sprites.
 
 use std::fmt;
 
@@ -25,6 +25,9 @@ pub struct SpriteFrame {
 pub struct DecodedFrame {
     pub frame: SpriteFrame,
     pub frame_count: usize,
+    pub rotation_count: u8,
+    pub stored_rotation: u8,
+    pub stored_palette: u8,
     pub frames_per_second: i32,
     /// Stored animation action-frame marker.
     pub action_frame: i32,
@@ -78,38 +81,50 @@ pub fn decode_frame(input: &[u8], index: usize) -> Result<DecodedFrame, Error> {
     decode_frame_with_palette(input, index, 0)
 }
 
-/// Decode a single-direction frame using stored palette zero or one.
-/// An absent slot one uses slot zero, as in the legacy wall blitter.
+/// Decode direction zero with the requested palette, falling back to slot zero
+/// when the requested slot is absent.
 pub fn decode_frame_with_palette(
     input: &[u8],
     index: usize,
     palette_slot: u8,
 ) -> Result<DecodedFrame, Error> {
-    if palette_slot > 1 {
-        return Err(Error::Unsupported(
-            "only palette slots zero and one are supported",
-        ));
+    decode_direction(input, index, 0, palette_slot)
+}
+
+/// Decode one stored direction. Single-direction ART aliases every rotation to zero.
+pub fn decode_direction(
+    input: &[u8],
+    index: usize,
+    rotation: u8,
+    palette_slot: u8,
+) -> Result<DecodedFrame, Error> {
+    if palette_slot >= 4 {
+        return Err(Error::Unsupported("ART palette slot must be in 0..4"));
+    }
+    if rotation >= 8 {
+        return Err(Error::Unsupported("ART rotation must be in 0..8"));
     }
     if input.len() > MAX_INPUT_BYTES {
         return Err(Error::InputTooLarge);
     }
     let header = section(input, 0, HEADER_BYTES, "header")?;
-    // The installed single-direction rug facades also set bit 3. Their
-    // palette, frame table and payload have the same layout.
-    if !matches!(word(header, 0), 0x01 | 0x09) {
-        return Err(Error::Unsupported(
-            "expected verified single-direction flags 0x01 or 0x09",
-        ));
-    }
+    let rotation_count = match word(header, 0) {
+        0 => 8,
+        0x01 | 0x09 => 1,
+        _ => {
+            return Err(Error::Unsupported(
+                "expected verified ART flags 0x00, 0x01 or 0x09",
+            ));
+        }
+    };
+    let stored_rotation = if rotation_count == 1 { 0 } else { rotation };
     if word(header, 8) != 8 {
         return Err(Error::Unsupported(
             "only 8-bit palette indices are supported",
         ));
     }
-    if word(header, 12) == 0 || [20, 24].into_iter().any(|pos| word(header, pos) != 0) {
-        return Err(Error::Unsupported(
-            "expected palette slot zero with optional slot one",
-        ));
+    if word(header, 12) == 0 {
+        return Err(Error::Unsupported("expected palette slot zero"));
     }
     let count = usize::try_from(word(header, 32))
         .ok()
@@ -119,16 +134,26 @@ pub fn decode_frame_with_palette(
         return Err(Error::FrameOutOfRange { index, count });
     }
 
-    let mut palette = section(input, HEADER_BYTES, PALETTE_BYTES, "palette")?;
+    let mut palette = section(input, HEADER_BYTES, PALETTE_BYTES, "palette zero")?;
+    let mut stored_palette = 0;
     let mut table_start = HEADER_BYTES + PALETTE_BYTES;
-    if word(header, 16) != 0 {
-        let alternate = section(input, table_start, PALETTE_BYTES, "palette slot one")?;
-        if palette_slot == 1 {
-            palette = alternate;
+    for slot in 1..4 {
+        if word(header, 12 + usize::from(slot) * 4) != 0 {
+            let alternate = section(input, table_start, PALETTE_BYTES, "alternate palette")?;
+            if palette_slot == slot {
+                palette = alternate;
+                stored_palette = slot;
+            }
+            table_start += PALETTE_BYTES;
         }
-        table_start += alternate.len();
     }
-    let table = section(input, table_start, count * FRAME_BYTES, "frame table")?;
+    let selected_index = usize::from(stored_rotation) * count + index;
+    let table = section(
+        input,
+        table_start,
+        count * usize::from(rotation_count) * FRAME_BYTES,
+        "frame table",
+    )?;
     let mut payload_offset = table_start + table.len();
     let mut selected = None;
     for (number, record) in table.as_chunks::<FRAME_BYTES>().0.iter().enumerate() {
@@ -151,7 +176,7 @@ pub fn decode_frame_with_palette(
             .filter(|size| *size != 0)
             .ok_or_else(|| invalid(record_offset + 8, "stored frame length must be positive"))?;
         let payload = section(input, payload_offset, stored_size, "frame payload")?;
-        if number == index {
+        if number == selected_index {
             selected = Some((
                 record,
                 width as u32,
@@ -187,6 +212,9 @@ pub fn decode_frame_with_palette(
             pixels,
         },
         frame_count: count,
+        rotation_count,
+        stored_rotation,
+        stored_palette,
         frames_per_second: word(header, 4),
         action_frame: word(header, 28),
         ignored_trailing_bytes: input.len() - payload_offset,

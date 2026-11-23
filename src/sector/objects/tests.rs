@@ -171,6 +171,27 @@ fn retains_scenery_placements_and_rejects_a_truncated_override() {
 }
 
 #[test]
+fn distinguishes_inheritable_scenery_art_from_missing_placement() {
+    let mut placed = vec![1];
+    placed.extend(103u32.to_le_bytes());
+    placed.extend(80u32.to_le_bytes());
+    let mut bytes = sector_header(0xaa0000);
+    bytes.extend(instance(3, [2, 0, 0], &placed));
+    bytes.extend(instance(3, [1, 0, 0], &0x4120_0380u32.to_le_bytes()));
+    bytes.extend(2u32.to_le_bytes());
+
+    let list = decode(&bytes).unwrap();
+    assert!(list.scenery.is_empty());
+    let records = &list.incomplete_scenery;
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].prototype, SerializedPrototypeId(1021));
+    assert_eq!(records[0].art_id, None);
+    assert_eq!(records[0].stored_tile, Some((103, 80)));
+    assert_eq!(records[1].art_id, Some(0x4120_0380));
+    assert_eq!(records[1].stored_tile, None);
+}
+
+#[test]
 fn portal_retains_current_art_and_optional_appearance_fields() {
     let mut data = 0x3210_3c11_u32.to_le_bytes().to_vec();
     data.push(1);

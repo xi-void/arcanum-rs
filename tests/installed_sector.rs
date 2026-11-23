@@ -855,7 +855,7 @@ fn bates_world_preserves_original_portal_states_geometry_and_wall_order() {
             .all(|issue| issue.category != arcanum_rs::sector::objects::StaticCategory::Portal)
     );
     assert_eq!(room.walls.len(), 96);
-    assert_eq!(room.scenery.len(), 24);
+    assert_eq!(room.scenery.len(), 34);
     let leaf = &room.portals[0];
     let other = &room.portals[1];
     assert_eq!(leaf.art.kind, Kind::Door);
@@ -1005,6 +1005,31 @@ fn bates_camera_selects_loaded_art_across_the_sector_and_round_trips() {
     drop(vfs);
 
     let room = &navigation.room;
+    let find = |index| {
+        room.scenery
+            .iter()
+            .find(|prop| prop.record.index == index)
+            .unwrap()
+    };
+    let (chair, alternate) = (find(59), find(242));
+    assert_eq!(room.scenery.len(), 79);
+    assert_eq!(chair.stored_art_id, Some(0x40d81b40));
+    assert_eq!(chair.prototype_art_id, Some(0x40000340));
+    assert_eq!(chair.appearance.offset, (-12, 7));
+    assert_eq!(chair.artwork.decoded.stored_rotation, 3);
+    assert_eq!(alternate.artwork.decoded.stored_palette, 2);
+    assert!(std::sync::Arc::ptr_eq(
+        &alternate.artwork,
+        &find(249).artwork
+    ));
+    assert_eq!(
+        navigation
+            .issues
+            .iter()
+            .map(|i| i.record)
+            .collect::<Vec<_>>(),
+        [19, 27]
+    );
     assert_eq!(room.floor.tiles().len(), 4096);
     assert_stock_wall_variants(room, &original);
     // The kitchen corner is two same-tile arms, followed by one neighboring
@@ -1312,7 +1337,15 @@ fn kna_tha_streams_both_original_sides_of_a_populated_boundary() {
             .reports()
             .map(|r| (r.id, r.surfaces, r.wall_count, r.scenery_count))
             .collect::<Vec<_>>(),
-        [(939524101, 4096, 28, 386), (939524102, 4096, 64, 426)]
+        [(939524101, 4096, 28, 433), (939524102, 4096, 64, 475)]
+    );
+    assert_eq!(
+        world.object_visibility(939524101, &camera, size),
+        Some((22, 439))
+    );
+    assert_eq!(
+        world.object_visibility(939524102, &camera, size),
+        Some((51, 488))
     );
     let reads = world.stats().vfs_reads;
     let decodes = world.stats().art.decodes;
@@ -1332,4 +1365,95 @@ fn kna_tha_streams_both_original_sides_of_a_populated_boundary() {
     assert_eq!(render(&world, &camera), initial);
     assert_eq!(world.stats().vfs_reads, reads);
     assert_eq!(world.stats().art.decodes, decodes);
+}
+
+#[test]
+#[ignore = "requires installed Arcanum data"]
+fn kna_tha_brazier_court_is_in_its_original_sector() {
+    use arcanum_rs::{
+        content::{
+            load_mes,
+            scenery::SceneryArt,
+            world::{SectorRegion, WorldStream},
+        },
+        sector::{Coordinates, objects},
+    };
+
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    let sector = Coordinates { x: 12, y: 12 };
+    assert_eq!(sector.id(), Some(805306380));
+    let mut bytes = Vec::new();
+    vfs.copy("maps/k'na tha/805306380.sec", &mut bytes).unwrap();
+    let court = objects::decode(&bytes).unwrap();
+    let names = load_mes(&mut vfs, "art/scenery/scenery.mes").unwrap();
+    let region = SectorRegion {
+        first: sector,
+        last: sector,
+    };
+    let center = (798, 786);
+    let camera = region.camera(center).unwrap();
+    let mut world = WorldStream::new(vfs, "k'na tha".into(), region, center).unwrap();
+    world.prepare(&camera, (1280, 720)).unwrap();
+    let report = world.reports().next().unwrap();
+    for (index, x) in [(102, 793), (104, 798), (106, 803)] {
+        let base = court
+            .scenery
+            .iter()
+            .find(|base| base.index == index)
+            .unwrap();
+        assert_eq!(base.world_tile(sector), Some((x, 781)));
+        assert_eq!(base.art_id, 0x407002c0);
+        assert_eq!(
+            SceneryArt::decode(base.art_id)
+                .unwrap()
+                .resource_path(&names.mes)
+                .unwrap(),
+            "art/scenery/brazurelarge.art"
+        );
+        assert!(report.diagnostics.iter().any(|issue| {
+            issue.starts_with(&format!(
+                "record {} Scenery at ({x}, 781) ART 0x40100540:",
+                index + 1
+            )) && issue.contains("blend (Some(16)")
+        }));
+    }
+}
+
+#[test]
+#[ignore = "requires installed Arcanum data"]
+fn kna_tha_passage_is_placed_on_the_overworld() {
+    use arcanum_rs::{
+        content::{load_mes, scenery::SceneryArt},
+        sector::{Coordinates, objects},
+    };
+
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    let sector = Coordinates { x: 1435, y: 614 };
+    assert_eq!(sector.id(), Some(41204843931));
+    let mut bytes = Vec::new();
+    vfs.copy("maps/arcanum1-024-fixed/41204843931.sec", &mut bytes)
+        .unwrap();
+    let objects = objects::decode(&bytes).unwrap();
+    let passage = objects
+        .scenery
+        .iter()
+        .find(|record| record.index == 160)
+        .unwrap();
+    assert_eq!(passage.world_tile(sector), Some((91900, 39315)));
+    assert_eq!(passage.prototype.0, 4047);
+    assert_eq!(passage.art_id, 0x40c80500);
+    assert_eq!(
+        (passage.fields.offset_x, passage.fields.offset_y),
+        (Some(5), Some(-15))
+    );
+    let names = load_mes(&mut vfs, "art/scenery/scenery.mes").unwrap();
+    assert_eq!(
+        SceneryArt::decode(passage.art_id)
+            .unwrap()
+            .resource_path(&names.mes)
+            .unwrap(),
+        "art/scenery/tree_door.art"
+    );
 }

@@ -41,9 +41,12 @@ both samples. At world Y=928, the seam cells at X=383 and X=384 store
 The two selected sectors contain no baked facades or portals. The Bates
 regression covers the existing facade and portal paths.
 
-Unsupported K'na Tha scenery includes alternate tree palettes and records
-without a stored ART ID or position. The headless inspection reports
-the unsupported inputs. A sector whose object list cannot be framed
+The table records the Milestone 39 baseline. Milestone 41 resolves the
+alternate tree palette requests and the prototype ART for positioned
+scenery with no instance ART override. The
+[coverage and location audit](SCENERY_ART_COVERAGE.md) gives the updated
+counts and the coordinates of the original paved brazier court.
+The headless inspection reports unsupported inputs. A sector whose object list cannot be framed
 keeps its validated floor and reports the object-layer error. An absent
 sector or unsupported floor cell leaves the normal cleared background.
 Original black void tiles remain regular original draws.
@@ -68,7 +71,7 @@ The sector cache retains at most 12 entries, including unavailable
 sectors. It evicts the least recently used entry outside the required
 set. A viewport whose conservative footprint needs more than 12
 sectors receives an explicit error. A separate decoded ART cache uses
-resource path, frame, palette and mirroring as a key. It shares frames
+resource path, frame, direction, palette and mirroring as a key. It shares frames
 across sectors and is capped at 96 MiB of retained RGBA and 4,096
 frames. Only entries that no cached raster references can be evicted
 from the ART cache.

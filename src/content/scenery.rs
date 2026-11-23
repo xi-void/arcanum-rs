@@ -10,7 +10,8 @@ use crate::{
     sector::{
         Coordinates,
         objects::{
-            AppearanceFields, StaticCategory, StaticRecord, decode, decode_scenery_prototype,
+            AppearanceFields, IncompleteScenery, SceneryPrototype, StaticCategory, StaticRecord,
+            decode, decode_scenery_prototype,
         },
     },
     vfs::Vfs,
@@ -37,7 +38,7 @@ pub struct SceneryArt {
 
 impl SceneryArt {
     pub fn decode(raw: u32) -> Result<Self, Box<dyn Error>> {
-        // The selected scenery uses pre-oriented files with ordinary blending.
+        // Filename selection is independent of stored direction and palette.
         if raw >> 28 != 4 || raw & 15 != 0 {
             return Err(format!("unsupported scenery ART ID {raw:#010x}").into());
         }
@@ -66,6 +67,9 @@ impl SceneryArt {
 pub struct ImportedScenery {
     pub record: StaticRecord,
     pub prototype_source: Source,
+    pub prototype_art_id: Option<u32>,
+    /// Present only when the original instance overrides the current ART ID.
+    pub stored_art_id: Option<u32>,
     pub names_source: Source,
     pub artwork: Arc<art::LoadedFrame>,
     pub art: SceneryArt,
@@ -173,7 +177,7 @@ pub(super) fn resolve_scenery(
 
 struct SceneryImport {
     names: LoadedMes,
-    prototypes: BTreeMap<SerializedPrototypeId, (Source, AppearanceFields)>,
+    prototypes: BTreeMap<SerializedPrototypeId, (Source, SceneryPrototype)>,
 }
 
 impl SceneryImport {
@@ -184,6 +188,55 @@ impl SceneryImport {
         })
     }
 
+    fn prototype(
+        &mut self,
+        vfs: &mut Vfs,
+        id: SerializedPrototypeId,
+    ) -> Result<&(Source, SceneryPrototype), Box<dyn Error>> {
+        let entry = match self.prototypes.entry(id) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => {
+                let (source, bytes) = sector::read_static_prototype(vfs, id)?;
+                let fields = decode_scenery_prototype(&bytes, id)
+                    .map_err(|err| format!("{} from {source}: {err}", source.virtual_path))?;
+                e.insert((source, fields))
+            }
+        };
+        Ok(entry)
+    }
+
+    fn resolve_inherited(
+        &mut self,
+        vfs: &mut Vfs,
+        frames: &mut art::FrameCache,
+        coordinates: Coordinates,
+        record: IncompleteScenery,
+        stored_tile: (u32, u32),
+    ) -> Result<ImportedScenery, Box<dyn Error>> {
+        let id = self
+            .prototype(vfs, record.prototype)?
+            .1
+            .art_id
+            .ok_or("scenery prototype has no current ART ID")?;
+        let mut imported = self.resolve(
+            vfs,
+            frames,
+            coordinates,
+            StaticRecord {
+                category: StaticCategory::Scenery,
+                index: record.index,
+                span: record.span,
+                prototype: record.prototype,
+                instance_id: record.instance_id,
+                art_id: id,
+                stored_tile,
+                fields: record.fields,
+            },
+        )?;
+        imported.stored_art_id = None;
+        Ok(imported)
+    }
+
     fn resolve(
         &mut self,
         vfs: &mut Vfs,
@@ -192,20 +245,21 @@ impl SceneryImport {
         record: StaticRecord,
     ) -> Result<ImportedScenery, Box<dyn Error>> {
         let index = record.index;
-        let (source, parent) = match self.prototypes.entry(record.prototype) {
-            Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => {
-                let (source, bytes) = sector::read_static_prototype(vfs, record.prototype)?;
-                let fields = decode_scenery_prototype(&bytes, record.prototype)
-                    .map_err(|err| format!("{} from {source}: {err}", source.virtual_path))?;
-                e.insert((source, fields))
-            }
-        };
-        let appearance = SceneryAppearance::resolve(record.fields, *parent)
+        let (source, parent) = self.prototype(vfs, record.prototype)?;
+        let source = source.clone();
+        let parent = *parent;
+        let appearance = SceneryAppearance::resolve(record.fields, parent.appearance)
             .map_err(|err| format!("scenery record {index}: {err}"))?;
         let art = SceneryArt::decode(record.art_id)?;
         let path = frames.resolve(|| art.resource_path(&self.names.mes))?;
-        let artwork = frames.load(vfs, &path, usize::from(art.frame), art.palette, false)?;
+        let artwork = frames.load_rotated(
+            vfs,
+            &path,
+            usize::from(art.frame),
+            art.palette,
+            false,
+            art.rotation,
+        )?;
         let frame = &artwork.decoded.frame;
         if frame.width > 512 || frame.height > 512 {
             return Err(format!("scenery frame exceeds 512 pixels per axis in {path}").into());
@@ -214,8 +268,10 @@ impl SceneryImport {
             .world_tile(coordinates)
             .ok_or("invalid scenery world tile")?;
         Ok(ImportedScenery {
+            stored_art_id: Some(record.art_id),
             record,
-            prototype_source: source.clone(),
+            prototype_source: source,
+            prototype_art_id: parent.art_id,
             names_source: self.names.source.clone(),
             artwork,
             art,
@@ -468,7 +524,11 @@ fn load_overview_timed(
     );
     let framing_only = (
         counts.1 - objects.portals.len(),
-        counts.2 - objects.scenery.len(),
+        objects
+            .incomplete_scenery
+            .iter()
+            .filter(|record| record.stored_tile.is_none())
+            .count(),
     );
     let mut walls = Vec::new();
     let mut scenery = Vec::new();
@@ -586,6 +646,33 @@ fn load_overview_timed(
             report(index, category, tile, art_id, error.to_string());
         }
     }
+    for record in objects.incomplete_scenery {
+        let Some(stored_tile) = record.stored_tile else {
+            continue;
+        };
+        let tile = coordinates
+            .world_tile((stored_tile.0 & 63) as u8, (stored_tile.1 & 63) as u8)
+            .ok_or("invalid inherited scenery tile")?;
+        let index = record.index;
+        match scenery_import.resolve_inherited(vfs, frames, coordinates, record, stored_tile) {
+            Ok(prop)
+                if !initial_view_only
+                    || prop
+                        .draw(center)
+                        .is_some_and(|draw| intersects_viewport(draw, viewport)) =>
+            {
+                scenery.push(prop)
+            }
+            Ok(_) => {}
+            Err(error) => report(
+                index,
+                StaticCategory::Scenery,
+                tile,
+                0,
+                format!("inherited scenery ART: {error}"),
+            ),
+        }
+    }
     issues.sort_unstable_by_key(|issue| issue.record);
     timing.object_import = start.elapsed();
     let outside = |tile: (u32, u32)| !inside_floor(tile);
@@ -606,7 +693,7 @@ fn load_overview_timed(
         sector_object_counts: counts,
         object_issue: (partial && framing_only != (0, 0)).then(|| {
             format!(
-                "{} portals and {} scenery records lack a stored ART ID or location",
+                "{} portals lack a stored ART ID or location, {} scenery records lack an instance location",
                 framing_only.0, framing_only.1
             )
         }),

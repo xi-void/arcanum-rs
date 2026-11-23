@@ -441,6 +441,28 @@ impl WorldStream {
             .map(|id| &self.cache.entries[id].0.report)
     }
 
+    /// Counts accepted object rasters submitted and culled at this viewport.
+    /// Surface rasters and rejected imports are excluded.
+    pub fn object_visibility(
+        &self,
+        id: u64,
+        camera: &Camera,
+        size: (u32, u32),
+    ) -> Option<(usize, usize)> {
+        let (sector, _) = self.cache.entries.get(&id)?;
+        let viewport = Viewport::new(camera.position(), size);
+        let mut submitted = 0;
+        let mut culled = 0;
+        for raster in sector.draws.iter().filter(|raster| raster.key.0) {
+            if viewport.place(raster.draw(), raster.bounds).is_some() {
+                submitted += 1;
+            } else {
+                culled += 1;
+            }
+        }
+        Some((submitted, culled))
+    }
+
     pub fn stats(&self) -> StreamStats {
         self.cache.stats(self.loader.stats())
     }

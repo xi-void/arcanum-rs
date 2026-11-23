@@ -35,7 +35,16 @@ impl ArtResource {
         index: usize,
         palette: u8,
     ) -> Result<LoadedFrame, Error> {
-        match art::decode_frame_with_palette(&self.bytes, index, palette) {
+        self.decode_direction(index, 0, palette)
+    }
+
+    fn decode_direction(
+        &self,
+        index: usize,
+        rotation: u8,
+        palette: u8,
+    ) -> Result<LoadedFrame, Error> {
+        match art::decode_direction(&self.bytes, index, rotation, palette) {
             Ok(decoded) => Ok(LoadedFrame {
                 source: self.source.clone(),
                 decoded,
@@ -73,7 +82,7 @@ pub struct FrameCacheStats {
     pub decode_time: Duration,
 }
 
-type FrameKey = (String, usize, u8, bool);
+type FrameKey = (String, usize, u8, bool, u8);
 
 /// Scope this cache to one immutable set of VFS mounts.
 #[derive(Default)]
@@ -109,8 +118,30 @@ impl FrameCache {
         palette: u8,
         mirror: bool,
     ) -> Result<Arc<LoadedFrame>, Box<dyn StdError>> {
+        self.load_rotated(vfs, path, index, palette, mirror, 0)
+    }
+
+    pub(super) fn load_rotated(
+        &mut self,
+        vfs: &mut Vfs,
+        path: &str,
+        index: usize,
+        palette: u8,
+        mirror: bool,
+        rotation: u8,
+    ) -> Result<Arc<LoadedFrame>, Box<dyn StdError>> {
         self.clock += 1;
-        let key = (path.to_owned(), index, palette, mirror);
+        let mut key = (path.to_owned(), index, palette, mirror, rotation);
+        if rotation != 0 && rotation < 8 {
+            key.4 = 0;
+            if !self
+                .frames
+                .get(&key)
+                .is_some_and(|(frame, _)| frame.decoded.rotation_count == 1)
+            {
+                key.4 = rotation;
+            }
+        }
         if let Some((frame, stamp)) = self.frames.get_mut(&key) {
             self.stats.hits += 1;
             *stamp = self.clock;
@@ -142,7 +173,7 @@ impl FrameCache {
             .as_ref()
             .expect("ART input loaded")
             .1
-            .decode_with_palette(index, palette);
+            .decode_direction(index, rotation, palette);
         self.stats.decode_time += start.elapsed();
         let mut frame = match result {
             Ok(frame) => frame,
@@ -166,6 +197,7 @@ impl FrameCache {
             self.stats.pixel_bytes -= old.decoded.frame.pixels.capacity() * size_of::<[u8; 4]>();
             self.stats.evictions += 1;
         }
+        key.4 = frame.decoded.stored_rotation;
         let frame = Arc::new(frame);
         self.frames.insert(key, (Arc::clone(&frame), self.clock));
         self.stats.frames = self.frames.len();

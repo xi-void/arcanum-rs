@@ -52,12 +52,25 @@ pub enum StaticCategory {
     Portal,
 }
 
+/// A scenery record whose current ART ID or instance location is absent.
+#[derive(Debug)]
+pub struct IncompleteScenery {
+    pub index: usize,
+    pub span: Range<usize>,
+    pub prototype: SerializedPrototypeId,
+    pub instance_id: [u8; 24],
+    pub art_id: Option<u32>,
+    pub stored_tile: Option<(u32, u32)>,
+    pub fields: AppearanceFields,
+}
+
 #[derive(Debug)]
 pub struct ObjectList {
     pub start: usize,
     pub count: usize,
     pub walls: Vec<StaticRecord>,
     pub scenery: Vec<StaticRecord>,
+    pub incomplete_scenery: Vec<IncompleteScenery>,
     pub portals: Vec<StaticRecord>,
     pub scenery_count: usize,
     pub portal_count: usize,
@@ -127,6 +140,7 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
         count,
         walls: Vec::new(),
         scenery: Vec::new(),
+        incomplete_scenery: Vec::new(),
         portals: Vec::new(),
         scenery_count: 0,
         portal_count: 0,
@@ -202,8 +216,19 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
             }
             _ => unreachable!("already validated category"),
         };
-        // Framing-only instances contribute to the category count.
+        // Framing-only instances contribute to the category count and scenery audit.
         if category != StaticCategory::Wall && (fields.art_id.is_none() || fields.tile.is_none()) {
+            if category == StaticCategory::Scenery {
+                list.incomplete_scenery.push(IncompleteScenery {
+                    index,
+                    span: start..reader.offset,
+                    prototype: SerializedPrototypeId(proto_id),
+                    instance_id,
+                    art_id: fields.art_id,
+                    stored_tile: fields.tile,
+                    fields: fields.appearance,
+                });
+            }
             continue;
         }
         let record = StaticRecord {
@@ -240,11 +265,21 @@ pub fn decode_wall_prototype(
     decode_static_prototype(input, id, WALL, 69).map(|fields| fields.appearance)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SceneryPrototype {
+    pub art_id: Option<u32>,
+    pub appearance: AppearanceFields,
+}
+
 pub fn decode_scenery_prototype(
     input: &[u8],
     id: SerializedPrototypeId,
-) -> Result<AppearanceFields, Error> {
-    decode_static_prototype(input, id, SCENERY, 70).map(|fields| fields.appearance)
+) -> Result<SceneryPrototype, Error> {
+    let fields = decode_static_prototype(input, id, SCENERY, 70)?;
+    Ok(SceneryPrototype {
+        art_id: fields.art_id,
+        appearance: fields.appearance,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
