@@ -305,3 +305,23 @@ fn eight_directions_use_direction_major_tables_and_sparse_palettes() {
         decode_frame(&flat, 0).unwrap()
     );
 }
+
+#[test]
+fn walking_flag_reads_eight_direction_tables_and_preserves_root_offsets() {
+    let one = fixture(&[(1, 1, &[1])]);
+    let table = HEADER_BYTES + PALETTE_BYTES;
+    let mut bytes = one[..table].to_vec();
+    set_word(&mut bytes, 0, 2);
+    for rotation in 0..8 {
+        let mut record = one[table..table + FRAME_BYTES].to_vec();
+        set_word(&mut record, 20, rotation);
+        bytes.extend(record);
+    }
+    bytes.extend([1; 8]);
+    let asset = decode_direction(&bytes, 0, 5, 0).unwrap();
+    assert_eq!((asset.rotation_count, asset.stored_rotation), (8, 5));
+    assert_eq!(asset.frame.offset, (5, -6));
+    assert_eq!(asset.frame.hotspot, (-3, 4));
+    assert_eq!(asset.ignored_trailing_bytes, 0);
+    assert!(decode_direction(&bytes[..bytes.len() - 1], 0, 5, 0).is_err());
+}

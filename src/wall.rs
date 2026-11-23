@@ -59,7 +59,7 @@ impl WallArtId {
         })
     }
 
-    /// Resolve the undamaged interior and exterior facings verified in the Bates sector.
+    /// Resolve verified undamaged interior and exterior wall facings.
     pub fn resolve(self, structures: &Mes, names: &Mes) -> Result<String, Error> {
         let fields = self.fields()?;
         if !matches!(
@@ -77,6 +77,8 @@ impl WallArtId {
             4 => "bcr",
             5 => "tcl",
             6 => "tcr",
+            9..=11 => ["w3l", "w3a", "w3r"][(fields.piece - 9) as usize],
+            12..=15 => ["w4l", "w4a", "w4b", "w4r"][(fields.piece - 12) as usize],
             21..=23 => ["d3l", "d3a", "d3r"][(fields.piece - 21) as usize],
             24..=27 => ["d4l", "d4a", "d4b", "d4r"][(fields.piece - 24) as usize],
             28..=33 => ["d6l", "d6a", "d6b", "d6c", "d6d", "d6r"][(fields.piece - 28) as usize],

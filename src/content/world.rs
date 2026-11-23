@@ -5,7 +5,7 @@ use super::{
     art::{FrameCache, FrameCacheStats, FrameLoop, LoadedFrame},
     lighting::{self, Ambient, LightGrid, LightImport, StaticLight, WallFace},
     load_mes,
-    mobile::{self, Caster, DirectionalFidget, FidgetPlayback, MobileShadows},
+    mobile::{self, Caster, DirectionalFidget, FidgetPlayback, MobileShadows, Walk, WalkStep},
     scenery::{
         DrawOrder, LoadStages, ObjectLight, RoomOverview, WorldRegion, load_streamed_sector,
     },
@@ -117,6 +117,10 @@ pub struct SectorReport {
     pub scenery_count: usize,
     pub portal_count: usize,
     pub original_object_counts: (usize, usize, usize),
+    /// When set, serialized object counts are unknown and the diagnostics explain why.
+    pub object_list_failed: bool,
+    pub object_raster_rejections: usize,
+    pub object_audit: Vec<String>,
     pub diagnostics: Vec<String>,
     /// Total, prepared and switched-off original light records.
     pub light_counts: Option<(usize, usize, usize)>,
@@ -160,6 +164,16 @@ pub struct LightUpdate {
     pub receivers: usize,
     pub shadows: Duration,
     pub shadow_changed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WalkStatus {
+    pub step: usize,
+    pub tile: (u32, u32),
+    pub offset: (i32, i32),
+    pub anchor: (i32, i32),
+    pub direction: u8,
+    pub frame: Option<usize>,
 }
 
 struct DynamicLight {
@@ -334,6 +348,7 @@ struct CachedSector {
     outdoor_rows: [u64; 64],
     casters: Vec<Caster>,
     mobile_shadows: Option<MobileShadows>,
+    walk: Option<(WorldOrder, Arc<Walk>)>,
 }
 
 impl CachedSector {
@@ -348,6 +363,9 @@ impl CachedSector {
                 scenery_count: 0,
                 portal_count: 0,
                 original_object_counts: (0, 0, 0),
+                object_list_failed: true,
+                object_raster_rejections: 0,
+                object_audit: Vec::new(),
                 diagnostics: vec![error],
                 light_counts: None,
                 object_lights: 0,
@@ -358,6 +376,7 @@ impl CachedSector {
             outdoor_rows: [0; 64],
             casters: Vec::new(),
             mobile_shadows: None,
+            walk: None,
         }
     }
 
@@ -366,6 +385,7 @@ impl CachedSector {
         world: RoomOverview,
         reference: (u32, u32),
         lights: Option<LightImport>,
+        audit: bool,
     ) -> Self {
         let room = &world.room;
         let mut report = SectorReport {
@@ -385,6 +405,9 @@ impl CachedSector {
             scenery_count: 0,
             portal_count: 0,
             original_object_counts: world.sector_object_counts,
+            object_list_failed: world.object_list_failed,
+            object_raster_rejections: 0,
+            object_audit: Vec::new(),
             diagnostics: room.floor.surface_issues.clone(),
             light_counts: lights
                 .as_ref()
@@ -414,6 +437,7 @@ impl CachedSector {
                 )
             })
             .collect();
+        let audit_sources = audit.then(|| room.audit_sources());
         if let Some(objects) = room.shared_objects() {
             for (key, draw, frame, light, animation) in objects {
                 let tile =
@@ -429,12 +453,34 @@ impl CachedSector {
                     .filter(|raster| within_overhang(raster.bounds, tile))
                 {
                     raster.object_light = light;
+                    if let Some(sources) = &audit_sources {
+                        let source = &sources[&key.6.unwrap_or(key.5)];
+                        let record = source.record;
+                        let frame_info = &frame.decoded;
+                        let (x, y) =
+                            crate::compositor::sprite_origin(&frame_info.frame, raster.anchor);
+                        let pivot = (
+                            i64::from(tile.0) + i64::from(source.offset.0) - x,
+                            i64::from(tile.1) + i64::from(source.offset.1) - y,
+                        );
+                        report.object_audit.push(format!(
+                            "record {} {:?} bytes {:?}, identity {:02x?}, prototype {} from {}, tile {:?} (stored {:?}), ART {:#010x} (stored {:x?}), {} from {}, direction {} (stored {}), frame {}, palette {}, offset {:?}, pivot {pivot:?}, order {key:?}",
+                            record.index, record.category, record.span, record.instance_id,
+                            record.prototype.0, source.prototype, (key.2, key.1), record.stored_tile,
+                            record.art_id, source.stored_art, frame.source.virtual_path, frame.source,
+                            source.rotation, frame_info.stored_rotation, source.frame,
+                            frame_info.stored_palette, source.offset,
+                        ));
+                    }
                     draws.push(raster);
                 } else {
+                    report.object_raster_rejections += 1;
                     report.diagnostics.push(format!("object at ({}, {}) record {} exceeds the {OVERHANG}px raster overhang bound", key.2, key.1, key.6.unwrap_or(key.5)));
                 }
             }
         } else {
+            report.object_raster_rejections =
+                room.walls.len() + room.portals.len() + room.scenery.len();
             report
                 .diagnostics
                 .push("static object projection overflow".into());
@@ -453,6 +499,7 @@ impl CachedSector {
             outdoor_rows: room.floor.outdoor_rows,
             casters: Vec::new(),
             mobile_shadows: None,
+            walk: None,
         }
     }
 
@@ -478,6 +525,36 @@ impl CachedSector {
             }
             self.report.diagnostics.push(mobile.diagnostic);
             raster.object_light = ObjectLight::Point;
+            let walk = mobile.walk.filter(|walk| {
+                let fits = walk.steps.iter().all(|&step| {
+                    let asset = walk.asset(step).unwrap_or(&mobile.asset);
+                    let bounds = if step.frame.is_some() {
+                        RasterBounds::new(SpriteDraw {
+                            frame: &asset.decoded.frame,
+                            anchor: step.anchor,
+                        })
+                    } else {
+                        let (dx, dy) = (
+                            i64::from(step.anchor.0) - i64::from(caster.anchor.0),
+                            i64::from(step.anchor.1) - i64::from(caster.anchor.1),
+                        );
+                        RasterBounds {
+                            min: (raster.bounds.min.0 + dx, raster.bounds.min.1 + dy),
+                            max: (raster.bounds.max.0 + dx, raster.bounds.max.1 + dy),
+                        }
+                    };
+                    within_overhang(bounds, tile)
+                });
+                if !fits {
+                    self.report
+                        .diagnostics
+                        .push("walk raster exceeds the sector overhang bound".into());
+                }
+                fits
+            });
+            if let Some(walk) = walk {
+                self.walk = Some((raster.key, walk));
+            }
             self.draws.push(raster);
             if mobile.casts_shadow {
                 self.casters.push(caster);
@@ -565,6 +642,29 @@ struct SectorCache {
     shadows: Vec<PreparedMask>,
     shadow_error: Option<shadow::Error>,
     fidget: FidgetPlayback,
+    walk_start: Option<Duration>,
+    walk_subject: Option<(usize, Arc<Walk>)>,
+    walk_facing: Option<u8>,
+    walking: Option<MovingDraw>,
+}
+
+struct MovingDraw {
+    raster: Raster,
+    origin: Caster,
+    step: usize,
+    insertion: usize,
+    shade: PreparedShade,
+    standing_direction: Option<u8>,
+    standing_since: Duration,
+}
+
+impl MovingDraw {
+    fn playback(&self, fidget: FidgetPlayback) -> FidgetPlayback {
+        FidgetPlayback {
+            direction: self.standing_direction,
+            start: fidget.start.filter(|start| *start >= self.standing_since),
+        }
+    }
 }
 
 impl SectorCache {
@@ -623,6 +723,8 @@ impl SectorCache {
     fn activate(&mut self, required: &[u64]) -> Duration {
         self.step += 1;
         self.ordered.clear();
+        self.walk_subject = None;
+        self.walking = None;
         self.active.clear();
         self.active.extend_from_slice(required);
         for id in required {
@@ -631,6 +733,14 @@ impl SectorCache {
             self.ordered.extend(sector.draws.iter().cloned());
         }
         self.ordered.sort_unstable_by_key(|draw| draw.key);
+        self.walk_subject = required.iter().find_map(|id| {
+            let (key, walk) = self.entries[id].0.walk.as_ref()?;
+            let index = self
+                .ordered
+                .binary_search_by_key(key, |raster| raster.key)
+                .ok()?;
+            Some((index, Arc::clone(walk)))
+        });
         self.animated.clear();
         self.animated.extend(
             self.ordered
@@ -715,6 +825,101 @@ impl SectorCache {
         })
     }
 
+    fn start_walk(&mut self, elapsed: Duration) -> bool {
+        if self.walk_subject.is_none() || self.walk_start.is_some() {
+            return false;
+        }
+        self.walk_start = Some(elapsed);
+        true
+    }
+
+    fn reset_walk(&mut self) -> bool {
+        self.walk_facing = None;
+        self.walk_start.take().is_some()
+    }
+
+    fn update_walk(&mut self, elapsed: Duration) -> Option<WalkStatus> {
+        let Some(((source, walk), start)) = self.walk_subject.as_ref().zip(self.walk_start) else {
+            if self.walking.take().is_some() {
+                self.refresh_shadows();
+            }
+            return None;
+        };
+        let original = &self.ordered[*source];
+        let index = walk.index(elapsed.saturating_sub(start));
+        if self.walking.as_ref().is_some_and(|draw| draw.step == index) {
+            return None;
+        }
+        let sample = walk.steps[index];
+        let key = (
+            true,
+            super::scenery::order(sample.tile, sample.offset, false, original.key.1.5),
+        );
+        let asset = walk.asset(sample).unwrap_or(&original.frame);
+        let mut raster = Raster::new(key, asset, sample.anchor);
+        if sample.frame.is_none()
+            && let Some(RasterAnimation::Fidget(poses)) = &original.animation
+        {
+            raster.set_fidget(Arc::clone(poses));
+        }
+        raster.object_light = ObjectLight::Point;
+        let origin = Caster {
+            tile: (original.key.1.2, original.key.1.1),
+            anchor: original.anchor,
+        };
+        self.walking = Some(MovingDraw {
+            raster,
+            origin,
+            step: index,
+            insertion: self.ordered.partition_point(|draw| draw.key < key),
+            shade: PreparedShade::Tint(Modulation::Unlit),
+            standing_since: start.saturating_add(walk.deadline(walk.steps.len() - 1)),
+            standing_direction: sample
+                .frame
+                .is_none()
+                .then_some(self.walk_facing.unwrap_or(sample.direction)),
+        });
+        self.refresh_walk_shade();
+        self.refresh_shadows();
+        Some(WalkStatus {
+            step: index,
+            tile: sample.tile,
+            offset: sample.offset,
+            anchor: sample.anchor,
+            direction: sample.direction,
+            frame: sample.frame,
+        })
+    }
+
+    fn refresh_walk_shade(&mut self) {
+        let Some((ambient, moving)) = self.ambient.zip(self.walking.as_ref()) else {
+            return;
+        };
+        let raster = &moving.raster;
+        let tile = (raster.key.1.2, raster.key.1.1);
+        let base = if self.outdoor(tile) {
+            ambient.0.outdoor
+        } else {
+            ambient.0.indoor
+        };
+        let color = lighting::point(self.light_emitters(), raster.anchor, base);
+        self.walking.as_mut().unwrap().shade = PreparedShade::uniform(color);
+    }
+
+    fn light_emitters(&self) -> impl Iterator<Item = &StaticLight> {
+        // CE adds object lights at the head of the owning sector's list.
+        self.active.iter().rev().flat_map(move |&id| {
+            self.dynamic
+                .iter()
+                .rev()
+                .filter(move |light| {
+                    tile_sector_id(light.state.tile) == id && self.light_active(light)
+                })
+                .map(|light| &light.mask)
+                .chain(self.entries[&id].0.emitters.iter().rev())
+        })
+    }
+
     fn fidget_poses(&self) -> Option<&DirectionalFidget> {
         self.animated
             .iter()
@@ -725,12 +930,22 @@ impl SectorCache {
     }
 
     fn start_fidget(&mut self, elapsed: Duration) -> bool {
+        if self
+            .walking
+            .as_ref()
+            .is_some_and(|moving| moving.standing_direction.is_none())
+        {
+            return false; // The same subject cannot fidget through a walk pose.
+        }
         let Some(poses) = self.fidget_poses() else {
             return false;
         };
-        let clip = poses.sequence(self.fidget.direction);
-        if self
-            .fidget
+        let playback = self
+            .walking
+            .as_ref()
+            .map_or(self.fidget, |moving| moving.playback(self.fidget));
+        let clip = poses.sequence(playback.direction);
+        if playback
             .start
             .is_some_and(|start| clip.one_shot_index(elapsed.saturating_sub(start)).is_some())
         {
@@ -742,9 +957,17 @@ impl SectorCache {
 
     fn turn_fidget(&mut self, step: i8) -> Option<u8> {
         let poses = self.fidget_poses()?;
-        let direction = self.fidget.direction.unwrap_or(poses.original_direction);
+        let direction = match &self.walking {
+            Some(moving) => moving.standing_direction?,
+            None => self.fidget.direction.unwrap_or(poses.original_direction),
+        };
         let direction = (i16::from(direction) + i16::from(step)).rem_euclid(8) as u8;
-        self.fidget.direction = Some(direction);
+        if let Some(moving) = &mut self.walking {
+            self.walk_facing = Some(direction);
+            moving.standing_direction = Some(direction);
+        } else {
+            self.fidget.direction = Some(direction);
+        }
         Some(direction)
     }
 
@@ -809,26 +1032,17 @@ impl SectorCache {
                 let Some(resources) = &sector.mobile_shadows else {
                     continue;
                 };
-                let lookup = resources.lookup.lookup();
-                for caster in &sector.casters {
-                    let base = if self.outdoor(caster.tile) {
-                        ambient.outdoor
-                    } else {
-                        ambient.indoor
-                    };
-                    let masks = shadow::select(
-                        &lookup,
-                        caster.anchor,
-                        base,
-                        0,
-                        true,
-                        self.shadow_candidates(),
-                    )
-                    .unwrap_or_else(|invalid| {
-                        error = Some(invalid);
-                        shadow::select(&lookup, caster.anchor, base, 0, false, [])
-                            .expect("ambient shadow selection")
-                    });
+                for &original in &sector.casters {
+                    let caster = self
+                        .walking
+                        .as_ref()
+                        .filter(|moving| moving.origin == original)
+                        .map_or(original, |moving| Caster {
+                            anchor: moving.raster.anchor,
+                            tile: (moving.raster.key.1.2, moving.raster.key.1.1),
+                        });
+                    let (masks, invalid) = self.caster_masks(resources, caster, ambient);
+                    error = error.or(invalid);
                     for mask in masks {
                         let frame = resources.frame(mask);
                         let draw = PreparedMask {
@@ -864,25 +1078,41 @@ impl SectorCache {
         changed
     }
 
+    fn caster_masks(
+        &self,
+        resources: &MobileShadows,
+        caster: Caster,
+        ambient: Ambient,
+    ) -> (Vec<shadow::Mask>, Option<shadow::Error>) {
+        let base = if self.outdoor(caster.tile) {
+            ambient.outdoor
+        } else {
+            ambient.indoor
+        };
+        let lookup = resources.lookup.lookup();
+        match shadow::select(
+            &lookup,
+            caster.anchor,
+            base,
+            0,
+            true,
+            self.shadow_candidates(),
+        ) {
+            Ok(masks) => (masks, None),
+            Err(invalid) => (
+                shadow::select(&lookup, caster.anchor, base, 0, false, [])
+                    .expect("ambient shadow selection"),
+                Some(invalid),
+            ),
+        }
+    }
+
     fn refresh_shades(&mut self, dirty: Option<[Option<RasterBounds>; 2]>) -> usize {
         let Some((ambient, reference)) = self.ambient else {
             return 0;
         };
         let mut shades = std::mem::take(&mut self.shades);
-        let mut emitters = Vec::new();
-        // CE adds object lights at the head of the owning sector's list.
-        for id in self.active.iter().rev() {
-            emitters.extend(
-                self.dynamic
-                    .iter()
-                    .rev()
-                    .filter(|light| {
-                        tile_sector_id(light.state.tile) == *id && self.light_active(light)
-                    })
-                    .map(|light| &light.mask),
-            );
-            emitters.extend(self.entries[id].0.emitters.iter().rev());
-        }
+        let emitters: Vec<_> = self.light_emitters().collect();
         let ambient_at = |tile| {
             if self.outdoor(tile) {
                 ambient.outdoor
@@ -909,6 +1139,7 @@ impl SectorCache {
             updated = shades.len();
         }
         self.shades = shades;
+        self.refresh_walk_shade();
         updated
     }
 
@@ -931,15 +1162,17 @@ impl SectorCache {
             )));
         }
         match raster.object_light {
-            ObjectLight::Point => {
-                PreparedShade::uniform(lighting::point(emitters, raster.anchor, base))
-            }
+            ObjectLight::Point => PreparedShade::uniform(lighting::point(
+                emitters.iter().copied(),
+                raster.anchor,
+                base,
+            )),
             ObjectLight::Portal(rotation) => {
                 let (sample_tile, offset) = lighting::portal_sample(tile, rotation);
                 let color = project_world_tile(sample_tile, reference)
                     .and_then(|(x, y)| Some((x.checked_add(offset)?, y.checked_sub(10)?)))
                     .map_or(base, |sample| {
-                        lighting::point(emitters, sample, ambient_at(sample_tile))
+                        lighting::point(emitters.iter().copied(), sample, ambient_at(sample_tile))
                     });
                 PreparedShade::uniform(color)
             }
@@ -1025,8 +1258,86 @@ impl SectorCache {
         let viewport = Viewport::new(camera.position(), size);
         self.animated
             .iter()
-            .filter_map(|&index| self.ordered[index].next_change(&viewport, elapsed, self.fidget))
+            .copied()
+            .filter(|index| {
+                self.walking.is_none()
+                    || Some(*index) != self.walk_subject.as_ref().map(|&(index, _)| index)
+            })
+            .filter_map(|index| self.ordered[index].next_change(&viewport, elapsed, self.fidget))
+            .chain(self.walk_delay(&viewport, elapsed))
             .min()
+    }
+
+    fn walk_delay(&self, viewport: &Viewport, elapsed: Duration) -> Option<Duration> {
+        let ((source, walk), start) = self.walk_subject.as_ref().zip(self.walk_start)?;
+        let original = &self.ordered[*source];
+        let index = walk.index(elapsed.saturating_sub(start));
+        if index + 1 == walk.steps.len() {
+            let moving = self.walking.as_ref()?;
+            return moving
+                .raster
+                .next_change(viewport, elapsed, moving.playback(self.fidget));
+        }
+        let visible = |&step: &WalkStep| {
+            let asset = walk
+                .asset(step)
+                .unwrap_or_else(|| match &original.animation {
+                    Some(RasterAnimation::Fidget(poses)) => {
+                        &poses.sequence(Some(step.direction)).frames[0]
+                    }
+                    _ => &original.frame,
+                });
+            let anchor = step.anchor;
+            if viewport.intersects(RasterBounds::new(SpriteDraw {
+                frame: &asset.decoded.frame,
+                anchor,
+            })) {
+                return true;
+            }
+            let (x, y) = (i64::from(anchor.0), i64::from(anchor.1));
+            if self.shadows_disabled
+                || !viewport.intersects(RasterBounds {
+                    min: (x - OVERHANG, y - OVERHANG),
+                    max: (x + OVERHANG, y + OVERHANG),
+                })
+            {
+                return false;
+            }
+            let Some(resources) = self.entries[&tile_sector_id(step.tile)]
+                .0
+                .mobile_shadows
+                .as_ref()
+            else {
+                return false;
+            };
+            let Some((ambient, _)) = self.ambient else {
+                return false;
+            };
+            let (masks, _) = self.caster_masks(
+                resources,
+                Caster {
+                    tile: step.tile,
+                    anchor,
+                },
+                ambient,
+            );
+            masks.into_iter().any(|mask| {
+                viewport.intersects(RasterBounds::new(SpriteDraw {
+                    frame: &resources.asset(mask).decoded.frame,
+                    anchor,
+                }))
+            })
+        };
+        let next = if visible(&walk.steps[index]) {
+            index + 1
+        } else {
+            index + 1 + walk.steps[index + 1..].iter().position(visible)?
+        };
+        Some(
+            start
+                .saturating_add(walk.deadline(next))
+                .saturating_sub(elapsed),
+        )
     }
 
     fn visible_assets(
@@ -1044,7 +1355,15 @@ impl SectorCache {
         viewport: Viewport,
         elapsed: Duration,
     ) -> impl Iterator<Item = WorldDraw<'_>> {
+        let replaced = self
+            .walking
+            .as_ref()
+            .and(self.walk_subject.as_ref())
+            .map(|&(source, _)| source);
         range.filter_map(move |index| {
+            if replaced == Some(index) {
+                return None;
+            }
             let raster = &self.ordered[index];
             let (asset, sprite) = raster.visible_at(&viewport, elapsed, self.fidget)?;
             let modulation = self.shades.get(index).map_or_else(
@@ -1073,12 +1392,27 @@ impl SectorCache {
         shadows: &'a [PreparedMask],
     ) -> impl Iterator<Item = WorldDraw<'a>> {
         let viewport = Viewport::new(camera.position(), size);
-        let split = if shadows.is_empty() {
+        let split = if shadows.is_empty() && self.walking.is_none() {
             self.ordered.len()
         } else {
             self.ordered
                 .partition_point(|raster| !raster.key.0 || !raster.key.1.0)
         };
+        let insertion = self
+            .walking
+            .as_ref()
+            .map_or(split, |moving| moving.insertion);
+        let moving = self.walking.as_ref().and_then(|moving| {
+            let (asset, sprite) =
+                moving
+                    .raster
+                    .visible_at(&viewport, elapsed, moving.playback(self.fidget))?;
+            Some(WorldDraw {
+                asset,
+                sprite,
+                modulation: moving.shade.modulation(),
+            })
+        });
         self.visible_rasters(0..split, viewport, elapsed)
             .chain(shadows.iter().filter_map(move |draw| {
                 let sprite = SpriteDraw {
@@ -1091,7 +1425,9 @@ impl SectorCache {
                     modulation: draw.mask.modulation(),
                 })
             }))
-            .chain(self.visible_rasters(split..self.ordered.len(), viewport, elapsed))
+            .chain(self.visible_rasters(split..insertion, viewport, elapsed))
+            .chain(moving)
+            .chain(self.visible_rasters(insertion..self.ordered.len(), viewport, elapsed))
     }
 
     fn visible_modulated(
@@ -1134,6 +1470,8 @@ impl WorldStream {
                 vfs,
                 frames: FrameCache::default(),
                 lighting: None,
+                walking: false,
+                audit: false,
             },
             cache: SectorCache::default(),
         })
@@ -1242,6 +1580,34 @@ impl WorldStream {
             return Err("light position is outside the world region");
         }
         self.cache.set_dynamic(slot, state)
+    }
+
+    /// Retain static raster provenance for headless inspection.
+    pub fn with_object_audit(mut self) -> Self {
+        self.loader.audit = true;
+        self
+    }
+
+    /// Prepare the authored rabbit walk in the loaded reference region.
+    pub fn with_walk_preview(mut self, start_at_epoch: bool) -> Result<Self, &'static str> {
+        if !self.cache.entries.is_empty() {
+            return Err("select the walk preview before loading a sector");
+        }
+        let Coordinates { x, y } =
+            Coordinates::from_id(mobile::RABBIT_SECTOR).expect("rabbit sector");
+        if !mobile::supports_walk(&self.loader.map, mobile::RABBIT_SECTOR)
+            || !(self.region.first.x..=self.region.last.x).contains(&x)
+            || !(self.region.first.y..=self.region.last.y).contains(&y)
+        {
+            return Err("walk preview requires the K'na Tha rabbit sector (6,12)");
+        }
+        self.loader.walking = true;
+        self.cache.walk_start = start_at_epoch.then_some(Duration::ZERO);
+        Ok(self)
+    }
+
+    pub fn update_walk(&mut self, elapsed: Duration) -> Option<WalkStatus> {
+        self.cache.update_walk(elapsed)
     }
 
     /// Start one original fidget at the shared animation epoch for deterministic previews.
@@ -1399,6 +1765,8 @@ struct SectorLoader {
     vfs: Vfs,
     frames: FrameCache,
     lighting: Option<(Ambient, LoadedMes)>,
+    walking: bool,
+    audit: bool,
 }
 
 impl SectorLoader {
@@ -1440,12 +1808,14 @@ impl SectorLoader {
                         id,
                         self.reference,
                         self.lighting.is_some(),
+                        self.walking,
                     )
                 });
                 self.frames.finish_sector();
                 timing.mobiles = start.elapsed();
                 let start = Instant::now();
-                let mut cached = CachedSector::from_room(id, room, self.reference, lights);
+                let mut cached =
+                    CachedSector::from_room(id, room, self.reference, lights, self.audit);
                 if let Some(mobiles) = mobiles {
                     cached.add_mobiles(mobiles, self.reference);
                 }
@@ -1540,6 +1910,147 @@ mod tests {
             }
             assert!(visible > 0);
         }
+    }
+
+    #[test]
+    fn walk_inserts_one_moving_draw_in_depth_order_and_preserves_other_deadlines() {
+        use crate::{
+            art::{DecodedFrame, SpriteFrame},
+            content::Source,
+            vfs::{Policy, Storage},
+        };
+        let mount_id = Vfs::new(Policy::Ordered).mount_directory(".").unwrap();
+        let asset = |name: &str| {
+            Arc::new(LoadedFrame {
+                source: Source {
+                    virtual_path: name.into(),
+                    mount_id,
+                    mount_path: ".".into(),
+                    loose_path: None,
+                    storage: Storage::Loose,
+                    mod_id: None,
+                },
+                decoded: DecodedFrame {
+                    frame: SpriteFrame {
+                        width: 3,
+                        height: 3,
+                        hotspot: (1, 2),
+                        offset: (0, 0),
+                        pixels: vec![
+                            if name == "scenery" {
+                                [7, 91, 16, 255]
+                            } else {
+                                [31, 20, 10, 255]
+                            };
+                            9
+                        ],
+                    },
+                    frame_count: 1,
+                    rotation_count: 1,
+                    stored_rotation: 0,
+                    stored_palette: 0,
+                    palette_key: [0; 3],
+                    frames_per_second: 10,
+                    action_frame: 0,
+                    ignored_trailing_bytes: 0,
+                },
+                input_bytes: 0,
+            })
+        };
+        let tile = (34, 32);
+        let camera = Camera::rectangle(tile, (0, 0), (64, 64)).unwrap();
+        let size = (320, 240);
+        let standing = asset("stand");
+        let walk = Arc::new(Walk::fixture(tile, &asset("walk")));
+        let retained = Arc::downgrade(&walk);
+        let key = (true, super::super::scenery::order(tile, (0, 0), false, 0));
+        let fidget = Arc::new(DirectionalFidget::fixture(std::array::from_fn(|_| {
+            FrameLoop::new(vec![Arc::clone(&standing), asset("fidget")], 10).unwrap()
+        })));
+        let mut rabbit = Raster::new(key, &standing, (0, 0));
+        rabbit.set_fidget(fidget);
+        let mut flame = Raster::new(
+            (
+                true,
+                super::super::scenery::order((34, 33), (0, 0), false, 1),
+            ),
+            &asset("flame"),
+            (40, 20),
+        );
+        flame.set_animation(
+            &Arc::new(FrameLoop::new(vec![asset("flame0"), asset("flame1")], 11).unwrap()),
+            0,
+        );
+        flame.object_light = ObjectLight::Additive;
+        let scenery = Raster::new(
+            (
+                true,
+                super::super::scenery::order((34, 33), (4, 2), false, 2),
+            ),
+            &asset("scenery"),
+            (44, 22),
+        );
+        let mut cache = SectorCache::default();
+        let mut sector = CachedSector::missing(0, String::new());
+        sector.draws = vec![rabbit, flame, scenery];
+        sector.walk = Some((key, walk));
+        cache.entries.insert(0, (sector, None));
+        cache.activate(&[0]);
+        assert!(cache.start_fidget(Duration::ZERO));
+        assert!(cache.start_walk(Duration::ZERO));
+        cache.update_walk(Duration::ZERO);
+        assert_eq!(
+            cache.animation_delay(&camera, size, Duration::ZERO),
+            Some(Duration::from_millis(41))
+        );
+        let tick = Duration::from_millis(246);
+        let pose = cache.update_walk(tick).unwrap();
+        assert_eq!(pose.anchor, (43, 22));
+        let ordered: Vec<_> = cache
+            .visible_assets(&camera, size, tick)
+            .map(|draw| (draw.asset.source.virtual_path.as_str(), draw.sprite.anchor))
+            .collect();
+        assert_eq!(
+            ordered,
+            [
+                ("flame0", (200, 140)),
+                ("walk", (203, 142)),
+                ("scenery", (204, 142))
+            ]
+        );
+        assert_eq!(
+            cache.animation_delay(&camera, size, tick),
+            Some(Duration::from_millis(24))
+        );
+        let mut pixels = vec![[0; 3]; (size.0 * size.1) as usize];
+        crate::compositor::blit_modulated(
+            &mut pixels,
+            size,
+            size.0 as usize,
+            cache.visible_modulated(&camera, size, tick),
+        )
+        .unwrap();
+        assert_eq!(pixels[141 * 320 + 202], [31, 20, 10]);
+        assert_eq!(pixels[141 * 320 + 203], [7, 91, 16]);
+        assert_eq!(cache.update_walk(tick), None);
+        assert_eq!(cache.fidget.start, Some(Duration::ZERO));
+        let mut away = camera.clone();
+        away.pan((-1000, 0), size);
+        assert_eq!(cache.animation_delay(&away, size, tick), None);
+        cache.activate(&[]);
+        assert!(retained.upgrade().is_some());
+        cache.activate(&[0]);
+        assert_eq!(cache.update_walk(tick), Some(pose));
+        let stop = Duration::from_millis(943);
+        assert_eq!(cache.update_walk(stop).unwrap().frame, None);
+        assert!(cache.start_fidget(stop));
+        assert!(cache.turn_fidget(1).is_some());
+        assert!(cache.reset_walk());
+        cache.update_walk(stop);
+        assert!(cache.walking.is_none());
+        cache.activate(&[]);
+        assert!(cache.evict(1, &[], false));
+        assert!(retained.upgrade().is_none());
     }
 
     #[test]

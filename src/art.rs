@@ -111,11 +111,11 @@ pub fn decode_direction(
     }
     let header = section(input, 0, HEADER_BYTES, "header")?;
     let rotation_count = match word(header, 0) {
-        0 => 8,
+        0 | 0x02 => 8,
         0x01 | 0x09 => 1,
         _ => {
             return Err(Error::Unsupported(
-                "expected verified ART flags 0x00, 0x01 or 0x09",
+                "expected verified ART flags 0x00, 0x01, 0x02 or 0x09",
             ));
         }
     };

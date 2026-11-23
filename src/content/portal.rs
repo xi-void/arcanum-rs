@@ -87,9 +87,8 @@ impl PortalArt {
         if self.kind == Kind::Door && !self.damaged {
             match (self.frame, self.rotation, self.palette, self.mirror_x) {
                 (0, 1, 0, false) | (0, 7, 1, true) => return Ok(PortalState::Closed),
-                // Rotation 5 uses the 1–3 opening sequence. Only its fully open
-                // endpoint with the observed palette and orientation is verified.
-                (3, 5, 0, false) => return Ok(PortalState::Open),
+                // Rotations 3 and 5 use the 1–3 opening sequence.
+                (3, 3, 1, true) | (3, 5, 0, false) => return Ok(PortalState::Open),
                 _ => {}
             }
         }
@@ -278,6 +277,9 @@ mod tests {
         let open = PortalArt::decode(0x3178_ec00).unwrap();
         assert_eq!((open.frame, open.rotation), (3, 5));
         assert_eq!(open.visual_state().unwrap(), PortalState::Open);
+        let mirrored = PortalArt::decode(0x3348_dc11).unwrap();
+        assert!(mirrored.mirror_x);
+        assert_eq!(mirrored.visual_state().unwrap(), PortalState::Open);
         for unsupported in [
             0x3178_6c00,
             0x3178_ac00,

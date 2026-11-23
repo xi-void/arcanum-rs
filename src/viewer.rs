@@ -474,6 +474,15 @@ impl ApplicationHandler for Viewer<'_> {
                     } = &mut self.content
                 {
                     let handled = match key.as_str() {
+                        "w" if animation_ms.is_none() && !event.repeat => {
+                            let size = view.window.inner_size();
+                            world.start_walk(
+                                camera,
+                                (size.width, size.height),
+                                self.epoch.elapsed(),
+                            )
+                        }
+                        "r" if animation_ms.is_none() && !event.repeat => world.reset_walk(),
                         "f" if animation_ms.is_none() && !event.repeat => {
                             let sampled = Instant::now();
                             let elapsed = sampled.duration_since(self.epoch);
@@ -652,6 +661,15 @@ impl WindowSurface {
             // Keep the last complete buffer visible while the worker prepares
             // the destination. The completion event drives the next redraw.
             return Ok(false);
+        }
+        let start = trace.then(Instant::now);
+        let pose = world.update_walk(elapsed);
+        if let (Some(start), Some(pose)) = (start, pose) {
+            eprintln!(
+                "Walk at {}ms {pose:?}, update {:?}",
+                elapsed.as_millis(),
+                start.elapsed()
+            );
         }
         #[cfg(feature = "gpu")]
         if let Presentation::Gpu(renderer) = &mut self.backend {

@@ -1647,3 +1647,287 @@ fn original_static_light_masks_modulate_the_scene_without_moving_rasters() {
         assert_eq!(after.light_samples, before.light_samples);
     }
 }
+
+#[test]
+#[ignore = "requires installed Arcanum data"]
+fn kna_tha_rabbit_sector_retains_building_objects_after_the_locked_portal() {
+    use arcanum_rs::{
+        content::{
+            load_mes,
+            portal::{PortalArt, PortalState},
+            world::{SectorRegion, WorldStream},
+        },
+        sector::{Coordinates, decode_floor, objects},
+    };
+
+    let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+    let mut vfs = Vfs::from_game(game, Policy::Ce).unwrap();
+    let path = "maps/k'na tha/805306374.sec";
+    assert!(vfs.resolve(path).unwrap().winner().unwrap().size < 80_000);
+    let mut bytes = Vec::new();
+    vfs.copy(path, &mut bytes).unwrap();
+    let floor = decode_floor(&bytes).unwrap();
+    assert_eq!(floor.tile_offset, 100);
+    assert_eq!(&bytes[16_484..16_488], &1u32.to_le_bytes());
+    assert_eq!(floor.ids().filter(|tile| tile.0 >> 28 != 0).count(), 0);
+    let names = load_mes(&mut vfs, "art/tile/tilename.mes").unwrap();
+    let tile = floor.tile(22, 14).unwrap();
+    assert_eq!(tile, TileArtId(0x028a_0400));
+    let floor_art = tile.resolve(&names.mes).unwrap();
+    assert_eq!(floor_art.path, "art/tile/stdbse0c.art");
+    assert!(!floor_art.fields.outdoor);
+    let road = floor.tile(21, 20).unwrap().resolve(&names.mes).unwrap();
+    assert_eq!(road.families, ["ts1", "ts1"]);
+    assert_eq!(road.path, "art/tile/ts1bse0a.art");
+
+    let objects = objects::decode(&bytes).unwrap();
+    assert_eq!((objects.start, objects.count), (17_044, 653));
+    assert_eq!(
+        (
+            objects.walls.len(),
+            objects.scenery_count,
+            objects.portals.len()
+        ),
+        (251, 400, 2)
+    );
+    let portal = objects
+        .portals
+        .iter()
+        .find(|record| record.index == 558)
+        .unwrap();
+    assert_eq!(portal.span, 67_710..67_801);
+    assert_eq!(portal.prototype.0, 2029);
+    assert_eq!(portal.stored_tile, (395, 826));
+    assert_eq!(portal.art_id, 0x3348_3c11);
+    assert_eq!(portal.fields.portal_flags, Some(0x11));
+    assert_eq!(&bytes[67_797..67_801], &100u32.to_le_bytes());
+    let next_wall = objects
+        .walls
+        .iter()
+        .find(|record| record.index == 559)
+        .unwrap();
+    assert_eq!(next_wall.span.start, portal.span.end);
+
+    let north_door = objects
+        .portals
+        .iter()
+        .find(|record| record.index == 202)
+        .unwrap();
+    assert_eq!(north_door.stored_tile, (406, 786));
+    assert_eq!(
+        PortalArt::decode(north_door.art_id)
+            .unwrap()
+            .visual_state()
+            .unwrap(),
+        PortalState::Open
+    );
+    let sector = Coordinates { x: 6, y: 12 };
+    let region = SectorRegion {
+        first: sector,
+        last: sector,
+    };
+    let center = (406, 782);
+    let size = (1280, 720);
+    let camera = region.camera(center).unwrap();
+    let mut world = WorldStream::new(vfs, "k'na tha".into(), region, center)
+        .unwrap()
+        .with_object_audit();
+    world.prepare(&camera, size).unwrap();
+    let report = world.reports().next().unwrap();
+    assert!(!report.object_list_failed);
+    assert_eq!(report.original_object_counts, (251, 2, 400));
+    assert_eq!(report.object_raster_rejections, 0);
+    assert_eq!(report.object_audit.len(), 653);
+    assert!(
+        report
+            .object_audit
+            .iter()
+            .any(|line| { line.starts_with("record 558 Portal") && line.contains("dg2e3au0.art") })
+    );
+    assert_eq!(
+        (
+            report.surfaces,
+            report.wall_count,
+            report.portal_count,
+            report.scenery_count
+        ),
+        (4096, 251, 2, 400),
+        "{:?}",
+        report.diagnostics
+    );
+    let draws = world
+        .visible_assets(&camera, size)
+        .map(|draw| draw.asset.source.virtual_path.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for path in [
+        "art/wall/dg2w3au0.art",
+        "art/wall/dg2w4bu0.art",
+        "art/portal/dg2e3au0.art",
+    ] {
+        assert!(draws.contains(path), "{path} missing from the north scene");
+    }
+}
+
+#[test]
+#[ignore = "requires installed Arcanum data"]
+fn tulla_is_reconstructed_from_map_metadata_and_generic_sector_import() {
+    use arcanum_rs::{
+        content::{
+            load_mes,
+            world::{SectorRegion, WorldStream},
+        },
+        sector::{Coordinates, objects},
+    };
+
+    let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+    let mut vfs = Vfs::from_game(game, Policy::Ce).unwrap();
+    let maps = load_mes(&mut vfs, "rules/maplist.mes").unwrap();
+    let (map, cx, cy) = maps
+        .mes
+        .entries()
+        .find_map(|(_, value)| {
+            let mut fields = value.split(',').map(str::trim);
+            let map = fields.next()?;
+            if !map.eq_ignore_ascii_case("Tulla Interior") {
+                return None;
+            }
+            Some((
+                map.to_ascii_lowercase(),
+                fields.next()?.parse::<u32>().ok()?,
+                fields.next()?.parse::<u32>().ok()?,
+            ))
+        })
+        .expect("Tulla map metadata");
+    let mut start = Vec::new();
+    vfs.copy(&format!("maps/{map}/startloc.txt"), &mut start)
+        .unwrap();
+    let mut words = std::str::from_utf8(&start)
+        .unwrap()
+        .split_ascii_whitespace();
+    let sx: u32 = words.next().unwrap().parse().unwrap();
+    let sy: u32 = words.next().unwrap().parse().unwrap();
+    let sector = |x, y| Coordinates { x, y };
+    let region = SectorRegion {
+        first: sector(cx.min(sx) / 64, cy.min(sy) / 64),
+        last: sector(cx.max(sx) / 64, cy.max(sy) / 64),
+    };
+    let mut raw_counts = std::collections::BTreeMap::new();
+    for y in region.first.y..=region.last.y {
+        for x in region.first.x..=region.last.x {
+            let id = sector(x, y).id().unwrap();
+            let mut bytes = Vec::new();
+            vfs.copy(&format!("maps/{map}/{id}.sec"), &mut bytes)
+                .unwrap();
+            let objects = objects::decode(&bytes).unwrap();
+            let counts = (
+                objects.walls.len(),
+                objects.portal_count,
+                objects.scenery_count,
+            );
+            assert_eq!(objects.count, counts.0 + counts.1 + counts.2);
+            raw_counts.insert(id, counts);
+        }
+    }
+    let center = (cx, cy);
+    let size = (1280, 720);
+    let camera = region.camera(center).unwrap();
+    let mut world = WorldStream::new(vfs, map, region, center)
+        .unwrap()
+        .with_object_audit();
+    world.prepare(&camera, size).unwrap();
+    let mut retained = Vec::new();
+    for report in world.reports() {
+        assert!(!report.object_list_failed, "{:?}", report.diagnostics);
+        assert_eq!(report.original_object_counts, raw_counts[&report.id]);
+        assert_eq!(report.surfaces, 4096);
+        assert_eq!(report.object_raster_rejections, 0);
+        let (walls, portals, scenery) = report.original_object_counts;
+        let imported = report.wall_count + report.portal_count + report.scenery_count;
+        assert_eq!(report.object_audit.len(), imported);
+        assert_eq!(
+            report
+                .diagnostics
+                .iter()
+                .filter(|line| line.starts_with("record "))
+                .count(),
+            walls + portals + scenery - imported
+        );
+        let (submitted, clipped) = world.object_visibility(report.id, &camera, size).unwrap();
+        assert_eq!(submitted + clipped, imported);
+        retained.push((
+            report.facades,
+            report.wall_count,
+            report.portal_count,
+            report.scenery_count,
+        ));
+    }
+    assert_eq!(retained, [(407, 331, 5, 50), (1111, 650, 5, 53)]);
+    let visible = world
+        .visible_assets(&camera, size)
+        .map(|draw| draw.asset.source.virtual_path.as_str())
+        .collect::<Vec<_>>();
+    for category in ["art/tile/", "art/wall/", "art/portal/", "art/scenery/"] {
+        assert!(
+            visible.iter().any(|path| path.starts_with(category)),
+            "{category}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires installed Arcanum data"]
+fn kna_tha_south_sector_preserves_geometry_across_the_floor_boundary() {
+    use arcanum_rs::{
+        content::world::{SectorRegion, WorldStream},
+        sector::{Coordinates, objects},
+    };
+    let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+    let mut vfs = Vfs::from_game(game, Policy::Ce).unwrap();
+    let north = Coordinates { x: 6, y: 12 };
+    let south = Coordinates { x: 6, y: 13 };
+    let id = south.id().unwrap();
+    let mut bytes = Vec::new();
+    vfs.copy(&format!("maps/k'na tha/{id}.sec"), &mut bytes)
+        .unwrap();
+    let original = objects::decode(&bytes).unwrap();
+    assert_eq!(
+        (
+            original.count,
+            original.walls.len(),
+            original.scenery_count,
+            original.portal_count
+        ),
+        (824, 373, 447, 4)
+    );
+    let scenery = original
+        .scenery
+        .iter()
+        .find(|record| record.index == 720)
+        .unwrap();
+    assert_eq!(scenery.span, 82_640..82_743);
+    assert_eq!(scenery.prototype.0, 4038);
+    assert_eq!(scenery.stored_tile, (434, 885));
+    assert_eq!(
+        &bytes[scenery.span.end - 4..scenery.span.end],
+        &25u32.to_le_bytes()
+    );
+
+    let region = SectorRegion {
+        first: north,
+        last: south,
+    };
+    let center = (396, 829);
+    let size = (1280, 720);
+    let mut camera = region.camera(center).unwrap();
+    camera.resize(size);
+    let mut world = WorldStream::new(vfs, "k'na tha".into(), region, center).unwrap();
+    world.prepare(&camera, size).unwrap();
+    let report = world.reports().find(|report| report.id == id).unwrap();
+    assert!(!report.object_list_failed);
+    assert_eq!(
+        (report.wall_count, report.scenery_count, report.portal_count),
+        (373, 447, 4)
+    );
+    assert_eq!(report.object_raster_rejections, 0);
+    assert_eq!(world.object_visibility(id, &camera, size), Some((53, 771)));
+}

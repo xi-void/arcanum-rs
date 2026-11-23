@@ -141,3 +141,144 @@ Warm Vulkan playback incurred zero uploads. The warm animation
 and light route did not read sectors or VFS resources or decode
 ART again. i915 reported 62,552 KiB (61.1 MiB) graphics residency,
 including presentation and driver allocations.
+
+## Original walking playback
+
+Use the same K'na Tha sector command above with `--walk`. The viewer
+prepares the route while loading the sector and opens in the serialized
+standing pose. **W** starts the walk and **R** resets to the original
+tile and enables another replay. Pressing W during or after a route
+keeps its progress until reset. With `--walk --animation-ms <ms>`,
+the same route starts at the fixed clock epoch and shows its state at
+that timestamp. The camera, light, shadow and fidget controls retain
+their bindings. While the rabbit is walking, fidget and turn input
+cannot override its current walk pose. The stopped rabbit can fidget or
+turn at its final position.
+
+### Source and route
+
+CE's `AGbeginAnimMove` selects WALK (ART animation ID 1), sets the
+first path rotation and starts frame zero. The rabbit's original
+prototype and mobile have the same identity, position, palette and
+shadow described above. `name_resolve_path` combines BUN, unarmored
+`uw`, shield-free `x`, weapon-free `a` and WALK `b` to resolve
+`art/monster/bun/bunuwxab.art`. The winning `Arcanum1.dat` resource
+has flags `0x02`, six frames in each of eight directions, four
+palettes and an 8 fps header. This walk uses palette 1. Frame zero
+in direction 3 has hotspot (23,29), mirrored from the stored
+rotation 5. Direction 5 uses that rotation directly. Reflection
+negates the incoming X offset and reflects the hotspot across the
+frame width. Palette index zero is transparent.
+
+In the installed base prototype, version 119 sparse field
+`OBJ_F_CRITTER_STAT_BASE_IDX` supplies Dexterity 17 at logical
+index 1. The mobile does not override that entry. For this
+unmodified rabbit, CE's `stat_base_get` and `stat_level_get` yield
+Speed 17. `sub_437990` computes
+`17 + 17 × (30 − 17) / 30 = 24` with integer division for an
+ordinary monster walk. `sub_42EE90` uses integer `1000 / 24`
+and its 30–800 ms clamp, giving **41 ms** between frames. The
+header's 8 fps would correspond to 125 ms and is not this
+mobile's effective movement interval.
+
+`object_inc_current_aid` applies the *incoming* frame's signed
+offset. `location_normalize` converts the projected pixel point
+back into a tile plus a pixel remainder while preserving its
+projected position. Tile origins use the existing
+`(40 × (Δy − Δx), 20 × (Δy + Δx))` transform. CE tests for
+arrival at the next tile's center on subsequent frames. At a
+turn it clears the remainder and rotates the ART ID saved
+before the increment. At the end it restores STAND frame zero
+with the final rotation and clears the remainder. The preview
+uses the same steps and center corrections. It has no
+interpolation between authored frames.
+
+The diagnostic path is CE rotations **3, 3, 3, 5** relative to
+the original spawn, or three Y+ steps and one X+ step. It remains
+within source sector 805306374 (6,12). It assumes those outdoor
+floor cells are clear for this preview. Gameplay collision,
+pathfinding, terrain effects and NPC decisions are outside this
+test. No scenery is moved or added.
+
+| Time | Tile | Pixel remainder | Anchor relative to (420,814) | Pose |
+| ---: | --- | --- | --- | --- |
+| 0 ms | (420,814) | (0,0) | (0,0) | WALK 3 frame 0 |
+| 164 ms | (420,815) | (−18,−8) | (22,12) | WALK 3 frame 4 |
+| 246 ms | (420,815) | (3,2) | (43,22) | WALK 3 frame 0 |
+| 697 ms | (420,817) | (0,0) | (120,60) | WALK 5 frame 4 |
+| 820 ms | (421,817) | (14,−7) | (94,73) | WALK 5 frame 1 |
+| 943 ms | (421,817) | (0,0) | (80,80) | STAND 5 frame 0 |
+
+The existing world draw key is recomputed from the normalized
+tile and pixel offsets. The moving draw joins the shared ordered
+upright pass, using the selected frame's hotspot and actual
+bounds. The original shadow bank, eligible-light lookup and
+subtractive pass use the same moving world anchor. The shadow
+selection takes the anchor, light state and ambient scheme and
+has no critter animation frame or facing input. The route
+resamples point tint and shadow choices at each changed step.
+Light edits update those choices without restarting playback.
+The worker prepares the 12 directional walk frame instances
+through the existing cache. A backend may upload a texture
+when first encountered. Warm playback reuses it.
+
+The route is sampled on the existing viewer clock. Only visible
+sprite or shadow changes add walk redraw deadlines. Flame
+deadlines still compete independently. The rabbit and Bates
+fireplaces are on different original maps. A synthetic scene
+tests concurrent deadlines and a late fidget after stopping.
+
+### Verification
+
+The native captures show the serialized stand, both walk facings,
+an intermediate position and the final stand. At 246 ms the
+original shadow changes 1,184 pixels when toggled. CPU and Vulkan
+captures match exactly at the sampled timestamps, after panning and
+resizing, and after returning Home. OpenGL is also checked at the
+turn timestamp. Original geometry outside the changing mobile and
+shadow footprint is pixel-identical.
+
+The available CE captures do not reproduce this rabbit's diagnostic
+route at known timestamps. The numeric comparison is against the
+original mobile, prototype, ART records and the cited CE movement
+functions. The original walking benchmark ran before the adjacent
+scenery was restored by the [generic sector
+audit](MULTI_SECTOR_WORLD.md#milestone-51-generic-reconstruction-audit).
+Occlusion against adjacent
+scenery is covered by a portable overlap fixture that checks both
+draw order and final pixel colors. A separate live Bates run checks
+the original fireplaces. Synthetic and hardware fixtures cover
+the independent animation deadlines and lighting updates without
+requiring that the same camera see two different original maps.
+
+### ThinkPad X270 measurements
+
+The release viewer ran at 1280×720 on the i5-6300U and Intel HD
+Graphics 520 under native Wayland, with Mesa 26.2.5. Each backend
+warmed the route once, then timed seven live routes and resets
+with a loaded diagnostic light. Each sample contained 168 walk
+poses and 175 rendered frames. A separate headless probe measured
+4,800 warm selections without a diagnostic emitter. Its median
+traversal of the visible draw stream was 30.78 µs. The single
+moving draw's insertion, retint and shadow refresh took 0.45 µs
+median in that probe. The original walk bank took 0.24 ms to
+prepare in the same run and added 39,352 bytes of RGBA pixels.
+
+| Wayland measurement | Median | p95 | Maximum |
+| --- | ---: | ---: | ---: |
+| CPU walking update | 6.57 µs | 10.86 µs | 28.09 µs |
+| Vulkan host walking update | 6.86 µs | 19.35 µs | 35.93 µs |
+| CPU composition | 7.63 ms | 23.03 ms | 49.24 ms |
+| Vulkan command preparation | 0.158 ms | 0.250 ms | 1.859 ms |
+| Vulkan sprite pass timestamp | 0.738 ms | 1.583 ms | 1.694 ms |
+| Vulkan traced frame completion | 2.67 ms | 5.07 ms | 12.77 ms |
+
+Host submission and the Vulkan presentation call took 0.162 ms and
+0.193 ms median. Completion includes host work and a traced GPU
+completion wait. Physical scanout time is outside the measurement.
+The i915 graphics resident counter was 62,552 KiB after replay.
+All 24 states were drawn in each timed replay. Warm routes and
+light moves did no sector reads, VFS reads or ART decodes. GPU
+replays uploaded zero textures after warming. Three-second
+Wayland checks after stopping, resetting and starting an entirely
+offscreen walk submitted zero additional buffers on both backends.
