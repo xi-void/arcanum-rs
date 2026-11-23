@@ -5,9 +5,11 @@ use arcanum_rs::art::SpriteFrame;
 
 #[cfg(feature = "gpu")]
 mod gpu;
+mod menu;
 use arcanum_rs::camera::{Camera, CameraScene};
 use arcanum_rs::compositor::{Modulation, SpriteDraw, blit_modulated};
-use arcanum_rs::content::world::{InteractiveWorld, WorldStream};
+use arcanum_rs::content::world::{Destination, DoorStates, InteractiveWorld, WorldStream};
+use menu::{Command as MenuCommand, Menu, Settings};
 use softbuffer::{Context, Surface};
 use std::{
     num::NonZeroU32,
@@ -16,8 +18,10 @@ use std::{
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize, Size};
-use winit::event::{ElementState, MouseButton, StartCause, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
+use winit::event_loop::{
+    ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy, OwnedDisplayHandle,
+};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
@@ -133,11 +137,23 @@ pub fn show_camera(
     )
 }
 
-pub struct StreamOptions {
+pub type TravelLoader<'a> = Box<
+    dyn Fn(&str, Destination, u8, (u32, u32)) -> Result<(String, WorldStream, Camera), String> + 'a,
+>;
+
+struct Travel<'a> {
+    map: String,
+    loader: TravelLoader<'a>,
+    wake: EventLoopProxy<()>,
+    doors: std::collections::BTreeMap<String, DoorStates>,
+}
+
+pub struct StreamOptions<'a> {
     pub trace: bool,
     pub renderer: RenderBackend,
     pub animation_ms: Option<u64>,
     pub explore: bool,
+    pub travel: Option<(String, TravelLoader<'a>)>,
 }
 
 pub fn show_stream(
@@ -145,13 +161,14 @@ pub fn show_stream(
     world: WorldStream,
     mut camera: Camera,
     size: (u32, u32),
-    options: StreamOptions,
+    options: StreamOptions<'_>,
 ) -> Result<(), String> {
     let StreamOptions {
         trace,
         renderer,
         animation_ms,
         explore,
+        travel,
     } = options;
     #[cfg(not(feature = "gpu"))]
     if renderer != RenderBackend::Cpu {
@@ -159,6 +176,12 @@ pub fn show_stream(
     }
     let event_loop = make_loop()?;
     let proxy = event_loop.create_proxy();
+    let travel = travel.map(|(map, loader)| Travel {
+        map,
+        loader,
+        wake: proxy.clone(),
+        doors: std::collections::BTreeMap::new(),
+    });
     let world = world
         .into_interactive(
             move || {
@@ -177,10 +200,12 @@ pub fn show_stream(
             direction: (0, 0),
             last_presented: None,
             last_viewport: (0, 0),
+            last_zoom: 1,
             waiting: false,
             explore,
             trace,
             animation_ms,
+            travel,
         },
         PhysicalSize::<u32>::from(size).into(),
         event_loop,
@@ -197,10 +222,12 @@ enum ViewContent<'a> {
         direction: (i32, i32),
         last_presented: Option<Camera>,
         last_viewport: (u32, u32),
+        last_zoom: u8,
         waiting: bool,
         explore: bool,
         trace: bool,
         animation_ms: Option<u64>,
+        travel: Option<Travel<'a>>,
     },
     World {
         scene: &'a CameraScene<'a>,
@@ -244,6 +271,9 @@ fn run_content(
         navigation: Navigation::default(),
         player_deadline: None,
         cursor: None,
+        settings: Settings::default(),
+        pause: None,
+        paused_for: Duration::ZERO,
     };
     event_loop
         .run_app(&mut app)
@@ -267,6 +297,9 @@ struct Viewer<'a> {
     navigation: Navigation,
     player_deadline: Option<Instant>,
     cursor: Option<(u32, u32)>,
+    settings: Settings,
+    pause: Option<(Menu, Instant)>,
+    paused_for: Duration,
 }
 
 const CAMERA_TICK: Duration = Duration::from_millis(16);
@@ -372,6 +405,34 @@ struct CpuSurface {
 impl Viewer<'_> {
     fn schedule_animation(&mut self, event_loop: &ActiveEventLoop, deadline: Option<Instant>) {
         self.animation_deadline = deadline;
+        self.update_control_flow(event_loop);
+    }
+
+    fn play_elapsed(&self, now: Instant) -> Duration {
+        self.pause
+            .as_ref()
+            .map_or(now, |(_, paused)| *paused)
+            .saturating_duration_since(self.epoch)
+            .saturating_sub(self.paused_for)
+    }
+
+    fn menu_action(&mut self, command: MenuCommand, event_loop: &ActiveEventLoop) {
+        match command {
+            MenuCommand::Continue => {
+                if let Some((_, paused)) = self.pause.take() {
+                    self.paused_for += paused.elapsed();
+                }
+                if matches!(&self.content, ViewContent::Stream { world, .. } if world.player_moving())
+                {
+                    self.player_deadline = Some(Instant::now());
+                }
+            }
+            MenuCommand::Quit => event_loop.exit(),
+            MenuCommand::Stay => {}
+        }
+        if let Some(view) = &self.view {
+            view.window.request_redraw();
+        }
         self.update_control_flow(event_loop);
     }
 
@@ -502,6 +563,10 @@ impl ApplicationHandler for Viewer<'_> {
             return;
         }
         let now = Instant::now();
+        if self.pause.is_some() {
+            return;
+        }
+        let elapsed = self.play_elapsed(now);
         let mut redraw = self
             .animation_deadline
             .is_some_and(|deadline| now >= deadline);
@@ -515,6 +580,9 @@ impl ApplicationHandler for Viewer<'_> {
                 shift,
                 direction,
                 waiting,
+                trace,
+                last_presented,
+                travel,
                 ..
             } = &mut self.content
             {
@@ -525,14 +593,73 @@ impl ApplicationHandler for Viewer<'_> {
                             let before = camera.position();
                             redraw |= world.move_player(
                                 input,
-                                *shift,
-                                now.duration_since(self.epoch),
+                                *shift ^ self.settings.run,
+                                elapsed,
                                 camera,
                             );
                             let after = camera.position();
                             if before != after {
                                 *direction = (after.0 - before.0, after.1 - before.1);
                             }
+                        }
+                        if let Some((target, facing)) = world.take_transition() {
+                            world.cancel_player_route();
+                            if let Some(travel) = travel {
+                                let size = view.window.inner_size();
+                                let loaded = (travel.loader)(
+                                    &travel.map,
+                                    target,
+                                    facing,
+                                    (size.width, size.height),
+                                )
+                                .and_then(
+                                    |(map, next, next_camera)| {
+                                        let wake = travel.wake.clone();
+                                        let next = next
+                                            .into_interactive(
+                                                move || {
+                                                    let _ = wake.send_event(());
+                                                },
+                                                *trace,
+                                            )
+                                            .map_err(|error| error.to_string())?;
+                                        Ok((map, next, next_camera))
+                                    },
+                                );
+                                match loaded {
+                                    Ok((map, mut next, next_camera)) => {
+                                        eprintln!("Entered {map} at {:?}", target.tile);
+                                        view.window.set_title(&format!("Arcanum-RS | {map} play"));
+                                        travel
+                                            .doors
+                                            .insert(travel.map.clone(), world.take_door_states());
+                                        if let Some(states) = travel.doors.remove(&map) {
+                                            next.restore_door_states(states);
+                                        }
+                                        travel.map = map;
+                                        **world = next;
+                                        *camera = next_camera;
+                                        *last_presented = None;
+                                        *waiting = false;
+                                        *direction = (0, 0);
+                                        self.navigation = Navigation::default();
+                                        self.player_deadline = None;
+                                        view.window.request_redraw();
+                                        self.update_control_flow(event_loop);
+                                        return;
+                                    }
+                                    Err(error) => {
+                                        eprintln!("Cannot travel to {target:?}: {error}");
+                                        view.window.set_title(&format!(
+                                            "Arcanum-RS | Travel unavailable: {error}"
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(message) = world.take_notice() {
+                            eprintln!("{message}");
+                            view.window.set_title(&format!("Arcanum-RS | {message}"));
                         }
                         self.player_deadline = (!view.occluded
                             && (input != (0, 0) || world.player_moving()))
@@ -595,6 +722,101 @@ impl ApplicationHandler for Viewer<'_> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if self.view.as_ref().is_none_or(|view| view.window.id() != id) {
+            return;
+        }
+        let playing = matches!(&self.content, ViewContent::Stream { world, .. } if world.playing());
+        let elapsed = self.play_elapsed(Instant::now());
+        if playing {
+            match &event {
+                WindowEvent::CursorMoved { position, .. } => {
+                    self.cursor = (position.x >= 0. && position.y >= 0.)
+                        .then_some((position.x as u32, position.y as u32));
+                }
+                WindowEvent::CursorLeft { .. } => self.cursor = None,
+                WindowEvent::KeyboardInput {
+                    event,
+                    is_synthetic: false,
+                    ..
+                } if event.state.is_pressed()
+                    && !event.repeat
+                    && event.logical_key == Key::Named(NamedKey::Escape) =>
+                {
+                    if let Some((menu, _)) = &mut self.pause {
+                        let command = menu.back();
+                        self.menu_action(command, event_loop);
+                    } else {
+                        if let ViewContent::Stream { world, shift, .. } = &mut self.content {
+                            world.cancel_player_route();
+                            *shift = false;
+                        }
+                        self.navigation = Navigation::default();
+                        self.player_deadline = None;
+                        self.animation_deadline = None;
+                        self.pause = Some((Menu::new(), Instant::now()));
+                        self.menu_action(MenuCommand::Stay, event_loop);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+            if let Some((menu, _)) = &mut self.pause {
+                let command = match &event {
+                    WindowEvent::KeyboardInput { event, .. } => {
+                        if !event.state.is_pressed() || event.repeat {
+                            return;
+                        }
+                        match event.logical_key {
+                            Key::Named(NamedKey::ArrowUp) => {
+                                menu.adjust(-1);
+                                MenuCommand::Stay
+                            }
+                            Key::Named(NamedKey::ArrowDown) => {
+                                menu.adjust(1);
+                                MenuCommand::Stay
+                            }
+                            Key::Named(NamedKey::Enter) => menu.activate(&mut self.settings),
+                            _ => return,
+                        }
+                    }
+                    WindowEvent::MouseInput {
+                        state: ElementState::Pressed,
+                        button: MouseButton::Left,
+                        ..
+                    } => {
+                        let Some(cursor) = self.cursor else { return };
+                        let size = self.view.as_ref().unwrap().window.inner_size();
+                        let scale = u32::from(self.settings.zoom);
+                        menu.click(
+                            (cursor.0 / scale, cursor.1 / scale),
+                            logical_size(size, self.settings.zoom),
+                            &mut self.settings,
+                        )
+                    }
+                    WindowEvent::MouseInput { .. }
+                    | WindowEvent::MouseWheel { .. }
+                    | WindowEvent::ModifiersChanged(_) => return,
+                    _ => {
+                        self.render_event(event_loop, id, event, elapsed);
+                        return;
+                    }
+                };
+                self.menu_action(command, event_loop);
+                return;
+            }
+        }
+        self.render_event(event_loop, id, event, elapsed);
+    }
+}
+
+impl Viewer<'_> {
+    fn render_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        id: WindowId,
+        event: WindowEvent,
+        play_elapsed: Duration,
+    ) {
         let Some(view) = self.view.as_mut().filter(|view| view.window.id() == id) else {
             return;
         };
@@ -611,18 +833,25 @@ impl ApplicationHandler for Viewer<'_> {
                     self.player_deadline = None;
                     self.schedule_animation(event_loop, None);
                 } else {
-                    if matches!(&self.content, ViewContent::Stream { world, .. } if world.player_moving())
+                    if self.pause.is_none()
+                        && matches!(&self.content, ViewContent::Stream { world, .. } if world.player_moving())
                     {
                         self.player_deadline = Some(Instant::now());
                     }
                     view.window.request_redraw();
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => {
-                self.cursor = (position.x >= 0.0 && position.y >= 0.0)
-                    .then_some((position.x as u32, position.y as u32));
+            WindowEvent::MouseWheel { delta, .. } if matches!(&self.content, ViewContent::Stream { world, .. } if world.playing()) =>
+            {
+                let y = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+                    MouseScrollDelta::PixelDelta(position) => position.y,
+                };
+                self.settings.zoom = (i32::from(self.settings.zoom) + (y > 0.) as i32
+                    - (y < 0.) as i32)
+                    .clamp(1, 3) as u8;
+                view.window.request_redraw();
             }
-            WindowEvent::CursorLeft { .. } => self.cursor = None,
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
@@ -635,6 +864,7 @@ impl ApplicationHandler for Viewer<'_> {
                         shift,
                         last_presented: Some(camera),
                         last_viewport,
+                        last_zoom,
                         ..
                     },
                 ) = (self.cursor, &mut self.content)
@@ -643,7 +873,14 @@ impl ApplicationHandler for Viewer<'_> {
                 {
                     let size = view.window.inner_size();
                     if *last_viewport == (size.width, size.height) {
-                        world.set_player_destination(cursor, *last_viewport, camera, *shift);
+                        let scale = u32::from(*last_zoom);
+                        world.set_player_destination(
+                            (cursor.0 / scale, cursor.1 / scale),
+                            logical_size(size, *last_zoom),
+                            camera,
+                            *shift ^ self.settings.run,
+                            play_elapsed,
+                        );
                         self.player_deadline = Some(Instant::now());
                         self.update_control_flow(event_loop);
                     }
@@ -743,7 +980,9 @@ impl ApplicationHandler for Viewer<'_> {
                             }
                             turned.is_some()
                         }
-                        "x" if *explore => Self::update_light_probe(world, "s", *trace),
+                        "x" if *explore && !world.playing() => {
+                            Self::update_light_probe(world, "s", *trace)
+                        }
                         _ => Self::update_light_probe(world, key.as_str(), *trace),
                     };
                     if handled {
@@ -752,8 +991,9 @@ impl ApplicationHandler for Viewer<'_> {
                     }
                 }
                 if matches!(&self.content, ViewContent::Stream { world, .. } if world.playing()) {
-                    if event.logical_key == Key::Named(NamedKey::Escape) {
-                        event_loop.exit();
+                    if matches!(&event.logical_key, Key::Character(key) if key == "0") {
+                        self.settings.zoom = 1;
+                        view.window.request_redraw();
                     }
                     return;
                 }
@@ -836,33 +1076,53 @@ impl ApplicationHandler for Viewer<'_> {
                         direction,
                         last_presented,
                         last_viewport,
+                        last_zoom,
                         waiting,
                         trace,
                         animation_ms,
                         ..
                     } => {
                         let sampled = Instant::now();
-                        let elapsed = animation_ms.map_or_else(
-                            || sampled.duration_since(self.epoch),
-                            Duration::from_millis,
-                        );
-                        view.redraw_stream(size, world, camera, *direction, *trace, elapsed)
-                            .map(|ready| {
-                                *waiting = !ready;
-                                if ready {
-                                    *last_presented = Some(camera.clone());
-                                    *last_viewport = (size.width, size.height);
-                                    if animation_ms.is_none() {
-                                        deadline = world
-                                            .animation_delay(
-                                                camera,
-                                                (size.width, size.height),
-                                                elapsed,
-                                            )
-                                            .map(|delay| sampled + delay);
-                                    }
+                        let elapsed = animation_ms.map_or(play_elapsed, Duration::from_millis);
+                        let menu = self.pause.as_ref().map(|(menu, _)| {
+                            menu.frame(
+                                self.settings,
+                                match self.renderer {
+                                    RenderBackend::Cpu => "CPU",
+                                    RenderBackend::Vulkan => "VULKAN",
+                                    RenderBackend::Gles => "OPENGL",
+                                },
+                            )
+                        });
+                        view.redraw_stream(
+                            size,
+                            world,
+                            camera,
+                            *direction,
+                            *trace,
+                            FrameOptions {
+                                elapsed,
+                                settings: self.settings,
+                                menu: menu.as_ref(),
+                            },
+                        )
+                        .map(|ready| {
+                            *waiting = !ready;
+                            if ready {
+                                *last_presented = Some(camera.clone());
+                                *last_viewport = (size.width, size.height);
+                                *last_zoom = self.settings.zoom;
+                                if animation_ms.is_none() && self.pause.is_none() {
+                                    deadline = world
+                                        .animation_delay(
+                                            camera,
+                                            logical_size(size, self.settings.zoom),
+                                            elapsed,
+                                        )
+                                        .map(|delay| sampled + delay);
                                 }
-                            })
+                            }
+                        })
                     }
                 };
                 self.schedule_animation(event_loop, deadline);
@@ -883,6 +1143,17 @@ struct FrameTiming {
     host: Duration,
 }
 
+fn logical_size(size: PhysicalSize<u32>, zoom: u8) -> (u32, u32) {
+    let zoom = u32::from(zoom);
+    (size.width.div_ceil(zoom), size.height.div_ceil(zoom))
+}
+
+struct FrameOptions<'a> {
+    elapsed: Duration,
+    settings: Settings,
+    menu: Option<&'a Arc<arcanum_rs::content::art::LoadedFrame>>,
+}
+
 impl WindowSurface {
     fn redraw_stream(
         &mut self,
@@ -891,9 +1162,15 @@ impl WindowSurface {
         camera: &mut Camera,
         direction: (i32, i32),
         trace: bool,
-        elapsed: Duration,
+        options: FrameOptions<'_>,
     ) -> Result<bool, String> {
-        let viewport = (size.width, size.height);
+        let FrameOptions {
+            elapsed,
+            settings,
+            menu,
+        } = options;
+        let zoom = settings.zoom;
+        let viewport = logical_size(size, zoom);
         if size.width == 0 || size.height == 0 {
             return Ok(false);
         }
@@ -915,6 +1192,22 @@ impl WindowSurface {
                 start.elapsed()
             );
         }
+        let draws = world
+            .visible_assets_at(camera, viewport, elapsed)
+            .filter_map(|mut draw| {
+                match draw.modulation {
+                    Modulation::Shadow(_) if !settings.shadows => return None,
+                    Modulation::Shadow(_) | Modulation::Additive => {}
+                    _ if !settings.lighting => draw.modulation = Modulation::Unlit,
+                    _ => {}
+                }
+                Some(draw)
+            })
+            .chain(menu.map(|asset| arcanum_rs::content::world::WorldDraw {
+                asset,
+                sprite: menu::layer(asset, viewport),
+                modulation: Modulation::Unlit,
+            }));
         #[cfg(feature = "gpu")]
         if let Presentation::Gpu(renderer) = &mut self.backend {
             if trace {
@@ -927,15 +1220,11 @@ impl WindowSurface {
                     prepared.shading,
                 );
             }
-            renderer.redraw(
-                viewport,
-                world.visible_assets_at(camera, viewport, elapsed),
-                &self.window,
-                trace,
-            )?;
+            renderer.redraw((size.width, size.height), zoom, draws, &self.window, trace)?;
             return Ok(true);
         }
-        let frame = self.redraw(size, world.visible_modulated_at(camera, viewport, elapsed))?;
+        let frame =
+            self.redraw_scaled(size, zoom, draws.map(|draw| (draw.sprite, draw.modulation)))?;
         if trace
             || prepared.scheduling
                 + prepared.ordering
@@ -968,8 +1257,17 @@ impl WindowSurface {
         size: PhysicalSize<u32>,
         draws: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
     ) -> Result<FrameTiming, String> {
+        self.redraw_scaled(size, 1, draws)
+    }
+
+    fn redraw_scaled<'a>(
+        &mut self,
+        size: PhysicalSize<u32>,
+        zoom: u8,
+        draws: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
+    ) -> Result<FrameTiming, String> {
         match &mut self.backend {
-            Presentation::Cpu(cpu) => cpu.redraw(size, draws, &self.window),
+            Presentation::Cpu(cpu) => cpu.redraw(size, zoom, draws, &self.window),
             #[cfg(feature = "gpu")]
             Presentation::Gpu(_) => Err("GPU presentation requires a streamed world".into()),
         }
@@ -980,6 +1278,7 @@ impl CpuSurface {
     fn redraw<'a>(
         &mut self,
         size: PhysicalSize<u32>,
+        zoom: u8,
         draws: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
         window: &Window,
     ) -> Result<FrameTiming, String> {
@@ -999,21 +1298,15 @@ impl CpuSurface {
                     width, height
                 )
             })?;
+        let viewport = logical_size(size, zoom);
+        let pixels = (viewport.0 * viewport.1) as usize;
         self.pixels
-            .try_reserve(count.saturating_sub(self.pixels.len()))
+            .try_reserve(pixels.saturating_sub(self.pixels.len()))
             .map_err(|error| format!("cannot allocate sprite framebuffer: {error}"))?;
-        self.pixels.truncate(count);
+        self.pixels.resize(pixels, BACKGROUND);
         self.pixels.fill(BACKGROUND);
-        self.pixels.resize(count, BACKGROUND);
-
-        blit_modulated(
-            &mut self.pixels,
-            (size.width, size.height),
-            size.width as usize,
-            draws,
-        )
-        .map_err(|error| format!("cannot composite sprite: {error}"))?;
-
+        blit_modulated(&mut self.pixels, viewport, viewport.0 as usize, draws)
+            .map_err(|error| format!("cannot composite sprite: {error}"))?;
         let composition = start.elapsed();
         let start = Instant::now();
         self.surface
@@ -1029,8 +1322,19 @@ impl CpuSurface {
                 buffer.len()
             ));
         }
-        for (output, &[r, g, b]) in buffer.iter_mut().zip(&self.pixels) {
-            *output = u32::from_be_bytes([0, r, g, b]);
+        if zoom == 1 {
+            for (output, &[r, g, b]) in buffer.iter_mut().zip(&self.pixels) {
+                *output = u32::from_be_bytes([0, r, g, b]);
+            }
+        } else {
+            let zoom = usize::from(zoom);
+            for (y, row) in buffer.chunks_exact_mut(size.width as usize).enumerate() {
+                let start = y / zoom * viewport.0 as usize;
+                for (x, output) in row.iter_mut().enumerate() {
+                    let [r, g, b] = self.pixels[start + x / zoom];
+                    *output = u32::from_be_bytes([0, r, g, b]);
+                }
+            }
         }
         let packing = start.elapsed();
         let start = Instant::now();
@@ -1050,6 +1354,25 @@ impl CpuSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zoom_maps_surface_pixels_to_original_tile_under_the_same_camera() {
+        let size = PhysicalSize::new(1919, 1079);
+        let reference = (104, 92);
+        for zoom in 1..=3 {
+            let z = u32::from(zoom);
+            let logical = logical_size(size, zoom);
+            let point = ((logical.0 / 2 + 40) * z, (logical.1 / 2 - 20) * z);
+            let offset = (
+                i64::from(point.0 / z - logical.0 / 2),
+                i64::from(point.1 / z) - i64::from(logical.1 / 2),
+            );
+            assert_eq!(
+                arcanum_rs::isometric::world_tile_at_pixel(offset, reference),
+                Some((103, 92))
+            );
+        }
+    }
 
     #[test]
     fn held_navigation_integrates_elapsed_time_and_waits_without_catching_up() {

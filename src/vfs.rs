@@ -37,6 +37,11 @@ impl fmt::Display for Policy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MountId(usize);
 
+impl MountId {
+    /// Provenance marker for generated render assets, which have no VFS mount.
+    pub const GENERATED: Self = Self(usize::MAX);
+}
+
 impl fmt::Display for MountId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)

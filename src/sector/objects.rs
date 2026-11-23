@@ -28,6 +28,8 @@ pub struct AppearanceFields {
     pub critter_flags: Option<u32>,
     pub critter_flags2: Option<u32>,
     pub spell_flags: Option<u32>,
+    pub use_script: Option<i32>,
+    pub unlock_script: Option<i32>,
 }
 
 #[derive(Debug)]
@@ -186,10 +188,9 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
             WALL => [u32::MAX, 0xf, 0x1f],
             // OBJ_F_HP_PTS (common bit 26) is an INT32. Its instance
             // value does not select artwork in the static renderer.
-            SCENERY => [0x84c4_7f0f, 1, 5],
-            // Flags and lock difficulty are both serialized as INT32.
-            // Difficulty is framing only in the read-only renderer.
-            PORTAL => [0x0004_0f0f, 0, 3],
+            SCENERY => [u32::MAX, 0xf, 0x3f],
+            // CE defines portal flags, difficulty, key ID, notification and pads.
+            PORTAL => [u32::MAX, 0xf, 0xff],
             _ => {
                 return Err(reader.error(format!(
                     "unsupported object category {category} at record {index}"
@@ -372,7 +373,22 @@ impl Fields {
                 }
             }
             5..=7 | 15..=17 | 30 | 34 => reader.array(4)?,
-            31 => reader.array(12)?,
+            31 => {
+                let (values, bitmap) = reader.sparse_array(12)?;
+                let script = |slot: u8| {
+                    let bits = bitmap.first().copied().unwrap_or(0);
+                    let bit = 1 << slot;
+                    if bits & bit == 0 {
+                        return 0;
+                    }
+                    let prior = (bits & (bit - 1)).count_ones() as usize;
+                    let at = prior * 12 + 8;
+                    i32::from_le_bytes(values[at..at + 4].try_into().unwrap())
+                };
+                // An explicitly present empty array overrides inherited scripts.
+                self.appearance.use_script = Some(script(1)); // SAP_USE
+                self.appearance.unlock_script = Some(script(3)); // SAP_UNLOCK
+            }
             35 => reader.array(8)?,
             65 if category == SCENERY => {
                 if reader.present()? {

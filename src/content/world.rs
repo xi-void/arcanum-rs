@@ -28,7 +28,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod interaction;
 mod prefetch;
+pub use super::jumps::Destination;
+pub use interaction::DoorStates;
 pub use lighting::DynamicLightState;
 pub use prefetch::{InteractiveWorld, PrefetchStats};
 
@@ -355,6 +358,8 @@ struct CachedSector {
     mobile_shadows: Option<MobileShadows>,
     walk: Option<(WorldOrder, Arc<Walk>)>,
     collision: Option<Collision>,
+    interactions: BTreeMap<WorldOrder, interaction::Target>,
+    doors_at: BTreeMap<(u32, u32), Vec<WorldOrder>>,
 }
 
 impl CachedSector {
@@ -386,6 +391,8 @@ impl CachedSector {
             mobile_shadows: None,
             walk: None,
             collision: None,
+            interactions: BTreeMap::new(),
+            doors_at: BTreeMap::new(),
         }
     }
 
@@ -527,6 +534,8 @@ impl CachedSector {
             mobile_shadows: None,
             walk: None,
             collision: world.collision,
+            interactions: BTreeMap::new(),
+            doors_at: BTreeMap::new(),
         }
     }
 
@@ -534,6 +543,11 @@ impl CachedSector {
         self.mobile_shadows = mobiles.shadows;
         self.report.diagnostics.extend(mobiles.issues);
         for (index, mobile) in mobiles.frames.into_iter().enumerate() {
+            if mobile.blocking
+                && let Some(collision) = &mut self.collision
+            {
+                collision.occupy(mobile.caster.tile);
+            }
             let caster = mobile.caster;
             let key =
                 super::scenery::order(caster.tile, mobile.offset, false, usize::MAX - 3 + index);
@@ -675,6 +689,8 @@ struct SectorCache {
     walking: Option<MovingDraw>,
     player: Option<Player>,
     player_shadows: Option<MobileShadows>,
+    jumps: super::jumps::Jumps,
+    door_states: DoorStates,
 }
 
 struct MovingDraw {
@@ -1296,6 +1312,7 @@ impl SectorCache {
             })
             .filter_map(|index| self.ordered[index].next_change(&viewport, elapsed, self.fidget))
             .chain(self.walk_delay(&viewport, elapsed))
+            .chain(self.door_delay(&viewport, elapsed))
             .min()
     }
 
@@ -1396,7 +1413,11 @@ impl SectorCache {
                 return None;
             }
             let raster = &self.ordered[index];
-            let (asset, sprite) = raster.visible_at(&viewport, elapsed, self.fidget)?;
+            let (asset, sprite) = if let Some((asset, draw)) = self.door_frame(raster, elapsed) {
+                (asset, viewport.place(draw, RasterBounds::new(draw))?)
+            } else {
+                raster.visible_at(&viewport, elapsed, self.fidget)?
+            };
             let modulation = self.shades.get(index).map_or_else(
                 || {
                     if matches!(raster.object_light, ObjectLight::Additive) {
@@ -1457,12 +1478,31 @@ impl SectorCache {
         Some(sector.collision.as_ref()?.cell(tile))
     }
 
+    fn validate_arrival(&self, tile: (u32, u32)) -> Result<(), String> {
+        let cell = Self::collision_cell(&self.entries, tile);
+        if collision::can_stand(cell) {
+            return Ok(());
+        }
+        let detail = if cell.is_none() {
+            self.entries
+                .get(&tile_sector_id(tile))
+                .and_then(|(sector, _)| sector.report.diagnostics.first())
+                .map_or("original collision data is unavailable", String::as_str)
+        } else {
+            "original terrain or an object blocks this tile"
+        };
+        Err(format!("cannot enter tile {tile:?}: {detail}"))
+    }
+
     fn update_player(&mut self, input: (i32, i32), run: bool, now: Duration) -> Option<(i32, i32)> {
         // Borrow the cache entries only while considering the next tile.
         let entries = &self.entries;
+        let states = &self.door_states;
         let player = self.player.as_mut()?;
         player.update(input, run, now, |tile, facing| {
-            collision::step(tile, facing, |tile| Self::collision_cell(entries, tile))
+            collision::step(tile, facing, |tile| {
+                Self::player_cell(entries, states, tile)
+            })
         });
         Some(player.sample(now).anchor)
     }
@@ -1611,6 +1651,7 @@ impl WorldStream {
         if self.loader.walking || !self.cache.entries.is_empty() {
             return Err("player mode must be selected before loading sectors and without the rabbit preview".into());
         }
+        self.cache.jumps = super::jumps::load(&mut self.loader.vfs, &self.loader.map)?;
         let reference = self.loader.reference;
         let player = Player::load(&mut self.loader.vfs, &mut self.loader.frames, reference)?;
         if self.loader.lighting.is_some() {
@@ -1642,6 +1683,20 @@ impl WorldStream {
             Err(error) => return Err(error.into()),
         };
         self.with_lighting(hour)
+    }
+
+    pub fn lighting_hour(&self) -> Option<u8> {
+        self.cache.ambient.map(|_| self.cache.hour)
+    }
+
+    pub fn set_arrival_facing(&mut self, facing: u8) {
+        if let Some(player) = &mut self.cache.player {
+            player.set_facing(facing & 7);
+        }
+    }
+
+    pub fn validate_arrival(&self, tile: (u32, u32)) -> Result<(), String> {
+        self.cache.validate_arrival(tile)
     }
 
     /// Opt in to static surface lighting at a fixed original scheme hour.
@@ -2031,11 +2086,35 @@ impl SectorLoader {
                 } else {
                     (Vec::new(), Vec::new())
                 };
+                let interactions = if self.playing {
+                    interaction::prepare(
+                        &mut self.vfs,
+                        &mut self.frames,
+                        &room.room,
+                        id,
+                        self.reference,
+                    )
+                } else {
+                    BTreeMap::new()
+                };
                 self.frames.finish_sector();
                 timing.mobiles = start.elapsed();
                 let start = Instant::now();
                 let mut cached =
                     CachedSector::from_room(id, room, self.reference, lights, self.audit);
+                for (&key, target) in &interactions {
+                    if let interaction::Action::Travel(dst) = target.action {
+                        cached.report.diagnostics.push(format!(
+                            "Use transition {:?} record {} -> {dst:?}",
+                            target.tile,
+                            key.1.6.unwrap_or(key.1.5)
+                        ));
+                    }
+                    if matches!(target.action, interaction::Action::Door(_)) {
+                        cached.doors_at.entry(target.tile).or_default().push(key);
+                    }
+                }
+                cached.interactions = interactions;
                 cached.report.diagnostics.extend(roof_issues);
                 for roof in roofs {
                     // CE's separate pass is globally ordered by roof row, then column.

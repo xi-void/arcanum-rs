@@ -199,7 +199,7 @@ impl Compositor {
         let globals_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some("sprite globals"),
             entries: &[
-                buffer_binding(0, ShaderStages::VERTEX, BufferBindingType::Uniform),
+                buffer_binding(0, ShaderStages::VERTEX_FRAGMENT, BufferBindingType::Uniform),
                 buffer_binding(
                     1,
                     ShaderStages::FRAGMENT,
@@ -320,6 +320,19 @@ impl Compositor {
         size: (u32, u32),
         input: impl IntoIterator<Item = WorldDraw<'a>>,
     ) -> Result<Preparation, String> {
+        self.prepare_scaled(size, 1, input)
+    }
+
+    /// Rasterize original pixels into integer-sized surface blocks.
+    pub fn prepare_scaled<'a>(
+        &mut self,
+        size: (u32, u32),
+        zoom: u8,
+        input: impl IntoIterator<Item = WorldDraw<'a>>,
+    ) -> Result<Preparation, String> {
+        if !(1..=3).contains(&zoom) {
+            return Err("zoom must be 1, 2 or 3".into());
+        }
         self.prepared = false;
         self.check_health()?;
         let start = Instant::now();
@@ -387,7 +400,7 @@ impl Compositor {
         self.queue.write_buffer(
             &self.viewport,
             0,
-            bytes_of(&[size.0 as f32, size.1 as f32, 0., 0.]),
+            bytes_of(&[size.0 as f32, size.1 as f32, f32::from(zoom), 0.]),
         );
         if !self.draws.is_empty() {
             self.queue

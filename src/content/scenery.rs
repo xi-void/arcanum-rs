@@ -15,7 +15,7 @@ use crate::{
         },
     },
     vfs::Vfs,
-    wall::{WallArtId, opening_order_key},
+    wall::WallArtId,
 };
 use std::{
     collections::{BTreeMap, btree_map::Entry},
@@ -84,9 +84,19 @@ pub struct ImportedScenery {
     pub appearance: SceneryAppearance,
     pub(super) animation: Option<Arc<art::FrameLoop>>,
     pub(super) light: Option<SceneryLight>,
+    pub(super) use_script: i32,
 }
 
 impl ImportedScenery {
+    pub(super) fn order(&self) -> DrawOrder {
+        order(
+            self.tile,
+            self.appearance.offset,
+            self.appearance.flags & FLAT != 0,
+            self.record.index,
+        )
+    }
+
     pub fn draw(&self, center: (u32, u32)) -> Option<SpriteDraw<'_>> {
         let (x, y) = project_world_tile(self.tile, center)?;
         let (dx, dy) = self.appearance.offset;
@@ -342,6 +352,11 @@ impl SceneryImport {
                 color: record.fields.light_color.or(parent.appearance.light_color),
             });
         Ok(ImportedScenery {
+            use_script: record
+                .fields
+                .use_script
+                .or(parent.appearance.use_script)
+                .unwrap_or(0),
             stored_art_id: Some(record.art_id),
             record,
             prototype_source: source,
@@ -936,12 +951,7 @@ impl Room {
             ));
         }
         for scenery in &self.scenery {
-            let key = order(
-                scenery.tile,
-                scenery.appearance.offset,
-                scenery.appearance.flags & FLAT != 0,
-                scenery.record.index,
-            );
+            let key = scenery.order();
             let light = if scenery.appearance.additive {
                 ObjectLight::Additive
             } else if scenery.appearance.flags & 0x00100000 != 0 {
@@ -961,17 +971,7 @@ impl Room {
             ));
         }
         for portal in &self.portals {
-            let (x, y) = portal.placement.tile;
-            let (depth, across) = opening_order_key(portal.art.rotation);
-            let key = (
-                true,
-                y,
-                x,
-                i64::from(depth),
-                i64::from(across),
-                portal.paired_wall_index,
-                Some(portal.record.index),
-            );
+            let key = portal.order();
             objects.push((
                 key,
                 portal.draw(center)?,

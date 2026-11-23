@@ -71,6 +71,53 @@ fn test_backend() -> Backends {
     }
 }
 
+#[test]
+#[ignore = "requires hardware GPU"]
+fn integer_zoom_matches_palette_and_clipping_at_odd_viewport_sizes() {
+    let backend = test_backend();
+    let context = instance(backend);
+    let adapter = hardware_adapter(&context, backend, None).unwrap();
+    let mut gpu = Compositor::new(&adapter, TextureFormat::Rgba8Unorm, false).unwrap();
+    let asset = fixture(
+        3,
+        2,
+        vec![
+            [11, 77, 25, 255],
+            [122, 51, 120, 255],
+            [0; 4],
+            [17, 27, 25, 255],
+            [84, 51, 85, 255],
+            [45, 12, 98, 255],
+        ],
+    );
+    let background = [33, 40, 59];
+    let size = (11u32, 7u32);
+    for zoom in [1u8, 2, 3] {
+        let z = u32::from(zoom);
+        let logical = (size.0.div_ceil(z), size.1.div_ceil(z));
+        let draw = || draw(&asset, (0, 2), Modulation::Unlit);
+        let mut cpu = vec![background; (logical.0 * logical.1) as usize];
+        let item = draw();
+        blit_modulated(
+            &mut cpu,
+            logical,
+            logical.0 as usize,
+            [(item.sprite, item.modulation)],
+        )
+        .unwrap();
+        let (gpu_pixels, _) = read_frame_zoom(&mut gpu, size, zoom, background, [draw()]);
+        for y in 0..size.1 {
+            for x in 0..size.0 {
+                assert_eq!(
+                    gpu_pixels[(y * size.0 + x) as usize],
+                    cpu[(y / z * logical.0 + x / z) as usize],
+                    "zoom {zoom} at ({x}, {y})"
+                );
+            }
+        }
+    }
+}
+
 fn read_target(gpu: &Compositor, size: (u32, u32)) -> Texture {
     gpu.device.create_texture(&TextureDescriptor {
         label: Some("GPU verification target"),
@@ -90,7 +137,17 @@ fn read_frame<'a>(
     bg: [u8; 3],
     draws: impl IntoIterator<Item = WorldDraw<'a>>,
 ) -> (Vec<[u8; 3]>, Preparation) {
-    let stats = gpu.prepare(size, draws).unwrap();
+    read_frame_zoom(gpu, size, 1, bg, draws)
+}
+
+fn read_frame_zoom<'a>(
+    gpu: &mut Compositor,
+    size: (u32, u32),
+    zoom: u8,
+    bg: [u8; 3],
+    draws: impl IntoIterator<Item = WorldDraw<'a>>,
+) -> (Vec<[u8; 3]>, Preparation) {
+    let stats = gpu.prepare_scaled(size, zoom, draws).unwrap();
     let target = read_target(gpu, size);
     let stride = (size.0 * 4).next_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT);
     let copy = buffer(

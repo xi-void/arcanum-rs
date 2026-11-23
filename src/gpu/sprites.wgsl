@@ -1,5 +1,5 @@
 // Work in byte-domain RGB as the reference compositor does.
-struct Viewport { size: vec2<f32>, padding: vec2<f32> }
+struct Viewport { size: vec2<f32>, zoom: f32, padding: f32 }
 @group(0) @binding(0) var<uniform> viewport: Viewport;
 @group(0) @binding(1) var<storage, read> columns: array<u32>;
 @group(1) @binding(0) var sprite: texture_2d<f32>;
@@ -22,7 +22,7 @@ struct Output {
 fn vs(instance: Instance, @builtin(vertex_index) vertex: u32) -> Output {
     let corners = array(vec2(0., 0.), vec2(1., 0.), vec2(0., 1.),
                         vec2(0., 1.), vec2(1., 0.), vec2(1., 1.));
-    let relative = (instance.rect.xy + corners[vertex] * instance.rect.zw) / viewport.size;
+    let relative = (instance.rect.xy + corners[vertex] * instance.rect.zw) * viewport.zoom / viewport.size;
     var out: Output;
     out.position = vec4(relative * vec2(2., -2.) + vec2(-1., 1.), 0., 1.);
     out.origin = instance.rect.xy;
@@ -44,7 +44,7 @@ fn node(input: Output, index: u32) -> vec3<u32> {
 
 @fragment
 fn fs(input: Output) -> @location(0) vec4<f32> {
-    let p = vec2<u32>(input.position.xy - input.origin);
+    let p = vec2<u32>(input.position.xy / viewport.zoom - input.origin);
     // Integer texel coordinates mean nearest sampling with no interpolation,
     // including at sprite edges and when a quad is clipped.
     let texel = vec4<u32>(round(textureLoad(sprite, vec2<i32>(p), 0) * 255.));
