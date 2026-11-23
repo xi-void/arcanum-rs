@@ -7,7 +7,7 @@ use crate::{
 use bytemuck::{Pod, Zeroable, bytes_of, cast_slice};
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Weak},
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
 use wgpu::*;
@@ -48,6 +48,9 @@ pub struct Preparation {
     pub uploads: Duration,
     pub uploaded: usize,
     pub uploaded_bytes: usize,
+    pub reused: usize,
+    pub retired: usize,
+    pub evicted: usize,
     pub texture_count: usize,
     pub texture_bytes: usize,
     pub draws: usize,
@@ -69,8 +72,10 @@ pub struct Compositor {
     columns: Vec<u32>,
     textures: BTreeMap<TextureId, SpriteTexture>,
     texture_bytes: usize,
+    texture_budget: (usize, usize), // bytes and distinct textures
     frame: u64,
     timestamp_query: Option<Timestamps>,
+    failure: Arc<Mutex<Option<String>>>,
 }
 
 pub fn instance(backends: Backends) -> Instance {
@@ -143,9 +148,22 @@ impl Compositor {
             label: Some("Arcanum sprite device"),
             required_features: features,
             required_limits: limits,
+            memory_hints: MemoryHints::MemoryUsage,
             ..Default::default()
         }))
         .map_err(|error| format!("cannot initialize GPU device: {error}"))?;
+        let failure = Arc::new(Mutex::new(None));
+        let lost = failure.clone();
+        device.set_device_lost_callback(move |reason, message| {
+            *lost.lock().unwrap() = Some(format!("GPU device lost ({reason:?}): {message}"));
+        });
+        let uncaptured = failure.clone();
+        device.on_uncaptured_error(Box::new(move |error| {
+            uncaptured
+                .lock()
+                .unwrap()
+                .get_or_insert_with(|| format!("GPU error: {error}"));
+        }));
         device.push_error_scope(ErrorFilter::Validation);
         let viewport = buffer(
             &device,
@@ -243,7 +261,7 @@ impl Compositor {
         if let Some(error) = pollster::block_on(device.pop_error_scope()) {
             return Err(format!("invalid sprite GPU pipeline: {error}"));
         }
-        Ok(Self {
+        let compositor = Self {
             device,
             queue,
             over,
@@ -258,9 +276,20 @@ impl Compositor {
             columns: Vec::new(),
             textures: BTreeMap::new(),
             texture_bytes: 0,
+            texture_budget: (CACHE_BYTES, CACHE_TEXTURES),
             frame: 0,
             timestamp_query,
-        })
+            failure,
+        };
+        compositor.check_health()?;
+        Ok(compositor)
+    }
+
+    pub fn check_health(&self) -> Result<(), String> {
+        match self.failure.lock().unwrap().as_ref() {
+            Some(message) => Err(message.clone()),
+            None => Ok(()),
+        }
     }
 
     pub fn prepare<'a>(
@@ -268,32 +297,41 @@ impl Compositor {
         size: (u32, u32),
         input: impl IntoIterator<Item = (WorldDraw<'a>, Blend)>,
     ) -> Result<Preparation, String> {
+        self.check_health()?;
         let start = Instant::now();
         self.frame += 1;
         self.commands.clear();
         self.draws.clear();
         self.columns.clear();
+        let mut stats = Preparation::default();
         self.textures.retain(|_, texture| {
             if texture.asset.strong_count() != 0 {
                 true
             } else {
                 self.texture_bytes -= texture.bytes;
+                stats.retired += 1;
                 false
             }
         });
-        let mut stats = Preparation::default();
+        let mut missing = BTreeMap::new();
+        let mut visible_bytes = 0;
+        let limit = self.device.limits().max_texture_dimension_2d;
         for (draw, blend) in input {
             if self.draws.len() == MAX_DRAWS {
                 return Err("GPU frame exceeds the draw limit".into());
             }
             let id = Arc::as_ptr(draw.asset) as usize;
             if let Some(entry) = self.textures.get_mut(&id) {
-                entry.used = self.frame;
-            } else {
-                let begin = Instant::now();
-                stats.uploaded_bytes += self.upload(id, draw.asset)?;
-                stats.uploads += begin.elapsed();
-                stats.uploaded += 1;
+                if entry.used != self.frame {
+                    visible_bytes += entry.bytes;
+                    stats.reused += 1;
+                    entry.used = self.frame;
+                }
+            } else if let std::collections::btree_map::Entry::Vacant(entry) = missing.entry(id) {
+                let bytes = sprite_bytes(draw.asset, limit)?;
+                visible_bytes += bytes;
+                stats.uploaded_bytes += bytes;
+                entry.insert(draw.asset);
             }
             let data = instance_data(&draw, &mut self.columns)?;
             let index = self.draws.len() as u32;
@@ -307,8 +345,20 @@ impl Compositor {
                 _ => self.commands.push((id, blend, index..index + 1)),
             }
         }
-        stats.commands = start.elapsed().saturating_sub(stats.uploads);
+        stats.uploaded = missing.len();
+        if visible_bytes > self.texture_budget.0
+            || stats.reused + stats.uploaded > self.texture_budget.1
+        {
+            return Err("visible GPU textures exceed the cache budget".into());
+        }
+
+        // Protect every visible hit before making room for any misses.
+        stats.evicted = self.make_room(stats.uploaded, stats.uploaded_bytes);
+        stats.commands = start.elapsed();
         let start = Instant::now();
+        for (id, asset) in missing {
+            self.upload(id, asset);
+        }
         self.queue.write_buffer(
             &self.viewport,
             0,
@@ -322,43 +372,47 @@ impl Compositor {
             self.queue
                 .write_buffer(&self.column_buffer, 0, cast_slice(&self.columns));
         }
-        stats.uploads += start.elapsed();
+        stats.uploads = start.elapsed();
         stats.texture_count = self.textures.len();
         stats.texture_bytes = self.texture_bytes;
         stats.draws = self.draws.len();
         stats.draw_calls = self.commands.len();
+        self.check_health()?;
         Ok(stats)
     }
 
-    fn upload(&mut self, id: TextureId, asset: &Arc<LoadedFrame>) -> Result<usize, String> {
+    fn make_room(&mut self, count: usize, bytes: usize) -> usize {
+        if self.texture_bytes + bytes <= self.texture_budget.0
+            && self.textures.len() + count <= self.texture_budget.1
+        {
+            return 0;
+        }
+        let mut inactive: Vec<_> = self
+            .textures
+            .iter()
+            .filter(|(_, entry)| entry.used != self.frame)
+            .map(|(&id, entry)| (entry.used, id))
+            .collect();
+        inactive.sort_unstable();
+        let mut evicted = 0;
+        for (_, id) in inactive {
+            self.texture_bytes -= self.textures.remove(&id).unwrap().bytes;
+            evicted += 1;
+            if self.texture_bytes + bytes <= self.texture_budget.0
+                && self.textures.len() + count <= self.texture_budget.1
+            {
+                break;
+            }
+        }
+        evicted
+    }
+
+    fn upload(&mut self, id: TextureId, asset: &Arc<LoadedFrame>) {
         let frame = &asset.decoded.frame;
         let bytes = size_of_val(frame.pixels.as_slice());
-        let limit = self.device.limits().max_texture_dimension_2d;
-        if frame.width == 0
-            || frame.height == 0
-            || frame.width > limit
-            || frame.height > limit
-            || u64::from(frame.width) * u64::from(frame.height) != frame.pixels.len() as u64
-        {
-            return Err(format!(
-                "invalid GPU sprite dimensions for {}",
-                asset.source.virtual_path
-            ));
-        }
-        while self.texture_bytes + bytes > CACHE_BYTES || self.textures.len() >= CACHE_TEXTURES {
-            let victim = self
-                .textures
-                .iter()
-                .filter(|(_, entry)| entry.used != self.frame)
-                .min_by_key(|(_, entry)| entry.used)
-                .map(|(&id, _)| id)
-                .ok_or("visible GPU textures exceed the cache budget")?;
-            self.texture_bytes -= self.textures.remove(&victim).unwrap().bytes;
-        }
-        let size = extent((frame.width, frame.height));
         let texture = self.device.create_texture(&TextureDescriptor {
             label: Some(&asset.source.virtual_path),
-            size,
+            size: extent((frame.width, frame.height)),
             mip_level_count: 1,
             sample_count: 1,
             dimension: TextureDimension::D2,
@@ -374,7 +428,7 @@ impl Compositor {
                 bytes_per_row: Some(frame.width * 4),
                 rows_per_image: None,
             },
-            size,
+            extent((frame.width, frame.height)),
         );
         let view = texture.create_view(&TextureViewDescriptor::default());
         let bind = self.device.create_bind_group(&BindGroupDescriptor {
@@ -395,7 +449,6 @@ impl Compositor {
             },
         );
         self.texture_bytes += bytes;
-        Ok(bytes)
     }
 
     pub fn encode(&self, encoder: &mut CommandEncoder, target: &TextureView, background: [u8; 3]) {
@@ -456,6 +509,22 @@ impl Compositor {
         let nanos = end.saturating_sub(begin) as f64 * f64::from(self.queue.get_timestamp_period());
         Ok((nanos > 0.).then(|| Duration::from_secs_f64(nanos / 1e9)))
     }
+}
+
+fn sprite_bytes(asset: &LoadedFrame, limit: u32) -> Result<usize, String> {
+    let frame = &asset.decoded.frame;
+    if frame.width == 0
+        || frame.height == 0
+        || frame.width > limit
+        || frame.height > limit
+        || u64::from(frame.width) * u64::from(frame.height) != frame.pixels.len() as u64
+    {
+        return Err(format!(
+            "invalid GPU sprite dimensions for {}",
+            asset.source.virtual_path
+        ));
+    }
+    Ok(size_of_val(frame.pixels.as_slice()))
 }
 
 fn instance_data(draw: &WorldDraw<'_>, columns: &mut Vec<u32>) -> Result<InstanceData, String> {

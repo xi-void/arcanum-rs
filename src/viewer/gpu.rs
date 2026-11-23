@@ -7,7 +7,7 @@ use arcanum_rs::{
 };
 use std::{sync::Arc, time::Instant};
 use wgpu::{
-    Backends, CommandEncoderDescriptor, CompositeAlphaMode, PresentMode, Surface,
+    Backends, CommandEncoderDescriptor, CompositeAlphaMode, Device, PresentMode, Surface,
     SurfaceConfiguration, SurfaceError, TextureFormat, TextureUsages, TextureViewDescriptor,
 };
 use winit::{event_loop::OwnedDisplayHandle, window::Window};
@@ -90,6 +90,7 @@ impl WindowRenderer {
         window: &Window,
         trace: bool,
     ) -> Result<(), String> {
+        self.compositor.check_health()?;
         let start = Instant::now();
         let limit = self.compositor.device.limits().max_texture_dimension_2d;
         if size.0 == 0
@@ -106,6 +107,7 @@ impl WindowRenderer {
                 .configure(&self.compositor.device, &self.config);
             self.configured = true;
         }
+        self.compositor.check_health()?;
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(SurfaceError::Lost | SurfaceError::Outdated) => {
@@ -131,12 +133,19 @@ impl WindowRenderer {
         self.compositor
             .encode(&mut encoder, &target, super::BACKGROUND);
         let commands = encoder.finish();
+        self.compositor.check_health()?;
         let encode = begin.elapsed();
+        let report_residency =
+            trace && (stats.uploaded != 0 || stats.retired != 0 || stats.evicted != 0);
+        if report_residency {
+            report_allocations(&self.compositor.device, "before submit");
+        }
         let begin = Instant::now();
         let submission = self.compositor.queue.submit([commands]);
         let submit = begin.elapsed();
-        window.pre_present_notify();
+        self.compositor.check_health()?;
         let begin = Instant::now();
+        window.pre_present_notify();
         frame.present();
         let present = begin.elapsed();
         if trace {
@@ -146,7 +155,25 @@ impl WindowRenderer {
                 "GPU frame {size:?} acquire {acquire:?} encode {encode:?} submit {submit:?} present {present:?} host {host:?} complete {:?} gpu {gpu:?} {stats:?}",
                 start.elapsed()
             );
+            if report_residency {
+                report_allocations(&self.compositor.device, "after completion");
+            }
         }
-        Ok(())
+        self.compositor.check_health()
+    }
+}
+
+fn report_allocations(device: &Device, stage: &str) {
+    // Nonzero on Vulkan builds with wgpu's optional resource counters.
+    let hal = device.get_internal_counters().hal;
+    let textures = hal.textures.read();
+    if textures != 0 {
+        eprintln!(
+            "GPU allocator {stage}: textures={textures} texture_bytes={} buffers={} buffer_bytes={} memory_allocations={}",
+            hal.texture_memory.read(),
+            hal.buffers.read(),
+            hal.buffer_memory.read(),
+            hal.memory_allocations.read(),
+        );
     }
 }
