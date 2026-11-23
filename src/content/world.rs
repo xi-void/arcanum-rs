@@ -8,6 +8,7 @@ use super::{
     scenery::{
         DrawOrder, LoadStages, ObjectLight, RoomOverview, WorldRegion, load_streamed_sector,
     },
+    shadow::PreparedMask,
 };
 use crate::{
     camera::{Camera, RasterBounds, Viewport},
@@ -18,6 +19,7 @@ use crate::{
 };
 use std::{
     collections::BTreeMap,
+    ops::Range,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -782,28 +784,64 @@ impl SectorCache {
         size: (u32, u32),
         elapsed: Duration,
     ) -> impl Iterator<Item = WorldDraw<'_>> {
-        let viewport = Viewport::new(camera.position(), size);
-        self.ordered
-            .iter()
-            .enumerate()
-            .filter_map(move |(index, raster)| {
-                let (asset, sprite) = raster.visible_at(&viewport, elapsed)?;
-                let modulation = self.shades.get(index).map_or_else(
-                    || {
-                        if matches!(raster.object_light, ObjectLight::Additive) {
-                            Modulation::Additive
-                        } else {
-                            Modulation::Unlit
-                        }
-                    },
-                    PreparedShade::modulation,
-                );
-                Some(WorldDraw {
-                    asset,
-                    sprite,
-                    modulation,
-                })
+        self.visible_rasters(
+            0..self.ordered.len(),
+            Viewport::new(camera.position(), size),
+            elapsed,
+        )
+    }
+
+    fn visible_rasters(
+        &self,
+        range: Range<usize>,
+        viewport: Viewport,
+        elapsed: Duration,
+    ) -> impl Iterator<Item = WorldDraw<'_>> {
+        range.filter_map(move |index| {
+            let raster = &self.ordered[index];
+            let (asset, sprite) = raster.visible_at(&viewport, elapsed)?;
+            let modulation = self.shades.get(index).map_or_else(
+                || {
+                    if matches!(raster.object_light, ObjectLight::Additive) {
+                        Modulation::Additive
+                    } else {
+                        Modulation::Unlit
+                    }
+                },
+                PreparedShade::modulation,
+            );
+            Some(WorldDraw {
+                asset,
+                sprite,
+                modulation,
             })
+        })
+    }
+
+    fn visible_with_shadows<'a>(
+        &'a self,
+        camera: &Camera,
+        size: (u32, u32),
+        elapsed: Duration,
+        shadows: &'a [PreparedMask],
+    ) -> impl Iterator<Item = WorldDraw<'a>> {
+        let viewport = Viewport::new(camera.position(), size);
+        let split = self
+            .ordered
+            .partition_point(|raster| !raster.key.0 || !raster.key.1.0);
+        self.visible_rasters(0..split, viewport, elapsed)
+            .chain(shadows.iter().filter_map(move |draw| {
+                let sprite = SpriteDraw {
+                    frame: &draw.frame.decoded.frame,
+                    anchor: draw.anchor,
+                };
+                Some(WorldDraw {
+                    asset: &draw.frame,
+                    sprite: viewport.place(sprite, RasterBounds::new(sprite))?,
+                    modulation: draw.mask.modulation(),
+                })
+            }))
+            .chain(self.visible_rasters(split..self.ordered.len(), viewport, elapsed))
     }
 
     fn visible_modulated(
@@ -1045,6 +1083,19 @@ impl WorldStream {
         elapsed: Duration,
     ) -> impl Iterator<Item = WorldDraw<'_>> {
         self.cache.visible_assets(camera, size, elapsed)
+    }
+
+    /// Draw prepared original shadows after surfaces and flat objects,
+    /// before upright objects. Draw order within the supplied masks is preserved.
+    pub fn visible_assets_with_shadows<'a>(
+        &'a self,
+        camera: &Camera,
+        size: (u32, u32),
+        elapsed: Duration,
+        shadows: &'a [PreparedMask],
+    ) -> impl Iterator<Item = WorldDraw<'a>> {
+        self.cache
+            .visible_with_shadows(camera, size, elapsed, shadows)
     }
 
     pub fn visible_modulated(
@@ -1353,6 +1404,15 @@ mod tests {
         );
         flame.object_light = ObjectLight::Additive;
         flame.set_animation(&clip, 0);
+        let shadows = [PreparedMask {
+            frame: Arc::clone(&mask),
+            anchor: (0, 0),
+            mask: crate::shadow::Mask {
+                direction: 2,
+                frame: 0,
+                gray: 10,
+            },
+        }];
         let sample_time = Duration::from_millis(95);
         let camera = Camera::rectangle(reference, (0, 0), (128, 64)).unwrap();
         let size = (64, 64);
@@ -1361,10 +1421,10 @@ mod tests {
                 cache.animation_delay(&camera, size, sample_time),
                 Some(Duration::from_millis(85))
             );
-            let current = cache
-                .visible_assets(&camera, size, sample_time)
-                .find(|draw| matches!(draw.modulation, Modulation::Additive))
-                .unwrap();
+            let mut draws = cache.visible_with_shadows(&camera, size, sample_time, &shadows);
+            assert!(draws.any(|draw| matches!(draw.modulation, Modulation::Shadow(10))));
+            let current = draws.next().unwrap();
+            assert!(matches!(current.modulation, Modulation::Additive));
             assert!(Arc::ptr_eq(current.asset, &clip.frames[1]));
         };
         let mut cache = SectorCache {
@@ -1457,7 +1517,9 @@ mod tests {
                 &mut pixels,
                 size,
                 64,
-                cache.visible_modulated(c, size, Duration::ZERO),
+                cache
+                    .visible_with_shadows(c, size, sample_time, &shadows)
+                    .map(|draw| (draw.sprite, draw.modulation)),
             )
             .unwrap();
             pixels

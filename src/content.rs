@@ -8,6 +8,7 @@ pub mod portal;
 pub mod scenery;
 pub mod schematics;
 pub mod sector;
+pub mod shadow;
 pub mod wall;
 pub mod world;
 

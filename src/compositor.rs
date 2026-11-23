@@ -38,6 +38,8 @@ pub enum Modulation<'a> {
     Unlit,
     /// Original indexed additive ART. Nonzero alpha selects a palette color.
     Additive,
+    /// Original indexed shadow ART subtracted after grayscale multiplication.
+    Shadow(u8),
     Uniform([u8; 3]),
     Floor([[u8; 3]; 9]),
     /// Screen-oriented multipliers, one per sprite column.
@@ -91,7 +93,7 @@ pub fn blit_modulated<'a>(
         let position = sprite_origin(draw.frame, draw.anchor);
         match shading {
             Modulation::Unlit => blit(destination, dimensions, stride, draw.frame, position)?,
-            Modulation::Additive => blit_with::<true, _>(
+            Modulation::Additive => blit_with::<ADD, _>(
                 destination,
                 dimensions,
                 stride,
@@ -99,8 +101,16 @@ pub fn blit_modulated<'a>(
                 position,
                 |_| |rgb, _| rgb,
             )?,
+            Modulation::Shadow(gray) => blit_with::<SUBTRACT, _>(
+                destination,
+                dimensions,
+                stride,
+                draw.frame,
+                position,
+                |_| move |rgb, _| multiply(rgb, [gray; 3]),
+            )?,
             Modulation::Uniform(color) => {
-                blit_with::<false, _>(
+                blit_with::<OVER, _>(
                     destination,
                     dimensions,
                     stride,
@@ -113,30 +123,23 @@ pub fn blit_modulated<'a>(
                 if (draw.frame.width, draw.frame.height) != (78, 40) {
                     return Err(Error::SpriteLayout);
                 }
-                blit_with::<false, _>(
-                    destination,
-                    dimensions,
-                    stride,
-                    draw.frame,
-                    position,
-                    |y| {
-                        let row = floor_row(&nodes, y);
-                        move |rgb, x| {
-                            let [start, step] = row[usize::from(x >= 39)];
-                            let x = (if x < 39 { x } else { x - 39 }) as i32;
-                            multiply(
-                                rgb,
-                                std::array::from_fn(|i| ((start[i] + step[i] * x) / 780) as u8),
-                            )
-                        }
-                    },
-                )?;
+                blit_with::<OVER, _>(destination, dimensions, stride, draw.frame, position, |y| {
+                    let row = floor_row(&nodes, y);
+                    move |rgb, x| {
+                        let [start, step] = row[usize::from(x >= 39)];
+                        let x = (if x < 39 { x } else { x - 39 }) as i32;
+                        multiply(
+                            rgb,
+                            std::array::from_fn(|i| ((start[i] + step[i] * x) / 780) as u8),
+                        )
+                    }
+                })?;
             }
             Modulation::Columns(colors) => {
                 if colors.len() != draw.frame.width as usize {
                     return Err(Error::SpriteLayout);
                 }
-                blit_with::<false, _>(
+                blit_with::<OVER, _>(
                     destination,
                     dimensions,
                     stride,
@@ -188,12 +191,16 @@ pub fn blit(
     frame: &SpriteFrame,
     position: (i64, i64),
 ) -> Result<(), Error> {
-    blit_with::<false, _>(destination, dimensions, stride, frame, position, |_| {
+    blit_with::<OVER, _>(destination, dimensions, stride, frame, position, |_| {
         |rgb, _| rgb
     })
 }
 
-fn blit_with<const ADD: bool, S: Fn([u8; 3], usize) -> [u8; 3]>(
+const OVER: u8 = 0;
+const ADD: u8 = 1;
+const SUBTRACT: u8 = 2;
+
+fn blit_with<const BLEND: u8, S: Fn([u8; 3], usize) -> [u8; 3]>(
     destination: &mut [[u8; 3]],
     dimensions: (u32, u32),
     stride: usize,
@@ -236,10 +243,15 @@ fn blit_with<const ADD: bool, S: Fn([u8; 3], usize) -> [u8; 3]>(
         let dest_row = &mut destination[dest_start..dest_start + columns];
         let source_row = &frame.pixels[source_start..source_start + columns];
         for (column, (dest, &[r, g, b, alpha])) in dest_row.iter_mut().zip(source_row).enumerate() {
-            if ADD {
+            if BLEND != OVER {
                 if alpha != 0 {
-                    for (dest, source) in dest.iter_mut().zip([r, g, b]) {
-                        *dest = dest.saturating_add(source);
+                    let color = shade([r, g, b], source_x + column);
+                    for (dest, source) in dest.iter_mut().zip(color) {
+                        *dest = if BLEND == ADD {
+                            dest.saturating_add(source)
+                        } else {
+                            dest.saturating_sub(source)
+                        };
                     }
                 }
                 continue;

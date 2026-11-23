@@ -38,7 +38,7 @@ impl ArtResource {
         self.decode_direction(index, 0, palette)
     }
 
-    fn decode_direction(
+    pub(super) fn decode_direction(
         &self,
         index: usize,
         rotation: u8,
