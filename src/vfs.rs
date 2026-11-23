@@ -191,6 +191,7 @@ pub struct Vfs {
     // The newest mount is last. Re-registering preserves its identifier.
     mounts: Vec<Mount>,
     next_id: usize,
+    read_attempts: u64,
 }
 
 impl Vfs {
@@ -199,6 +200,7 @@ impl Vfs {
             policy,
             mounts: Vec::new(),
             next_id: 1,
+            read_attempts: 0,
         }
     }
 
@@ -307,8 +309,14 @@ impl Vfs {
             .map(|(path, _)| self.resolve_normalized(path.to_owned()))
     }
 
+    /// Number of resource stream attempts since this VFS was created.
+    pub fn read_attempts(&self) -> u64 {
+        self.read_attempts
+    }
+
     /// Stream the winning regular resource to a writer.
     pub fn copy(&mut self, path: &str, output: impl Write) -> Result<u64, Error> {
+        self.read_attempts += 1;
         let resolution = self.resolve(path)?;
         let winner = resolution
             .winner()

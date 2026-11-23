@@ -48,6 +48,7 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] art sector-wall-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art world-inspect <game-directory> [--view <local-x> <local-y> <side> <center-x> <center-y> <width> <height>] [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art world <game-directory> [--view <local-x> <local-y> <side> <center-x> <center-y> <width> <height>] [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
+  arcanum-rs [--ordered] art world <game-directory> --sectors <map> <min-x> <min-y> <max-x> <max-y> <world-x> <world-y> <width> <height> [--trace] [--mods …]
   arcanum-rs [--ordered] art sector-room-wide-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art sector-room-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector-room-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
@@ -1070,6 +1071,16 @@ fn show_room(
 
 #[cfg(feature = "windowed")]
 fn show_world(game: &Path, options: &[OsString], policy: Policy) -> Result<(), Box<dyn Error>> {
+    if let Some((world, camera, size, trace, map)) = streaming_world(game, options, policy)? {
+        return viewer::show_stream(
+            format!("Arcanum-RS | {map} world"),
+            world,
+            camera,
+            size,
+            trace,
+        )
+        .map_err(Into::into);
+    }
     use arcanum_rs::camera::{Camera, CameraScene};
     use content::scenery::{WorldRegion, load_navigation_world};
     let default = WorldRegion {
@@ -1122,11 +1133,113 @@ fn show_world(game: &Path, options: &[OsString], policy: Policy) -> Result<(), B
 }
 
 fn inspect_world(game: &Path, options: &[OsString], policy: Policy) -> Result<(), Box<dyn Error>> {
+    if let Some((mut world, mut camera, size, _, _)) = streaming_world(game, options, policy)? {
+        camera.resize(size);
+        let timing = world.prepare(&camera, size)?;
+        let mut out = io::stdout().lock();
+        for report in world.reports() {
+            writeln!(
+                out,
+                "Sector {}: {}",
+                report.id,
+                report.source.as_deref().unwrap_or("unavailable")
+            )?;
+            let (walls, portals, scenery) = report.original_object_counts;
+            writeln!(
+                out,
+                "{} surfaces ({} facades), original {walls} walls / {scenery} scenery / {portals} portals, retained {} / {} / {}",
+                report.surfaces,
+                report.facades,
+                report.wall_count,
+                report.scenery_count,
+                report.portal_count
+            )?;
+            for diagnostic in &report.diagnostics {
+                writeln!(out, "  {diagnostic}")?;
+            }
+        }
+        writeln!(
+            out,
+            "World cache {:?}, preparation {:?}",
+            world.stats(),
+            timing
+        )?;
+        return Ok(());
+    }
     use content::scenery::{WorldRegion, load_world};
     let (region, options) = world_options(WorldRegion::BATES_MANSION, options)?;
     let mut vfs = inspection_vfs(game, options, policy)?;
     let overview = load_world(&mut vfs, region)?;
     report_room_overview(&mut io::stdout().lock(), &overview)
+}
+
+type StreamPreview = (
+    content::world::WorldStream,
+    arcanum_rs::camera::Camera,
+    (u32, u32),
+    bool,
+    String,
+);
+
+fn streaming_world(
+    game: &Path,
+    options: &[OsString],
+    policy: Policy,
+) -> Result<Option<StreamPreview>, Box<dyn Error>> {
+    use arcanum_rs::sector::Coordinates;
+    use content::world::{SectorRegion, WorldStream};
+    let [flag, rest @ ..] = options else {
+        return Ok(None);
+    };
+    if flag != "--sectors" {
+        return Ok(None);
+    }
+    let [
+        map,
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+        start_x,
+        start_y,
+        width,
+        height,
+        rest @ ..,
+    ] = rest
+    else {
+        return Err(
+            "expected --sectors MAP MIN_X MIN_Y MAX_X MAX_Y START_X START_Y WIDTH HEIGHT".into(),
+        );
+    };
+    let map = resource_name(map)?;
+    let region = SectorRegion {
+        first: Coordinates {
+            x: parse_view_number(min_x, "first sector X")?,
+            y: parse_view_number(min_y, "first sector Y")?,
+        },
+        last: Coordinates {
+            x: parse_view_number(max_x, "last sector X")?,
+            y: parse_view_number(max_y, "last sector Y")?,
+        },
+    };
+    let reference = (
+        parse_view_number(start_x, "world X")?,
+        parse_view_number(start_y, "world Y")?,
+    );
+    let size = (
+        parse_view_number::<u32>(width, "width")?,
+        parse_view_number::<u32>(height, "height")?,
+    );
+    if size.0 == 0 || size.1 == 0 || u64::from(size.0) * u64::from(size.1) > 16 * 1024 * 1024 {
+        return Err("invalid world viewport size".into());
+    }
+    let camera = region
+        .camera(reference)
+        .ok_or("invalid sector rectangle or world camera position")?;
+    let trace = rest.first().is_some_and(|flag| flag == "--trace");
+    let vfs = inspection_vfs(game, &rest[usize::from(trace)..], policy)?;
+    let world = WorldStream::new(vfs, map.to_owned(), region, reference)?;
+    Ok(Some((world, camera, size, trace, map.to_owned())))
 }
 
 fn world_options<'a>(

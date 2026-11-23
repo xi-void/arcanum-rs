@@ -14,6 +14,8 @@ different target, or a different initial viewport. `art world-inspect`
 continues to inspect the fixed overview by default. Its `--view` can inspect
 another region, including the full sector.
 
+For the original-map streaming mode, see [Multi-sector world navigation](MULTI_SECTOR_WORLD.md).
+
 ## Geometry and cache
 
 The default viewer loads all 4,096 surface cells of

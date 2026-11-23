@@ -8,6 +8,7 @@ pub mod scenery;
 pub mod schematics;
 pub mod sector;
 pub mod wall;
+pub mod world;
 
 use crate::mes::{self, Encoding, Mes};
 use crate::mod_id::ModId;
