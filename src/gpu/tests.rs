@@ -217,6 +217,32 @@ fn hardware_matches_cpu_shading_and_saturating_additive_blending() {
     );
     assert_eq!(hot.uploaded, 1);
     assert_eq!(additive, [[255, 255, 140], [200, 100, 80], [255, 255, 255]]);
+    let shadow_draws = || {
+        [
+            draw(&fire, (1, 1), Modulation::Shadow(171)),
+            draw(&fire, (1, 1), Modulation::Shadow(171)),
+        ]
+    };
+    let mut cpu = [[200, 100, 80]; 3];
+    blit_modulated(
+        &mut cpu,
+        (3, 1),
+        3,
+        shadow_draws().map(|d| (d.sprite, d.modulation)),
+    )
+    .unwrap();
+    let (subtractive, warm) = read_frame(
+        &mut gpu,
+        (3, 1),
+        [200, 100, 80],
+        shadow_draws().map(|d| {
+            let blend = Blend::for_modulation(d.modulation);
+            (d, blend)
+        }),
+    );
+    assert_eq!(warm.uploaded, 0);
+    assert_eq!(subtractive, cpu);
+    assert_eq!(subtractive, [[100, 0, 40], [200, 100, 80], [160, 0, 0]]);
     let (_, hot) = read_frame(
         &mut gpu,
         size,
@@ -585,4 +611,96 @@ fn deliberate_device_destruction_reports_loss() {
     let _ = gpu.device.poll(PollType::Wait);
     let error = gpu.prepare((1, 1), []).unwrap_err();
     assert!(error.contains("GPU device lost"), "{error}");
+}
+
+#[test]
+#[ignore = "requires installed Arcanum data and a hardware GPU adapter"]
+fn installed_bates_shadow_pass_matches_cpu_with_clipping() {
+    use crate::{
+        content::{
+            shadow::PreparedMask,
+            world::{SectorRegion, WorldStream},
+        },
+        sector::Coordinates,
+        shadow::tests::bates_fixture,
+    };
+    let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+    let mut vfs = Vfs::from_game(game, Policy::Ce).unwrap();
+    let (caster, masks) = bates_fixture(&mut vfs);
+    let shadows = masks.map(|(mask, frame)| PreparedMask {
+        frame: Arc::new(frame),
+        anchor: (0, 0),
+        mask,
+    });
+    let region = SectorRegion {
+        first: Coordinates { x: 1, y: 1 },
+        last: Coordinates { x: 1, y: 1 },
+    };
+    let mut camera = region.camera(caster).unwrap();
+    let mut world = WorldStream::new(vfs, "bates mansion lev 1".into(), region, caster)
+        .unwrap()
+        .with_lighting(12)
+        .unwrap();
+    let backend = test_backend();
+    let instance = instance(backend);
+    let adapter = hardware_adapter(&instance, backend, None).unwrap();
+    let mut gpu = Compositor::new(&adapter, TextureFormat::Rgba8Unorm, true).unwrap();
+    let time = Duration::from_millis(90);
+    let bg = [32, 43, 58];
+    let mut home = None;
+    for (size, offset) in [
+        ((1280, 720), (0, 0)),
+        ((64, 48), (25, 9)),
+        ((1280, 720), (0, 0)),
+    ] {
+        camera.reset(size);
+        camera.pan(offset, size);
+        world.prepare(&camera, size).unwrap();
+        let draws = || world.visible_assets_with_shadows(&camera, size, time, &shadows);
+        let blend = |d: &WorldDraw<'_>| Blend::for_modulation(d.modulation);
+        let reference = |shadows| {
+            let mut pixels = vec![bg; size.0 as usize * size.1 as usize];
+            blit_modulated(
+                &mut pixels,
+                size,
+                size.0 as usize,
+                world
+                    .visible_assets_with_shadows(&camera, size, time, shadows)
+                    .map(|draw| (draw.sprite, draw.modulation)),
+            )
+            .unwrap();
+            pixels
+        };
+
+        let (actual, _) = read_frame(
+            &mut gpu,
+            size,
+            bg,
+            draws().map(|d| {
+                let mode = blend(&d);
+                (d, mode)
+            }),
+        );
+        assert_eq!(actual, reference(&shadows));
+        assert_ne!(actual, reference(&[]));
+        if size == (1280, 720) {
+            if let Some(pixels) = &home {
+                assert_eq!(pixels, &actual);
+            } else {
+                home = Some(actual.clone());
+            }
+        }
+
+        let (warm, stats) = read_frame(
+            &mut gpu,
+            size,
+            bg,
+            draws().map(|d| {
+                let mode = blend(&d);
+                (d, mode)
+            }),
+        );
+        assert_eq!(warm, actual);
+        assert_eq!(stats.uploaded, 0);
+    }
 }

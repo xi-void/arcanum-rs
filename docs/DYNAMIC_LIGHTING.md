@@ -104,8 +104,8 @@ Off and dark lights also fail the check, and a light does not cast a
 directional shadow for its own object.
 
 Original shadow rendering needs each object's `OBJ_F_SHADOW` ART,
-original sprite pivots, the indexed `art/light/shadowmap.bmp` lookup
-and seven prepared shadow palettes. CE examines nearby light positions
+original sprite pivots and the indexed `art/light/shadowmap.bmp` lookup.
+CE examines nearby light positions
 in the lookup, rejects invalid indices and compares source grayscale
 with indoor or outdoor ambient grayscale. It converts the nonzero
 index into direction and distance frame, retains up to four candidate
@@ -116,7 +116,9 @@ handles concealed critters, flat objects and wading. A faithful
 extension must preserve these inputs, eligibility, ordering and
 invalidation as light or object positions change. Advanced occluders,
 character/overlay light state and animated light masks remain outside
-this diagnostic.
+this diagnostic. Milestone 47 traces the prepared palette pointers
+through to the actual blit and verifies the indexed mask pass.
+See [Original isometric shadows](ORIGINAL_SHADOWS.md).
 
 ## X270 measurements and visual checks
 

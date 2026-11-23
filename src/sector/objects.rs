@@ -12,6 +12,7 @@ const SCENERY: u32 = 3;
 pub struct AppearanceFields {
     pub offset_x: Option<i32>,
     pub offset_y: Option<i32>,
+    pub shadow_art: Option<u32>,
     pub scale: Option<i32>,
     pub flags: Option<u32>,
     pub blit_flags: Option<u32>,
@@ -374,6 +375,7 @@ impl Fields {
                 match index {
                     2 => self.appearance.offset_x = Some(value as i32),
                     3 => self.appearance.offset_y = Some(value as i32),
+                    4 => self.appearance.shadow_art = Some(value),
                     8 => self.appearance.blit_flags = Some(value),
                     9 => self.appearance.blit_color = Some(value),
                     10 => self.appearance.alpha = Some(value),
@@ -479,3 +481,25 @@ impl<'a> Reader<'a> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) fn fixture_npc_prototype_appearance(
+    input: &[u8],
+    id: SerializedPrototypeId,
+) -> Result<AppearanceFields, Error> {
+    let mut reader = Reader { input, offset: 0 };
+    let header = decode_header(input).map_err(|error| Error {
+        offset: error.offset,
+        message: error.to_string(),
+    })?;
+    if header.object_type != 16 || header.id != id {
+        return Err(reader.error("fixture NPC prototype type or identity mismatch"));
+    }
+    reader.take(HEADER_SIZE + 20, "NPC prototype header and change bitmap")?;
+    let mut fields = Fields::default();
+    // The audited case imports only the common appearance prefix.
+    for index in 0..=18 {
+        fields.read(&mut reader, index, 16)?;
+    }
+    Ok(fields.appearance)
+}

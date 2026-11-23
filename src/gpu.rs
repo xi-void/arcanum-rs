@@ -21,12 +21,14 @@ const CACHE_TEXTURES: usize = 4096;
 pub enum Blend {
     SourceOver,
     Add,
+    Subtract,
 }
 
 impl Blend {
     pub fn for_modulation(modulation: Modulation<'_>) -> Self {
         match modulation {
             Modulation::Additive => Self::Add,
+            Modulation::Shadow(_) => Self::Subtract,
             _ => Self::SourceOver,
         }
     }
@@ -71,6 +73,7 @@ pub struct Compositor {
     pub queue: Queue,
     over: RenderPipeline,
     add: RenderPipeline,
+    subtract: RenderPipeline,
     globals: BindGroup,
     texture_layout: BindGroupLayout,
     viewport: Buffer,
@@ -246,23 +249,31 @@ impl Compositor {
             format,
             BlendState::ALPHA_BLENDING,
         );
+        let indexed_blend = |operation| BlendState {
+            color: BlendComponent {
+                src_factor: BlendFactor::One,
+                dst_factor: BlendFactor::One,
+                operation,
+            },
+            alpha: BlendComponent {
+                src_factor: BlendFactor::Zero,
+                dst_factor: BlendFactor::One,
+                operation: BlendOperation::Add,
+            },
+        };
         let add = pipeline(
             &device,
             &pipeline_layout,
             &shader,
             format,
-            BlendState {
-                color: BlendComponent {
-                    src_factor: BlendFactor::One,
-                    dst_factor: BlendFactor::One,
-                    operation: BlendOperation::Add,
-                },
-                alpha: BlendComponent {
-                    src_factor: BlendFactor::Zero,
-                    dst_factor: BlendFactor::One,
-                    operation: BlendOperation::Add,
-                },
-            },
+            indexed_blend(BlendOperation::Add),
+        );
+        let subtract = pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            format,
+            indexed_blend(BlendOperation::ReverseSubtract),
         );
         let timestamp_query = features
             .contains(Features::TIMESTAMP_QUERY)
@@ -275,6 +286,7 @@ impl Compositor {
             queue,
             over,
             add,
+            subtract,
             globals,
             texture_layout,
             viewport,
@@ -491,6 +503,7 @@ impl Compositor {
                     pass.set_pipeline(match blend {
                         Blend::SourceOver => &self.over,
                         Blend::Add => &self.add,
+                        Blend::Subtract => &self.subtract,
                     });
                     active = Some(*blend);
                 }
@@ -549,6 +562,7 @@ fn instance_data(draw: &WorldDraw<'_>, columns: &mut Vec<u32>) -> Result<Instanc
     let pack = |[r, g, b]: [u8; 3]| u32::from_le_bytes([r, g, b, 0]);
     match draw.modulation {
         Modulation::Unlit | Modulation::Additive => {}
+        Modulation::Shadow(gray) => data.shade = [1, pack([gray; 3]), 0, 0],
         Modulation::Uniform(rgb) => data.shade = [1, pack(rgb), 0, 0],
         Modulation::Floor(nodes) => {
             if (frame.width, frame.height) != (78, 40) {

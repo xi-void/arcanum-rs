@@ -16,5 +16,6 @@ pub mod prototype;
 pub mod resource_path;
 pub mod runtime;
 pub mod sector;
+pub mod shadow;
 pub mod vfs;
 pub mod wall;

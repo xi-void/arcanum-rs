@@ -183,6 +183,7 @@ impl RasterBounds {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct Viewport(RasterBounds);
 
 impl Viewport {
