@@ -141,7 +141,8 @@ impl SceneryAppearance {
         );
         let additive = effects && blend == (Some(0x10), Some(0x00ff_ffff), Some(255));
         let (object_mask, scenery_mask) = if additive {
-            (0x0010_0000, 0x80)
+            // IS_FIRE and SOUND_MEDIUM leave the stored additive draw intact.
+            (0x0010_0000, 0x90)
         } else {
             (0, 0)
         };
@@ -273,16 +274,20 @@ impl SceneryImport {
         let appearance =
             SceneryAppearance::resolve_for_world(record.fields, parent.appearance, self.effects)
                 .map_err(|err| format!("scenery record {index}: {err}"))?;
-        let art = SceneryArt::decode(record.art_id)?;
-        let path = frames.resolve(|| art.resource_path(&self.names.mes))?;
-        let artwork = frames.load_rotated(
-            vfs,
-            &path,
-            usize::from(art.frame),
-            art.palette,
-            false,
-            art.rotation,
-        )?;
+        let art = SceneryArt::decode(record.art_id).map_err(super::ObjectArtFailure::from_error)?;
+        let path = frames
+            .resolve(|| art.resource_path(&self.names.mes))
+            .map_err(super::ObjectArtFailure::from_error)?;
+        let artwork = frames
+            .load_rotated(
+                vfs,
+                &path,
+                usize::from(art.frame),
+                art.palette,
+                false,
+                art.rotation,
+            )
+            .map_err(super::ObjectArtFailure::from_error)?;
         let frame = &artwork.decoded.frame;
         if frame.width > 512 || frame.height > 512 {
             return Err(format!("scenery frame exceeds 512 pixels per axis in {path}").into());
@@ -301,14 +306,9 @@ impl SceneryImport {
                 Entry::Vacant(entry) => {
                     let sequence = (0..count)
                         .map(|i| {
-                            let frame = frames.load_rotated(
-                                vfs,
-                                &path,
-                                i,
-                                art.palette,
-                                false,
-                                art.rotation,
-                            )?;
+                            let frame = frames
+                                .load_rotated(vfs, &path, i, art.palette, false, art.rotation)
+                                .map_err(super::ObjectArtFailure::from_error)?;
                             if frame.decoded.frame.width > 512 || frame.decoded.frame.height > 512 {
                                 return Err(format!(
                                     "animated scenery frame exceeds 512 pixels per axis in {path}"
@@ -402,6 +402,8 @@ pub struct RoomOverview {
     pub outside_floor_scenery: usize,
     pub object_issue: Option<String>,
     pub object_list_failed: bool,
+    pub(super) roof_words: Vec<(usize, u32)>,
+    pub(super) collision: Option<super::collision::Collision>,
 }
 
 pub struct CulledPortal {
@@ -418,6 +420,7 @@ pub struct SceneIssue {
     pub tile: (u32, u32),
     pub art_id: u32,
     pub reason: String,
+    pub art_failure: bool,
 }
 
 pub const OVERVIEW_SIZE: (u32, u32) = (1280, 720);
@@ -481,9 +484,15 @@ pub(super) fn load_streamed_sector(
     vfs: &mut Vfs,
     frames: &mut art::FrameCache,
     region: WorldRegion<'_>,
+    playing: bool,
 ) -> (Result<RoomOverview, Box<dyn Error>>, LoadStages) {
     let mut timing = LoadStages::default();
-    let result = load_overview_timed(vfs, frames, region, LoadMode::Streamed, &mut timing);
+    let mode = if playing {
+        LoadMode::Playable
+    } else {
+        LoadMode::Streamed
+    };
+    let result = load_overview_timed(vfs, frames, region, mode, &mut timing);
     frames.finish_sector();
     (result, timing)
 }
@@ -506,6 +515,7 @@ enum LoadMode {
     WorldPreview,
     Navigation,
     Streamed,
+    Playable,
 }
 
 fn load_overview(
@@ -528,7 +538,7 @@ fn load_overview_timed(
 
     let include_portals = !matches!(mode, LoadMode::RoomPreview);
     let initial_view_only = matches!(mode, LoadMode::RoomPreview | LoadMode::WorldPreview);
-    let partial = matches!(mode, LoadMode::Streamed);
+    let partial = matches!(mode, LoadMode::Streamed | LoadMode::Playable);
     let WorldRegion {
         map,
         sector: coordinates,
@@ -547,7 +557,20 @@ fn load_overview_timed(
     let (source, bytes) = base?;
     let start = Instant::now();
     let floor = sector::parse_surface(&source, &bytes)?;
+    let roof_words = crate::sector::objects::roof_words(&bytes, floor.tile_offset)
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .map(|(slot, word)| (slot, u32::from_le_bytes(*word)))
+        .filter(|(_, id)| *id != u32::MAX)
+        .collect();
     timing.floor_parse = start.elapsed();
+    let terrain = if matches!(mode, LoadMode::Playable) {
+        let names = load_mes(vfs, "art/tile/tilename.mes")?;
+        Some(super::collision::Collision::terrain(&floor, &names.mes))
+    } else {
+        None
+    };
     let start = Instant::now();
     let floor = sector::resolve_surface(
         vfs,
@@ -593,10 +616,13 @@ fn load_overview_timed(
                 outside_floor_scenery: 0,
                 object_issue: Some(error),
                 object_list_failed: true,
+                roof_words,
+                collision: None,
             });
         }
         Err(error) => return Err(error.into()),
     };
+    let collision = terrain.map(|terrain| terrain.with_objects(vfs, &objects));
     let counts = (
         objects.walls.len(),
         objects.portal_count,
@@ -643,7 +669,7 @@ fn load_overview_timed(
                 .checked_sub(first.1)
                 .is_some_and(|y| y < u32::from(side))
     };
-    let mut report = |record, category, tile, art_id, reason| {
+    let mut report = |record, category, tile, art_id, reason, art_failure| {
         // Unresolved artwork has no reliable bounds. Report records on
         // the selected floor or with a tile anchor near the overview.
         let on_floor = inside_floor(tile);
@@ -661,6 +687,7 @@ fn load_overview_timed(
                 tile,
                 art_id,
                 reason,
+                art_failure,
             });
         }
     };
@@ -723,7 +750,14 @@ fn load_overview_timed(
             },
         };
         if let Err(error) = result {
-            report(index, category, tile, art_id, error.to_string());
+            report(
+                index,
+                category,
+                tile,
+                art_id,
+                error.to_string(),
+                error.is::<super::ObjectArtFailure>(),
+            );
         }
     }
     for record in objects.incomplete_scenery {
@@ -750,6 +784,7 @@ fn load_overview_timed(
                 tile,
                 0,
                 format!("inherited scenery ART: {error}"),
+                error.is::<super::ObjectArtFailure>(),
             ),
         }
     }
@@ -772,6 +807,8 @@ fn load_overview_timed(
         culled_portals,
         sector_object_counts: counts,
         object_list_failed: false,
+        roof_words,
+        collision,
         object_issue: (partial && framing_only != (0, 0)).then(|| {
             format!(
                 "{} portals lack a stored ART ID or location, {} scenery records lack an instance location",
@@ -822,6 +859,7 @@ pub(super) enum ObjectLight {
     Portal(u8),
     Unlit,
     Additive,
+    Roof,
 }
 
 pub(super) struct ObjectAuditSource<'a> {

@@ -307,3 +307,20 @@ fn portal_lock_difficulty_preserves_the_next_record_boundary() {
     unknown[portal_start + 66] = 5; // An unrelated subtype bit stays unsupported.
     assert!(decode(&unknown).is_err());
 }
+
+#[test]
+fn roof_table_exposes_exactly_the_serialized_slots() {
+    let mut bytes = vec![0; 4 + SIDE * SIDE * 4];
+    bytes.extend(0u32.to_le_bytes());
+    for slot in 0..256 {
+        let id = if slot == 8 { 0xa071_c000 } else { u32::MAX };
+        bytes.extend(id.to_le_bytes());
+    }
+    assert!(roof_words(&bytes, 4).is_err()); // Footer may not supply roof bytes.
+    bytes.extend(0xaa0000u32.to_le_bytes());
+    bytes.extend(0u32.to_le_bytes());
+    let words = roof_words(&bytes, 4).unwrap();
+    assert_eq!(words.len(), 256);
+    assert_eq!(u32::from_le_bytes(words[8]), 0xa071_c000);
+    assert!(decode(&bytes).unwrap().walls.is_empty());
+}

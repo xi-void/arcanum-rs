@@ -16,7 +16,7 @@ use std::{
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize, Size};
-use winit::event::{StartCause, WindowEvent};
+use winit::event::{ElementState, MouseButton, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
@@ -133,15 +133,26 @@ pub fn show_camera(
     )
 }
 
+pub struct StreamOptions {
+    pub trace: bool,
+    pub renderer: RenderBackend,
+    pub animation_ms: Option<u64>,
+    pub explore: bool,
+}
+
 pub fn show_stream(
     title: String,
     world: WorldStream,
-    camera: Camera,
+    mut camera: Camera,
     size: (u32, u32),
-    trace: bool,
-    renderer: RenderBackend,
-    animation_ms: Option<u64>,
+    options: StreamOptions,
 ) -> Result<(), String> {
+    let StreamOptions {
+        trace,
+        renderer,
+        animation_ms,
+        explore,
+    } = options;
     #[cfg(not(feature = "gpu"))]
     if renderer != RenderBackend::Cpu {
         return Err("GPU renderer requires the gpu feature".into());
@@ -156,6 +167,7 @@ pub fn show_stream(
             trace,
         )
         .map_err(|error| format!("cannot start sector preparation worker: {error}"))?;
+    world.follow_player(Duration::ZERO, &mut camera);
     run_content(
         title,
         ViewContent::Stream {
@@ -164,7 +176,9 @@ pub fn show_stream(
             shift: false,
             direction: (0, 0),
             last_presented: None,
+            last_viewport: (0, 0),
             waiting: false,
+            explore,
             trace,
             animation_ms,
         },
@@ -182,7 +196,9 @@ enum ViewContent<'a> {
         shift: bool,
         direction: (i32, i32),
         last_presented: Option<Camera>,
+        last_viewport: (u32, u32),
         waiting: bool,
+        explore: bool,
         trace: bool,
         animation_ms: Option<u64>,
     },
@@ -225,6 +241,9 @@ fn run_content(
         failure: None,
         epoch: Instant::now(),
         animation_deadline: None,
+        navigation: Navigation::default(),
+        player_deadline: None,
+        cursor: None,
     };
     event_loop
         .run_app(&mut app)
@@ -245,6 +264,92 @@ struct Viewer<'a> {
     failure: Option<String>,
     epoch: Instant,
     animation_deadline: Option<Instant>,
+    navigation: Navigation,
+    player_deadline: Option<Instant>,
+    cursor: Option<(u32, u32)>,
+}
+
+const CAMERA_TICK: Duration = Duration::from_millis(16);
+
+#[derive(Default)]
+struct Navigation {
+    held: u8,
+    sampled_at: Option<Instant>,
+    remainder: (f64, f64),
+}
+
+impl Navigation {
+    fn key(key: &Key) -> Option<u8> {
+        let index = match key {
+            Key::Named(NamedKey::ArrowLeft) => 0,
+            Key::Named(NamedKey::ArrowRight) => 1,
+            Key::Named(NamedKey::ArrowUp) => 2,
+            Key::Named(NamedKey::ArrowDown) => 3,
+            Key::Character(c) if c.eq_ignore_ascii_case("a") => 4,
+            Key::Character(c) if c.eq_ignore_ascii_case("d") => 5,
+            Key::Character(c) if c.eq_ignore_ascii_case("w") => 6,
+            Key::Character(c) if c.eq_ignore_ascii_case("s") => 7,
+            _ => return None,
+        };
+        Some(1 << index)
+    }
+
+    fn direction(&self) -> (i32, i32) {
+        let held = self.held | (self.held >> 4);
+        let axis = |neg, pos| i32::from(held & pos != 0) - i32::from(held & neg != 0);
+        (axis(1, 2), axis(4, 8))
+    }
+
+    fn set_key(&mut self, bit: u8, pressed: bool, now: Instant) {
+        let prior = self.direction();
+        if pressed {
+            self.held |= bit;
+        } else {
+            self.held &= !bit;
+        }
+        let after = self.direction();
+        if after != prior {
+            self.remainder = (0., 0.);
+            self.sampled_at = (after != (0, 0)).then_some(now);
+        }
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.sampled_at.map(|last| last + CAMERA_TICK)
+    }
+
+    fn advance(&mut self, now: Instant, fast: bool, blocked: bool) -> (i32, i32) {
+        let Some(last) = self.sampled_at.replace(now) else {
+            return (0, 0);
+        };
+        if blocked {
+            self.remainder = (0., 0.);
+            return (0, 0);
+        }
+        let (x, y) = self.direction();
+        let speed = if fast { 1000. } else { 300. };
+        let distance = speed
+            * now
+                .saturating_duration_since(last)
+                .min(Duration::from_millis(100))
+                .as_secs_f64()
+            / if x != 0 && y != 0 {
+                std::f64::consts::SQRT_2
+            } else {
+                1.
+            };
+        // These quanta preserve exact integer steps in both inverse isometric axes.
+        let axis = |sign, quantum: f64, remainder: &mut f64| {
+            let value = *remainder + f64::from(sign) * distance;
+            let step = (value / quantum).trunc() * quantum;
+            *remainder = value - step;
+            step as i32
+        };
+        (
+            axis(x, 4., &mut self.remainder.0),
+            axis(y, 2., &mut self.remainder.1),
+        )
+    }
 }
 
 struct WindowSurface {
@@ -267,7 +372,17 @@ struct CpuSurface {
 impl Viewer<'_> {
     fn schedule_animation(&mut self, event_loop: &ActiveEventLoop, deadline: Option<Instant>) {
         self.animation_deadline = deadline;
-        event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+        self.update_control_flow(event_loop);
+    }
+
+    fn update_control_flow(&self, event_loop: &ActiveEventLoop) {
+        let next = self
+            .animation_deadline
+            .into_iter()
+            .chain(self.navigation.deadline())
+            .chain(self.player_deadline)
+            .min();
+        event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
     fn update_light_probe(world: &mut InteractiveWorld, key: &str, trace: bool) -> bool {
@@ -383,16 +498,66 @@ impl Viewer<'_> {
 
 impl ApplicationHandler for Viewer<'_> {
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
-        if matches!(cause, StartCause::ResumeTimeReached { .. })
-            && self
-                .animation_deadline
-                .is_some_and(|deadline| Instant::now() >= deadline)
-        {
-            self.schedule_animation(event_loop, None);
-            if let Some(view) = &self.view {
+        if !matches!(cause, StartCause::ResumeTimeReached { .. }) {
+            return;
+        }
+        let now = Instant::now();
+        let mut redraw = self
+            .animation_deadline
+            .is_some_and(|deadline| now >= deadline);
+        if redraw {
+            self.animation_deadline = None;
+        }
+        if let Some(view) = &self.view {
+            if let ViewContent::Stream {
+                world,
+                camera,
+                shift,
+                direction,
+                waiting,
+                ..
+            } = &mut self.content
+            {
+                if world.playing() {
+                    if self.player_deadline.is_some_and(|deadline| now >= deadline) {
+                        let input = self.navigation.direction();
+                        if !*waiting && !view.occluded {
+                            let before = camera.position();
+                            redraw |= world.move_player(
+                                input,
+                                *shift,
+                                now.duration_since(self.epoch),
+                                camera,
+                            );
+                            let after = camera.position();
+                            if before != after {
+                                *direction = (after.0 - before.0, after.1 - before.1);
+                            }
+                        }
+                        self.player_deadline = (!view.occluded
+                            && (input != (0, 0) || world.player_moving()))
+                        .then_some(now + CAMERA_TICK);
+                    }
+                } else if self
+                    .navigation
+                    .deadline()
+                    .is_some_and(|deadline| now >= deadline)
+                {
+                    let delta = self
+                        .navigation
+                        .advance(now, *shift, *waiting || view.occluded);
+                    let size = view.window.inner_size();
+                    if delta != (0, 0) && camera.pan(delta, (size.width, size.height)) {
+                        *direction = delta;
+                        redraw = true;
+                    }
+                }
+            }
+            if redraw {
                 view.window.request_redraw();
             }
         }
+        self.update_control_flow(event_loop);
     }
 
     fn user_event(&mut self, _: &ActiveEventLoop, _: ()) {
@@ -417,6 +582,8 @@ impl ApplicationHandler for Viewer<'_> {
     }
 
     fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        self.navigation = Navigation::default();
+        self.player_deadline = None;
         self.schedule_animation(event_loop, None);
         self.view = None;
     }
@@ -440,9 +607,46 @@ impl ApplicationHandler for Viewer<'_> {
             WindowEvent::Occluded(occluded) => {
                 view.occluded = occluded;
                 if occluded {
+                    self.navigation = Navigation::default();
+                    self.player_deadline = None;
                     self.schedule_animation(event_loop, None);
                 } else {
+                    if matches!(&self.content, ViewContent::Stream { world, .. } if world.player_moving())
+                    {
+                        self.player_deadline = Some(Instant::now());
+                    }
                     view.window.request_redraw();
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = (position.x >= 0.0 && position.y >= 0.0)
+                    .then_some((position.x as u32, position.y as u32));
+            }
+            WindowEvent::CursorLeft { .. } => self.cursor = None,
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if let (
+                    Some(cursor),
+                    ViewContent::Stream {
+                        world,
+                        shift,
+                        last_presented: Some(camera),
+                        last_viewport,
+                        ..
+                    },
+                ) = (self.cursor, &mut self.content)
+                    && world.playing()
+                    && self.navigation.held == 0
+                {
+                    let size = view.window.inner_size();
+                    if *last_viewport == (size.width, size.height) {
+                        world.set_player_destination(cursor, *last_viewport, camera, *shift);
+                        self.player_deadline = Some(Instant::now());
+                        self.update_control_flow(event_loop);
+                    }
                 }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
@@ -453,10 +657,38 @@ impl ApplicationHandler for Viewer<'_> {
                 }
             }
             WindowEvent::Focused(false) => {
+                self.navigation = Navigation::default();
+                self.update_control_flow(event_loop);
                 if let ViewContent::World { shift, .. } | ViewContent::Stream { shift, .. } =
                     &mut self.content
                 {
                     *shift = false;
+                }
+            }
+            WindowEvent::KeyboardInput {
+                ref event,
+                is_synthetic: false,
+                ..
+            } if matches!(self.content, ViewContent::Stream { explore: true, .. })
+                && Navigation::key(&event.logical_key).is_some() =>
+            {
+                if !event.repeat {
+                    let now = Instant::now();
+                    self.navigation.set_key(
+                        Navigation::key(&event.logical_key).unwrap(),
+                        event.state.is_pressed(),
+                        now,
+                    );
+                    if let ViewContent::Stream { world, .. } = &mut self.content
+                        && world.playing()
+                    {
+                        if event.state.is_pressed() {
+                            world.cancel_player_route();
+                        }
+                        self.navigation.sampled_at = None; // Gameplay uses its own tick, including after release.
+                        self.player_deadline = Some(now);
+                    }
+                    self.update_control_flow(event_loop);
                 }
             }
             WindowEvent::KeyboardInput {
@@ -470,6 +702,7 @@ impl ApplicationHandler for Viewer<'_> {
                         camera,
                         trace,
                         animation_ms,
+                        explore,
                         ..
                     } = &mut self.content
                 {
@@ -510,12 +743,19 @@ impl ApplicationHandler for Viewer<'_> {
                             }
                             turned.is_some()
                         }
+                        "x" if *explore => Self::update_light_probe(world, "s", *trace),
                         _ => Self::update_light_probe(world, key.as_str(), *trace),
                     };
                     if handled {
                         view.window.request_redraw();
                         return;
                     }
+                }
+                if matches!(&self.content, ViewContent::Stream { world, .. } if world.playing()) {
+                    if event.logical_key == Key::Named(NamedKey::Escape) {
+                        event_loop.exit();
+                    }
+                    return;
                 }
                 let size = view.window.inner_size();
                 let viewport = (size.width, size.height);
@@ -595,6 +835,7 @@ impl ApplicationHandler for Viewer<'_> {
                         camera,
                         direction,
                         last_presented,
+                        last_viewport,
                         waiting,
                         trace,
                         animation_ms,
@@ -610,6 +851,7 @@ impl ApplicationHandler for Viewer<'_> {
                                 *waiting = !ready;
                                 if ready {
                                     *last_presented = Some(camera.clone());
+                                    *last_viewport = (size.width, size.height);
                                     if animation_ms.is_none() {
                                         deadline = world
                                             .animation_delay(
@@ -655,6 +897,7 @@ impl WindowSurface {
         if size.width == 0 || size.height == 0 {
             return Ok(false);
         }
+        world.follow_player(elapsed, camera);
         camera.resize(viewport);
         let prepared = world.prepare(camera, viewport, direction)?;
         if !prepared.ready {
@@ -662,6 +905,7 @@ impl WindowSurface {
             // the destination. The completion event drives the next redraw.
             return Ok(false);
         }
+        world.start_player()?;
         let start = trace.then(Instant::now);
         let pose = world.update_walk(elapsed);
         if let (Some(start), Some(pose)) = (start, pose) {
@@ -800,5 +1044,29 @@ impl CpuSurface {
             submission: start.elapsed(),
             host: frame_start.elapsed(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn held_navigation_integrates_elapsed_time_and_waits_without_catching_up() {
+        let now = Instant::now();
+        let mut motion = Navigation::default();
+        assert!(motion.deadline().is_none());
+        motion.set_key(1 << 5, true, now); // D
+        motion.set_key(1 << 1, true, now); // Right also held
+        motion.set_key(1 << 5, false, now);
+        assert_eq!(motion.direction(), (1, 0));
+        let divide = |ms| Duration::from_millis(ms);
+        let a = motion.advance(now + divide(20), false, false);
+        let b = motion.advance(now + divide(40), false, false);
+        assert_eq!((a.0 + b.0, a.1 + b.1), (12, 0));
+        assert_eq!(motion.advance(now + divide(80), true, true), (0, 0));
+        assert_eq!(motion.advance(now + divide(100), true, false), (20, 0));
+        motion.set_key(1 << 1, false, now + divide(100));
+        assert!(motion.deadline().is_none());
     }
 }

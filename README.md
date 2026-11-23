@@ -31,6 +31,39 @@ architectural principles and CE compatibility boundaries.
 Arcanum-RS is independent of both projects. Original copyrighted
 game assets are not included.
 
+## First playable alpha
+
+```sh
+cargo run --locked --release --features windowed -- play "$HOME/Work/arcanum-ce-test"
+```
+
+Hold **W/A/S/D** or the **arrow keys** to walk. Combine two keys to walk
+diagonally. Hold **Shift** to run. **Left-click** a destination on the floor
+to walk there, or **Shift + left-click** to run there. A new click replaces
+the route. Movement keys cancel it. An already-started step finishes at the
+next tile center. **Escape** exits.
+The camera follows the character, and original sectors load in the
+background. The default spawn is Bates Mansion Level 1's authored in-game
+entry. For outdoor exploration, add `--map "k'na tha" --center 383 928`.
+With `--features gpu`, add `--renderer vulkan` to use Vulkan.
+
+The alpha uses original human standing, walking and running sprites.
+The shipped walk and run clips use 17 and 20 FPS respectively, with
+movement speed derived from their stored per-frame strides.
+Lighting uses the authored hour in `rules/gameinit.mes` (15:00 in the
+installed game). Use `--lighting <hour>` to select another fixed hour.
+
+Mouse routes use loaded sectors and stop when a destination is blocked or
+unreachable. Movement checks sector tile-block masks, terrain and facade
+flags, static scenery,
+and orientation-dependent wall and door edges. Open original doors can
+be crossed. Closed doors block movement. Door interaction, stairs, map
+transitions, character creation, and collision with standalone mobiles
+are still pending. Movement into a sector stops if its collision data is
+unavailable. The free-camera diagnostic is still available via `art world`.
+Party-dependent roof and wall visibility, including Tulla’s interior views,
+remains existing rendering work.
+
 ## Usage
 
 Build with `cargo build`, then run these commands from the project directory.

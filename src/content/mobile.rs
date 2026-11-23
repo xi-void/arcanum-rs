@@ -28,7 +28,7 @@ use std::{
 // mobile families and the compiled mobile stream need separate validation.
 pub(super) const MAP: &str = "bates mansion lev 1";
 pub(super) const SECTOR: u64 = 67_108_865;
-const VERIFIED_SHADOW: u32 = 0x9030_0001;
+pub(super) const VERIFIED_SHADOW: u32 = 0x9030_0001;
 const BATES_RECORDS: [&str; 3] = [
     "g_0a68bdf7_1d83_4ec4_b208_b4c36b06bf87.mob",
     "g_931574ed_1454_40f7_aaab_5a5e19b13ef2.mob",
@@ -58,8 +58,8 @@ fn records(map: &str, sector: u64) -> &'static [&'static str] {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Pose {
-    path: String,
+pub(super) struct Pose {
+    pub(super) path: String,
     direction: u8,
     rotation: u8,
     frame: usize,
@@ -67,7 +67,7 @@ struct Pose {
 }
 
 impl Pose {
-    fn decode(raw: u32, monster_names: Option<&Mes>) -> Result<Self, &'static str> {
+    pub(super) fn decode(raw: u32, monster_names: Option<&Mes>) -> Result<Self, &'static str> {
         if raw & 0x0008_07cf != 0 {
             return Err("expected a weapon-free, shield-free standing critter");
         }
@@ -123,7 +123,7 @@ impl Pose {
         .in_direction(direction)
     }
 
-    fn in_direction(mut self, direction: u8) -> Self {
+    pub(super) fn in_direction(mut self, direction: u8) -> Self {
         self.direction = direction;
         self.rotation = if (1..4).contains(&direction) {
             8 - direction
@@ -133,7 +133,7 @@ impl Pose {
         self
     }
 
-    fn load(
+    pub(super) fn load(
         &self,
         vfs: &mut Vfs,
         cache: &mut FrameCache,
@@ -248,7 +248,7 @@ impl MobileShadows {
         &self.frames[usize::from(mask.direction) * 7 + usize::from(mask.frame)]
     }
 
-    fn load(
+    pub(super) fn load(
         vfs: &mut Vfs,
         cache: &mut FrameCache,
         art: shadow::Art,
