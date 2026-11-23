@@ -704,3 +704,102 @@ fn installed_bates_shadow_pass_matches_cpu_with_clipping() {
         assert_eq!(stats.uploaded, 0);
     }
 }
+
+#[test]
+#[ignore = "requires installed Arcanum data and a hardware GPU adapter"]
+fn original_mobile_shadow_tracks_probe_without_reloading_art() {
+    use crate::{
+        content::world::{SectorRegion, WorldStream},
+        sector::Coordinates,
+    };
+    let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+    let backend = test_backend();
+    let context = instance(backend);
+    let adapter = hardware_adapter(&context, backend, None).unwrap();
+    let mut gpu = Compositor::new(&adapter, TextureFormat::Rgba8Unorm, false).unwrap();
+    let sector = Coordinates { x: 1, y: 1 };
+    let region = SectorRegion {
+        first: sector,
+        last: sector,
+    };
+    let center = (91, 79);
+    let size = (1280, 720);
+    let time = Duration::from_millis(90);
+    let mut camera = region.camera(center).unwrap();
+    camera.resize(size);
+    let mut world = WorldStream::new(
+        Vfs::from_game(game, Policy::Ce).unwrap(),
+        "bates mansion lev 1".into(),
+        region,
+        center,
+    )
+    .unwrap()
+    .with_lighting(12)
+    .unwrap();
+    world.add_light_probe((90, 79), false).unwrap();
+    let start = world.dynamic_light(0).unwrap();
+    let (initial, _) = compare_world_tick(&mut gpu, &mut world, &camera, size, time);
+    let expected_anchor = (
+        size.0 as i32 / 2 - camera.position().0,
+        size.1 as i32 / 2 - camera.position().1,
+    );
+    let draws: Vec<_> = world.visible_assets_at(&camera, size, time).collect();
+    let mobile = draws
+        .iter()
+        .position(|d| {
+            d.asset.source.virtual_path == "art/critter/hmm/hmmcdxaa.art"
+                && d.sprite.anchor == expected_anchor
+        })
+        .expect("verified dining-room mobile");
+    assert_eq!(draws[mobile].sprite.frame.hotspot, (12, 74));
+    let shadow = draws
+        .iter()
+        .rposition(|d| matches!(d.modulation, Modulation::Shadow(_)))
+        .unwrap();
+    assert!(shadow < mobile);
+    let cold = world.stats();
+    assert_eq!(world.toggle_probe_shadow(0), Some((false, true)));
+    let (excluded, _) = compare_world_tick(&mut gpu, &mut world, &camera, size, time);
+    assert_ne!(initial, excluded);
+    assert_eq!(world.toggle_probe_shadow(0), Some((true, true)));
+    assert_eq!(
+        initial,
+        compare_world_tick(&mut gpu, &mut world, &camera, size, time).0
+    );
+    assert_eq!(world.toggle_shadows(), Some(false));
+    let (unshadowed, _) = compare_world_tick(&mut gpu, &mut world, &camera, size, time);
+    assert_ne!(initial, unshadowed);
+    assert_eq!(world.toggle_shadows(), Some(true));
+    let moved = crate::content::world::DynamicLightState {
+        tile: (91, 78),
+        ..start
+    };
+    assert!(world.set_dynamic_light(0, moved).unwrap().shadow_changed);
+    let (relocated, _) = compare_world_tick(&mut gpu, &mut world, &camera, size, time);
+    assert_ne!(relocated, initial);
+    let off = crate::content::world::DynamicLightState {
+        active: false,
+        ..moved
+    };
+    assert!(world.set_dynamic_light(0, off).unwrap().shadow_changed);
+    assert_ne!(
+        relocated,
+        compare_world_tick(&mut gpu, &mut world, &camera, size, time).0
+    );
+    world.set_dynamic_light(0, moved).unwrap();
+    let (again, warm) = compare_world_tick(&mut gpu, &mut world, &camera, size, time);
+    assert_eq!(relocated, again);
+    assert_eq!(warm.uploaded, 0);
+    camera.pan((64, 32), size);
+    compare_world_tick(&mut gpu, &mut world, &camera, (960, 560), time);
+    camera.reset(size);
+    assert_eq!(
+        relocated,
+        compare_world_tick(&mut gpu, &mut world, &camera, size, time).0
+    );
+    let after = world.stats();
+    assert_eq!(
+        (after.sector_reads, after.vfs_reads, after.art.decodes),
+        (cold.sector_reads, cold.vfs_reads, cold.art.decodes)
+    );
+}

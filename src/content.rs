@@ -4,6 +4,7 @@ pub mod art;
 pub mod effects;
 pub mod items;
 mod lighting;
+mod mobile;
 pub mod portal;
 pub mod scenery;
 pub mod schematics;
