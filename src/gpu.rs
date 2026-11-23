@@ -23,6 +23,15 @@ pub enum Blend {
     Add,
 }
 
+impl Blend {
+    pub fn for_modulation(modulation: Modulation<'_>) -> Self {
+        match modulation {
+            Modulation::Additive => Self::Add,
+            _ => Self::SourceOver,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct InstanceData {
@@ -539,7 +548,7 @@ fn instance_data(draw: &WorldDraw<'_>, columns: &mut Vec<u32>) -> Result<Instanc
     };
     let pack = |[r, g, b]: [u8; 3]| u32::from_le_bytes([r, g, b, 0]);
     match draw.modulation {
-        Modulation::Unlit => {}
+        Modulation::Unlit | Modulation::Additive => {}
         Modulation::Uniform(rgb) => data.shade = [1, pack(rgb), 0, 0],
         Modulation::Floor(nodes) => {
             if (frame.width, frame.height) != (78, 40) {

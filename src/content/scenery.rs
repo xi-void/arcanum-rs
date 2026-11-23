@@ -64,6 +64,13 @@ impl SceneryArt {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct SceneryLight {
+    pub(super) art_id: u32,
+    pub(super) flags: Option<u32>,
+    pub(super) color: Option<u32>,
+}
+
 pub struct ImportedScenery {
     pub record: StaticRecord,
     pub prototype_source: Source,
@@ -75,6 +82,8 @@ pub struct ImportedScenery {
     pub art: SceneryArt,
     pub tile: (u32, u32),
     pub appearance: SceneryAppearance,
+    pub(super) animation: Option<Arc<art::FrameLoop>>,
+    pub(super) light: Option<SceneryLight>,
 }
 
 impl ImportedScenery {
@@ -94,12 +103,14 @@ pub struct SceneryAppearance {
     pub scale: i32,
     pub flags: u32,
     pub scenery_flags: u32,
+    pub additive: bool,
 }
 
 impl SceneryAppearance {
-    fn resolve(
+    fn resolve_for_world(
         instance: AppearanceFields,
         parent: AppearanceFields,
+        effects: bool,
     ) -> Result<Self, Box<dyn Error>> {
         let offset = (
             instance
@@ -128,11 +139,17 @@ impl SceneryAppearance {
             instance.blit_color.or(parent.blit_color),
             instance.alpha.or(parent.alpha),
         );
+        let additive = effects && blend == (Some(0x10), Some(0x00ff_ffff), Some(255));
+        let (object_mask, scenery_mask) = if additive {
+            (0x0010_0000, 0x80)
+        } else {
+            (0, 0)
+        };
         // Physical interaction bits and the respawnable marker leave this base draw intact.
         if scale != 100
-            || flags & !(0x0040_4c30 | FLAT) != 0
-            || scenery_flags & !0x21 != 0
-            || blend != (Some(0), Some(0x00ff_ffff), Some(255))
+            || flags & !(0x0040_4c30 | FLAT | object_mask) != 0
+            || scenery_flags & !(0x21 | scenery_mask) != 0
+            || (!additive && blend != (Some(0), Some(0x00ff_ffff), Some(255)))
         {
             return Err(format!("unsupported scenery appearance: scale {scale}, flags {flags:#x}, subtype flags {scenery_flags:#x}, blend {blend:?}").into());
         }
@@ -141,6 +158,7 @@ impl SceneryAppearance {
             scale,
             flags,
             scenery_flags,
+            additive,
         })
     }
 }
@@ -167,7 +185,7 @@ pub(super) fn resolve_scenery(
     if selected.is_empty() {
         return Ok(Vec::new());
     }
-    let mut importer = SceneryImport::new(vfs)?;
+    let mut importer = SceneryImport::new(vfs, false)?;
     let mut frames = art::FrameCache::default();
     selected
         .into_iter()
@@ -176,13 +194,17 @@ pub(super) fn resolve_scenery(
 }
 
 struct SceneryImport {
+    effects: bool,
+    loops: BTreeMap<(String, u8, u8), Arc<art::FrameLoop>>,
     names: LoadedMes,
     prototypes: BTreeMap<SerializedPrototypeId, (Source, SceneryPrototype)>,
 }
 
 impl SceneryImport {
-    fn new(vfs: &mut Vfs) -> Result<Self, Box<dyn Error>> {
+    fn new(vfs: &mut Vfs, effects: bool) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
+            effects,
+            loops: BTreeMap::new(),
             names: load_mes(vfs, NAMES)?,
             prototypes: BTreeMap::new(),
         })
@@ -248,8 +270,9 @@ impl SceneryImport {
         let (source, parent) = self.prototype(vfs, record.prototype)?;
         let source = source.clone();
         let parent = *parent;
-        let appearance = SceneryAppearance::resolve(record.fields, parent.appearance)
-            .map_err(|err| format!("scenery record {index}: {err}"))?;
+        let appearance =
+            SceneryAppearance::resolve_for_world(record.fields, parent.appearance, self.effects)
+                .map_err(|err| format!("scenery record {index}: {err}"))?;
         let art = SceneryArt::decode(record.art_id)?;
         let path = frames.resolve(|| art.resource_path(&self.names.mes))?;
         let artwork = frames.load_rotated(
@@ -264,9 +287,60 @@ impl SceneryImport {
         if frame.width > 512 || frame.height > 512 {
             return Err(format!("scenery frame exceeds 512 pixels per axis in {path}").into());
         }
+        let animation = if appearance.additive
+            && appearance.scenery_flags & 1 == 0
+            && artwork.decoded.frame_count > 1
+        {
+            let count = artwork.decoded.frame_count;
+            if count > 32 {
+                return Err("scenery animation exceeds ART ID frame capacity".into());
+            }
+            let key = (path.clone(), art.rotation, art.palette);
+            let animation = match self.loops.entry(key) {
+                Entry::Occupied(entry) => Arc::clone(entry.get()),
+                Entry::Vacant(entry) => {
+                    let sequence = (0..count)
+                        .map(|i| {
+                            let frame = frames.load_rotated(
+                                vfs,
+                                &path,
+                                i,
+                                art.palette,
+                                false,
+                                art.rotation,
+                            )?;
+                            if frame.decoded.frame.width > 512 || frame.decoded.frame.height > 512 {
+                                return Err(format!(
+                                    "animated scenery frame exceeds 512 pixels per axis in {path}"
+                                )
+                                .into());
+                            }
+                            Ok(frame)
+                        })
+                        .collect::<Result<_, Box<dyn Error>>>()?;
+                    let fps = u32::try_from(artwork.decoded.frames_per_second)
+                        .map_err(|_| "invalid scenery ART frame rate")?;
+                    let clip = Arc::new(art::FrameLoop::new(sequence, fps)?);
+                    Arc::clone(entry.insert(clip))
+                }
+            };
+            Some(animation)
+        } else {
+            None
+        };
         let tile = record
             .world_tile(coordinates)
             .ok_or("invalid scenery world tile")?;
+        let light = record
+            .fields
+            .light_art
+            .or(parent.appearance.light_art)
+            .filter(|&id| id != u32::MAX)
+            .map(|art_id| SceneryLight {
+                art_id,
+                flags: record.fields.light_flags.or(parent.appearance.light_flags),
+                color: record.fields.light_color.or(parent.appearance.light_color),
+            });
         Ok(ImportedScenery {
             stored_art_id: Some(record.art_id),
             record,
@@ -277,6 +351,8 @@ impl SceneryImport {
             art,
             tile,
             appearance,
+            animation,
+            light,
         })
     }
 }
@@ -551,7 +627,7 @@ fn load_overview_timed(
         }
     }
     let mut wall_import = wall::WallImport::new(vfs, &source, objects.start, counts)?;
-    let mut scenery_import = SceneryImport::new(vfs)?;
+    let mut scenery_import = SceneryImport::new(vfs, partial)?;
     let first = coordinates
         .world_tile(origin.0, origin.1)
         .ok_or("invalid floor origin")?;
@@ -741,6 +817,7 @@ pub(super) enum ObjectLight {
     Wall(u8),
     Portal(u8),
     Unlit,
+    Additive,
 }
 
 type SharedObject<'a> = (
@@ -748,6 +825,7 @@ type SharedObject<'a> = (
     SpriteDraw<'a>,
     &'a Arc<art::LoadedFrame>,
     ObjectLight,
+    Option<(&'a Arc<art::FrameLoop>, usize)>,
 );
 
 impl Room {
@@ -772,6 +850,7 @@ impl Room {
                 wall.draw(center)?,
                 &wall.artwork,
                 ObjectLight::Wall(wall.orientation.rotation),
+                None,
             ));
         }
         for scenery in &self.scenery {
@@ -781,12 +860,23 @@ impl Room {
                 scenery.appearance.flags & FLAT != 0,
                 scenery.record.index,
             );
-            let light = if scenery.appearance.flags & 0x00100000 != 0 {
+            let light = if scenery.appearance.additive {
+                ObjectLight::Additive
+            } else if scenery.appearance.flags & 0x00100000 != 0 {
                 ObjectLight::Unlit
             } else {
                 ObjectLight::Point
             };
-            objects.push((key, scenery.draw(center)?, &scenery.artwork, light));
+            objects.push((
+                key,
+                scenery.draw(center)?,
+                &scenery.artwork,
+                light,
+                scenery
+                    .animation
+                    .as_ref()
+                    .map(|clip| (clip, scenery.art.frame.into())),
+            ));
         }
         for portal in &self.portals {
             let (x, y) = portal.placement.tile;
@@ -805,6 +895,7 @@ impl Room {
                 portal.draw(center)?,
                 &portal.artwork,
                 ObjectLight::Portal(portal.art.rotation),
+                None,
             ));
         }
         Some(objects)
@@ -813,11 +904,11 @@ impl Room {
     /// Ordered base surface followed by flat and upright object draws.
     pub fn draws(&self) -> Option<impl Iterator<Item = SpriteDraw<'_>>> {
         let mut objects = self.shared_objects()?;
-        objects.sort_unstable_by_key(|(key, _, _, _)| *key);
+        objects.sort_unstable_by_key(|(key, _, _, _, _)| *key);
         Some(
             self.floor
                 .draws()
-                .chain(objects.into_iter().map(|(_, draw, _, _)| draw)),
+                .chain(objects.into_iter().map(|(_, draw, _, _, _)| draw)),
         )
     }
 }
@@ -864,15 +955,15 @@ mod tests {
             flags: Some(0),
             ..AppearanceFields::default()
         };
-        let effective = SceneryAppearance::resolve(instance, parent).unwrap();
+        let effective = SceneryAppearance::resolve_for_world(instance, parent, false).unwrap();
         assert_eq!(effective.offset, (-7, 0));
         assert_eq!(effective.flags, 0);
         assert_eq!(effective.scenery_flags, 0x20);
         instance.scale = Some(75);
-        assert!(SceneryAppearance::resolve(instance, parent).is_err());
+        assert!(SceneryAppearance::resolve_for_world(instance, parent, false).is_err());
         instance.scale = None;
         instance.flags = Some(0x200);
-        assert!(SceneryAppearance::resolve(instance, parent).is_err());
+        assert!(SceneryAppearance::resolve_for_world(instance, parent, false).is_err());
     }
 
     #[test]

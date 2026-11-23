@@ -31,11 +31,13 @@ pub struct SpriteDraw<'a> {
     pub anchor: (i32, i32),
 }
 
-/// Source-color modulation before source-over. A floor grid covers four
+/// Sprite color and compositing operation. A floor grid covers four
 /// 39 × 20 quadrants of a 78 × 40 sprite, with shared nodes in row order.
 #[derive(Clone, Copy)]
 pub enum Modulation<'a> {
     Unlit,
+    /// Original indexed additive ART. Nonzero alpha selects a palette color.
+    Additive,
     Uniform([u8; 3]),
     Floor([[u8; 3]; 9]),
     /// Screen-oriented multipliers, one per sprite column.
@@ -89,8 +91,16 @@ pub fn blit_modulated<'a>(
         let position = sprite_origin(draw.frame, draw.anchor);
         match shading {
             Modulation::Unlit => blit(destination, dimensions, stride, draw.frame, position)?,
+            Modulation::Additive => blit_with::<true, _>(
+                destination,
+                dimensions,
+                stride,
+                draw.frame,
+                position,
+                |_| |rgb, _| rgb,
+            )?,
             Modulation::Uniform(color) => {
-                blit_with(
+                blit_with::<false, _>(
                     destination,
                     dimensions,
                     stride,
@@ -103,23 +113,30 @@ pub fn blit_modulated<'a>(
                 if (draw.frame.width, draw.frame.height) != (78, 40) {
                     return Err(Error::SpriteLayout);
                 }
-                blit_with(destination, dimensions, stride, draw.frame, position, |y| {
-                    let row = floor_row(&nodes, y);
-                    move |rgb, x| {
-                        let [start, step] = row[usize::from(x >= 39)];
-                        let x = (if x < 39 { x } else { x - 39 }) as i32;
-                        multiply(
-                            rgb,
-                            std::array::from_fn(|i| ((start[i] + step[i] * x) / 780) as u8),
-                        )
-                    }
-                })?;
+                blit_with::<false, _>(
+                    destination,
+                    dimensions,
+                    stride,
+                    draw.frame,
+                    position,
+                    |y| {
+                        let row = floor_row(&nodes, y);
+                        move |rgb, x| {
+                            let [start, step] = row[usize::from(x >= 39)];
+                            let x = (if x < 39 { x } else { x - 39 }) as i32;
+                            multiply(
+                                rgb,
+                                std::array::from_fn(|i| ((start[i] + step[i] * x) / 780) as u8),
+                            )
+                        }
+                    },
+                )?;
             }
             Modulation::Columns(colors) => {
                 if colors.len() != draw.frame.width as usize {
                     return Err(Error::SpriteLayout);
                 }
-                blit_with(
+                blit_with::<false, _>(
                     destination,
                     dimensions,
                     stride,
@@ -171,12 +188,12 @@ pub fn blit(
     frame: &SpriteFrame,
     position: (i64, i64),
 ) -> Result<(), Error> {
-    blit_with(destination, dimensions, stride, frame, position, |_| {
+    blit_with::<false, _>(destination, dimensions, stride, frame, position, |_| {
         |rgb, _| rgb
     })
 }
 
-fn blit_with<S: Fn([u8; 3], usize) -> [u8; 3]>(
+fn blit_with<const ADD: bool, S: Fn([u8; 3], usize) -> [u8; 3]>(
     destination: &mut [[u8; 3]],
     dimensions: (u32, u32),
     stride: usize,
@@ -219,6 +236,14 @@ fn blit_with<S: Fn([u8; 3], usize) -> [u8; 3]>(
         let dest_row = &mut destination[dest_start..dest_start + columns];
         let source_row = &frame.pixels[source_start..source_start + columns];
         for (column, (dest, &[r, g, b, alpha])) in dest_row.iter_mut().zip(source_row).enumerate() {
+            if ADD {
+                if alpha != 0 {
+                    for (dest, source) in dest.iter_mut().zip([r, g, b]) {
+                        *dest = dest.saturating_add(source);
+                    }
+                }
+                continue;
+            }
             match alpha {
                 0 => {}
                 255 => *dest = shade([r, g, b], source_x + column),

@@ -465,20 +465,31 @@ impl InteractiveWorld {
         self.cache.visible(camera, viewport)
     }
 
-    pub fn visible_assets(
+    pub fn animation_delay(
         &self,
         camera: &Camera,
         size: (u32, u32),
-    ) -> impl Iterator<Item = super::WorldDraw<'_>> {
-        self.cache.visible_assets(camera, size)
+        elapsed: Duration,
+    ) -> Option<Duration> {
+        self.cache.animation_delay(camera, size, elapsed)
     }
 
-    pub fn visible_modulated(
+    pub fn visible_assets_at(
         &self,
         camera: &Camera,
         size: (u32, u32),
+        elapsed: Duration,
+    ) -> impl Iterator<Item = super::WorldDraw<'_>> {
+        self.cache.visible_assets(camera, size, elapsed)
+    }
+
+    pub fn visible_modulated_at(
+        &self,
+        camera: &Camera,
+        size: (u32, u32),
+        elapsed: Duration,
     ) -> impl Iterator<Item = (SpriteDraw<'_>, crate::compositor::Modulation<'_>)> {
-        self.cache.visible_modulated(camera, size)
+        self.cache.visible_modulated(camera, size, elapsed)
     }
 }
 

@@ -122,7 +122,10 @@ impl WindowRenderer {
         let acquire = start.elapsed();
         let stats = self.compositor.prepare(
             size,
-            draws.into_iter().map(|draw| (draw, Blend::SourceOver)),
+            draws.into_iter().map(|draw| {
+                let blend = Blend::for_modulation(draw.modulation);
+                (draw, blend)
+            }),
         )?;
         let begin = Instant::now();
         let target = frame.texture.create_view(&TextureViewDescriptor::default());

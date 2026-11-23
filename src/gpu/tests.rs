@@ -298,6 +298,31 @@ fn installed_world_matches_cpu_across_maps_resizing_and_eviction() {
             world = world.with_lighting(hour).unwrap();
         }
         let (home, _) = compare_world_frame(&mut gpu, &mut world, &camera, size);
+        if first == (12, 12) {
+            let decodes = world.stats().art.decodes;
+            let reads = world.stats().vfs_reads;
+            let (next, different) = compare_world_tick(
+                &mut gpu,
+                &mut world,
+                &camera,
+                size,
+                Duration::from_millis(90),
+            );
+            assert!(different.uploaded > 0);
+            assert_ne!(home, next);
+            let (same, warm) = compare_world_tick(
+                &mut gpu,
+                &mut world,
+                &camera,
+                size,
+                Duration::from_millis(1890),
+            );
+            assert_eq!(next, same);
+            assert_eq!(warm.uploaded, 0);
+            assert_eq!(world.stats().art.decodes, decodes);
+            assert_eq!(world.stats().vfs_reads, reads);
+        }
+
         camera.pan(offset, size);
         compare_world_frame(&mut gpu, &mut world, &camera, size);
         if first == (5, 14) {
@@ -377,6 +402,16 @@ fn compare_world_frame(
     camera: &crate::camera::Camera,
     size: (u32, u32),
 ) -> (Vec<[u8; 3]>, Preparation) {
+    compare_world_tick(gpu, world, camera, size, Duration::ZERO)
+}
+
+fn compare_world_tick(
+    gpu: &mut Compositor,
+    world: &mut crate::content::world::WorldStream,
+    camera: &crate::camera::Camera,
+    size: (u32, u32),
+    tick: Duration,
+) -> (Vec<[u8; 3]>, Preparation) {
     world.prepare(camera, size).unwrap();
     let background = [32, 43, 58];
     let mut cpu = vec![background; (size.0 * size.1) as usize];
@@ -384,16 +419,19 @@ fn compare_world_frame(
         &mut cpu,
         size,
         size.0 as usize,
-        world.visible_modulated(camera, size),
+        world
+            .visible_assets_at(camera, size, tick)
+            .map(|d| (d.sprite, d.modulation)),
     )
     .unwrap();
     let (rendered, stats) = read_frame(
         gpu,
         size,
         background,
-        world
-            .visible_assets(camera, size)
-            .map(|d| (d, Blend::SourceOver)),
+        world.visible_assets_at(camera, size, tick).map(|d| {
+            let blend = Blend::for_modulation(d.modulation);
+            (d, blend)
+        }),
     );
     assert!(
         cpu == rendered,

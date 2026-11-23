@@ -97,10 +97,8 @@ portals in that sector are reported individually by `art world-inspect`.
   the same additive mode. CE's `object_setup_blit` uses the original palette
   for additive software blits. TIG skips palette index zero and uses
   saturating per-channel addition against already drawn pixels. Order
-  therefore matters. The CPU compositor could support this with a
-  dedicated blend operation. It retains an explicit unsupported diagnostic
-  today. Lighting, animation timing and flame overlays remain separate
-  from loading their indexed artwork.
+  therefore matters. Milestone 45 implements this operation and frame
+  playback in the streamed viewer. [Original animated fire](ANIMATED_FIRE.md)
 
 The complete local inventory is generated under
 `target/visual-checks/milestone-41/scenery-inventory.tsv`. Its 112 rows

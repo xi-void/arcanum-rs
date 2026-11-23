@@ -232,6 +232,10 @@ The streamed world viewer also supports an experimental hardware backend
 with the optional `gpu` feature. See [GPU renderer](docs/GPU_RENDERER.md)
 for Vulkan, GLES and CPU comparison commands.
 
+The streamed viewer plays original additive fire scenery. Pass
+`--animation-ms 90` with `--sectors` to freeze a reproducible animation tick.
+[Original animated fire](docs/ANIMATED_FIRE.md)
+
 The synthetic demos require only a display session. `art overlap` shows
 bread and alignment frames with explicit draw order and independent anchors.
 In `art world`, use the arrow keys to pan, Shift to pan faster, Home to restore
