@@ -3,7 +3,7 @@
 use arcanum_rs::art::SpriteFrame;
 use arcanum_rs::camera::{Camera, CameraScene};
 use arcanum_rs::compositor::{SpriteDraw, blit_ordered};
-use arcanum_rs::content::world::WorldStream;
+use arcanum_rs::content::world::{InteractiveWorld, WorldStream};
 use softbuffer::{Context, Surface};
 use std::{
     num::NonZeroU32,
@@ -136,24 +136,41 @@ pub fn show_stream(
     size: (u32, u32),
     trace: bool,
 ) -> Result<(), String> {
-    show_content(
+    let event_loop = make_loop()?;
+    let proxy = event_loop.create_proxy();
+    let world = world
+        .into_interactive(
+            move || {
+                let _ = proxy.send_event(());
+            },
+            trace,
+        )
+        .map_err(|error| format!("cannot start sector preparation worker: {error}"))?;
+    run_content(
         title,
         ViewContent::Stream {
             world: Box::new(world),
             camera,
             shift: false,
+            direction: (0, 0),
+            last_presented: None,
+            waiting: false,
             trace,
         },
         PhysicalSize::<u32>::from(size).into(),
+        event_loop,
     )
 }
 
 enum ViewContent<'a> {
     Fixed(&'a [Layer<'a>]),
     Stream {
-        world: Box<WorldStream>,
+        world: Box<InteractiveWorld>,
         camera: Camera,
         shift: bool,
+        direction: (i32, i32),
+        last_presented: Option<Camera>,
+        waiting: bool,
         trace: bool,
     },
     World {
@@ -164,7 +181,21 @@ enum ViewContent<'a> {
 }
 
 fn show_content(title: String, content: ViewContent<'_>, size: Size) -> Result<(), String> {
-    let event_loop = EventLoop::new().map_err(|error| format!("cannot open display: {error}"))?;
+    run_content(title, content, size, make_loop()?)
+}
+
+fn make_loop() -> Result<EventLoop<()>, String> {
+    EventLoop::with_user_event()
+        .build()
+        .map_err(|error| format!("cannot open display: {error}"))
+}
+
+fn run_content(
+    title: String,
+    content: ViewContent<'_>,
+    size: Size,
+    event_loop: EventLoop<()>,
+) -> Result<(), String> {
     event_loop.set_control_flow(ControlFlow::Wait);
     let context = Context::new(event_loop.owned_display_handle())
         .map_err(|error| format!("cannot initialize software presentation: {error}"))?;
@@ -226,6 +257,15 @@ impl Viewer<'_> {
 }
 
 impl ApplicationHandler for Viewer<'_> {
+    fn user_event(&mut self, _: &ActiveEventLoop, _: ()) {
+        if let ViewContent::Stream { world, .. } = &mut self.content
+            && world.receive()
+            && let Some(view) = &self.view
+        {
+            view.window.request_redraw();
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.view.is_none() {
             match self.open(event_loop) {
@@ -273,29 +313,50 @@ impl ApplicationHandler for Viewer<'_> {
                 is_synthetic: false,
                 ..
             } if event.state.is_pressed() => {
-                if let ViewContent::World { camera, shift, .. }
-                | ViewContent::Stream { camera, shift, .. } = &mut self.content
-                {
-                    let size = view.window.inner_size();
-                    let viewport = (size.width, size.height);
-                    let step = if *shift { 64 } else { 16 };
-                    let changed = match event.logical_key {
-                        Key::Named(NamedKey::Escape) => {
-                            event_loop.exit();
-                            return;
-                        }
-                        Key::Named(NamedKey::Home) => camera.reset(viewport),
-                        Key::Named(NamedKey::ArrowLeft) => camera.pan((-step, 0), viewport),
-                        Key::Named(NamedKey::ArrowRight) => camera.pan((step, 0), viewport),
-                        Key::Named(NamedKey::ArrowUp) => camera.pan((0, -step), viewport),
-                        Key::Named(NamedKey::ArrowDown) => camera.pan((0, step), viewport),
-                        _ => false,
-                    };
-                    if changed {
-                        view.window.request_redraw();
+                let size = view.window.inner_size();
+                let viewport = (size.width, size.height);
+                let (camera, shift, navigation) = match &mut self.content {
+                    ViewContent::World { camera, shift, .. } => (camera, shift, None),
+                    ViewContent::Stream {
+                        camera,
+                        shift,
+                        direction,
+                        last_presented,
+                        waiting,
+                        ..
+                    } => (camera, shift, Some((direction, last_presented, *waiting))),
+                    ViewContent::Fixed(_) => return,
+                };
+                let step = if *shift { 64 } else { 16 };
+                let delta = match event.logical_key {
+                    Key::Named(NamedKey::Escape) => {
+                        event_loop.exit();
+                        return;
+                    }
+                    Key::Named(NamedKey::Home) => (0, 0),
+                    Key::Named(NamedKey::ArrowLeft) => (-step, 0),
+                    Key::Named(NamedKey::ArrowRight) => (step, 0),
+                    Key::Named(NamedKey::ArrowUp) => (0, -step),
+                    Key::Named(NamedKey::ArrowDown) => (0, step),
+                    _ => return,
+                };
+                let previous = camera.position();
+                if let Some((direction, last, waiting)) = navigation {
+                    *direction = delta;
+                    if waiting && let Some(last) = last {
+                        *camera = last.clone();
                     }
                 }
+                if delta == (0, 0) {
+                    camera.reset(viewport);
+                } else {
+                    camera.pan(delta, viewport);
+                }
+                if camera.position() != previous {
+                    view.window.request_redraw();
+                }
             }
+
             WindowEvent::RedrawRequested => {
                 let size = view.window.inner_size();
                 let result = match &mut self.content {
@@ -321,9 +382,19 @@ impl ApplicationHandler for Viewer<'_> {
                     ViewContent::Stream {
                         world,
                         camera,
+                        direction,
+                        last_presented,
+                        waiting,
                         trace,
                         ..
-                    } => view.redraw_stream(size, world, camera, *trace),
+                    } => view
+                        .redraw_stream(size, world, camera, *direction, *trace)
+                        .map(|ready| {
+                            *waiting = !ready;
+                            if ready {
+                                *last_presented = Some(camera.clone());
+                            }
+                        }),
                 };
                 if let Err(error) = result {
                     self.fail(event_loop, error);
@@ -345,34 +416,25 @@ impl WindowSurface {
     fn redraw_stream(
         &mut self,
         size: PhysicalSize<u32>,
-        world: &mut WorldStream,
+        world: &mut InteractiveWorld,
         camera: &mut Camera,
+        direction: (i32, i32),
         trace: bool,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let viewport = (size.width, size.height);
         if size.width == 0 || size.height == 0 {
-            return Ok(());
+            return Ok(false);
         }
         camera.resize(viewport);
-        let before = world.stats().sector_reads;
-        let prepared = world.prepare(camera, viewport)?;
-        if world.stats().sector_reads != before {
-            for sector in world.reports() {
-                let note = sector.diagnostics.first().map_or("", String::as_str);
-                eprintln!(
-                    "Sector {}: {} surfaces, {} walls, {} scenery, {} portals, {} diagnostics {note}",
-                    sector.id,
-                    sector.surfaces,
-                    sector.wall_count,
-                    sector.scenery_count,
-                    sector.portal_count,
-                    sector.diagnostics.len()
-                );
-            }
+        let prepared = world.prepare(camera, viewport, direction)?;
+        if !prepared.ready {
+            // Keep the last complete buffer visible while the worker prepares
+            // the destination. The completion event drives the next redraw.
+            return Ok(false);
         }
         let frame = self.redraw(size, world.visible(camera, viewport))?;
         if trace
-            || prepared.load
+            || prepared.scheduling
                 + prepared.ordering
                 + frame.composition
                 + frame.packing
@@ -380,20 +442,18 @@ impl WindowSurface {
                 > Duration::from_millis(30)
         {
             eprintln!(
-                "Frame {:?} {}x{} load {:?} (ART read {:?}, ART decode {:?}) order {:?} compose {:?} pack {:?} submit {:?}",
+                "Frame {:?} {}x{} sync load wait 0ns schedule {:?} order {:?} compose {:?} pack {:?} submit {:?}",
                 camera.position(),
                 size.width,
                 size.height,
-                prepared.load,
-                prepared.art_read,
-                prepared.art_decode,
+                prepared.scheduling,
                 prepared.ordering,
                 frame.composition,
                 frame.packing,
                 frame.submission
             );
         }
-        Ok(())
+        Ok(true)
     }
 
     fn redraw<'a>(

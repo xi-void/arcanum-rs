@@ -1269,4 +1269,78 @@ fn streams_original_layout_from_two_synthetic_adjacent_sectors() {
     let reads = world.stats().sector_reads;
     world.prepare(&camera, size).unwrap();
     assert_eq!(world.stats().sector_reads, reads);
+
+    let mut vfs = Vfs::new(Policy::Ordered);
+    vfs.mount_directory(&fixture.0).unwrap();
+    let wide = SectorRegion {
+        last: Coordinates { x: 14, y: 0 },
+        ..region
+    };
+    let mut camera = wide.camera(center).unwrap();
+    let world = WorldStream::new(vfs, "synthetic".into(), wide, center).unwrap();
+    let (wake, completed) = std::sync::mpsc::channel();
+    let mut interactive = world
+        .into_interactive(
+            move || {
+                let _ = wake.send(());
+            },
+            false,
+        )
+        .unwrap();
+    let complete = || {
+        completed
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap()
+    };
+    camera.reset(size);
+    assert!(!interactive.prepare(&camera, size, (0, 0)).unwrap().ready);
+    complete();
+    assert!(interactive.receive());
+    assert!(interactive.prepare(&camera, size, (-64, 32)).unwrap().ready);
+    let home_frame = std::ptr::from_ref(interactive.visible(&camera, size).next().unwrap().frame);
+    complete();
+    assert!(
+        !interactive.receive(),
+        "speculative completion must not request a redraw"
+    );
+    let stats = interactive.stats();
+    camera.pan((-1260, 630), size);
+    assert!(interactive.prepare(&camera, size, (0, 0)).unwrap().ready);
+    assert_eq!(interactive.stats().prefetch_hits, 1);
+    assert_eq!(interactive.stats().cache.vfs_reads, stats.cache.vfs_reads);
+    assert_eq!(
+        interactive.stats().cache.art.decodes,
+        stats.cache.art.decodes
+    );
+    let mut pixels = vec![[0; 3]; 160 * 100];
+    blit_ordered(&mut pixels, size, 160, interactive.visible(&camera, size)).unwrap();
+    assert_eq!(pixels, seam);
+
+    for sector in 3..=14 {
+        let (x, y) = camera.position();
+        let d = (sector * 64) * 40;
+        camera.pan((-d - x, d / 2 - y), size);
+        while !interactive.prepare(&camera, size, (0, 0)).unwrap().ready {
+            complete();
+            interactive.receive();
+        }
+    }
+    assert_eq!(interactive.stats().cache.cached_sectors, 12);
+    assert!(interactive.stats().cache.sector_evictions > 0);
+    camera.reset(size);
+    assert!(!interactive.prepare(&camera, size, (0, 0)).unwrap().ready);
+    complete();
+    assert!(interactive.receive());
+    assert!(interactive.prepare(&camera, size, (0, 0)).unwrap().ready);
+    assert_eq!(
+        interactive.stats().cache.art.decodes,
+        stats.cache.art.decodes
+    );
+    assert_eq!(
+        std::ptr::from_ref(interactive.visible(&camera, size).next().unwrap().frame),
+        home_frame
+    );
+    pixels.fill([0; 3]);
+    blit_ordered(&mut pixels, size, 160, interactive.visible(&camera, size)).unwrap();
+    assert_eq!(pixels, home);
 }

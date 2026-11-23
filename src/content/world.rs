@@ -2,7 +2,7 @@
 
 use super::{
     art::{FrameCache, FrameCacheStats, LoadedFrame},
-    scenery::{DrawOrder, RoomOverview, WorldRegion, load_streamed_sector},
+    scenery::{DrawOrder, LoadStages, RoomOverview, WorldRegion, load_streamed_sector},
 };
 use crate::{
     camera::{Camera, RasterBounds, Viewport},
@@ -16,6 +16,9 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+
+mod prefetch;
+pub use prefetch::{InteractiveWorld, PrefetchStats};
 
 const MAX_SECTORS: usize = 12;
 const OVERHANG: i64 = 640;
@@ -123,6 +126,8 @@ pub struct StreamStats {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PrepareTiming {
     pub load: Duration,
+    pub stages: LoadStages,
+    pub art_resolution: Duration,
     pub art_read: Duration,
     pub art_decode: Duration,
     pub ordering: Duration,
@@ -262,7 +267,7 @@ fn within_overhang(bounds: RasterBounds, (x, y): (i32, i32)) -> bool {
 
 #[derive(Default)]
 struct SectorCache {
-    entries: BTreeMap<u64, (CachedSector, u64)>,
+    entries: BTreeMap<u64, (CachedSector, Option<u64>)>,
     active: Vec<u64>,
     ordered: Vec<Raster>,
     step: u64,
@@ -286,36 +291,72 @@ impl SectorCache {
         self.ordered.clear();
         for &id in required {
             if let Some((_, touched)) = self.entries.get_mut(&id) {
-                *touched = self.step;
+                *touched = Some(self.step);
                 self.hits += 1;
                 continue;
             }
             if self.entries.len() == capacity {
-                let (&oldest, _) = self
-                    .entries
-                    .iter()
-                    .filter(|(id, _)| !required.contains(id))
-                    .min_by_key(|(_, (_, touched))| *touched)
-                    .expect("at least one inactive sector at capacity");
-                self.entries.remove(&oldest);
-                self.evictions += 1;
+                self.evict(capacity, required, false);
             }
-            self.entries.insert(id, (load(id), self.step));
+            self.entries.insert(id, (load(id), Some(self.step)));
             self.loads += 1;
         }
         let load = start.elapsed();
         let start = Instant::now();
-        self.active.clear();
-        self.active.extend_from_slice(required);
-        for id in &self.active {
-            self.ordered
-                .extend(self.entries[id].0.draws.iter().cloned());
-        }
-        self.ordered.sort_unstable_by_key(|draw| draw.key);
+        self.activate(required);
         PrepareTiming {
             load,
             ordering: start.elapsed(),
             ..PrepareTiming::default()
+        }
+    }
+
+    fn evict(&mut self, capacity: usize, required: &[u64], keep_active: bool) -> bool {
+        if self.entries.len() < capacity {
+            return true;
+        }
+        let victim = self
+            .entries
+            .iter()
+            .filter(|(id, _)| !required.contains(id) && (!keep_active || !self.active.contains(id)))
+            .min_by_key(|(_, (_, touched))| *touched)
+            .map(|(&id, _)| id);
+        if let Some(victim) = victim {
+            self.entries.remove(&victim);
+            self.evictions += 1;
+        }
+        victim.is_some()
+    }
+
+    fn activate(&mut self, required: &[u64]) {
+        self.step += 1;
+        self.ordered.clear();
+        self.active.clear();
+        self.active.extend_from_slice(required);
+        for id in required {
+            let (sector, touched) = self.entries.get_mut(id).expect("activate prepared sector");
+            *touched = Some(self.step);
+            self.ordered.extend(sector.draws.iter().cloned());
+        }
+        self.ordered.sort_unstable_by_key(|draw| draw.key);
+    }
+
+    fn stats(&self, (reads, art): (u64, FrameCacheStats)) -> StreamStats {
+        StreamStats {
+            sector_reads: self.loads,
+            sector_hits: self.hits,
+            sector_evictions: self.evictions,
+            cached_sectors: self.entries.len(),
+            active_sectors: self.active.len(),
+            vfs_reads: reads,
+            raster_bytes: (self.ordered.capacity()
+                + self
+                    .entries
+                    .values()
+                    .map(|(sector, _)| sector.draws.capacity())
+                    .sum::<usize>())
+                * size_of::<Raster>(),
+            art,
         }
     }
 
@@ -330,11 +371,8 @@ impl SectorCache {
 /// A selected map rectangle, one immutable set of mounts and a bounded cache.
 /// Sector loading takes place in prepare, before immutable raster iteration.
 pub struct WorldStream {
-    map: String,
     region: SectorRegion,
-    reference: (u32, u32),
-    vfs: Vfs,
-    frames: FrameCache,
+    loader: SectorLoader,
     cache: SectorCache,
 }
 
@@ -352,41 +390,48 @@ impl WorldStream {
             .camera(reference)
             .ok_or("invalid world sector bounds or camera reference")?;
         Ok(Self {
-            map,
             region,
-            reference,
-            vfs,
-            frames: FrameCache::default(),
+            loader: SectorLoader {
+                map,
+                reference,
+                vfs,
+                frames: FrameCache::default(),
+            },
             cache: SectorCache::default(),
         })
     }
 
+    /// Synchronous inspection and controlled benchmarking. The viewer uses into_interactive.
     pub fn prepare(&mut self, camera: &Camera, size: (u32, u32)) -> Result<PrepareTiming, String> {
         let required = self
             .region
-            .needed(self.reference, camera.position(), size)?;
-        let before = self.frames.stats();
+            .needed(self.loader.reference, camera.position(), size)?;
+        let before = self.loader.frames.stats();
+        let mut stages = LoadStages::default();
         let mut timing = self.cache.select(required.as_slice(), MAX_SECTORS, |id| {
-            let sector = Coordinates::from_id(id).expect("validated sector coordinates");
-            let region = WorldRegion {
-                map: &self.map,
-                sector,
-                origin: (0, 0),
-                side: SIDE as u8,
-                center: sector
-                    .world_tile(0, 0)
-                    .expect("validated sector coordinates"),
-                viewport: size,
-            };
-            match load_streamed_sector(&mut self.vfs, &mut self.frames, region) {
-                Ok(room) => CachedSector::from_room(id, room, self.reference),
-                Err(error) => CachedSector::missing(id, error.to_string()),
-            }
+            let (sector, slice) = self.loader.load(id);
+            stages.sector_read += slice.sector_read;
+            stages.floor_parse += slice.floor_parse;
+            stages.surfaces += slice.surfaces;
+            stages.object_parse += slice.object_parse;
+            stages.object_import += slice.object_import;
+            stages.rasters += slice.rasters;
+            sector
         });
-        let after = self.frames.stats();
+        timing.stages = stages;
+        let after = self.loader.frames.stats();
+        timing.art_resolution = after.resolution_time - before.resolution_time;
         timing.art_read = after.read_time - before.read_time;
         timing.art_decode = after.decode_time - before.decode_time;
         Ok(timing)
+    }
+
+    pub fn into_interactive(
+        self,
+        wake: impl Fn() + Send + 'static,
+        trace: bool,
+    ) -> std::io::Result<InteractiveWorld> {
+        prefetch::InteractiveWorld::new(self, wake, trace)
     }
 
     pub fn reports(&self) -> impl Iterator<Item = &SectorReport> {
@@ -397,23 +442,7 @@ impl WorldStream {
     }
 
     pub fn stats(&self) -> StreamStats {
-        StreamStats {
-            sector_reads: self.cache.loads,
-            sector_hits: self.cache.hits,
-            sector_evictions: self.cache.evictions,
-            cached_sectors: self.cache.entries.len(),
-            active_sectors: self.cache.active.len(),
-            vfs_reads: self.vfs.read_attempts(),
-            raster_bytes: (self.cache.ordered.capacity()
-                + self
-                    .cache
-                    .entries
-                    .values()
-                    .map(|(sector, _)| sector.draws.capacity())
-                    .sum::<usize>())
-                * size_of::<Raster>(),
-            art: self.frames.stats(),
-        }
+        self.cache.stats(self.loader.stats())
     }
 
     pub fn visible(
@@ -422,6 +451,42 @@ impl WorldStream {
         size: (u32, u32),
     ) -> impl Iterator<Item = SpriteDraw<'_>> {
         self.cache.visible(camera, size)
+    }
+}
+
+struct SectorLoader {
+    map: String,
+    reference: (u32, u32),
+    vfs: Vfs,
+    frames: FrameCache,
+}
+
+impl SectorLoader {
+    fn load(&mut self, id: u64) -> (CachedSector, LoadStages) {
+        let sector = Coordinates::from_id(id).expect("validated sector coordinates");
+        let region = WorldRegion {
+            map: &self.map,
+            sector,
+            origin: (0, 0),
+            side: SIDE as u8,
+            center: sector
+                .world_tile(0, 0)
+                .expect("validated sector coordinates"),
+            // Full-sector import is independent of the current viewport.
+            viewport: (1, 1),
+        };
+        let (room, mut timing) = load_streamed_sector(&mut self.vfs, &mut self.frames, region);
+        let start = Instant::now();
+        let sector = match room {
+            Ok(room) => CachedSector::from_room(id, room, self.reference),
+            Err(error) => CachedSector::missing(id, error.to_string()),
+        };
+        timing.rasters = start.elapsed();
+        (sector, timing)
+    }
+
+    fn stats(&self) -> (u64, FrameCacheStats) {
+        (self.vfs.read_attempts(), self.frames.stats())
     }
 }
 

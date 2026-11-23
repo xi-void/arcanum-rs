@@ -16,6 +16,9 @@ Arrows pan, Shift increases the step, Home restores the starting point and
 Escape closes the window. The default Bates Mansion view and the existing
 `--view` inspection mode are also available.
 
+The current viewer uses [predictive sector preparation](SECTOR_PREFETCH.md).
+The measurements below preserve the Milestone 39 synchronous baseline.
+
 ## Original data
 
 CE's `sector_id_from_loc` shifts each world tile coordinate right by six.
