@@ -122,26 +122,34 @@ impl ArtFields {
 
     /// Adjust the legacy hotspot. Mirroring uses the wall blitter's width-minus-two rule.
     pub fn pivot(self, frame: &SpriteFrame) -> (i64, i64) {
-        let (mut x, mut y) = (i64::from(frame.hotspot.0), i64::from(frame.hotspot.1));
-        if !(2..=5).contains(&self.rotation) {
-            x -= 40;
-            y += 20;
-        }
-        if self.mirror_x() {
-            x = i64::from(frame.width) - x - 2;
-        }
-        (x, y)
+        opening_pivot(frame, self.rotation, self.mirror_x())
     }
 
-    /// Within-cell ordering for upright walls. The original object list
-    /// uses a rotation-driven order offset independent of the visual offset.
+    /// Within-cell ordering is independent of the visual offset.
     pub fn order_key(self) -> (i32, i32) {
-        // (depth, horizontal) from sub_4F2230 and sub_4B93F0.
-        if (2..=5).contains(&self.rotation) {
-            (-2, 38)
-        } else {
-            (-40, 0)
-        }
+        opening_order_key(self.rotation)
+    }
+}
+
+/// Walls and portals share the legacy directional and mirrored hotspot rules.
+pub(crate) fn opening_pivot(frame: &SpriteFrame, rotation: u8, mirror: bool) -> (i64, i64) {
+    let (mut x, mut y) = (i64::from(frame.hotspot.0), i64::from(frame.hotspot.1));
+    if !(2..=5).contains(&rotation) {
+        x -= 40;
+        y += 20;
+    }
+    if mirror {
+        x = i64::from(frame.width) - x - 2;
+    }
+    (x, y)
+}
+
+pub(crate) fn opening_order_key(rotation: u8) -> (i32, i32) {
+    // (depth, horizontal) from sub_4F2230 and sub_4B93F0.
+    if (2..=5).contains(&rotation) {
+        (-2, 38)
+    } else {
+        (-40, 0)
     }
 }
 

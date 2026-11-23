@@ -823,3 +823,91 @@ fn bates_room_overview_reuses_the_original_room_inside_the_larger_sector_scene()
     }
     assert!(wide.walls.iter().any(|wall| wall.orientation.rotation == 5));
 }
+
+#[test]
+#[ignore = "requires installed Arcanum data"]
+fn bates_world_preserves_original_closed_portal_geometry_and_wall_order() {
+    use arcanum_rs::{
+        compositor::{blit_ordered, sprite_origin},
+        content::{
+            portal::Kind,
+            scenery::{WorldRegion, load_world},
+        },
+    };
+    use std::sync::Arc;
+    let game = PathBuf::from(std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"));
+    let mut vfs = Vfs::from_game(&game, Policy::Ce).unwrap();
+    let world = load_world(&mut vfs, WorldRegion::BATES_MANSION).unwrap();
+    let room = &world.room;
+    assert_eq!(
+        room.portals
+            .iter()
+            .map(|p| p.record.index)
+            .collect::<Vec<_>>(),
+        [150, 152, 184, 191, 244, 246]
+    );
+    assert!(
+        world
+            .issues
+            .iter()
+            .any(|i| i.record == 186 && i.reason.contains("frame: 3"))
+    );
+    assert_eq!(room.walls.len(), 96);
+    assert_eq!(room.scenery.len(), 24);
+    let leaf = &room.portals[0];
+    let other = &room.portals[1];
+    assert_eq!(leaf.art.kind, Kind::Door);
+    assert_eq!(leaf.record.span, 31758..31841);
+    assert_eq!(leaf.record.art_id, 0x3210_3c11);
+    assert_eq!(leaf.prototype_art_id, 0x3000_3411);
+    assert_eq!(leaf.placement.tile, (94, 90));
+    assert_eq!(leaf.appearance.offset, (0, 0));
+    assert_eq!(leaf.appearance.scale, 100);
+    assert_eq!(leaf.appearance.portal_flags, 9);
+    assert_eq!(leaf.artwork.source.virtual_path, "art/portal/in4e4au0.art");
+    assert_eq!(leaf.art.pivot(&leaf.artwork.decoded.frame), (42, 99));
+    assert_eq!(other.art.pivot(&other.artwork.decoded.frame), (33, 103));
+    assert!(Arc::ptr_eq(&leaf.artwork, &room.portals[4].artwork));
+    assert!(!Arc::ptr_eq(&leaf.artwork, &room.portals[2].artwork));
+    let draw = leaf.draw(room.floor.center).unwrap();
+    assert_eq!(sprite_origin(draw.frame, draw.anchor), (518, -99));
+    let shifted = leaf.draw((102, 83)).unwrap();
+    assert_eq!(sprite_origin(shifted.frame, shifted.anchor), (558, -119));
+
+    let wall = room
+        .walls
+        .iter()
+        .find(|w| w.record.index == leaf.paired_wall_index)
+        .unwrap();
+    let wall_draw = wall.draw(room.floor.center).unwrap();
+    let draws = room.draws().unwrap().collect::<Vec<_>>();
+    let index = draws
+        .iter()
+        .position(|d| std::ptr::eq(d.frame, draw.frame) && d.anchor == draw.anchor)
+        .unwrap();
+    assert!(std::ptr::eq(draws[index - 1].frame, wall_draw.frame));
+    assert_eq!(draws[index - 1].anchor, wall_draw.anchor);
+    let clip = |dimensions: (u32, u32), position: (i32, i32)| {
+        let stride = dimensions.0 as usize;
+        let mut pixels = vec![[32, 43, 58]; stride * dimensions.1 as usize];
+        blit_ordered(
+            &mut pixels,
+            dimensions,
+            stride,
+            draws.iter().map(|d| {
+                let mut d = *d;
+                d.anchor.0 += 640 - position.0;
+                d.anchor.1 += 360 - position.1;
+                d
+            }),
+        )
+        .unwrap();
+        pixels
+    };
+    let full = clip((1280, 720), (0, 0));
+    let part = clip((140, 115), (1140, 255));
+    for (row, value) in part.chunks(140).enumerate() {
+        let start = (255 + row) * 1280 + 1140;
+        assert_eq!(value, &full[start..start + 140]);
+    }
+}

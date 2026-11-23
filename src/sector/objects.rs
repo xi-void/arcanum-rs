@@ -19,6 +19,7 @@ pub struct AppearanceFields {
     pub alpha: Option<u32>,
     pub wall_flags: Option<u32>,
     pub scenery_flags: Option<u32>,
+    pub portal_flags: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -155,7 +156,7 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
         let valid = match category {
             WALL => [u32::MAX, 0xf, 0x1f],
             SCENERY => [0x80c4_7f0f, 1, 5],
-            PORTAL => [3, 0, 0],
+            PORTAL => [0x0004_0f0f, 0, 1],
             _ => {
                 return Err(reader.error(format!(
                     "unsupported object category {category} at record {index}"
@@ -236,14 +237,34 @@ pub fn decode_wall_prototype(
     input: &[u8],
     id: SerializedPrototypeId,
 ) -> Result<AppearanceFields, Error> {
-    decode_static_prototype(input, id, WALL, 69)
+    decode_static_prototype(input, id, WALL, 69).map(|fields| fields.appearance)
 }
 
 pub fn decode_scenery_prototype(
     input: &[u8],
     id: SerializedPrototypeId,
 ) -> Result<AppearanceFields, Error> {
-    decode_static_prototype(input, id, SCENERY, 70)
+    decode_static_prototype(input, id, SCENERY, 70).map(|fields| fields.appearance)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortalPrototype {
+    pub art_id: u32,
+    pub appearance: AppearanceFields,
+}
+
+pub fn decode_portal_prototype(
+    input: &[u8],
+    id: SerializedPrototypeId,
+) -> Result<PortalPrototype, Error> {
+    let fields = decode_static_prototype(input, id, PORTAL, 72)?;
+    Ok(PortalPrototype {
+        art_id: fields.art_id.ok_or_else(|| Error {
+            offset: HEADER_SIZE + 12,
+            message: "missing portal prototype ART ID".into(),
+        })?,
+        appearance: fields.appearance,
+    })
 }
 
 fn decode_static_prototype(
@@ -251,7 +272,7 @@ fn decode_static_prototype(
     id: SerializedPrototypeId,
     category: u32,
     end: usize,
-) -> Result<AppearanceFields, Error> {
+) -> Result<Fields, Error> {
     let mut reader = Reader { input, offset: 0 };
     if input.len() > MAX_PROTOTYPE_BYTES {
         return Err(reader.error("static prototype exceeds the input limit"));
@@ -275,7 +296,7 @@ fn decode_static_prototype(
     if reader.offset != input.len() {
         return Err(reader.error("trailing data after static prototype"));
     }
-    Ok(fields.appearance)
+    Ok(fields)
 }
 
 #[derive(Default)]
@@ -308,21 +329,22 @@ impl Fields {
             69 if category == SCENERY => reader.array(8)?,
             67 if category == WALL => reader.array(4)?,
             68 if category == WALL => reader.array(8)?,
+            70 if category == PORTAL => reader.array(4)?,
+            71 if category == PORTAL => reader.array(8)?,
             _ => {
                 let value = reader.u32(field)?;
-                if category != PORTAL {
-                    match index {
-                        2 => self.appearance.offset_x = Some(value as i32),
-                        3 => self.appearance.offset_y = Some(value as i32),
-                        8 => self.appearance.blit_flags = Some(value),
-                        9 => self.appearance.blit_color = Some(value),
-                        10 => self.appearance.alpha = Some(value),
-                        11 => self.appearance.scale = Some(value as i32),
-                        18 => self.appearance.flags = Some(value),
-                        64 if category == WALL => self.appearance.wall_flags = Some(value),
-                        64 if category == SCENERY => self.appearance.scenery_flags = Some(value),
-                        _ => {}
-                    }
+                match index {
+                    2 => self.appearance.offset_x = Some(value as i32),
+                    3 => self.appearance.offset_y = Some(value as i32),
+                    8 => self.appearance.blit_flags = Some(value),
+                    9 => self.appearance.blit_color = Some(value),
+                    10 => self.appearance.alpha = Some(value),
+                    11 => self.appearance.scale = Some(value as i32),
+                    18 => self.appearance.flags = Some(value),
+                    64 if category == WALL => self.appearance.wall_flags = Some(value),
+                    64 if category == SCENERY => self.appearance.scenery_flags = Some(value),
+                    64 if category == PORTAL => self.appearance.portal_flags = Some(value),
+                    _ => {}
                 }
             }
         }
