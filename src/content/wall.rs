@@ -1,12 +1,15 @@
 //! Read-only wall placement and source resolution through the VFS.
 
-use super::{LoadedMes, Source, art, load_mes, read_bounded, sector::read_base_sector};
+use super::{
+    LoadedMes, Source, art, load_mes,
+    sector::{read_base_sector, read_static_prototype},
+};
 use crate::{
     compositor::SpriteDraw,
-    prototype::{MAX_PROTOTYPE_BYTES, SerializedPrototypeId},
+    prototype::SerializedPrototypeId,
     sector::{
         Coordinates,
-        objects::{WallFields, WallRecord, decode, decode_wall_prototype},
+        objects::{AppearanceFields, ObjectList, StaticRecord, decode, decode_wall_prototype},
     },
     vfs::Vfs,
     wall::{ArtFields, Placement, WallArtId},
@@ -28,7 +31,7 @@ pub struct ImportedWall {
     pub sector_source: Source,
     pub object_list_offset: usize,
     pub object_counts: (usize, usize, usize),
-    pub record: WallRecord,
+    pub record: StaticRecord,
     pub prototype_source: Source,
     pub structure_source: Source,
     pub names_source: Source,
@@ -70,19 +73,29 @@ pub fn load_many(
     coordinates: Coordinates,
     indices: &[usize],
 ) -> Result<Vec<ImportedWall>, Box<dyn Error>> {
+    if indices.is_empty() {
+        return Ok(Vec::new());
+    }
     if indices.len() > 64 {
         return Err("wall selection exceeds 64 records".into());
-    }
-    let mut requested: BTreeSet<_> = indices.iter().copied().collect();
-    if requested.len() != indices.len() {
-        return Err("duplicate wall record selection".into());
-    }
-    if requested.is_empty() {
-        return Ok(Vec::new());
     }
     let (source, bytes) = read_base_sector(vfs, map, coordinates)?;
     let list = decode(&bytes)
         .map_err(|error| format!("{} from {source}: {error}", source.virtual_path))?;
+    resolve_many(vfs, coordinates, &source, list, indices)
+}
+
+pub(super) fn resolve_many(
+    vfs: &mut Vfs,
+    coordinates: Coordinates,
+    source: &Source,
+    list: ObjectList,
+    indices: &[usize],
+) -> Result<Vec<ImportedWall>, Box<dyn Error>> {
+    let mut requested: BTreeSet<_> = indices.iter().copied().collect();
+    if requested.len() != indices.len() {
+        return Err("duplicate wall record selection".into());
+    }
     let records: Vec<_> = list
         .walls
         .into_iter()
@@ -95,21 +108,16 @@ pub fn load_many(
         )
         .into());
     }
-    let structure = load_mes(vfs, "art/wall/structure.mes")?;
-    let names = load_mes(vfs, "art/wall/wallname.mes")?;
-    let mut import = WallImport {
+    let mut import = WallImport::new(
+        vfs,
         source,
-        start: list.start,
-        counts: (
+        list.start,
+        (
             list.count - list.portal_count - list.scenery_count,
             list.portal_count,
             list.scenery_count,
         ),
-        structure,
-        names,
-        prototypes: BTreeMap::new(),
-        artwork: BTreeMap::new(),
-    };
+    )?;
     let mut walls = Vec::with_capacity(records.len());
     for record in records {
         walls.push(import.resolve(vfs, coordinates, record)?);
@@ -124,22 +132,39 @@ pub fn load_many(
     Ok(walls)
 }
 
-struct WallImport {
+pub(super) struct WallImport {
     source: Source,
     start: usize,
     counts: (usize, usize, usize),
     structure: LoadedMes,
     names: LoadedMes,
-    prototypes: BTreeMap<SerializedPrototypeId, (Source, WallFields)>,
+    prototypes: BTreeMap<SerializedPrototypeId, (Source, AppearanceFields)>,
     artwork: BTreeMap<(String, u8, bool), Arc<art::LoadedFrame>>,
 }
 
 impl WallImport {
-    fn resolve(
+    pub(super) fn new(
+        vfs: &mut Vfs,
+        source: &Source,
+        start: usize,
+        counts: (usize, usize, usize),
+    ) -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            source: source.clone(),
+            start,
+            counts,
+            structure: load_mes(vfs, "art/wall/structure.mes")?,
+            names: load_mes(vfs, "art/wall/wallname.mes")?,
+            prototypes: BTreeMap::new(),
+            artwork: BTreeMap::new(),
+        })
+    }
+
+    pub(super) fn resolve(
         &mut self,
         vfs: &mut Vfs,
         coordinates: Coordinates,
-        record: WallRecord,
+        record: StaticRecord,
     ) -> Result<ImportedWall, Box<dyn Error>> {
         let record_index = record.index;
         let (prototype_source, parent) = match self.prototypes.entry(record.prototype) {
@@ -242,22 +267,8 @@ impl WallImport {
 fn load_prototype(
     vfs: &mut Vfs,
     id: SerializedPrototypeId,
-) -> Result<(Source, WallFields), Box<dyn Error>> {
-    let prefix = format!("proto/{:06} - ", id.0);
-    let candidates: Vec<_> = vfs
-        .paths_with_prefix(&prefix)
-        .into_iter()
-        .filter(|path| path.ends_with(".pro") && !path[prefix.len()..].contains('/'))
-        .collect();
-    let [path] = candidates.as_slice() else {
-        return Err(format!(
-            "expected one wall prototype for {}, found {candidates:?}",
-            id.0
-        )
-        .into());
-    };
-    let path = (*path).to_owned();
-    let (source, bytes) = read_bounded(vfs, &path, MAX_PROTOTYPE_BYTES)?;
+) -> Result<(Source, AppearanceFields), Box<dyn Error>> {
+    let (source, bytes) = read_static_prototype(vfs, id)?;
     let fields = decode_wall_prototype(&bytes, id)
         .map_err(|error| format!("{} from {source}: {error}", source.virtual_path))?;
     Ok((source, fields))

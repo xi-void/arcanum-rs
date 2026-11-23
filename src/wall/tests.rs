@@ -95,3 +95,23 @@ fn uses_wall_pivot_offsets_and_draws_visible_pixels_over_the_surface() {
     assert_eq!(viewport, [[20, 40, 60], [255, 140, 60]]);
     assert!(placement.draw(&wall, (u32::MAX, 0)).is_none());
 }
+
+#[test]
+fn resolves_verified_exterior_and_doorway_piece_without_adjusting_placement() {
+    let structures = Mes::parse_text("{0}{In40 WoD0 nul nul}").unwrap();
+    let names = Mes::parse_text("{0}{in40}{1}{wod0}").unwrap();
+    let id = WallArtId(0x1000_0000 | (27 << 14) | (5 << 11) | (1 << 8));
+    assert_eq!(
+        id.resolve(&structures, &names).unwrap(),
+        "art/wall/wodd4ru1.art"
+    );
+    let frame = SpriteFrame {
+        width: 40,
+        height: 154,
+        hotspot: (39, 132),
+        offset: (0, 0),
+        pixels: Vec::new(),
+    };
+    assert_eq!(id.fields().unwrap().pivot(&frame), (39, 132));
+    assert_eq!(id.fields().unwrap().order_key(), (-2, 38));
+}

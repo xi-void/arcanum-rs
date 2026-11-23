@@ -16,6 +16,12 @@ pub fn project_tile(x: i32, y: i32) -> Option<(i32, i32)> {
     ))
 }
 
+/// Project a world tile relative to the scene's shared center tile.
+pub fn project_world_tile(tile: (u32, u32), center: (u32, u32)) -> Option<(i32, i32)> {
+    let delta = |tile, center| i32::try_from(i64::from(tile) - i64::from(center)).ok();
+    project_tile(delta(tile.0, center.0)?, delta(tile.1, center.1)?)
+}
+
 /// Place a verified 78 × 40 floor frame at a projected tile center.
 pub fn floor_draw(frame: &SpriteFrame, x: i32, y: i32) -> Option<SpriteDraw<'_>> {
     if (frame.width, frame.height) != FLOOR_SIZE || frame.hotspot != FLOOR_HOTSPOT {

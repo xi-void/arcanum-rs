@@ -913,3 +913,99 @@ fn selected_wall_instances_keep_depth_order_and_reuse_oriented_frames() {
     fs::write(sector_path, sector).unwrap();
     assert!(error(&mut vfs, &[0, 1]).contains("invalid optional field marker"));
 }
+
+#[test]
+fn native_scenery_reuses_vfs_frame_and_clips_at_shared_anchor() {
+    use crate::{
+        compositor::{blit_ordered, sprite_origin},
+        prototype::SerializedPrototypeId,
+        sector::{
+            Coordinates,
+            objects::{AppearanceFields, StaticCategory, StaticRecord},
+        },
+    };
+    use std::sync::Arc;
+
+    let fixture = Fixture::new();
+    fixture.write("art/scenery/scenery.mes", b"{14036}{Prop.ART}");
+    let mut prototype = vec![0; 68];
+    prototype[..4].copy_from_slice(&119u32.to_le_bytes());
+    prototype[4..6].fill(255);
+    prototype[28] = 1;
+    prototype[36..40].copy_from_slice(&4039u32.to_le_bytes());
+    prototype[52] = 3;
+    for index in (0..36).chain(64..70) {
+        if matches!(index, 1 | 5..=7 | 15..=17 | 30 | 31 | 34 | 35 | 65 | 68 | 69) {
+            prototype.push(0);
+        } else {
+            let value: i32 = match index {
+                2 => -1,
+                3 => 2,
+                9 => 0xff_ffff,
+                10 => 255,
+                11 => 100,
+                _ => 0,
+            };
+            prototype.extend(value.to_le_bytes());
+        }
+    }
+    fixture.write("proto/004039 - scenery.pro", &prototype);
+    let mut art = vec![0; 132 + 1024 + 2 * 28];
+    for (offset, word) in [
+        (0, 1u32),
+        (8, 8),
+        (12, 1),
+        (32, 2),
+        (1156, 1),
+        (1160, 1),
+        (1164, 1),
+        (1184, 3),
+        (1188, 1),
+        (1192, 3),
+        (1196, 1),
+        (1204, 7),
+    ] {
+        art[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    art[136..139].copy_from_slice(&[3, 2, 1]);
+    art.extend([0, 1, 1, 0]);
+    fixture.write("art/scenery/prop.art", &art);
+
+    let mut vfs = Vfs::new(Policy::Ordered);
+    let mount = vfs.mount_directory(&fixture.0).unwrap();
+    let make_record = |index, offset_y| StaticRecord {
+        category: StaticCategory::Scenery,
+        index,
+        span: 0..0,
+        prototype: SerializedPrototypeId(4039),
+        instance_id: [0; 24],
+        art_id: 0x4120_4380,
+        stored_tile: (1, 1),
+        fields: AppearanceFields {
+            offset_y,
+            ..AppearanceFields::default()
+        },
+    };
+    let scenery = scenery::resolve_scenery(
+        &mut vfs,
+        Coordinates { x: 0, y: 0 },
+        vec![make_record(1, Some(0)), make_record(2, None)],
+        &[2, 1],
+    )
+    .unwrap();
+    let selected = &scenery[0];
+    assert_eq!(selected.record.index, 1);
+    assert_eq!(selected.appearance.offset, (-1, 0));
+    assert_eq!(scenery[1].appearance.offset, (-1, 2));
+    assert_eq!(selected.artwork.source.mount_id, mount);
+    assert!(Arc::ptr_eq(&selected.artwork, &scenery[1].artwork));
+    assert_eq!(selected.art.frame, 1);
+
+    let mut draw = selected.draw((1, 1)).unwrap();
+    assert_eq!(sprite_origin(draw.frame, draw.anchor), (-2, 0));
+    assert_eq!(draw.frame.offset, (7, 0));
+    let mut surface = [[20, 30, 40]; 3];
+    draw.anchor.0 += 1;
+    blit_ordered(&mut surface, (3, 1), 3, [draw]).unwrap();
+    assert_eq!(surface, [[1, 2, 3], [20, 30, 40], [20, 30, 40]]);
+}

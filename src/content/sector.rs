@@ -14,6 +14,7 @@ use std::error::Error;
 
 pub const PATCH_SIDE: u8 = 5;
 pub const WIDE_SIDE: u8 = 9;
+const MAX_FACADE_SIDE: u8 = 25;
 pub const WIDE_ORIGIN: (u8, u8) = (20, 13);
 pub const DEMO_MAP: &str = "bates mansion lev 1";
 pub const DEMO_SECTOR: Coordinates = Coordinates { x: 1, y: 1 };
@@ -118,8 +119,13 @@ fn load_surface(
     side: u8,
     include_facades: bool,
 ) -> Result<FloorPatch, Box<dyn Error>> {
-    if !(1..=WIDE_SIDE).contains(&side) {
-        return Err("sector region side must be between 1 and 9".into());
+    let max_side = if include_facades {
+        MAX_FACADE_SIDE
+    } else {
+        WIDE_SIDE
+    };
+    if !(1..=max_side).contains(&side) {
+        return Err(format!("sector region side must be between 1 and {max_side}").into());
     }
     let limit = sector::SIDE as u8 - side;
     if origin.0 > limit || origin.1 > limit {
@@ -246,6 +252,31 @@ pub(super) fn read_base_sector(
         .ok_or("sector coordinates exceed 26 bits")?;
     let path = format!("maps/{map}/{id}.sec");
     Ok(read_bounded(vfs, &path, sector::MAX_INPUT_BYTES)?)
+}
+
+pub(super) fn read_static_prototype(
+    vfs: &mut Vfs,
+    id: crate::prototype::SerializedPrototypeId,
+) -> Result<(Source, Vec<u8>), Box<dyn Error>> {
+    let prefix = format!("proto/{:06} - ", id.0);
+    let candidates: Vec<_> = vfs
+        .paths_with_prefix(&prefix)
+        .into_iter()
+        .filter(|path| path.ends_with(".pro") && !path[prefix.len()..].contains('/'))
+        .collect();
+    let [path] = candidates.as_slice() else {
+        return Err(format!(
+            "expected one static prototype for {}, found {candidates:?}",
+            id.0
+        )
+        .into());
+    };
+    let path = (*path).to_owned();
+    Ok(read_bounded(
+        vfs,
+        &path,
+        crate::prototype::MAX_PROTOTYPE_BYTES,
+    )?)
 }
 
 // Floor rectangles keep their origin. A mirrored frame reverses only the
