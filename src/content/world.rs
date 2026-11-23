@@ -2,7 +2,7 @@
 
 use super::{
     LoadedMes,
-    art::{FrameCache, FrameCacheStats, LoadedFrame},
+    art::{FrameCache, FrameCacheStats, FrameLoop, LoadedFrame},
     lighting::{self, Ambient, LightGrid, LightImport, StaticLight, WallFace},
     load_mes,
     scenery::{
@@ -115,6 +115,7 @@ pub struct SectorReport {
     pub diagnostics: Vec<String>,
     /// Total, prepared and switched-off original light records.
     pub light_counts: Option<(usize, usize, usize)>,
+    pub object_lights: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -162,6 +163,7 @@ struct Raster {
     anchor: (i32, i32),
     bounds: RasterBounds,
     object_light: ObjectLight,
+    animation: Option<(Arc<FrameLoop>, usize)>,
 }
 
 impl Raster {
@@ -171,6 +173,7 @@ impl Raster {
             frame: Arc::clone(frame),
             anchor,
             object_light: ObjectLight::Unlit,
+            animation: None,
             bounds: RasterBounds::new(SpriteDraw {
                 frame: &frame.decoded.frame,
                 anchor,
@@ -178,11 +181,66 @@ impl Raster {
         }
     }
 
-    fn draw(&self) -> SpriteDraw<'_> {
+    fn set_animation(&mut self, clip: &Arc<FrameLoop>, initial: usize) {
+        // The sector overhang bound must hold for every frame, including
+        // frames that extend farther than the original serialized image.
+        for frame in &clip.frames {
+            let frame = RasterBounds::new(self.frame_draw(frame));
+            self.bounds.min.0 = self.bounds.min.0.min(frame.min.0);
+            self.bounds.min.1 = self.bounds.min.1.min(frame.min.1);
+            self.bounds.max.0 = self.bounds.max.0.max(frame.max.0);
+            self.bounds.max.1 = self.bounds.max.1.max(frame.max.1);
+        }
+        self.animation = Some((Arc::clone(clip), initial));
+    }
+
+    fn asset_at(&self, elapsed: Duration) -> &Arc<LoadedFrame> {
+        match &self.animation {
+            Some((clip, initial)) => &clip.frames[clip.index(*initial, elapsed)],
+            None => &self.frame,
+        }
+    }
+
+    fn frame_draw<'a>(&self, frame: &'a LoadedFrame) -> SpriteDraw<'a> {
         SpriteDraw {
-            frame: &self.frame.decoded.frame,
+            frame: &frame.decoded.frame,
             anchor: self.anchor,
         }
+    }
+
+    fn visible_at(
+        &self,
+        viewport: &Viewport,
+        elapsed: Duration,
+    ) -> Option<(&Arc<LoadedFrame>, SpriteDraw<'_>)> {
+        let (asset, bounds) = if self.animation.is_some() {
+            if !viewport.intersects(self.bounds) {
+                return None;
+            }
+            let asset = self.asset_at(elapsed);
+            (asset, RasterBounds::new(self.frame_draw(asset)))
+        } else {
+            (&self.frame, self.bounds)
+        };
+        Some((asset, viewport.place(self.frame_draw(asset), bounds)?))
+    }
+
+    fn next_change(&self, viewport: &Viewport, elapsed: Duration) -> Option<Duration> {
+        let (clip, initial) = self.animation.as_ref()?;
+        if !viewport.intersects(self.bounds) {
+            return None;
+        }
+        let current = clip.index(*initial, elapsed);
+        let visible = |index| {
+            let frame: &Arc<LoadedFrame> = &clip.frames[index];
+            viewport.intersects(RasterBounds::new(self.frame_draw(frame)))
+        };
+        if visible(current) {
+            return Some(clip.delay(elapsed, 1));
+        }
+        (1..clip.frames.len())
+            .find(|steps| visible((current + steps) % clip.frames.len()))
+            .map(|steps| clip.delay(elapsed, steps))
     }
 }
 
@@ -208,6 +266,7 @@ impl CachedSector {
                 original_object_counts: (0, 0, 0),
                 diagnostics: vec![error],
                 light_counts: None,
+                object_lights: 0,
             },
             draws: Vec::new(),
             lights: LightGrid::default(),
@@ -244,6 +303,7 @@ impl CachedSector {
             light_counts: lights
                 .as_ref()
                 .map(|lights| (room.floor.lights.len(), lights.accepted, lights.off)),
+            object_lights: lights.as_ref().map_or(0, |lights| lights.object_lights),
         };
         report.diagnostics.extend(world.object_issue);
         report
@@ -269,11 +329,17 @@ impl CachedSector {
             })
             .collect();
         if let Some(objects) = room.shared_objects() {
-            for (key, draw, frame, light) in objects {
+            for (key, draw, frame, light, animation) in objects {
                 let tile =
                     project_world_tile((key.2, key.1), reference).expect("bounded object tile");
                 if let Some(mut raster) = shift(draw.anchor)
-                    .map(|anchor| Raster::new((true, key), frame, anchor))
+                    .map(|anchor| {
+                        let mut raster = Raster::new((true, key), frame, anchor);
+                        if let Some((clip, initial)) = animation {
+                            raster.set_animation(clip, initial);
+                        }
+                        raster
+                    })
                     .filter(|raster| within_overhang(raster.bounds, tile))
                 {
                     raster.object_light = light;
@@ -338,6 +404,7 @@ struct SectorCache {
     entries: BTreeMap<u64, (CachedSector, Option<u64>)>,
     active: Vec<u64>,
     ordered: Vec<Raster>,
+    animated: Vec<usize>,
     step: u64,
     loads: u64,
     hits: u64,
@@ -411,6 +478,13 @@ impl SectorCache {
             self.ordered.extend(sector.draws.iter().cloned());
         }
         self.ordered.sort_unstable_by_key(|draw| draw.key);
+        self.animated.clear();
+        self.animated.extend(
+            self.ordered
+                .iter()
+                .enumerate()
+                .filter_map(|(index, raster)| raster.animation.is_some().then_some(index)),
+        );
         let Some((ambient, reference)) = self.ambient else {
             return Duration::ZERO;
         };
@@ -480,6 +554,7 @@ impl SectorCache {
                         }
                     }
                     ObjectLight::Unlit => PreparedShade::Tint(Modulation::Unlit),
+                    ObjectLight::Additive => PreparedShade::Tint(Modulation::Additive),
                 }
             };
             self.shades.push(shade);
@@ -523,29 +598,47 @@ impl SectorCache {
     }
 
     fn visible(&self, camera: &Camera, size: (u32, u32)) -> impl Iterator<Item = SpriteDraw<'_>> {
+        self.visible_assets(camera, size, Duration::ZERO)
+            .map(|draw| draw.sprite)
+    }
+
+    fn animation_delay(
+        &self,
+        camera: &Camera,
+        size: (u32, u32),
+        elapsed: Duration,
+    ) -> Option<Duration> {
         let viewport = Viewport::new(camera.position(), size);
-        self.ordered
+        self.animated
             .iter()
-            .filter_map(move |draw| viewport.place(draw.draw(), draw.bounds))
+            .filter_map(|&index| self.ordered[index].next_change(&viewport, elapsed))
+            .min()
     }
 
     fn visible_assets(
         &self,
         camera: &Camera,
         size: (u32, u32),
+        elapsed: Duration,
     ) -> impl Iterator<Item = WorldDraw<'_>> {
         let viewport = Viewport::new(camera.position(), size);
         self.ordered
             .iter()
             .enumerate()
             .filter_map(move |(index, raster)| {
-                let sprite = viewport.place(raster.draw(), raster.bounds)?;
-                let modulation = self
-                    .shades
-                    .get(index)
-                    .map_or(Modulation::Unlit, PreparedShade::modulation);
+                let (asset, sprite) = raster.visible_at(&viewport, elapsed)?;
+                let modulation = self.shades.get(index).map_or_else(
+                    || {
+                        if matches!(raster.object_light, ObjectLight::Additive) {
+                            Modulation::Additive
+                        } else {
+                            Modulation::Unlit
+                        }
+                    },
+                    PreparedShade::modulation,
+                );
                 Some(WorldDraw {
-                    asset: &raster.frame,
+                    asset,
                     sprite,
                     modulation,
                 })
@@ -556,8 +649,9 @@ impl SectorCache {
         &self,
         camera: &Camera,
         size: (u32, u32),
+        elapsed: Duration,
     ) -> impl Iterator<Item = (SpriteDraw<'_>, Modulation<'_>)> {
-        self.visible_assets(camera, size)
+        self.visible_assets(camera, size, elapsed)
             .map(|draw| (draw.sprite, draw.modulation))
     }
 }
@@ -662,7 +756,7 @@ impl WorldStream {
         let mut submitted = 0;
         let mut culled = 0;
         for raster in sector.draws.iter().filter(|raster| raster.key.0) {
-            if viewport.place(raster.draw(), raster.bounds).is_some() {
+            if raster.visible_at(&viewport, Duration::ZERO).is_some() {
                 submitted += 1;
             } else {
                 culled += 1;
@@ -688,7 +782,16 @@ impl WorldStream {
         camera: &Camera,
         size: (u32, u32),
     ) -> impl Iterator<Item = WorldDraw<'_>> {
-        self.cache.visible_assets(camera, size)
+        self.visible_assets_at(camera, size, Duration::ZERO)
+    }
+
+    pub fn visible_assets_at(
+        &self,
+        camera: &Camera,
+        size: (u32, u32),
+        elapsed: Duration,
+    ) -> impl Iterator<Item = WorldDraw<'_>> {
+        self.cache.visible_assets(camera, size, elapsed)
     }
 
     pub fn visible_modulated(
@@ -696,7 +799,7 @@ impl WorldStream {
         camera: &Camera,
         size: (u32, u32),
     ) -> impl Iterator<Item = (SpriteDraw<'_>, Modulation<'_>)> {
-        self.cache.visible_modulated(camera, size)
+        self.cache.visible_modulated(camera, size, Duration::ZERO)
     }
 }
 
@@ -731,7 +834,7 @@ impl SectorLoader {
                         &mut self.vfs,
                         &mut self.frames,
                         &names.mes,
-                        &room.room.floor.lights,
+                        (&room.room.floor.lights, &room.room.scenery),
                         sector,
                         self.reference,
                         *ambient,
@@ -832,6 +935,99 @@ mod tests {
             }
             assert!(visible > 0);
         }
+    }
+
+    #[test]
+    fn animated_raster_schedules_only_intersecting_frames_and_survives_shared_sector_lifetime() {
+        use crate::{
+            art::DecodedFrame,
+            content::Source,
+            vfs::{Policy, Storage},
+        };
+        let mount_id = Vfs::new(Policy::Ordered).mount_directory(".").unwrap();
+        let fixture = |hotspot_x| {
+            Arc::new(LoadedFrame {
+                source: Source {
+                    virtual_path: "effect.art".into(),
+                    mount_id,
+                    mount_path: ".".into(),
+                    loose_path: None,
+                    storage: Storage::Loose,
+                    mod_id: None,
+                },
+                decoded: DecodedFrame {
+                    frame: crate::art::SpriteFrame {
+                        width: 2,
+                        height: 1,
+                        hotspot: (hotspot_x, 0),
+                        offset: (0, 0),
+                        pixels: vec![[30, 20, 10, 255]; 2],
+                    },
+                    frame_count: 3,
+                    rotation_count: 1,
+                    stored_rotation: 0,
+                    stored_palette: 0,
+                    palette_key: [0; 3],
+                    frames_per_second: 11,
+                    action_frame: 0,
+                    ignored_trailing_bytes: 0,
+                },
+                input_bytes: 0,
+            })
+        };
+        let clip = Arc::new(FrameLoop::new(vec![fixture(0), fixture(1), fixture(40)], 11).unwrap());
+        let retained = Arc::downgrade(&clip.frames[2]);
+        let mut raster = Raster::new(
+            (true, (true, 50, 64, 0, 0, 0, None)),
+            &clip.frames[0],
+            (40, 0),
+        );
+        raster.set_animation(&clip, 0);
+        raster.object_light = ObjectLight::Additive;
+        assert_eq!(clip.index(1, Duration::from_millis(89)), 1);
+        assert_eq!(clip.index(1, Duration::from_millis(90)), 2);
+        assert_eq!(clip.index(1, Duration::from_millis(270)), 1);
+        assert!(FrameLoop::new(clip.frames.to_vec(), 1001).is_err());
+        drop(clip);
+
+        let camera = Camera::rectangle((63, 50), (0, 0), (128, 64)).unwrap();
+        let view = (8, 4);
+        let mut cache = SectorCache::default();
+        let empty = |id| CachedSector::missing(id, String::new());
+        cache.select(&[0, 1], 2, |id| {
+            let mut sector = empty(id);
+            if id == 1 {
+                sector.draws.push(raster.clone());
+            }
+            sector
+        });
+        drop(raster);
+        assert_eq!(
+            cache.animation_delay(&camera, view, Duration::ZERO),
+            Some(Duration::from_millis(180))
+        );
+        let tick = Duration::from_millis(180);
+        let draw = cache.visible_assets(&camera, view, tick).next().unwrap();
+        assert_eq!(draw.sprite.anchor, (44, 2));
+        assert!(matches!(draw.modulation, Modulation::Additive));
+        assert_eq!(
+            cache.animation_delay(&camera, view, tick),
+            Some(Duration::from_millis(90))
+        );
+        assert!(
+            cache
+                .visible_assets(&camera, view, Duration::from_millis(179))
+                .next()
+                .is_none()
+        );
+        let mut away = camera.clone();
+        away.pan((-128, 0), view);
+        assert_eq!(cache.animation_delay(&away, view, tick), None);
+        cache.select(&[0], 2, empty);
+        assert!(retained.upgrade().is_some());
+        assert_eq!(cache.animation_delay(&camera, view, tick), None);
+        cache.select(&[0, 2], 2, empty);
+        assert!(retained.upgrade().is_none());
     }
 
     #[test]

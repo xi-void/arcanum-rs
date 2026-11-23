@@ -218,3 +218,40 @@ pub(super) fn mirror_rows(frame: &mut art::SpriteFrame) {
         row.reverse();
     }
 }
+
+/// Prepared indexed ART loop. Time remains independent of resource loading.
+#[derive(Debug)]
+pub(super) struct FrameLoop {
+    pub(super) frames: Box<[Arc<LoadedFrame>]>,
+    period_ms: u32,
+}
+
+impl FrameLoop {
+    pub(super) fn new(frames: Vec<Arc<LoadedFrame>>, fps: u32) -> Result<Self, &'static str> {
+        if !(1..=1000).contains(&fps) || !(2..=32).contains(&frames.len()) {
+            return Err("invalid scenery loop length or ART frame rate");
+        }
+        if frames
+            .iter()
+            .any(|frame| frame.decoded.frame.offset != (0, 0))
+        {
+            return Err("animated scenery with ART movement offsets is unsupported");
+        }
+        Ok(Self {
+            frames: frames.into_boxed_slice(),
+            period_ms: 1000 / fps,
+        })
+    }
+
+    pub(super) fn index(&self, initial: usize, elapsed: Duration) -> usize {
+        let step = elapsed.as_millis() / u128::from(self.period_ms);
+        ((step + initial as u128) % self.frames.len() as u128) as usize
+    }
+
+    /// Delay to the next boundary, or a later one when intervening frames
+    /// are completely outside the viewport.
+    pub(super) fn delay(&self, elapsed: Duration, steps: usize) -> Duration {
+        let period = u128::from(self.period_ms) * 1_000_000;
+        Duration::from_nanos((period * steps as u128 - elapsed.as_nanos() % period) as u64)
+    }
+}

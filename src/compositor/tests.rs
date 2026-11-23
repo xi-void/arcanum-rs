@@ -286,3 +286,48 @@ fn wall_columns_follow_screen_raster_clipping_and_keep_alpha() {
         Err(Error::SpriteLayout)
     );
 }
+
+#[test]
+fn indexed_addition_saturates_over_earlier_draws_and_skips_transparent_texels() {
+    let fire = SpriteFrame {
+        width: 4,
+        height: 1,
+        hotspot: (0, 0),
+        offset: (0, 0),
+        pixels: vec![[255; 4], [180, 10, 60, 255], [0, 0, 255, 0], [30, 2, 90, 1]],
+    };
+    let draw = SpriteDraw {
+        frame: &fire,
+        anchor: (-1, 0),
+    };
+    let mut pixels = [[20, 100, 100]; 4];
+    blit_modulated(&mut pixels, (3, 1), 4, [(draw, Modulation::Additive); 2]).unwrap();
+    assert_eq!(
+        pixels,
+        [
+            [255, 120, 220],
+            [20, 100, 100],
+            [80, 104, 255],
+            [20, 100, 100]
+        ]
+    );
+    let front = SpriteFrame {
+        width: 1,
+        pixels: vec![[7, 8, 9, 255]],
+        ..fire
+    };
+    blit_modulated(
+        &mut pixels,
+        (3, 1),
+        4,
+        [(
+            SpriteDraw {
+                frame: &front,
+                anchor: (0, 0),
+            },
+            Modulation::Unlit,
+        )],
+    )
+    .unwrap();
+    assert_eq!(pixels[0], [7, 8, 9]);
+}

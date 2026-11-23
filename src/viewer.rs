@@ -16,7 +16,7 @@ use std::{
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize, Size};
-use winit::event::WindowEvent;
+use winit::event::{StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
@@ -140,6 +140,7 @@ pub fn show_stream(
     size: (u32, u32),
     trace: bool,
     renderer: RenderBackend,
+    animation_ms: Option<u64>,
 ) -> Result<(), String> {
     #[cfg(not(feature = "gpu"))]
     if renderer != RenderBackend::Cpu {
@@ -165,6 +166,7 @@ pub fn show_stream(
             last_presented: None,
             waiting: false,
             trace,
+            animation_ms,
         },
         PhysicalSize::<u32>::from(size).into(),
         event_loop,
@@ -182,6 +184,7 @@ enum ViewContent<'a> {
         last_presented: Option<Camera>,
         waiting: bool,
         trace: bool,
+        animation_ms: Option<u64>,
     },
     World {
         scene: &'a CameraScene<'a>,
@@ -220,6 +223,8 @@ fn run_content(
         view: None,
         content,
         failure: None,
+        epoch: Instant::now(),
+        animation_deadline: None,
     };
     event_loop
         .run_app(&mut app)
@@ -238,11 +243,14 @@ struct Viewer<'a> {
     view: Option<WindowSurface>,
     content: ViewContent<'a>,
     failure: Option<String>,
+    epoch: Instant,
+    animation_deadline: Option<Instant>,
 }
 
 struct WindowSurface {
     backend: Presentation,
     window: Arc<Window>,
+    occluded: bool,
 }
 
 enum Presentation {
@@ -257,6 +265,11 @@ struct CpuSurface {
 }
 
 impl Viewer<'_> {
+    fn schedule_animation(&mut self, event_loop: &ActiveEventLoop, deadline: Option<Instant>) {
+        self.animation_deadline = deadline;
+        event_loop.set_control_flow(deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+    }
+
     fn open(&self, event_loop: &ActiveEventLoop) -> Result<WindowSurface, String> {
         let attributes = Window::default_attributes()
             .with_title(&self.title)
@@ -291,7 +304,11 @@ impl Viewer<'_> {
             #[cfg(not(feature = "gpu"))]
             _ => return Err("GPU renderer requires the gpu feature".into()),
         };
-        Ok(WindowSurface { backend, window })
+        Ok(WindowSurface {
+            backend,
+            window,
+            occluded: false,
+        })
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: String) {
@@ -301,6 +318,19 @@ impl Viewer<'_> {
 }
 
 impl ApplicationHandler for Viewer<'_> {
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        if matches!(cause, StartCause::ResumeTimeReached { .. })
+            && self
+                .animation_deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.schedule_animation(event_loop, None);
+            if let Some(view) = &self.view {
+                view.window.request_redraw();
+            }
+        }
+    }
+
     fn user_event(&mut self, _: &ActiveEventLoop, _: ()) {
         if let ViewContent::Stream { world, .. } = &mut self.content
             && world.receive()
@@ -322,7 +352,8 @@ impl ApplicationHandler for Viewer<'_> {
         }
     }
 
-    fn suspended(&mut self, _: &ActiveEventLoop) {
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        self.schedule_animation(event_loop, None);
         self.view = None;
     }
 
@@ -341,8 +372,14 @@ impl ApplicationHandler for Viewer<'_> {
             WindowEvent::Resized(size) if size.width != 0 && size.height != 0 => {
                 view.window.request_redraw();
             }
-            WindowEvent::ScaleFactorChanged { .. } | WindowEvent::Occluded(false) => {
-                view.window.request_redraw();
+            WindowEvent::ScaleFactorChanged { .. } => view.window.request_redraw(),
+            WindowEvent::Occluded(occluded) => {
+                view.occluded = occluded;
+                if occluded {
+                    self.schedule_animation(event_loop, None);
+                } else {
+                    view.window.request_redraw();
+                }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 if let ViewContent::World { shift, .. } | ViewContent::Stream { shift, .. } =
@@ -407,8 +444,9 @@ impl ApplicationHandler for Viewer<'_> {
                 }
             }
 
-            WindowEvent::RedrawRequested => {
+            WindowEvent::RedrawRequested if !view.occluded => {
                 let size = view.window.inner_size();
+                let mut deadline = None;
                 let result = match &mut self.content {
                     ViewContent::Fixed(layers) => {
                         let center = ((size.width / 2) as i32, (size.height / 2) as i32);
@@ -442,16 +480,33 @@ impl ApplicationHandler for Viewer<'_> {
                         last_presented,
                         waiting,
                         trace,
+                        animation_ms,
                         ..
-                    } => view
-                        .redraw_stream(size, world, camera, *direction, *trace)
-                        .map(|ready| {
-                            *waiting = !ready;
-                            if ready {
-                                *last_presented = Some(camera.clone());
-                            }
-                        }),
+                    } => {
+                        let sampled = Instant::now();
+                        let elapsed = animation_ms.map_or_else(
+                            || sampled.duration_since(self.epoch),
+                            Duration::from_millis,
+                        );
+                        view.redraw_stream(size, world, camera, *direction, *trace, elapsed)
+                            .map(|ready| {
+                                *waiting = !ready;
+                                if ready {
+                                    *last_presented = Some(camera.clone());
+                                    if animation_ms.is_none() {
+                                        deadline = world
+                                            .animation_delay(
+                                                camera,
+                                                (size.width, size.height),
+                                                elapsed,
+                                            )
+                                            .map(|delay| sampled + delay);
+                                    }
+                                }
+                            })
+                    }
                 };
+                self.schedule_animation(event_loop, deadline);
                 if let Err(error) = result {
                     self.fail(event_loop, error);
                 }
@@ -477,6 +532,7 @@ impl WindowSurface {
         camera: &mut Camera,
         direction: (i32, i32),
         trace: bool,
+        elapsed: Duration,
     ) -> Result<bool, String> {
         let viewport = (size.width, size.height);
         if size.width == 0 || size.height == 0 {
@@ -493,8 +549,9 @@ impl WindowSurface {
         if let Presentation::Gpu(renderer) = &mut self.backend {
             if trace {
                 eprintln!(
-                    "GPU world camera {:?} schedule {:?} order {:?} shading {:?}",
+                    "GPU world camera {:?} animation {}ms schedule {:?} order {:?} shading {:?}",
                     camera.position(),
+                    elapsed.as_millis(),
                     prepared.scheduling,
                     prepared.ordering,
                     prepared.shading,
@@ -502,13 +559,13 @@ impl WindowSurface {
             }
             renderer.redraw(
                 viewport,
-                world.visible_assets(camera, viewport),
+                world.visible_assets_at(camera, viewport, elapsed),
                 &self.window,
                 trace,
             )?;
             return Ok(true);
         }
-        let frame = self.redraw(size, world.visible_modulated(camera, viewport))?;
+        let frame = self.redraw(size, world.visible_modulated_at(camera, viewport, elapsed))?;
         if trace
             || prepared.scheduling
                 + prepared.ordering

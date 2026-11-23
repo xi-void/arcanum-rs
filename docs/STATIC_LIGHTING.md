@@ -151,7 +151,8 @@ visibility are separate. Objects with `OF_DONTLIGHT` or special blend
 paths bypass normal tint in CE. Critter rendering, object-owned lights,
 shadow sprites, light animations, saved lighting changes, terrain
 templates, subsector lighting behavior and gameplay time progression
-remain outside this slice.
+remain outside this slice. Milestone 45 adds primary one-frame light masks
+for supported scenery, including the Bates candle stands. [Original animated fire and candle audit](ANIMATED_FIRE.md)
 
 ## Wayland and installed-data verification
 

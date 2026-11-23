@@ -357,6 +357,7 @@ pub(super) struct LightImport {
     pub sources: Vec<StaticLight>,
     pub accepted: usize,
     pub off: usize,
+    pub object_lights: usize,
     pub issues: Vec<String>,
 }
 
@@ -371,7 +372,7 @@ pub(super) fn prepare(
     vfs: &mut vfs::Vfs,
     frames: &mut FrameCache,
     names: &Mes,
-    records: &[LightRecord],
+    (records, scenery): (&[LightRecord], &[super::scenery::ImportedScenery]),
     sector: Coordinates,
     reference: (u32, u32),
     ambient: Ambient,
@@ -386,14 +387,7 @@ pub(super) fn prepare(
     for (index, &record) in records.iter().take(MAX_RECORDS).enumerate() {
         match import_one(vfs, frames, names, record, context) {
             Ok(Some(light)) => {
-                import.grid.insert_mask(
-                    &light.art.decoded.frame,
-                    light.art.decoded.palette_key,
-                    light.origin,
-                    light.tint,
-                    light.dark,
-                );
-                import.sources.push(light);
+                import.insert(light);
                 import.accepted += 1;
             }
             Ok(None) => import.off += 1,
@@ -409,7 +403,59 @@ pub(super) fn prepare(
             records.len() - MAX_RECORDS
         ));
     }
+    for object in scenery {
+        let Some(light) = object.light else { continue };
+        let result = (|| {
+            let flags = light.flags.ok_or("missing object light flags")?;
+            if flags & 1 != 0 {
+                return Ok(None);
+            }
+            if flags & !0x0800_0080 != 0 {
+                return Err(format!("unsupported object light flags {flags:#x}").into());
+            }
+            let color = light.color.ok_or("missing object light color")?;
+            let [blue, green, red, _] = color.to_le_bytes();
+            let placement = LightRecord {
+                owner: 0,
+                tile: object.tile,
+                offset: object.appearance.offset,
+                flags: 0,
+                art_id: light.art_id,
+                rgb: [red, green, blue],
+            };
+            let mask = import_one(vfs, frames, names, placement, context)?
+                .ok_or("expected an active object-owned light")?;
+            if mask.art.decoded.frame_count != 1 {
+                return Err("animated object-owned light masks are unsupported".into());
+            }
+            Ok::<_, Box<dyn StdError>>(Some(mask))
+        })();
+        match result {
+            Ok(Some(mask)) => {
+                import.insert(mask);
+                import.object_lights += 1;
+            }
+            Ok(None) => {}
+            Err(error) => import.issues.push(format!(
+                "scenery record {} light {:#010x}: {error}",
+                object.record.index, light.art_id
+            )),
+        }
+    }
     import
+}
+
+impl LightImport {
+    fn insert(&mut self, light: StaticLight) {
+        self.grid.insert_mask(
+            &light.art.decoded.frame,
+            light.art.decoded.palette_key,
+            light.origin,
+            light.tint,
+            light.dark,
+        );
+        self.sources.push(light);
+    }
 }
 
 fn import_one(
@@ -634,14 +680,17 @@ mod tests {
             &mut vfs,
             &mut FrameCache::default(),
             &Mes::parse_text("{11}{largelight}").unwrap(),
-            &[
-                record,
-                LightRecord {
-                    flags: 0x20,
-                    ..record
-                },
-                LightRecord { flags: 1, ..record },
-            ],
+            (
+                &[
+                    record,
+                    LightRecord {
+                        flags: 0x20,
+                        ..record
+                    },
+                    LightRecord { flags: 1, ..record },
+                ],
+                &[],
+            ),
             sector,
             (64, 0),
             Ambient {

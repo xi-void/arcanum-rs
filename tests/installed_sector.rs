@@ -1395,7 +1395,7 @@ fn kna_tha_brazier_court_is_in_its_original_sector() {
     let camera = region.camera(center).unwrap();
     let mut world = WorldStream::new(vfs, "k'na tha".into(), region, center).unwrap();
     world.prepare(&camera, (1280, 720)).unwrap();
-    let report = world.reports().next().unwrap();
+
     for (index, x) in [(102, 793), (104, 798), (106, 803)] {
         let base = court
             .scenery
@@ -1411,12 +1411,67 @@ fn kna_tha_brazier_court_is_in_its_original_sector() {
                 .unwrap(),
             "art/scenery/brazurelarge.art"
         );
-        assert!(report.diagnostics.iter().any(|issue| {
-            issue.starts_with(&format!(
-                "record {} Scenery at ({x}, 781) ART 0x40100540:",
-                index + 1
-            )) && issue.contains("blend (Some(16)")
-        }));
+        let flame = court
+            .scenery
+            .iter()
+            .find(|flame| flame.index == index + 1)
+            .unwrap();
+        assert_eq!(flame.world_tile(sector), Some((x, 781)));
+        assert_eq!(flame.prototype.0, 4040);
+        assert_eq!(flame.art_id, 0x40100540);
+        assert_eq!(flame.fields.blit_flags, Some(16));
+        assert_eq!(flame.fields.light_flags, Some(0x08000080));
+        assert_eq!(flame.fields.light_art, Some(0x90180000));
+        assert_eq!(flame.fields.light_color, Some(0x00cca873));
+    }
+    use arcanum_rs::compositor::Modulation;
+    use std::time::Duration;
+    let size = (1280, 720);
+    let flames_at = |ms| {
+        world
+            .visible_assets_at(&camera, size, Duration::from_millis(ms))
+            .filter(|draw| matches!(draw.modulation, Modulation::Additive))
+            .collect::<Vec<_>>()
+    };
+    let draws: Vec<_> = world.visible_assets(&camera, size).collect();
+    for (base, flame) in [
+        ((641, 159), (642, 161)),
+        ((441, 261), (442, 261)),
+        ((239, 361), (240, 363)),
+    ] {
+        let base = draws
+            .iter()
+            .position(|draw| {
+                draw.asset.source.virtual_path == "art/scenery/brazurelarge.art"
+                    && draw.sprite.anchor == base
+            })
+            .unwrap();
+        let flame = draws
+            .iter()
+            .position(|draw| {
+                matches!(draw.modulation, Modulation::Additive) && draw.sprite.anchor == flame
+            })
+            .unwrap();
+        assert!(base < flame);
+    }
+    let first = flames_at(0);
+    let next = flames_at(90);
+    assert_eq!(first.len(), 3);
+    assert_eq!(next.len(), 3);
+    for (i, (from, to)) in first.iter().zip(&next).enumerate() {
+        assert_eq!(
+            from.asset.source.virtual_path,
+            "art/scenery/brazurefire.art"
+        );
+        assert_eq!(from.asset.decoded.stored_palette, 0);
+        assert_eq!(from.asset.decoded.frames_per_second, 11);
+        assert_eq!(from.asset.decoded.frame_count, 20);
+        assert_eq!(from.sprite.anchor, [(642, 161), (442, 261), (240, 363)][i]);
+        assert_eq!(from.sprite.anchor, to.sprite.anchor);
+        assert_eq!(from.sprite.frame.hotspot, (40, 155));
+        assert_eq!(to.sprite.frame.hotspot, (44, 154));
+        assert!(std::sync::Arc::ptr_eq(from.asset, first[0].asset));
+        assert!(std::sync::Arc::ptr_eq(from.asset, flames_at(1800)[i].asset));
     }
 }
 
@@ -1475,7 +1530,7 @@ fn original_static_light_masks_modulate_the_scene_without_moving_rasters() {
             (101, 83),
             12,
             (9, 9, 0),
-            [107, 113, 131],
+            [124, 126, 139],
         ),
         (
             "k'na tha",
@@ -1501,14 +1556,22 @@ fn original_static_light_masks_modulate_the_scene_without_moving_rasters() {
         world.prepare(&camera, size).unwrap();
         let report = world.reports().next().unwrap();
         assert_eq!(report.light_counts, Some(expected_counts));
+        if map == "k'na tha" {
+            assert_eq!(report.object_lights, 3);
+        }
         if map == DEMO_MAP {
             assert_eq!(report.wall_count, 268);
+            assert_eq!(report.scenery_count, 81);
+            // Fifteen candle stands and two hanging lanterns join the
+            // two fireplace lights. Stands with invalid primary IDs stay dark.
+            assert_eq!(report.object_lights, 19);
         }
         let center_anchor = (640 - camera.position().0, 379 - camera.position().1);
         let mut shaded_center = false;
         let mut lit_objects = 0;
         let mut column_lit = 0;
         let mut checked_original_objects = 0;
+        let mut checked_candle_tiles = 0;
         for (ordinary, (draw, shade)) in world
             .visible(&camera, size)
             .zip(world.visible_modulated(&camera, size))
@@ -1521,14 +1584,33 @@ fn original_static_light_masks_modulate_the_scene_without_moving_rasters() {
                     draw.anchor.1 + camera.position().1 - 360,
                 );
                 let expected = match (draw.frame.width, draw.frame.height, position) {
-                    (121, 109, (-177, -28)) => Some([101, 107, 125]), // Sofa 61.
-                    (121, 109, (12, -42)) => Some([94, 100, 118]),    // Sofa 78.
-                    (40, 154, (0, -160)) => Some([74, 80, 98]),       // Wall 52.
+                    (121, 109, (-177, -28)) => Some([129, 128, 138]), // Sofa 61.
+                    (121, 109, (12, -42)) => Some([127, 125, 134]),   // Sofa 78.
                     _ => None,
                 };
                 if let Some(expected) = expected {
                     assert!(matches!(shade, Modulation::Uniform(actual) if actual == expected));
                     checked_original_objects += 1;
+                }
+                if (draw.frame.width, draw.frame.height, position) == (40, 154, (0, -160)) {
+                    let Modulation::Columns(columns) = shade else {
+                        panic!("candle 35 should light wall 52 across a gradient");
+                    };
+                    assert_eq!(columns[0], [169, 153, 144]);
+                    assert_eq!(columns[19], [158, 144, 139]);
+                    assert_eq!(columns[39], [142, 132, 131]);
+                    checked_original_objects += 1;
+                }
+                if (draw.frame.width, draw.frame.height) == (78, 40) {
+                    let candle_tile_sample = match position {
+                        (-160, -101) => Some([255, 255, 212]), // Candle 35: tile (100,78).
+                        (200, -1) => Some([255, 255, 210]),    // Candle 100: tile (98,85).
+                        _ => None,
+                    };
+                    if let Some(expected) = candle_tile_sample {
+                        assert!(matches!(shade, Modulation::Floor(nodes) if nodes[4] == expected));
+                        checked_candle_tiles += 1;
+                    }
                 }
             }
             if draw.anchor == center_anchor
@@ -1553,6 +1635,7 @@ fn original_static_light_masks_modulate_the_scene_without_moving_rasters() {
         assert!(column_lit > 0);
         if map == DEMO_MAP {
             assert_eq!(checked_original_objects, 3);
+            assert_eq!(checked_candle_tiles, 2);
         }
         let before = world.stats();
         camera.pan((32, -16), size);

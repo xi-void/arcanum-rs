@@ -195,22 +195,26 @@ impl Viewport {
         })
     }
 
+    pub(crate) fn intersects(&self, bounds: RasterBounds) -> bool {
+        let (left, top) = self.0.min;
+        let (right, bottom) = self.0.max;
+        left != right
+            && top != bottom
+            && bounds.min.0 < right
+            && bounds.max.0 > left
+            && bounds.min.1 < bottom
+            && bounds.max.1 > top
+    }
+
     pub(crate) fn place<'a>(
         &self,
         draw: SpriteDraw<'a>,
         bounds: RasterBounds,
     ) -> Option<SpriteDraw<'a>> {
-        let (left, top) = self.0.min;
-        let (right, bottom) = self.0.max;
-        if left == right
-            || top == bottom
-            || bounds.min.0 >= right
-            || bounds.max.0 <= left
-            || bounds.min.1 >= bottom
-            || bounds.max.1 <= top
-        {
+        if !self.intersects(bounds) {
             return None;
         }
+        let (left, top) = self.0.min;
         Some(SpriteDraw {
             frame: draw.frame,
             anchor: (
