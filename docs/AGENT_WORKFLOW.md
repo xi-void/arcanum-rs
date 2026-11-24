@@ -83,6 +83,12 @@ map interface is available. A failed `reloadui` leaves the working UI active
 and reports a structured error. For a short event history, use `rpc trace on`
 before reproduction, then `rpc events` or `rpc events snapshot_restored`.
 
+For original mobiles, use `rpc objects category mobile` or a concrete
+category such as `npc`, `container`, or `armor`. Use `rpc objects original
+2:GUIDHEX` when a persistent GUID is known. Inspect effective property
+origins, placement, and ownership together. See the
+[mobile object reference](ORIGINAL_MOBILE_OBJECTS.md) for installed-data fixtures.
+
 ## Asynchronous operations
 
 Read the top-level `status` before using `result`. `completed` confirms the
@@ -168,7 +174,9 @@ examples. Compare unfiltered runs to evaluate changes across the installed data.
 Choose a saved report with the same scan scope and original resource set.
 Schema 2 preserves the meanings of schema 1 coverage counters and parent
 issue codes. The new metadata charge and door target counters have no
-schema 1 equivalent. New cause subdivisions need a schema 2 baseline.
+schema 1 equivalent. Schema 3 retains the static counters and changes the
+mobile decode denominator interpretation from prefix acceptance to full
+typed instance framing. Use a schema 3 baseline for equivalent mobile coverage.
 Keep changes in evaluated coverage separate from changes in issue counts.
 
 ```bash
@@ -182,7 +190,7 @@ diff -u <(jq -r '.issues[] | [.code, .occurrences] | @tsv' "$baseline" | sort) \
 
 Use `.issues[].causes[]` to compare subtype counts by parent code, cause code,
 and category. Use `.research.mobile_headers` to distinguish mobile discovery,
-header observations, and render-prefix acceptance. A falling issue count can
+header observations, and full instance acceptance. A falling issue count can
 result from reduced evaluated coverage. Check `.coverage`, `.scope`, and
 verification labels before reporting recovery.
 

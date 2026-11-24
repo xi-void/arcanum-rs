@@ -1385,7 +1385,7 @@ fn show_world(
         };
         let travel: Option<viewer::TravelLoader<'_>> = if playing {
             Some(Box::new(
-                move |current, dst, facing, viewport, current_hour, bypass| {
+                move |current, previous, dst, facing, viewport, current_hour, bypass| {
                     let load = || -> Result<_, Box<dyn Error>> {
                         let mut vfs = inspection_vfs(game, mount_options, policy)?;
                         let catalog = content::maps::Catalog::load(&mut vfs)?;
@@ -1407,6 +1407,7 @@ fn show_world(
                             world = world.with_lighting(current_hour.unwrap_or(hour))?;
                         }
                         world = world.with_player()?.with_collision_bypass(bypass);
+                        world.reuse_mobile_discovery(previous);
                         if debug {
                             world = world.with_object_audit();
                         }

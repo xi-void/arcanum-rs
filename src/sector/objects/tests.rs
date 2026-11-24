@@ -173,14 +173,40 @@ fn mobile_observation_uses_category_specific_bitmap_width() {
     assert_eq!(observed.category, Some(5));
     assert_eq!(observed.bitmap.as_deref(), Some([3, 0, 2, 0].as_slice()));
     assert_eq!(
-        decode_mobile(&item).unwrap_err().code,
-        "mobile_instance_category_unsupported"
+        decode_instance(&item).unwrap_err().message,
+        "truncated object scalar field"
     );
     assert!(
         InstanceHeader::observe(&item[..70])
             .unwrap()
             .bitmap
             .is_none()
+    );
+}
+
+#[test]
+fn standalone_item_decodes_reference_and_preserves_explicit_null_location() {
+    let mut bytes = instance(5, [2, 0, 2], &[]);
+    bytes.extend_from_slice(&0u32.to_le_bytes()); // Weapon subtype bitmap.
+    bytes.push(0); // Explicit null location.
+    bytes.push(1); // Present item parent field.
+    let mut owner = [0; 24];
+    owner[0] = 2;
+    owner[8..].fill(0x5a);
+    bytes.extend_from_slice(&owner);
+
+    let decoded = decode_instance(&bytes).unwrap();
+    assert_eq!(decoded.category, 5);
+    assert!(decoded.field(0).is_none());
+    assert!(matches!(decoded.field(1), Some(FieldValue::Null)));
+    assert_eq!(
+        decoded.field(65).and_then(FieldValue::reference),
+        Some(OriginalId::from_wire(owner))
+    );
+    bytes.push(0);
+    assert_eq!(
+        decode_instance(&bytes).unwrap_err().code,
+        "instance_trailing_bytes"
     );
 }
 
@@ -316,16 +342,19 @@ fn mobile_appearance_uses_permanent_identity_and_bounds_checked_fields() {
     record.extend(81u32.to_le_bytes());
     record.extend((-5i32).to_le_bytes());
     record.extend(1u32.to_le_bytes()); // OCF_IS_CONCEALED override.
-    let imported = decode_mobile(&record).unwrap();
-    assert_eq!(imported.tile, (80, 81));
-    assert_eq!(imported.art, 0x2880_2820);
-    assert_eq!(imported.fields.offset_x, Some(-5));
-    assert_eq!(imported.fields.critter_flags, Some(1));
+    let imported = decode_instance(&record).unwrap();
+    assert_eq!(imported.tile(), Some((80, 81)));
+    assert_eq!(
+        imported.field(0).and_then(FieldValue::scalar),
+        Some(0x2880_2820)
+    );
+    assert_eq!(imported.appearance().offset_x, Some(-5));
+    assert_eq!(imported.appearance().critter_flags, Some(1));
     for end in [4, 55, 77, 85, 98] {
-        assert!(decode_mobile(&record[..end]).is_err(), "prefix {end}");
+        assert!(decode_instance(&record[..end]).is_err(), "prefix {end}");
     }
     record[56] = 3;
-    assert!(decode_mobile(&record).is_err());
+    assert!(decode_instance(&record).is_err());
 }
 
 #[test]
@@ -347,13 +376,27 @@ fn mobile_dexterity_uses_the_sparse_logical_index_and_rejects_truncation() {
     for word in [4u32, 2, 0, 9, 17, 1, 3] {
         record.extend(word.to_le_bytes());
     }
-    assert_eq!(decode_mobile(&record).unwrap().dexterity, Some(17));
+    assert_eq!(
+        decode_instance(&record)
+            .unwrap()
+            .field(66)
+            .and_then(|v| v.array_entry(1))
+            .map(|b| i32::from_le_bytes(b.try_into().unwrap())),
+        Some(17)
+    );
     let bitmap = record.len() - 4;
     record[bitmap] = 5; // Indices 0 and 2. Index 1 inherits from the prototype.
-    assert_eq!(decode_mobile(&record).unwrap().dexterity, None);
-    assert!(decode_mobile(&record[..record.len() - 1]).is_err());
+    assert_eq!(
+        decode_instance(&record)
+            .unwrap()
+            .field(66)
+            .and_then(|v| v.array_entry(1))
+            .map(|b| i32::from_le_bytes(b.try_into().unwrap())),
+        None
+    );
+    assert!(decode_instance(&record[..record.len() - 1]).is_err());
     record[bitmap] = 2; // One set bit cannot describe two serialized entries.
-    assert!(decode_mobile(&record).is_err());
+    assert!(decode_instance(&record).is_err());
 }
 
 #[test]

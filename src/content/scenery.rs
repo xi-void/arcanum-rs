@@ -443,6 +443,7 @@ pub struct RoomOverview {
     pub object_issue: Option<String>,
     pub(super) object_rejection: Option<(&'static str, ListEvidence)>,
     pub(super) object_preparation_bytes: usize,
+    pub(super) object_ids: std::collections::BTreeSet<crate::sector::objects::OriginalId>,
     pub(super) traps: Vec<crate::sector::objects::TrapRecord>,
     pub(super) decoded_records: Option<usize>,
     pub(super) original_records: Vec<serde_json::Value>,
@@ -767,6 +768,7 @@ fn load_overview_timed(
                 outside_floor_scenery: 0,
                 object_issue: Some(error),
                 object_rejection: Some((code, evidence)),
+                object_ids: Default::default(),
                 object_preparation_bytes: preparation_bytes,
                 traps: Vec::new(),
                 decoded_records: None,
@@ -779,6 +781,21 @@ fn load_overview_timed(
         }
         Err((_, error)) => return Err(error.into()),
     };
+    let object_ids = objects
+        .walls
+        .iter()
+        .chain(&objects.scenery)
+        .chain(&objects.portals)
+        .map(|record| record.instance_id)
+        .chain(
+            objects
+                .incomplete_scenery
+                .iter()
+                .map(|record| record.instance_id),
+        )
+        .map(crate::sector::objects::OriginalId::from_wire)
+        .filter(|id| id.kind == 2)
+        .collect();
     let decoded_records = objects.count;
     let original_records = if matches!(mode, LoadMode::Audited) {
         use serde_json::json;
@@ -992,6 +1009,7 @@ fn load_overview_timed(
         decoded_records: Some(decoded_records),
         original_records,
         object_rejection: None,
+        object_ids,
         object_preparation_bytes: preparation_bytes,
         object_issue: (partial && framing_only != (0, 0)).then(|| {
             format!(

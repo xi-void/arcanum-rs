@@ -1,5 +1,6 @@
 //! Render-only import of verified base-map mobile records.
 
+pub(super) mod population;
 mod walk;
 pub(super) use walk::{Step as WalkStep, Walk};
 
@@ -10,12 +11,8 @@ use super::{
     shadow::LoadedLookup,
 };
 use crate::{
-    isometric::project_world_tile,
-    mes::Mes,
-    prototype::{MAX_PROTOTYPE_BYTES, SerializedPrototypeId},
-    sector::objects::{self, AppearanceFields},
-    shadow,
-    vfs::Vfs,
+    isometric::project_world_tile, mes::Mes, prototype::MAX_PROTOTYPE_BYTES, sector::objects,
+    shadow, vfs::Vfs,
 };
 use std::{
     collections::BTreeMap,
@@ -24,37 +21,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-// Original standalone placements audited for this stationary slice. Other
-// mobile families and the compiled mobile stream need separate validation.
+#[cfg(test)]
 pub(super) const MAP: &str = "bates mansion lev 1";
+#[cfg(test)]
 pub(super) const SECTOR: u64 = 67_108_865;
 pub(super) const VERIFIED_SHADOW: u32 = 0x9030_0001;
-const BATES_RECORDS: [&str; 3] = [
-    "g_0a68bdf7_1d83_4ec4_b208_b4c36b06bf87.mob",
-    "g_931574ed_1454_40f7_aaab_5a5e19b13ef2.mob",
-    "g_cdc859eb_d01d_472c_bc76_17750785cb55.mob",
-];
-
 const RABBIT_MAP: &str = "k'na tha";
 pub(super) const RABBIT_SECTOR: u64 = 805_306_374;
-const RABBIT_RECORDS: [&str; 1] = ["g_5f490f51_d2d1_4e9d_ad68_07de7a74d824.mob"];
 
 pub(super) fn supports_walk(map: &str, sector: u64) -> bool {
     map.eq_ignore_ascii_case(RABBIT_MAP) && sector == RABBIT_SECTOR
-}
-
-pub(super) fn supports(map: &str, sector: u64) -> bool {
-    !records(map, sector).is_empty()
-}
-
-fn records(map: &str, sector: u64) -> &'static [&'static str] {
-    if map.eq_ignore_ascii_case(MAP) && sector == SECTOR {
-        &BATES_RECORDS
-    } else if map.eq_ignore_ascii_case(RABBIT_MAP) && sector == RABBIT_SECTOR {
-        &RABBIT_RECORDS
-    } else {
-        &[]
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,48 +43,61 @@ pub(super) struct Pose {
 }
 
 impl Pose {
-    pub(super) fn decode(raw: u32, monster_names: Option<&Mes>) -> Result<Self, &'static str> {
+    pub(super) fn decode(raw: u32, names: Option<&Mes>) -> Result<Self, &'static str> {
         if raw & 0x0008_07cf != 0 {
             return Err("expected a weapon-free, shield-free standing critter");
         }
-        if raw >> 28 == 12 {
-            if raw & 0x0070_0000 != 0 {
-                return Err("armored monster stand is outside the verified subset");
-            }
-            let species = ((raw >> 23) & 31) as i32;
-            let name = monster_names
-                .and_then(|names| names.get(species))
-                .ok_or("missing monster name")?;
-            let name = crate::resource_path::normalize(name).map_err(|_| "invalid monster name")?;
-            if name.contains('/') {
-                return Err("expected a monster name basename");
-            }
-            return Ok(Self::new(
-                raw,
-                format!("art/monster/{name}/{name}uwxaa.art"),
-            ));
-        }
-        if raw >> 28 != 2 {
-            return Err("unsupported standing ART type");
-        }
-        let body = ["hm", "df", "gh", "hg", "ef"]
-            .get(((raw >> 24) & 7) as usize)
-            .ok_or("unknown critter body type")?;
-        let male = raw & 0x0800_0000 != 0;
-        if !male && *body == "ef" {
-            return Err("female elf body substitution is outside the verified subset");
-        }
-        let gender = if male { 'm' } else { 'f' };
-        let armor = match (raw >> 20) & 15 {
-            0 => "uw",
-            1 => "v1",
-            8 => "cd",
-            _ => return Err("unsupported standing critter clothing"),
+
+        // CE name_normalize_aid and name_resolve_path. The authored direction,
+        // palette and frame stay on Pose, independent of filename selection.
+        const CLOTHING: [&str; 9] = ["uw", "v1", "la", "cm", "pm", "rb", "pc", "bn", "cd"];
+        let clothing = |armor| {
+            CLOTHING
+                .get(armor as usize)
+                .copied()
+                .ok_or("unknown standing critter clothing")
         };
-        Ok(Self::new(
-            raw,
-            format!("art/critter/{body}{gender}/{body}{gender}{armor}xaa.art"),
-        ))
+        let path = match raw >> 28 {
+            2 => {
+                let armor = (raw >> 20) & 15;
+                let mut body = ((raw >> 24) & 7) as usize;
+                let mut gender = if raw & 0x0800_0000 != 0 { 'm' } else { 'f' };
+                if body == 4 && gender == 'f' {
+                    body = 0;
+                }
+                if matches!(armor, 4 | 6) {
+                    gender = 'x';
+                    body = match body {
+                        4 => 0, // Elf plate uses the human body asset.
+                        2 => 1, // Halfling plate uses the dwarven body asset.
+                        _ => body,
+                    };
+                }
+                let body = ["hm", "df", "gh", "hg", "ef"]
+                    .get(body)
+                    .ok_or("unknown critter body type")?;
+                let name = format!("{body}{gender}");
+                format!("art/critter/{name}/{name}{}xaa.art", clothing(armor)?)
+            }
+            kind @ (12 | 13) => {
+                let (dir, id, armor) = if kind == 12 {
+                    ("monster", (raw >> 23) & 31, clothing((raw >> 20) & 7)?)
+                } else {
+                    ("unique_npc", (raw >> 20) & 255, "")
+                };
+                let name = names
+                    .and_then(|table| table.get(id as i32))
+                    .ok_or("missing named critter ART entry")?;
+                let name =
+                    crate::resource_path::normalize(name).map_err(|_| "invalid critter name")?;
+                if name.contains('/') {
+                    return Err("expected a critter name basename");
+                }
+                format!("art/{dir}/{name}/{name}{armor}xaa.art")
+            }
+            _ => return Err("unsupported standing ART type"),
+        };
+        Ok(Self::new(raw, path))
     }
 
     fn new(raw: u32, path: String) -> Self {
@@ -169,12 +158,13 @@ pub(super) struct Caster {
 }
 
 pub(super) struct MobileFrame {
+    pub object_index: usize,
+    pub flat: bool,
     pub caster: Caster,
     pub offset: (i32, i32),
     pub asset: Arc<LoadedFrame>,
     pub diagnostic: String,
     pub casts_shadow: bool,
-    pub blocking: bool,
     pub fidget: Option<Arc<DirectionalFidget>>,
     pub walk: Option<Arc<Walk>>,
 }
@@ -273,46 +263,184 @@ impl MobileShadows {
 
 #[derive(Default)]
 pub(super) struct PreparedMobiles {
+    pub objects: Vec<population::Resident>,
     pub frames: Vec<MobileFrame>,
     pub shadows: Option<MobileShadows>,
     pub issues: Vec<String>,
 }
 
+pub(super) struct Prepare<'a> {
+    pub index: &'a population::Index,
+    pub prototypes: &'a mut population::Prototypes,
+    pub excluded: &'a std::collections::BTreeSet<objects::OriginalId>,
+    pub sector: u64,
+    pub reference: (u32, u32),
+    pub lighting: bool,
+    pub fidget: bool,
+    pub walking: bool,
+}
+
 pub(super) fn prepare(
     vfs: &mut Vfs,
     cache: &mut FrameCache,
-    map: &str,
-    sector: u64,
-    reference: (u32, u32),
-    lighting: bool,
-    walking: bool,
+    context: Prepare<'_>,
 ) -> PreparedMobiles {
+    use population::{Effective, Resident};
+    let Prepare {
+        index,
+        prototypes,
+        excluded,
+        sector,
+        reference,
+        lighting,
+        fidget,
+        walking,
+    } = context;
     let mut result = PreparedMobiles::default();
-    let mut prototypes = BTreeMap::new();
-    let names = if sector == RABBIT_SECTOR && map.eq_ignore_ascii_case(RABBIT_MAP) {
-        match load_mes(vfs, "art/monster/monster.mes") {
-            Ok(names) => Some(names),
-            Err(error) => {
-                result.issues.push(format!("monster names: {error}"));
-                return result;
-            }
+    let mut names = BTreeMap::new();
+    let mut bytes_kept = 0;
+    // Bound retained payload and resident metadata independently of the
+    // shared texture cache and the bounded sector cache.
+    const RESIDENCY_BYTES: usize = 4 * 1024 * 1024;
+    for (id, path) in index.entries(sector) {
+        if excluded.contains(&id) {
+            continue;
         }
-    } else {
-        None
-    };
-    for name in records(map, sector) {
-        let path = format!("maps/{map}/{name}");
-        match load(
-            vfs,
-            cache,
-            &mut prototypes,
-            &path,
-            (sector, reference),
-            names.as_ref().map(|names| &names.mes),
-            walking && names.is_some(),
-        ) {
-            Ok(frame) => result.frames.push(frame),
-            Err(error) => result.issues.push(format!("{name}: {error}")),
+        let prepared = (|| -> Result<(), Box<dyn Error>> {
+            let (source, bytes) = read_bounded(vfs, path, MAX_PROTOTYPE_BYTES)?;
+            let object = objects::decode_instance(&bytes)?;
+            if object.id != id {
+                return Err("mobile identity changed during discovery".into());
+            }
+            let (prototype, prototype_error) = match prototypes.get(vfs, &object) {
+                Ok(proto) => (Some(proto), None),
+                Err(error) => (None, Some(error)),
+            };
+            let effective = Effective::new(&object, prototype.as_deref());
+            let parent = index.owner(id).map(|owner| (owner, index.contains(owner)));
+            let inventory: Vec<_> = population::inventory(&object)
+                .into_iter()
+                .map(|item| (item, index.contains(item)))
+                .collect();
+            bytes_kept += bytes.len()
+                + size_of::<Resident>()
+                + path.len()
+                + inventory.len() * size_of::<(objects::OriginalId, bool)>();
+            if bytes_kept > RESIDENCY_BYTES {
+                return Err("sector mobile metadata budget exceeded".into());
+            }
+            let contained = index.is_contained(&object, effective.flags.value());
+            let tile = object.tile().filter(|tile| *tile != (0, 0));
+            let world_tile =
+                tile.filter(|&tile| !contained && super::world::tile_sector_id(tile) == sector);
+            let flags = effective.flags.value();
+            let placement = if contained {
+                "contained"
+            } else if world_tile.is_some() {
+                "world"
+            } else {
+                "unresolved"
+            };
+            let mut render_issue = None;
+            if let Some(tile) = world_tile {
+                let frame = if flags.is_none() {
+                    Err("unresolved object visibility flags".into())
+                } else if flags.is_some_and(|flags| {
+                    flags & (population::INACTIVE | population::DONT_DRAW | population::INVISIBLE)
+                        != 0
+                }) {
+                    Err("original visibility flags suppress normal draw".into())
+                } else if matches!(object.category, 15 | 16) {
+                    let art = effective
+                        .current_art
+                        .value()
+                        .ok_or("unresolved current ART");
+                    art.map_err(Into::into).and_then(|art| {
+                        let table = match art >> 28 {
+                            12 => Some("art/monster/monster.mes"),
+                            13 => Some("art/unique_npc/unique_npc.mes"),
+                            _ => None,
+                        };
+                        let names = table
+                            .map(|table| {
+                                use std::collections::btree_map::Entry;
+                                let loaded = match names.entry(table) {
+                                    Entry::Occupied(entry) => entry.into_mut(),
+                                    Entry::Vacant(entry) => entry.insert(load_mes(vfs, table)?),
+                                };
+                                Ok::<_, Box<dyn Error>>(&loaded.mes)
+                            })
+                            .transpose()?;
+                        // Walking remains a diagnostic for the verified rabbit
+                        // asset. Populating a map does not start NPC behavior.
+                        let walk = walking && art >> 28 == 12;
+                        load_critter(
+                            vfs,
+                            cache,
+                            &effective,
+                            (art, tile),
+                            reference,
+                            names,
+                            (fidget, walk),
+                        )
+                    })
+                } else {
+                    load_prop(
+                        vfs,
+                        cache,
+                        &mut names,
+                        &effective,
+                        (object.category, tile),
+                        reference,
+                    )
+                };
+                match frame {
+                    Ok(mut frame) => {
+                        frame.object_index = result.objects.len();
+                        result.frames.push(frame);
+                    }
+                    Err(error) => render_issue = Some(error.to_string()),
+                }
+            } else {
+                render_issue = Some(
+                    if contained {
+                        "owned or in inventory"
+                    } else {
+                        "unresolved placement"
+                    }
+                    .into(),
+                );
+            }
+            let blocks = world_tile.is_some() && effective.blocks(object.category);
+            let category = object.category;
+            let prototype_id = object.prototype.0;
+            result.objects.push(Resident {
+                id,
+                category,
+                prototype_id,
+                current_art: effective.current_art,
+                source,
+                prototype,
+                prototype_error,
+                parent,
+                inventory,
+                conflict: index.conflicting_owner(id),
+                placement,
+                tile: if contained { None } else { tile },
+                blocks,
+                render_issue,
+                raster: None,
+                bytes,
+            });
+            Ok(())
+        })();
+        if let Err(error) = prepared {
+            if result.issues.len() < 32 {
+                result.issues.push(format!("{path}: {error}"));
+            }
+            if bytes_kept > RESIDENCY_BYTES {
+                break;
+            }
         }
     }
     if lighting && result.frames.iter().any(|mobile| mobile.casts_shadow) {
@@ -338,65 +466,39 @@ pub(super) fn prepare(
     result
 }
 
-fn load(
+fn load_critter(
     vfs: &mut Vfs,
     cache: &mut FrameCache,
-    prototypes: &mut BTreeMap<SerializedPrototypeId, (AppearanceFields, Option<i32>)>,
-    path: &str,
-    (sector, reference): (u64, (u32, u32)),
-    monster_names: Option<&Mes>,
-    walking: bool,
+    effective: &population::Effective,
+    (art, tile): (u32, (u32, u32)),
+    reference: (u32, u32),
+    names: Option<&Mes>,
+    (animate, walking): (bool, bool),
 ) -> Result<MobileFrame, Box<dyn Error>> {
-    let start = std::time::Instant::now();
-    let (_, bytes) = read_bounded(vfs, path, MAX_PROTOTYPE_BYTES)?;
-    let mobile = objects::decode_mobile(&bytes)?;
-    if super::world::tile_sector_id(mobile.tile) != sector {
-        return Err("mobile placement falls outside the audited sector".into());
-    }
-    let (defaults, dexterity) = match prototypes.entry(mobile.prototype) {
-        std::collections::btree_map::Entry::Occupied(entry) => *entry.get(),
-        std::collections::btree_map::Entry::Vacant(entry) => {
-            let (_, bytes) = read_static_prototype(vfs, mobile.prototype)?;
-            let appearance = objects::decode_npc_prototype_appearance(&bytes, mobile.prototype)?;
-            let dexterity = if walking {
-                objects::decode_npc_prototype_dexterity(&bytes, mobile.prototype)?
-            } else {
-                None
-            };
-            *entry.insert((appearance, dexterity))
-        }
-    };
-    let f = mobile.fields;
-    let flags = f.flags.or(defaults.flags).unwrap_or_default();
-    let critter = f
-        .critter_flags
-        .or(defaults.critter_flags)
-        .unwrap_or_default();
+    let start = Instant::now();
+    let f = effective.appearance;
+    let flags = f.flags.ok_or("unresolved critter flags")?;
+    let critter = f.critter_flags.ok_or("unresolved critter subtype flags")?;
     const UNSUPPORTED: u32 = 0x301f_93c7;
     if flags & UNSUPPORTED != 0
         || critter & 1 != 0
-        || f.scale.or(defaults.scale) != Some(100)
-        || f.blit_flags.or(defaults.blit_flags).unwrap_or_default() != 0
+        || f.scale != Some(100)
+        || f.blit_flags != Some(0)
     {
-        return Err(format!("unsupported mobile appearance (flags {flags:#x}, critter {critter:#x}, scale {:?}, blit {:?})", f.scale.or(defaults.scale), f.blit_flags.or(defaults.blit_flags)).into());
+        return Err(format!("unsupported mobile appearance (flags {flags:#x}, critter {critter:#x}, scale {:?}, blit {:?})", f.scale, f.blit_flags).into());
     }
-    let shadow_id = f.shadow_art.or(defaults.shadow_art).unwrap_or(u32::MAX);
+    let shadow_id = f.shadow_art.unwrap_or(u32::MAX);
     let casts_shadow = shadow_id == VERIFIED_SHADOW;
     let shadow_note = if casts_shadow {
         "verified"
     } else {
         "not prepared"
     };
-    let original_light = f.light_art.or(defaults.light_art).unwrap_or(u32::MAX);
-    let light_flags = f.light_flags.or(defaults.light_flags).unwrap_or_default();
-    if original_light != u32::MAX && light_flags & 1 == 0 {
-        return Err(format!("unsupported mobile-owned emitter ART {original_light:#010x}").into());
-    }
     let offset = (
-        f.offset_x.or(defaults.offset_x).unwrap_or_default(),
-        f.offset_y.or(defaults.offset_y).unwrap_or_default(),
+        f.offset_x.ok_or("unresolved critter X offset")?,
+        f.offset_y.ok_or("unresolved critter Y offset")?,
     );
-    let center = project_world_tile(mobile.tile, reference).ok_or("mobile projection overflow")?;
+    let center = project_world_tile(tile, reference).ok_or("mobile projection overflow")?;
     let anchor = (
         center
             .0
@@ -407,13 +509,12 @@ fn load(
             .checked_add(offset.1)
             .ok_or("mobile Y offset overflow")?,
     );
-    let pose = cache.resolve(|| Pose::decode(mobile.art, monster_names))?;
+    let pose = cache.resolve(|| Pose::decode(art, names))?;
     let asset = pose.load(vfs, cache, pose.frame)?;
     let diagnostic = format!(
-        "mobile {path} prototype {} at {:?} ART {:#010x}: {}, direction {} (stored {}), frame {}, palette {}, hotspot {:?}, offset {offset:?}, shadow {shadow_id:#010x} ({shadow_note}); prepared in {:?}",
-        mobile.prototype.0,
-        mobile.tile,
-        mobile.art,
+        "mobile at {:?} ART {:#010x}: {}, direction {} (stored {}), frame {}, palette {}, hotspot {:?}, offset {offset:?}, shadow {shadow_id:#010x} ({shadow_note}); prepared in {:?}",
+        tile,
+        art,
         pose.path,
         pose.direction,
         pose.rotation,
@@ -422,12 +523,9 @@ fn load(
         asset.decoded.frame.hotspot,
         start.elapsed()
     );
-    let (fidget, diagnostic) = if monster_names.is_some() && asset.decoded.frame_count > 1 {
-        let flags2 = f
-            .critter_flags2
-            .or(defaults.critter_flags2)
-            .unwrap_or_default();
-        let spell = f.spell_flags.or(defaults.spell_flags).unwrap_or_default();
+    let (fidget, diagnostic) = if animate && art >> 28 == 12 && asset.decoded.frame_count > 1 {
+        let flags2 = f.critter_flags2.unwrap_or_default();
+        let spell = f.spell_flags.unwrap_or_default();
         let diagnostic =
             format!("{diagnostic}; critter flags {critter:#x}/{flags2:#x}, spell flags {spell:#x}");
         let start = Instant::now();
@@ -457,24 +555,17 @@ fn load(
     } else {
         (None, diagnostic)
     };
-    let caster = Caster {
-        tile: mobile.tile,
-        anchor,
-    };
+    let caster = Caster { tile, anchor };
     let (walk, diagnostic) = if walking {
         let start = Instant::now();
         let movement = if fidget.is_some()
             && offset == (0, 0)
             && critter == 0x2008
-            && f.spell_flags.or(defaults.spell_flags).unwrap_or_default() == 0
-            && f.critter_flags2
-                .or(defaults.critter_flags2)
-                .unwrap_or_default()
-                == 0
+            && f.spell_flags.unwrap_or_default() == 0
+            && f.critter_flags2.unwrap_or_default() == 0
         {
-            mobile
+            effective
                 .dexterity
-                .or(dexterity)
                 .ok_or_else(|| "missing walk Dexterity".into())
                 .and_then(|dx| Walk::load(vfs, cache, &pose, caster, reference, dx))
         } else {
@@ -504,20 +595,149 @@ fn load(
         (None, diagnostic)
     };
     Ok(MobileFrame {
+        object_index: 0,
+        flat: false,
         caster,
         offset,
         asset,
         diagnostic,
         casts_shadow,
-        blocking: flags & 0x400 == 0,
         fidget,
         walk,
+    })
+}
+
+fn load_prop(
+    vfs: &mut Vfs,
+    cache: &mut FrameCache,
+    names: &mut BTreeMap<&'static str, super::LoadedMes>,
+    effective: &population::Effective,
+    (category, tile): (u32, (u32, u32)),
+    reference: (u32, u32),
+) -> Result<MobileFrame, Box<dyn Error>> {
+    let art = effective
+        .current_art
+        .value()
+        .ok_or("unresolved current ART")?;
+    let appearance = effective.appearance;
+    let flags = effective
+        .flags
+        .value()
+        .ok_or("unresolved visibility flags")?;
+    if appearance.scale != Some(100)
+        || appearance.blit_flags != Some(0)
+        || appearance.blit_color != Some(0x00ff_ffff)
+        || appearance.alpha != Some(255)
+        || flags & 0x0002_00c0 != 0
+    {
+        return Err("unsupported mobile prop scale, blending or water state".into());
+    }
+    let (dir, table, entry, frame, rotation) = match (category, art >> 28) {
+        (5..=14, 6) if (art >> 12) & 3 == 0 => {
+            let kind = (art & 15) as i32;
+            let subtype = ((art >> 6) & 15) as i32;
+            let coverage = ((art >> 14) & 7) as i32;
+            let adjust = if kind == 2 && coverage != 0 {
+                20 * (5 * coverage + 10)
+            } else {
+                0
+            };
+            (
+                "item",
+                "art/item/item_ground.mes",
+                ((art >> 17) & 0x7ff) as i32 + 20 * (subtype + 50 * kind) + adjust,
+                0,
+                0,
+            )
+        }
+        (2, 7) => (
+            "container",
+            "art/container/container.mes",
+            (((art >> 6) & 31) * 1000 + ((art >> 19) & 511)) as i32,
+            ((art >> 14) & 31) as usize,
+            ((art >> 11) & 7) as u8,
+        ),
+        (3, 4) => {
+            let art = super::scenery::SceneryArt::decode(art)?;
+            (
+                "scenery",
+                "art/scenery/scenery.mes",
+                i32::from(art.family) * 1000 + i32::from(art.number),
+                usize::from(art.frame),
+                art.rotation,
+            )
+        }
+        _ => {
+            return Err(format!("unsupported mobile category {category} with ART {art:#x}").into());
+        }
+    };
+    use std::collections::btree_map::Entry;
+    let mes = match names.entry(table) {
+        Entry::Occupied(entry) => entry.into_mut(),
+        Entry::Vacant(entry) => entry.insert(load_mes(vfs, table)?),
+    };
+    let name = mes.mes.get(entry).ok_or("missing ground ART name")?.trim();
+    let name = crate::resource_path::normalize(name)?;
+    if name.contains('/') || !name.ends_with(".art") {
+        return Err("invalid ground ART name".into());
+    }
+    let path = format!("art/{dir}/{name}");
+    let asset = cache.load_rotated(vfs, &path, frame, ((art >> 4) & 3) as u8, false, rotation)?;
+    let offset = (
+        appearance.offset_x.ok_or("unresolved X offset")?,
+        appearance.offset_y.ok_or("unresolved Y offset")?,
+    );
+    let (x, y) = project_world_tile(tile, reference).ok_or("mobile prop projection overflow")?;
+    let anchor = (
+        x.checked_add(offset.0)
+            .ok_or("mobile prop X offset overflow")?,
+        y.checked_add(offset.1)
+            .ok_or("mobile prop Y offset overflow")?,
+    );
+    Ok(MobileFrame {
+        object_index: 0,
+        flat: flags & 4 != 0,
+        caster: Caster { tile, anchor },
+        offset,
+        asset,
+        diagnostic: format!("placed mobile prop {path} at {tile:?}"),
+        casts_shadow: false,
+        fidget: None,
+        walk: None,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standing_paths_follow_original_clothing_and_body_substitution() {
+        for (art, path) in [
+            (0x2820_2000, "art/critter/hmm/hmmlaxaa.art"),
+            (0x2930_2000, "art/critter/dfm/dfmcmxaa.art"),
+            (0x2c50_2830, "art/critter/efm/efmrbxaa.art"),
+            (0x2450_2030, "art/critter/hmf/hmfrbxaa.art"),
+            (0x2a40_2000, "art/critter/dfx/dfxpmxaa.art"),
+            (0x2c60_2000, "art/critter/hmx/hmxpcxaa.art"),
+        ] {
+            assert_eq!(Pose::decode(art, None).unwrap().path, path);
+        }
+        assert!(Pose::decode(0x2890_2000, None).is_err());
+    }
+
+    #[test]
+    fn unique_npc_stand_uses_named_table_and_retains_authored_palette_and_facing() {
+        let names = Mes::parse_text("{22}{HLBUW}").unwrap();
+        let pose = Pose::decode(0xd160_1820, Some(&names)).unwrap();
+        assert_eq!(pose.path, "art/unique_npc/hlbuw/hlbuwxaa.art");
+        assert_eq!(
+            (pose.direction, pose.rotation, pose.frame, pose.palette),
+            (3, 5, 0, 2)
+        );
+        assert!(Pose::decode(0xd160_1860, Some(&names)).is_err());
+        assert!(Pose::decode(0xd160_1820, None).is_err());
+    }
 
     #[test]
     fn resolves_original_kitchen_stand_and_reflection() {
@@ -577,10 +797,31 @@ fn installed_mobile_poses_and_shadow_bank_share_decoded_resources() {
     let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
     let mut vfs = Vfs::from_game(game, crate::vfs::Policy::Ce).unwrap();
     let mut cache = FrameCache::default();
-    let prepared = prepare(&mut vfs, &mut cache, MAP, SECTOR, (80, 81), true, false);
-    assert_eq!(prepared.frames.len(), 3, "{:?}", prepared.issues);
-    let original = &prepared.frames[0];
-    let reflected = &prepared.frames[2];
+    let index = population::Index::load(&mut vfs, MAP);
+    let prepared = prepare(
+        &mut vfs,
+        &mut cache,
+        Prepare {
+            index: &index,
+            prototypes: &mut Default::default(),
+            excluded: &Default::default(),
+            sector: SECTOR,
+            reference: (80, 81),
+            lighting: true,
+            fidget: false,
+            walking: false,
+        },
+    );
+    let original = prepared
+        .frames
+        .iter()
+        .find(|frame| frame.caster.tile == (80, 81))
+        .expect("kitchen NPC");
+    let reflected = prepared
+        .frames
+        .iter()
+        .find(|frame| frame.caster.tile == (91, 79))
+        .expect("reflected NPC");
     assert_eq!(original.caster.anchor, (0, 0));
     assert_eq!(original.asset.decoded.stored_rotation, 5);
     assert_eq!(original.asset.decoded.stored_palette, 2);
@@ -623,18 +864,26 @@ fn installed_standing_rabbit_supplies_authored_fidget_frames() {
     let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
     let mut vfs = Vfs::from_game(game, crate::vfs::Policy::Ce).unwrap();
     let mut cache = FrameCache::default();
+    let index = population::Index::load(&mut vfs, RABBIT_MAP);
     let prepared = prepare(
         &mut vfs,
         &mut cache,
-        RABBIT_MAP,
-        RABBIT_SECTOR,
-        (420, 814),
-        true,
-        true,
+        Prepare {
+            index: &index,
+            prototypes: &mut Default::default(),
+            excluded: &Default::default(),
+            sector: RABBIT_SECTOR,
+            reference: (420, 814),
+            lighting: true,
+            fidget: true,
+            walking: true,
+        },
     );
-    let [rabbit] = prepared.frames.as_slice() else {
-        panic!("{:?}", prepared.issues)
-    };
+    let rabbit = prepared
+        .frames
+        .iter()
+        .find(|frame| frame.caster.tile == (420, 814))
+        .expect("authored rabbit");
     assert_eq!(
         (rabbit.caster.tile, rabbit.caster.anchor),
         ((420, 814), (0, 0))

@@ -80,7 +80,7 @@ quit` closes the session cleanly.
 - `sectors` reports cached, required and speculative sectors, their source
   kind, record coverage, collision availability and bounded issues.
 - `objects` combines optional `near X Y RADIUS`, `id SECTOR:RECORD`,
-  `category CATEGORY` and `prototype ID` filters. Results are limited to
+  `original 2:GUIDHEX`, `category CATEGORY` and `prototype ID` filters. Results are limited to
   128 decoded records and 128 issues from cached sectors. Raster state is
   evaluated against the active scene and viewport. Whole object lists
   rejected by the format reader are represented as sector issues.
@@ -182,3 +182,16 @@ observations separately from the engine's render-prefix decode. The
 `.research.coverage_model` names evaluated and unevaluated stages. See the
 [research report](WORLD_COMPATIBILITY_RESEARCH.md) for source evidence and
 interpretation, including visibility flags and portal association.
+
+Schema 3 adds typed mobile inspection and scan coverage. Persistent original
+IDs use `2:` followed by raw serialized GUID bytes in hex. Mobile queries
+return resource and prototype provenance, property origins, ownership,
+placement, and rendering and collision state. Category `mobile` selects all
+mobile instances. Concrete categories select a type.
+See [original mobile objects](ORIGINAL_MOBILE_OBJECTS.md).
+
+In schema 3, `mobile_records_decoded` counts full typed instances. Schema 2
+counted successful probes of the narrower NPC render prefix.
+`mobile_resources_attempted` and the static coverage metrics remain comparable.
+`research.prepared_mobile_kinds` and `prepared_mobile_examples` describe
+authored-sector raster preparation by object category and ART origin.
