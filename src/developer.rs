@@ -28,6 +28,12 @@ pub enum Request {
     Operation(u64),
     Events(Option<String>),
     Trace(bool),
+    Inventory,
+    Owner(String),
+    OpenInventory(Option<String>),
+    CloseInventory,
+    ApproachObject(String),
+    Transfer(String, String, Option<String>),
     Quit,
 }
 
@@ -194,6 +200,56 @@ fn object_filter(args: &[String]) -> Option<ObjectFilter> {
 }
 
 const COMMANDS: &[Command] = &[
+    command!(
+        "approachobject",
+        "approachobject ORIGINAL_ID",
+        "Start normal approach and use of a resident item or container. Observe navigation and inventory for the outcome.",
+        |a| match a {
+            [id] => Some(Request::ApproachObject(id.clone())),
+            _ => None,
+        }
+    ),
+    query!(
+        "inventory",
+        "inventory",
+        "Inspect current player and open container contents.",
+        |a| a.is_empty().then_some(Request::Inventory)
+    ),
+    query!(
+        "owner",
+        "owner ORIGINAL_ID",
+        "Inspect current and original placement, including unloaded modified items.",
+        |a| match a {
+            [id] => Some(Request::Owner(id.clone())),
+            _ => None,
+        }
+    ),
+    command!(
+        "openinventory",
+        "openinventory [ORIGINAL_ID]",
+        "Open player inventory or a nearby accessible container.",
+        |a| (a.len() <= 1).then(|| Request::OpenInventory(a.first().cloned()))
+    ),
+    simple!(
+        "closeinventory",
+        "Close the inventory window.",
+        CloseInventory
+    ),
+    command!(
+        "transfer",
+        "transfer take|put|drop ORIGINAL_ID [CONTAINER_ID]",
+        "Transfer one whole object using gameplay access checks.",
+        |a| {
+            let [op, id, rest @ ..] = a else { return None };
+            let valid_id = |s: &str| crate::sector::objects::OriginalId::parse(s).is_some();
+            (matches!(
+                (op.as_str(), rest),
+                ("take" | "drop", []) | ("take" | "put", [_])
+            ) && valid_id(id)
+                && rest.iter().all(|s| valid_id(s)))
+            .then(|| Request::Transfer(op.clone(), id.clone(), rest.first().cloned()))
+        }
+    ),
     query!(
         "maps",
         "maps [filter]",
@@ -423,9 +479,9 @@ impl Command {
                     "near" | "id" | "original" | "category" | "prototype" => ("literal", name),
                     "JSON" => ("string", "version-1 snapshot JSON object"),
                     "0..23" | "50..300" => ("integer", name),
-                    "on|off" => ("enum", name),
+                    "on|off" | "take|put|drop" => ("enum", name),
                     "ID" | "SECTOR:RECORD" => ("string", "sector:record"),
-                    "ORIGINAL_ID" => ("string", "2: followed by 32 hexadecimal digits in serialized GUID-byte order"),
+                    "ORIGINAL_ID" | "CONTAINER_ID" => ("string", "2: followed by 32 hexadecimal digits in serialized GUID-byte order"),
                     "CATEGORY" if self.name == "objects" => {
                         ("string", "mobile or a canonical category such as npc, container, armor, or wall")
                     }
@@ -444,6 +500,21 @@ impl Command {
                 "ui",
                 "world",
                 "renderer",
+            ],
+            "inventory" | "openinventory" | "closeinventory" => {
+                &["open", "container", "container_name", "player", "contents"]
+            }
+            "transfer" => &["id", "from", "to"],
+            "approachobject" => &["id", "route_steps", "interaction_pending"],
+            "owner" => &[
+                "id",
+                "source",
+                "original",
+                "current",
+                "quantity",
+                "icon",
+                "slot",
+                "footprint",
             ],
             "sectors" => &["bounds", "cached", "required", "speculative", "stats"],
             "objects" | "inspect" => &["map", "objects", "issues", "truncated"],
@@ -598,6 +669,24 @@ mod tests {
         assert_eq!(runtime.0, Some(Request::Position));
     }
 
+    #[test]
+    fn inventory_registry_rejects_incomplete_transfers_before_execution() {
+        let mut runtime = Recording::default();
+        let id = "2:00000000000000000000000000000001";
+        for command in [
+            format!("transfer put {id}"),
+            format!("transfer drop {id} {id}"),
+            "transfer take invalid".into(),
+        ] {
+            assert!(dispatch(&command, &mut runtime).is_err());
+            assert_eq!(runtime.0, None);
+        }
+        dispatch(&format!("transfer take {id}"), &mut runtime).unwrap();
+        assert_eq!(
+            runtime.0,
+            Some(Request::Transfer("take".into(), id.into(), None))
+        );
+    }
     #[test]
     fn object_registry_checks_combined_filters() {
         let mut runtime = Recording::default();

@@ -277,10 +277,12 @@ impl InteractiveWorld {
         let WorldStream {
             region,
             mut loader,
-            cache,
+            mut cache,
         } = world;
         let reference = loader.reference;
         let map = loader.map.clone();
+        cache.inventory.map = map.clone();
+        cache.inventory.reference = reference;
         let mobile_index = loader.mobile_index.clone();
         let resources = loader.stats();
         let worker = Worker::start(
@@ -609,13 +611,8 @@ impl InteractiveWorld {
         if !self.cache.collision_disabled
             && let Some(key) = self.cache.pick(point, self.reference, elapsed)
         {
-            let steps = self.cache.approach(key, run);
-            self.pending_use = steps.map(|_| key);
-            if steps.is_none() {
-                self.notice = Some("cannot reach the object".into());
-            }
-            if self.trace {
-                eprintln!("Use target {key:?}: {steps:?} steps");
+            if let Err(e) = self.approach_target(key, run) {
+                self.notice = Some(e)
             }
             return;
         }
@@ -625,6 +622,35 @@ impl InteractiveWorld {
         }
     }
 
+    fn approach_target(&mut self, key: WorldOrder, run: bool) -> Result<usize, String> {
+        self.cancel_player_route();
+        let steps = self
+            .cache
+            .approach(key, run)
+            .ok_or("Cannot reach the object")?;
+        self.pending_use = Some(key);
+        Ok(steps)
+    }
+    pub fn approach_inventory_object(&mut self, identity: &str) -> Result<usize, String> {
+        if self.inventory_is_open() {
+            return Err("Close the inventory before approaching a target".into());
+        }
+        let id = crate::sector::objects::OriginalId::parse(identity)
+            .ok_or("Invalid original identity")?;
+        let key = self
+            .cache
+            .ordered
+            .iter()
+            .rev()
+            .find_map(|r| {
+                let target = self.cache.target(r.key)?;
+                (matches!(target.action,interaction::Action::Inventory(i) if i==id)
+                    && !r.click_through)
+                    .then_some(r.key)
+            })
+            .ok_or("Object has no active interaction target")?;
+        self.approach_target(key, false)
+    }
     pub fn update_hover(
         &mut self,
         cursor: Option<(u32, u32)>,

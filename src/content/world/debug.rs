@@ -187,6 +187,7 @@ impl InteractiveWorld {
                 interaction::Action::Door(door) => {
                     self.cache.door_states.diagnostic(door, self.cache.hour)
                 }
+                interaction::Action::Inventory(id) => json!({"kind":"inventory","id":id.key()}),
                 interaction::Action::Travel(dst) => json!({"kind":"transition","destination":dst}),
                 interaction::Action::Unsupported(reason) => {
                     json!({"kind":"unsupported","reason":reason})
@@ -203,8 +204,9 @@ impl InteractiveWorld {
         size: (u32, u32),
         now: Duration,
     ) -> Value {
-        let mut objects = Vec::new();
-        let mut truncated = false;
+        let mut objects: Vec<_> = self.cache.changed_reports(filter).take(129).collect();
+        let mut truncated = objects.len() > 128;
+        objects.truncate(128);
         let matches = |id: u64,
                        record: usize,
                        tile: Option<(u32, u32)>,
@@ -260,7 +262,8 @@ impl InteractiveWorld {
                 }
             }
             for entry in &sector.mobiles {
-                if filter.record.is_some()
+                if self.cache.modified(entry.id)
+                    || filter.record.is_some()
                     || filter
                         .original
                         .as_ref()
@@ -293,6 +296,13 @@ impl InteractiveWorld {
                     info["sector"] = json!(id);
                     info
                 };
+                let mut info = info;
+                if entry.category == 2 && self.cache.inventory_changed() {
+                    info["original_inventory"] = info["inventory"].take();
+                    info["original_inventory_count"] = info["inventory_count"].take();
+                    info["inventory"] = json!(self.cache.current_members(entry));
+                    info["inventory_count"] = json!(info["inventory"].as_array().map(Vec::len));
+                }
                 objects.push(info);
             }
             if truncated {

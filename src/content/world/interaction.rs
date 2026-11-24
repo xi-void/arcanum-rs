@@ -7,6 +7,7 @@ type Tile = (u32, u32);
 type Id = (u64, usize);
 
 pub(super) enum Action {
+    Inventory(crate::sector::objects::OriginalId),
     Travel(Destination),
     Door(Door),
     Unsupported(String),
@@ -103,7 +104,7 @@ impl DoorStates {
     }
 }
 
-fn locked(flags: u32, hour: u8) -> bool {
+pub(super) fn locked(flags: u32, hour: u8) -> bool {
     // CE object_locked_get. ALWAYS_LOCKED gates the indoor egress exception
     // in ai_attempt_open_portal, rather than replacing OPF_LOCKED.
     if flags & 8 != 0 {
@@ -366,6 +367,9 @@ impl SectorCache {
         (change.started + 2 * door.period).checked_sub(tick)
     }
     pub(super) fn target(&self, key: WorldOrder) -> Option<&Target> {
+        if let Some(target) = self.inventory.dropped_targets.get(&key) {
+            return Some(target);
+        }
         let tile = (key.1.2, key.1.1);
         self.entries
             .get(&tile_sector_id(tile))?
@@ -454,6 +458,10 @@ impl SectorCache {
                     .iter()
                     .filter_map(|&direction| neighbor(tile, direction)),
             )
+            .filter(|&candidate| {
+                !matches!(target.action, Action::Inventory(_))
+                    || self.in_inventory_range(candidate, tile)
+            })
             .collect();
         let entries = &self.entries;
         let states = &self.door_states;
@@ -475,8 +483,7 @@ impl SectorCache {
         }
         let tile = player.tile();
         let facing = player.facing();
-        let (sector, _) = self.entries.get(&tile_sector_id(target.tile))?;
-        let target = &sector.interactions[&key];
+
         let near = match &target.action {
             Action::Door(door) => {
                 target.tile == tile || neighbor(target.tile, door.direction) == Some(tile)
@@ -486,7 +493,16 @@ impl SectorCache {
         if !near {
             return Some(Err("cannot reach the object".into()));
         }
+        if let Action::Inventory(id) = target.action {
+            return Some(self.use_inventory_object(id).map(|()| None));
+        }
+        let target = &self
+            .entries
+            .get(&tile_sector_id(target.tile))?
+            .0
+            .interactions[&key];
         match &target.action {
+            Action::Inventory(_) => unreachable!(),
             Action::Door(door) => {
                 let result = self.door_states.change(door, tick, self.hour);
                 Some(result.map(|open| {

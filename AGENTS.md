@@ -131,27 +131,27 @@ The objective is a coherent, extensible reconstruction of Arcanum, followed by s
 
 ## User interface architecture
 
-- Keep gameplay state independent of UI presentation.
-- Implement Classic UI through the same public component and configuration system available to third-party UI packages.
-- Classic must not receive privileged layout or presentation logic unavailable to external themes.
-- Preserve original interface fidelity in Classic.
-- Do not add unrequested controls, labels, overlays or decorative elements.
-- Keep diagnostic information separate from normal gameplay UI.
+Arcanum-RS is an independent replacement engine with its own interface design philosophy. Reproducing the original Arcanum interface is not a project requirement.
+
+- Prioritize usability, readability, efficiency and coherent interaction design.
+- Preserve original gameplay semantics independently of interface presentation.
+- Modernize interaction conventions where beneficial.
+- Avoid unnecessary modal windows, redundant controls, excessive navigation and screen-consuming decorative elements.
+- Prefer compact, functional interfaces that maximize visible gameplay space.
+- Use original item artwork and other resources where useful, without requiring original panel geometry or layouts.
+- Support modern graphical inventories, drag-and-drop, contextual actions, tooltips and efficient item transfers.
+- Keep gameplay state and transactions independent of presentation.
+- Use a shared, externally configurable UI component system.
 - Support independently replaceable HUDs and interface screens.
-- Allow alternative HUDs to coexist with Classic inventory, character, dialogue and map screens.
-- Inactive interfaces must not be instantiated as hidden or transparent duplicate overlays.
-- Disabling a UI component must remove its rendering and input handling.
 - Preserve independent UI scaling and world-camera zoom.
-- Keep fonts, artwork, colors, layouts and component positioning externally configurable.
-- Support external font resources and reusable typography configuration.
-- Prefer scalable text rendering and readable layouts over fixed-resolution assumptions.
-- Ensure rendering, layout and input handling remain consistent at different resolutions and scale factors.
-- Treat 1920×1080 as a primary manual testing resolution while preserving support for smaller displays and other aspect ratios.
-- Keep UI behavior shared across Classic and alternative themes rather than duplicating gameplay logic.
-- Use the shared Vulkan rendering infrastructure for UI composition.
-- Preserve original artwork through the installed game VFS rather than redistributing proprietary assets.
-- Do not require engine recompilation to replace ordinary UI layouts or visual resources.
-- Do not let minor cosmetic discrepancies unnecessarily delay functional milestones.
+- Support external fonts, artwork, colors and layouts.
+- Keep diagnostic interfaces separate from ordinary gameplay.
+- Do not instantiate inactive interfaces as hidden duplicate overlays.
+- Use the shared Vulkan rendering infrastructure.
+- Do not require engine recompilation for ordinary interface customization.
+- Treat 1920×1080 as a primary testing resolution while supporting other resolutions and aspect ratios.
+- Original-style interfaces may be implemented as optional community themes, but are not mandatory development targets.
+- Do not spend development time reproducing obsolete interface conventions solely for historical fidelity.
 
 ## Gameplay-driven development
 

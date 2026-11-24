@@ -7,6 +7,7 @@ mod development;
 pub(super) use development::Developer;
 mod gpu;
 mod hud;
+mod inventory;
 mod map_ui;
 use map_ui::Arrival;
 pub(super) use map_ui::MapUi;
@@ -193,6 +194,7 @@ pub struct StreamOptions<'a> {
     pub travel: Option<(String, TravelLoader<'a>)>,
     pub hud: Option<Box<Hud>>,
     pub map_ui: Option<Box<MapUi>>,
+    pub inventory_theme: Option<(std::path::PathBuf, u16)>,
 }
 
 pub fn show_stream(
@@ -211,6 +213,7 @@ pub fn show_stream(
         travel,
         hud,
         map_ui,
+        inventory_theme,
     } = options;
     let event_loop = make_loop()?;
     let proxy = event_loop.create_proxy();
@@ -247,6 +250,7 @@ pub fn show_stream(
             travel,
             hud,
             map_ui,
+            inventory: inventory_theme.map(|(p, s)| Box::new(inventory::InventoryUi::new(p, s))),
         },
         PhysicalSize::<u32>::from(size).into(),
         event_loop,
@@ -272,6 +276,7 @@ enum ViewContent<'a> {
         travel: Option<Travel<'a>>,
         hud: Option<Box<Hud>>,
         map_ui: Option<Box<MapUi>>,
+        inventory: Option<Box<inventory::InventoryUi>>,
     },
     World {
         scene: &'a CameraScene<'a>,
@@ -531,6 +536,7 @@ impl Viewer<'_> {
         view.window.set_title(&format!("Arcanum-RS | {map} play"));
         view.developer_status = bypass.then(|| menu::developer_status("COLLISION OFF"));
         travel.map = map;
+        next.inherit_inventory(world);
         **world = next;
         *camera = next_camera;
         *last_presented = None;
@@ -615,6 +621,13 @@ impl Viewer<'_> {
             hud::Action::Pause => self.pause_game(event_loop),
             hud::Action::ToggleRun => self.settings.run = !self.settings.run,
             hud::Action::ResetZoom => self.settings.zoom = 1,
+            hud::Action::OpenInventory => {
+                if let ViewContent::Stream { world, .. } = &mut self.content {
+                    let _ = world.inventory_open(None);
+                    self.navigation = Navigation::default();
+                    self.player_deadline = world.player_moving().then_some(Instant::now());
+                }
+            }
             hud::Action::OpenMap => self.open_map(event_loop),
             _ => {}
         }
@@ -1180,7 +1193,10 @@ impl ApplicationHandler for Viewer<'_> {
         if self.view.as_ref().is_none_or(|view| view.window.id() != id) {
             return;
         }
-        if self.developer_event(event_loop, &event) || self.map_event(event_loop, &event) {
+        if self.developer_event(event_loop, &event)
+            || self.inventory_event(&event)
+            || self.map_event(event_loop, &event)
+        {
             return;
         }
         let playing = matches!(&self.content, ViewContent::Stream { world, .. } if world.playing());
@@ -1682,6 +1698,7 @@ impl Viewer<'_> {
                         animation_ms,
                         hud,
                         map_ui,
+                        inventory,
                         travel,
                         ..
                     } => {
@@ -1704,6 +1721,16 @@ impl Viewer<'_> {
                                 hud.set_travel_available(map_ui.can_travel());
                             }
                         }
+                        if let Some(ui) = inventory {
+                            if let Some(h) = hud {
+                                ui.scale = h.scale();
+                            }
+                            if let Err(e) = ui.prepare(world, (size.width, size.height)) {
+                                eprintln!("Inventory UI: {e}");
+                                view.window.set_title(&e);
+                                world.close_inventory();
+                            }
+                        }
                         view.redraw_stream(
                             size,
                             world,
@@ -1717,6 +1744,7 @@ impl Viewer<'_> {
                                 cursor: self.cursor,
                                 hud: hud.as_deref_mut(),
                                 developer: self.developer.as_mut(),
+                                inventory: inventory.as_deref().filter(|ui| ui.panel.is_some()),
                             },
                         )
                         .map(|ready| {
@@ -1809,6 +1837,7 @@ struct FrameOptions<'a> {
     menu: Option<&'a Arc<arcanum_rs::content::art::LoadedFrame>>,
     hud: Option<&'a mut Hud>,
     developer: Option<&'a mut Developer>,
+    inventory: Option<&'a inventory::InventoryUi>,
     cursor: Option<(u32, u32)>,
 }
 
@@ -1828,6 +1857,7 @@ impl WindowSurface {
             menu,
             hud,
             mut developer,
+            inventory,
             cursor,
         } = options;
         let zoom = settings.zoom;
@@ -1855,7 +1885,7 @@ impl WindowSurface {
             let scale = u32::from(zoom);
             world.update_hover(
                 cursor
-                    .filter(|_| menu.is_none())
+                    .filter(|_| menu.is_none() && inventory.is_none())
                     .map(|(x, y)| (x / scale, y / scale)),
                 viewport,
                 camera,
@@ -1915,6 +1945,7 @@ impl WindowSurface {
             draws,
             hud.into_iter()
                 .flat_map(|hud| hud.draws(settings.run))
+                .chain(inventory.into_iter().flat_map(|ui| ui.draws()))
                 .map(|(asset, sprite)| unlit(asset, sprite.anchor))
                 .chain(
                     self.developer_status

@@ -41,7 +41,7 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] mes get <game-directory> <resource-path> <entry-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art inspect <game-directory> <resource-path> <frame> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art export <game-directory> <resource-path> <frame> <output.pam> [--mods <mods-directory> <mod-id> ...]
-  arcanum-rs [--ordered] play <game-directory> [--map <map-name-or-id>] [--center X Y] [--ui classic|off|PATH] [--ui-scale PERCENT] [--map-ui PATH] [--map-reveal] [--discover-all] [--debug] [--console-ui PATH] [--lighting <hour>] (requires --features windowed)
+  arcanum-rs [--ordered] play <game-directory> [--map <map-name-or-id>] [--center X Y] [--ui classic|off|PATH] [--ui-scale PERCENT] [--inventory-ui DIRECTORY] [--map-ui PATH] [--map-reveal] [--discover-all] [--debug] [--console-ui PATH] [--lighting <hour>] (requires --features windowed)
   arcanum-rs art demo                          (requires --features windowed)
   arcanum-rs [--ordered] art sector-audit <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art sector-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
@@ -1264,6 +1264,7 @@ fn show_world(
     policy: Policy,
     playing: bool,
 ) -> Result<(), Box<dyn Error>> {
+    let mut inventory_theme = None;
     let mut map_theme = None;
     let mut map_reveal = false;
     let mut discover_all = false;
@@ -1280,6 +1281,12 @@ fn show_world(
             break;
         }
         match flag.to_str() {
+            Some("--inventory-ui") if playing && inventory_theme.is_none() => {
+                inventory_theme = Some(std::path::PathBuf::from(
+                    args.next()
+                        .ok_or("--inventory-ui expects a package directory")?,
+                ));
+            }
             Some("--map-ui") if playing && map_theme.is_none() => {
                 let path = Path::new(
                     args.next()
@@ -1370,18 +1377,24 @@ fn show_world(
         } else {
             None
         };
-        let map_ui = if playing {
-            let vfs = inspection_vfs(game, mount_options, policy)?;
-            match viewer::MapUi::load(&path, vfs, ui_scale, map_reveal, discover_all) {
+        let (world, map_ui) = if playing {
+            let vfs = std::rc::Rc::new(std::cell::RefCell::new(inspection_vfs(
+                game,
+                mount_options,
+                policy,
+            )?));
+            let world = world.with_inventory(vfs.clone());
+            let map = match viewer::MapUi::load(&path, vfs, ui_scale, map_reveal, discover_all) {
                 Ok(map) => Some(Box::new(map)),
                 Err(error) if !custom => {
                     eprintln!("Map interface unavailable: {error}");
                     None
                 }
                 Err(error) => return Err(format!("Map UI {}: {error}", path.display()).into()),
-            }
+            };
+            (world, map)
         } else {
-            None
+            (world, None)
         };
         let travel: Option<viewer::TravelLoader<'_>> = if playing {
             Some(Box::new(
@@ -1436,6 +1449,14 @@ fn show_world(
                 developer,
                 travel: travel.map(|loader| (map, loader)),
                 map_ui,
+                inventory_theme: playing.then(|| {
+                    (
+                        inventory_theme.unwrap_or_else(|| {
+                            Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/inventory")
+                        }),
+                        ui_scale.unwrap_or(125),
+                    )
+                }),
                 hud,
             },
         )

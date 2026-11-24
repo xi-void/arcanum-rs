@@ -264,6 +264,7 @@ impl Prototypes {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct Effective {
     pub current_art: Property<u32>,
     pub flags: Property<u32>,
@@ -345,6 +346,7 @@ pub(crate) struct Resident {
     pub placement: &'static str,
     pub tile: Option<(u32, u32)>,
     pub blocks: bool,
+    pub click_through: bool,
     pub render_issue: Option<String>,
     pub raster: Option<usize>,
 }

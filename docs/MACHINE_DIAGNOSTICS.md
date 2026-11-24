@@ -195,3 +195,9 @@ counted successful probes of the narrower NPC render prefix.
 `mobile_resources_attempted` and the static coverage metrics remain comparable.
 `research.prepared_mobile_kinds` and `prepared_mobile_examples` describe
 authored-sector raster preparation by object category and ART origin.
+
+## Session inventory
+
+`inventory` reports `open`, the active container GUID and name, its `contents` (null when closed), and the player's inventory. Each item carries its GUID, prototype, description ID, original and current physical placement, source, original inventory slot, current slot, footprint, quantity and icon resource where available. Slots are row-major, ten per row. `owner GUID` works even outside the source map for changed items. `objects original GUID` reports their current world placement and preparation state.
+
+`approachobject GUID` schedules the ordinary approach and use action. Poll inventory or owner for the resulting change. `openinventory [CONTAINER_GUID]` enforces ordinary reach and access checks. `closeinventory` dismisses the interface. `transfer take GUID [CONTAINER_GUID]`, `transfer put GUID CONTAINER_GUID` and `transfer drop GUID` use the same transaction as mouse input. Successful transfers report the item identity and both placements. Access or placement failures return `transfer_rejected` and retain the original state. Read-only queries do not schedule presentation. See [Session objects and inventory](RUNTIME_INVENTORY.md) for scope and storage lifetime.

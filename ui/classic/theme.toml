@@ -57,7 +57,7 @@ parent = "top"
 offset = [115, 2]
 size = [34, 34]
 image = "vfs:art/interface/invn_but.art"
-disabled = true
+action = "open-inventory"
 
 [[hud]]
 id = "fate"
