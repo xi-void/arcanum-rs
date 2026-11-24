@@ -295,8 +295,11 @@ fn run_content(
     content: ViewContent<'_>,
     size: Size,
     event_loop: EventLoop<()>,
-    developer: Option<Developer>,
+    mut developer: Option<Developer>,
 ) -> Result<(), String> {
+    if let Some(dev) = &mut developer {
+        dev.start_automation(event_loop.create_proxy())?;
+    }
     event_loop.set_control_flow(ControlFlow::Wait);
     let clock = match &content {
         ViewContent::Stream { world, .. } => world.game_clock(),
@@ -503,7 +506,7 @@ impl Viewer<'_> {
             &travel.map,
             target,
             facing,
-            (size.width, size.height),
+            logical_size(size, self.settings.zoom),
             hour,
             bypass,
         )?;
@@ -537,6 +540,9 @@ impl Viewer<'_> {
         self.animation_deadline = None;
         view.window.request_redraw();
         self.reset_developer_location();
+        if let Some(dev) = &mut self.developer {
+            dev.event("map_loaded", None, serde_json::json!({"target":target}));
+        }
         Ok(())
     }
 
@@ -971,7 +977,11 @@ impl Viewer<'_> {
                 .map_err(|error| format!("cannot create sprite window: {error}"))?,
         );
         let trace = matches!(&self.content, ViewContent::Stream { trace: true, .. });
-        let renderer = gpu::WindowRenderer::new(Arc::clone(&window), trace)?;
+        let capture = self
+            .developer
+            .as_ref()
+            .is_some_and(Developer::capture_enabled);
+        let renderer = gpu::WindowRenderer::new(Arc::clone(&window), trace, capture)?;
         Ok(WindowSurface {
             renderer,
             map_inset: None,
@@ -1114,15 +1124,29 @@ impl ApplicationHandler for Viewer<'_> {
         self.update_control_flow(event_loop);
     }
 
-    fn user_event(&mut self, _: &ActiveEventLoop, _: ()) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, _: ()) {
         let paste = self.developer_paste();
-        if let ViewContent::Stream { world, .. } = &mut self.content
-            && (world.receive() || paste)
-            && self.map_since.is_none()
-            && let Some(view) = &self.view
-        {
-            view.window.request_redraw();
+        if let ViewContent::Stream { world, .. } = &mut self.content {
+            let received = world.receive();
+            if let Some((id, accepted, duration)) = world.take_diagnostic_completion()
+                && let Some(dev) = &mut self.developer
+            {
+                dev.event(
+                    "sector_completed",
+                    None,
+                    serde_json::json!({
+                        "sector":id,"accepted":accepted,"elapsed":duration,
+                    }),
+                );
+            }
+            if (received || paste)
+                && self.map_since.is_none()
+                && let Some(view) = &self.view
+            {
+                view.window.request_redraw();
+            }
         }
+        self.pump_automation(event_loop);
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {

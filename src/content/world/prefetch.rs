@@ -208,7 +208,7 @@ impl Drop for Worker {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct PrefetchStats {
     pub cache: StreamStats,
     pub prefetch_hits: u64,
@@ -247,8 +247,8 @@ pub struct InteractiveWorld {
     pub(super) cache: SectorCache,
     worker: Worker,
     resources: (u64, FrameCacheStats),
-    required: Vec<u64>,
-    speculative: Vec<u64>,
+    pub(super) required: Vec<u64>,
+    pub(super) speculative: Vec<u64>,
     ready_plan: Option<ViewPlan>,
     prefetch_hits: u64,
     prefetch_misses: u64,
@@ -263,6 +263,7 @@ pub struct InteractiveWorld {
     route_goal: Option<((u32, u32), bool)>,
     wait_for_door: Option<Duration>,
     notice: Option<String>,
+    diagnostic_completion: Option<(u64, bool, Duration)>,
 }
 
 impl InteractiveWorld {
@@ -307,10 +308,15 @@ impl InteractiveWorld {
             route_goal: None,
             wait_for_door: None,
             notice: None,
+            diagnostic_completion: None,
         })
     }
 
     /// Consume one complete import. Only an import needed by the requested view wakes rendering.
+    pub fn take_diagnostic_completion(&mut self) -> Option<(u64, bool, Duration)> {
+        self.diagnostic_completion.take()
+    }
+
     pub fn receive(&mut self) -> bool {
         let Some(mut done) = self.worker.take() else {
             return false;
@@ -324,6 +330,7 @@ impl InteractiveWorld {
         let evictions = self.cache.evictions;
         let accepted = wanted && self.cache.evict(MAX_SECTORS, &self.required, true);
         let (reads, art) = done.resources;
+        self.diagnostic_completion = Some((id, accepted, done.elapsed));
         if accepted {
             if let Some((ambient, _)) = self.cache.ambient {
                 done.sector.retint_lights(ambient);
@@ -677,6 +684,15 @@ impl InteractiveWorld {
 
     pub fn take_transition(&mut self) -> Option<(Destination, u8)> {
         self.transition.take()
+    }
+
+    pub fn debug_navigation(&self) -> serde_json::Value {
+        serde_json::json!({
+            "moving":self.player_moving(),
+            "destination":self.route_goal.map(|goal|goal.0).or_else(||self.cache.player.as_ref()?.route_destination()),
+            "pending_interaction":self.pending_use.map(|key|key.1.6.unwrap_or(key.1.5)),
+            "pending_transition":self.transition,
+        })
     }
 
     pub fn collision_bypassed(&self) -> bool {

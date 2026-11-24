@@ -1,0 +1,220 @@
+# Agent workflow for Arcanum-RS diagnostics
+
+Use local RPC to reproduce runtime defects and the headless scanner to investigate
+original-data compatibility. See [Machine-readable diagnostics](MACHINE_DIAGNOSTICS.md)
+for the protocol, socket limits, and command conventions.
+
+## Quick start
+
+Run from the repository in a Wayland session with Vulkan available. Use a fresh
+private socket directory for each debug instance.
+
+```sh
+cargo build --locked --release --features windowed
+rpc_dir=$(mktemp -d /tmp/arcanum-rs.XXXXXX)
+chmod 700 "$rpc_dir"
+mkdir -p target/visual-checks/milestone-59
+printf '%s\n' "$rpc_dir/engine.sock"
+target/release/arcanum-rs play "$HOME/Work/arcanum-ce-test" --debug \
+  --rpc "$rpc_dir/engine.sock" --diagnostics target/visual-checks/milestone-59
+```
+
+From a second terminal in the repository, substitute the printed socket path.
+Keep this instance running for the whole investigation.
+
+```sh
+bin=target/release/arcanum-rs
+sock=/tmp/arcanum-rs.REPLACE_ME/engine.sock
+rpc() { "$bin" rpc "$sock" "$@"; }
+rpc commands
+rpc help objects
+rpc pos
+```
+
+When finished, run `rpc quit`. The engine removes the socket on clean exit.
+After it exits, remove the empty directory with `rmdir "$(dirname "$sock")"`.
+
+## Runtime debugging
+
+```sh
+rpc maps Tulla
+rpc coc Tulla
+rpc teleport 28447 31171
+rpc pos | jq '.result | {map, player, camera, sector, streaming}'
+rpc sectors | jq '.result | {cached, required, speculative, stats}'
+rpc objects near 28446 31171 1
+rpc objects id 32682017212:7 | jq '.result.objects[] | {
+  id, prototype, sector_source, effective, collision, interaction, rendering, issues
+}'
+rpc resource 'proto/001021 - wall.pro'
+rpc resource art/wall/txxbseu1.art 0
+```
+
+- `coc` accepts a discovered map name or numeric ID, with optional `X Y`.
+  Without coordinates it uses the authored start. `teleport X Y` stays within
+  the current map. Check the returned map and tile, then confirm camera readiness
+  as described below.
+- `sectors` reports cached entries and required and speculative sector IDs.
+  Check these and `pos.result.streaming` when investigating a pending load.
+- `objects id SECTOR:RECORD` addresses a serialized sector record in the active map.
+  Nearby queries also accept `category CATEGORY` and `prototype ID` filters.
+  Read `sector_source`, `effective.prototype_source`, and
+  `effective.asset_source` for provenance. Inspect `collision`, `interaction`,
+  `rendering.state`, and `issues` to see what the engine knows. A missing field
+  means the query did not supply that information. `resource` reports the VFS
+  `winner`, override `candidates`, and available `decode` information.
+
+```sh
+# Toggle keyboard and mouse collision bypass. Check the returned state.
+rpc tcl | jq '.result.collision_bypass'
+rpc pos | jq '.result.player | {tile, collision, collision_bypass, navigation}'
+
+# Set the hour (0–23). The game clock continues advancing.
+rpc settime 23
+rpc pos | jq '.result.world | {hour, world_tile, area, travel}'
+
+# After editing the currently selected UI packages
+rpc reloadui
+rpc pos | jq '.result.ui | {reload_generation, reload_status}'
+```
+
+`world.travel` reports `travel_eligible`, `waypoints`, and `journey` when the
+map interface is available. A failed `reloadui` leaves the working UI active
+and reports a structured error. For a short event history, use `rpc trace on`
+before reproduction, then `rpc events` or `rpc events snapshot_restored`.
+
+## Asynchronous operations
+
+Read the top-level `status` before using `result`. `completed` confirms the
+command finished. `accepted` confirms it was queued. For token-bearing results,
+poll `rpc operation TOKEN` with a bounded deadline until `completed` or
+`failed`. Read `error.code`, `error.message`, and any `error.details` on failure.
+
+`coc`, `teleport`, and `restore` can return `completed` with `view_ready: false`.
+The destination is active and presentation follows. Before judging visible
+results, confirm the target map and tile and poll
+`rpc pos | jq -e '.result.camera.view_ready == true'`. Check `sectors` as well
+when the investigation depends on a particular cached sector. Camera readiness
+does not imply speculative prefetch finished.
+
+The client exits with 0 for completed or accepted requests, 1 for a structured
+failure, and 2 for usage, transport, or protocol errors. The client waits up
+to 120 seconds for a response. A timeout or disconnect can leave a dispatched
+mutation in effect. Reconnect and query state before retrying, especially for
+toggles such as `tcl`. Use `rpc --id N COMMAND ...` to correlate requests.
+
+## Diagnostic snapshots
+
+```sh
+snapshot=target/visual-checks/milestone-59/tulla-snapshot.json
+rpc snapshot | jq -e '.result' > "$snapshot"
+rpc restore "$(cat "$snapshot")"
+rpc pos | jq '.result | {map, player, camera, world}'
+```
+
+Restore uses the normal location loader and expects the same UI packages and
+declared VFS mods. It restores map, tile, facing, game hour, collision bypass,
+zoom, UI scale, render toggles, diagnostic overlays, and the selected record
+when available. Camera coordinates, viewport dimensions, and cached-sector
+references are recorded for context. The camera follows the player after
+restore and the window keeps its current size. Snapshots cover reproduction
+context. Door changes and other runtime object state, pending interactions,
+travel progress, cache ordering, and exact animation phase are outside the
+restore scope.
+
+## Vulkan screenshot capture
+
+Use structured diagnostics for placement, provenance, and state. Capture a
+frame when the question depends on actual visual output. After confirming
+`camera.view_ready`, request a fresh simple PNG filename.
+
+```sh
+capture=$(rpc capture tulla-review.png)
+token=$(printf '%s\n' "$capture" | jq -er 'select(.status == "accepted") | .result.token')
+rpc operation "$token"
+```
+
+If the operation remains `accepted`, poll again until it completes or fails.
+The completed result contains `path`, `backend`, and the physical `viewport`.
+The file is written under the configured `--diagnostics` directory. Existing
+files are protected. Capture records the presented Vulkan view and active UI.
+Use `--ui off` at launch when a capture needs the HUD disabled.
+
+## World compatibility scanner
+
+Use the same installed data and override set for comparisons. Build the revision
+under investigation in release mode and keep reports and timing files under
+the ignored `target/` directory. The full scan needs no running game.
+
+```sh
+game="$HOME/Work/arcanum-ce-test"
+out=target/visual-checks/milestone-59
+mkdir -p "$out"
+/usr/bin/time -f 'elapsed_seconds=%e max_rss_kib=%M' -o "$out/current.time" \
+  "$bin" world-scan "$game" > "$out/current.json"
+
+"$bin" world-scan "$game" --map "Tulla Interior" --summary
+"$bin" world-scan "$game" --map 5000 --sector 32682017212
+"$bin" world-scan "$game" --category portal --group portal_opening_unsupported --examples 3
+jq '{scope, coverage, elapsed_ms}' "$out/current.json"
+jq -r '.issues[] | [.code, .occurrences, .affected_resources, .affected_world_sectors] | @tsv' \
+  "$out/current.json"
+```
+
+`--limit N` bounds authored and template load attempts independently.
+`--category` and `--group` filter issues. `--summary` omits representative
+examples. Compare unfiltered runs to evaluate changes across the installed data.
+If the original Milestone 59 report is still present as `compatibility.json`
+in this directory, use it as the baseline. Otherwise save the first comparable
+report as `baseline.json` before collecting `current.json` again.
+
+```bash
+# Compare coverage before interpreting issue-count changes.
+baseline="$out/compatibility.json" # Or "$out/baseline.json"
+diff -u <(jq -S '.coverage' "$baseline") \
+        <(jq -S '.coverage' "$out/current.json")
+diff -u <(jq -r '.issues[] | [.code, .occurrences] | @tsv' "$baseline" | sort) \
+        <(jq -r '.issues[] | [.code, .occurrences] | @tsv' "$out/current.json" | sort)
+```
+
+### Milestone 59 installed-data baseline
+
+| Report field or issue code | Count | Unit |
+| --- | ---: | --- |
+| `coverage.authored_attempted` | 1,663 | Authored sector resources |
+| `coverage.templates_attempted` | 413 | Template sector resources |
+| `coverage.object_lists_decoded` | 2,055 | Successfully decoded object lists |
+| `coverage.serialized_records_decoded` | 289,553 | Decoded serialized object records |
+| `mobile_format_rejected` | 10,541 | Mobile files outside the supported decoder format |
+| `object_appearance_unsupported` | 1,593 | Object appearance issue occurrences |
+| `portal_opening_unsupported` | 1,035 | Portal-opening mismatch occurrences |
+| `coverage.object_lists_rejected` | 21 | Rejected object lists |
+
+The release scan took **44.5 seconds** with **124 MiB peak RSS** on the
+validation machine. To reproduce the baseline, run the unfiltered scan above
+against the same installed resources and compare coverage and timings.
+Issue counts measure occurrences and can overlap across groups. Keep the
+generated JSON local under `target/`.
+
+## Known limitations
+
+- Runtime object queries cover cached sectors and return bounded results.
+- Snapshot restoration has the limited scope described above.
+- Compatibility scans exercise format decoding and preparation. Visual
+  fidelity requires separate verification.
+- Dynamically resolved world positions require targeted checks. Template
+  scans cover resources and terrain references.
+- General script execution remains incomplete. Transition metadata can be
+  inspected within the supported subset.
+
+## Recommended debugging workflow
+
+1. Reproduce the reported defect through runtime automation.
+2. Query structured engine state.
+3. Identify original resource provenance.
+4. Determine the generic engine deficiency.
+5. Implement the smallest verified reusable correction.
+6. Run focused regression tests.
+7. Reproduce the same scenario through automation.
+8. Capture visual evidence only when relevant.
+9. Report remaining limitations.

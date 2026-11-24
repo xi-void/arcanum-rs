@@ -6,6 +6,8 @@ pub mod compositor;
 pub mod content;
 pub mod dat;
 pub mod developer;
+#[cfg(target_os = "linux")]
+pub mod developer_ipc;
 pub mod facade;
 #[cfg(feature = "windowed")]
 pub mod gpu;

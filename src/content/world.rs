@@ -30,6 +30,8 @@ use std::{
 };
 
 mod debug;
+mod scan;
+pub use scan::{ScanOptions, compatibility_scan};
 mod interaction;
 pub use debug::{DebugCollision, DebugObject};
 mod prefetch;
@@ -41,7 +43,7 @@ pub use prefetch::{DeveloperAction, InteractiveWorld, PrefetchStats};
 const MAX_SECTORS: usize = 12;
 const OVERHANG: i64 = 640;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct SectorRegion {
     pub first: Coordinates,
     pub last: Coordinates,
@@ -117,6 +119,11 @@ impl Required {
 
 #[derive(Debug)]
 pub struct SectorReport {
+    pub source_details: Option<serde_json::Value>,
+    pub decoded_records: Option<usize>,
+    pub structured_issues: Vec<scan::Issue>,
+    pub original_records: BTreeMap<usize, serde_json::Value>,
+
     pub id: u64,
     pub source: Option<String>,
     pub collision_available: bool,
@@ -139,7 +146,7 @@ pub struct SectorReport {
     pub roofs: (usize, usize),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct StreamStats {
     pub sector_reads: u64,
     pub sector_hits: u64,
@@ -395,6 +402,10 @@ impl CachedSector {
             townmap: 0,
             report: SectorReport {
                 id,
+                source_details: None,
+                decoded_records: None,
+                structured_issues: vec![scan::Issue::sector_failure(&error)],
+                original_records: BTreeMap::new(),
                 source: None,
                 collision_available: false,
                 surfaces: 0,
@@ -438,6 +449,19 @@ impl CachedSector {
         let room = &world.room;
         let mut report = SectorReport {
             id,
+            source_details: Some(super::diagnostics::source(&room.floor.source)),
+            decoded_records: world.decoded_records,
+            structured_issues: Vec::new(),
+            original_records: world
+                .original_records
+                .into_iter()
+                .map(|record| {
+                    (
+                        record["record"].as_u64().expect("record index") as usize,
+                        record,
+                    )
+                })
+                .collect(),
             source: Some(format!(
                 "{} from {}",
                 room.floor.source.virtual_path, room.floor.source
@@ -470,8 +494,32 @@ impl CachedSector {
             roofs: (world.roof_words.len(), 0),
         };
         if let Some(error) = world.object_issue {
+            report.structured_issues.push(scan::Issue::new(
+                if world.object_list_failed {
+                    "object_list_rejected"
+                } else {
+                    "object_placement_incomplete"
+                },
+                &error,
+            ));
             report.diagnostics.insert(0, error);
         }
+        report.structured_issues.extend(
+            room.floor
+                .surface_issues
+                .iter()
+                .map(|issue| scan::Issue::new("surface_unavailable", issue)),
+        );
+        report
+            .structured_issues
+            .extend(world.issues.iter().map(scan::Issue::scene));
+        report.structured_issues.extend(
+            world
+                .traps
+                .iter()
+                .map(|record| scan::Issue::trap(record.index, record.prototype.0)),
+        );
+
         report
             .diagnostics
             .extend(world.issues.into_iter().map(|issue| {
@@ -542,6 +590,16 @@ impl CachedSector {
                             i64::from(tile.0) + i64::from(source.offset.0) - x,
                             i64::from(tile.1) + i64::from(source.offset.1) - y,
                         );
+                        let details = serde_json::json!({
+                            "prototype_source": super::diagnostics::source(source.prototype),
+                            "asset_source": super::diagnostics::source(&frame.source),
+                            "effective_art":record.art_id,"direction":source.rotation,"authored_frame":source.frame,
+                            "palette":frame_info.stored_palette,"offset":source.offset,"pivot":pivot,
+                            "flags":source.flags,"use_script":source.use_script,
+                        });
+                        if let Some(original) = report.original_records.get_mut(&record.index) {
+                            original["effective"] = details;
+                        }
                         report.object_audit.push((record.index, format!(
                             "record {} {:?} bytes {:?}, identity {:02x?}, prototype {} from {}, tile {:?} (stored {:?}), ART {:#010x} (stored {:x?}), {} from {}, direction {} (stored {}), frame {}, palette {}, offset {:?}, pivot {pivot:?}, order {key:?}; effective object flags {:#010x}, Use script {:?}; instance overrides {:?}",
                             record.index, record.category, record.span, record.instance_id,
@@ -554,6 +612,12 @@ impl CachedSector {
                     draws.push(raster);
                 } else {
                     report.object_raster_rejections += 1;
+                    report.structured_issues.push(scan::Issue::record(
+                        "raster_overhang",
+                        key.6.unwrap_or(key.5),
+                        (key.2, key.1),
+                        "Raster exceeds supported overhang",
+                    ));
                     report.diagnostics.push(format!("object at ({}, {}) record {} exceeds the {OVERHANG}px raster overhang bound", key.2, key.1, key.6.unwrap_or(key.5)));
                 }
             }
@@ -2291,6 +2355,10 @@ struct SectorLoader {
 
 impl SectorLoader {
     fn load(&mut self, id: u64) -> (CachedSector, LoadStages) {
+        self.load_source(id, None)
+    }
+
+    fn load_source(&mut self, id: u64, template_path: Option<&str>) -> (CachedSector, LoadStages) {
         let sector = Coordinates::from_id(id).expect("validated sector coordinates");
         let region = WorldRegion {
             map: &self.map,
@@ -2313,6 +2381,7 @@ impl SectorLoader {
                 .as_ref()
                 .map(Option::as_ref)
                 .map_err(String::as_str),
+            template_path,
         );
         let sector = match room {
             Ok(room) => {
@@ -2387,6 +2456,14 @@ impl SectorLoader {
                     }
                 }
                 for (&key, target) in &interactions {
+                    if let interaction::Action::Unsupported(reason) = &target.action {
+                        cached.report.structured_issues.push(scan::Issue::record(
+                            "interaction_unsupported",
+                            key.1.6.unwrap_or(key.1.5),
+                            target.tile,
+                            reason,
+                        ));
+                    }
                     if let interaction::Action::Travel(dst) = target.action {
                         cached.report.diagnostics.push(format!(
                             "Use transition {:?} record {} -> {dst:?}",
@@ -2399,6 +2476,12 @@ impl SectorLoader {
                     }
                 }
                 cached.interactions = interactions;
+                cached.report.structured_issues.extend(
+                    roofs
+                        .issues
+                        .iter()
+                        .map(|detail| scan::Issue::new("roof_unavailable", detail)),
+                );
                 cached.report.diagnostics.extend(roofs.issues);
                 cached.roofs = roofs.cells;
                 cached.roof_shades = roofs.shades;

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 type Tile = (u32, u32);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Destination {
     /// None means the destination uses the same original map namespace.
     pub map: Option<i32>,

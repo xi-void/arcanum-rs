@@ -39,18 +39,14 @@ struct Change {
 pub struct DoorStates(BTreeMap<Id, Change>, BTreeSet<Id>);
 
 impl DoorStates {
-    pub(super) fn describe(&self, door: &Door, hour: u8) -> String {
+    pub(super) fn diagnostic(&self, door: &Door, hour: u8) -> serde_json::Value {
         let open = self
             .0
             .get(&door.id)
             .map_or(door.originally_open, |change| change.open);
-        format!(
-            "Door open {open}, flags {:#x}, locked {}, developer unlock {}, Unlock script {}",
-            door.flags,
-            !self.1.contains(&door.id) && locked(door.flags, hour),
-            self.1.contains(&door.id),
-            door.unlock_script
-        )
+        serde_json::json!({"kind":"door","open":open,"flags":door.flags,
+            "locked":!self.1.contains(&door.id)&&locked(door.flags,hour),
+            "developer_unlock":self.1.contains(&door.id),"unlock_script":door.unlock_script})
     }
 
     pub(super) fn unlock(&mut self, door: &Door) -> Result<bool, String> {

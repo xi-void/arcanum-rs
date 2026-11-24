@@ -171,9 +171,33 @@ impl Console {
     pub fn output(&mut self, result: Result<developer::Output, String>) {
         match result {
             Ok(developer::Output::Clear) => self.log.clear(),
-            Ok(developer::Output::Lines(lines)) => {
-                for line in lines {
-                    self.push(&line, self.theme.text);
+            Ok(developer::Output::Data(data) | developer::Output::Accepted(data)) => {
+                if let Some(message) = data["message"].as_str() {
+                    self.push(message, self.theme.text);
+                }
+                if let Some(commands) = data["commands"].as_array() {
+                    for command in commands {
+                        if let (Some(syntax), Some(description)) =
+                            (command["syntax"].as_str(), command["description"].as_str())
+                        {
+                            self.push(&format!("{syntax}  -  {description}"), self.theme.text);
+                        }
+                    }
+                } else {
+                    let mut data = data;
+                    if let Some(object) = data.as_object_mut() {
+                        object.remove("message");
+                    }
+                    if !data.as_object().is_some_and(|object| object.is_empty()) {
+                        let rendered = if data.get("version").is_some()
+                            && data.get("loaded_sectors").is_some()
+                        {
+                            data.to_string()
+                        } else {
+                            serde_json::to_string_pretty(&data).expect("JSON data")
+                        };
+                        self.push(&rendered, self.theme.text);
+                    }
                 }
             }
             Err(error) => self.push(&error, self.theme.error),

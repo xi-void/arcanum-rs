@@ -276,18 +276,14 @@
 
 ## Machine-readable diagnostics and automation
 
-- Treat machine-readable engine inspection as a core development capability.
-- Prefer structured diagnostic output over exclusively human-readable logs.
-- Expose meaningful runtime state through reusable inspection APIs.
-- Reuse the developer command registry for interactive and automated diagnostics.
-- Support headless resource and world-format validation wherever practical.
-- Preserve original resource provenance in structured diagnostic results.
-- Group compatibility failures by generic underlying cause rather than individual location.
-- Support deterministic reproduction of gameplay and rendering defects.
-- Prefer direct engine-state inspection over simulated keyboard and mouse navigation.
-- Keep runtime automation interfaces local, explicitly developer-enabled and disabled during normal gameplay.
-- Do not introduce unnecessary continuous diagnostic logging or expensive GPU readbacks.
-- Use screenshots when visual verification is necessary, not as a substitute for accessible engine state.
+- Read [docs/AGENT_WORKFLOW.md](docs/AGENT_WORKFLOW.md) before debugging runtime behavior through simulated keyboard or mouse interaction.
+- Use the local `rpc` client as the first tool for runtime reproduction and state inspection. Use the headless `world-scan` command for original-data compatibility investigations.
+- Share the developer command registry across the console and automation interfaces.
+- Preserve actionable source provenance and group compatibility failures by their underlying engine or format cause.
+- Extend the existing diagnostics alongside gameplay subsystems and support deterministic reproduction through versioned diagnostic snapshots.
+- Prefer headless validation for nonvisual behavior and screenshots for actual visual verification.
+- Keep automation local, explicitly developer-enabled, disabled in ordinary play and independent of external AI providers.
+- Use bounded event histories and on-demand capture. Avoid redundant readers, continuous diagnostic logging and unnecessary GPU readbacks.
 
 ## Completion reports
 

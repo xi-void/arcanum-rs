@@ -68,7 +68,7 @@ use std::{
 const FRAME_CACHE_BYTES: usize = 96 * 1024 * 1024;
 const FRAME_CACHE_ENTRIES: usize = 4096;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 pub struct FrameCacheStats {
     pub hits: u64,
     pub rejected_hits: u64,

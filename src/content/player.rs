@@ -206,6 +206,18 @@ impl Player {
         count
     }
 
+    pub(super) fn route_destination(&self) -> Option<Tile> {
+        if !self.moving() {
+            return None;
+        }
+        self.route
+            .iter()
+            .try_fold(self.route_origin(), |(x, y), &direction| {
+                let (dx, dy) = DIRECTIONS[usize::from(direction)];
+                Some((x.checked_add_signed(dx)?, y.checked_add_signed(dy)?))
+            })
+    }
+
     pub(super) fn route_origin(&self) -> Tile {
         self.step.map_or(self.tile, |step| step.to)
     }

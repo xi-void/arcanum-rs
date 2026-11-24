@@ -74,7 +74,10 @@ const USAGE: &str = "Usage:
   arcanum-rs simulate resistance-demo
   arcanum-rs simulate electrical-demo
   arcanum-rs simulate composite-demo
-  arcanum-rs simulate same-channel-demo";
+  arcanum-rs simulate same-channel-demo
+  arcanum-rs rpc SOCKET [--id N] COMMAND [ARGS...]
+  arcanum-rs world-scan GAME [--map MAP] [--sector ID] [--limit N] [--category CATEGORY] [--group CODE] [--summary | --examples N]
+  play options: --debug --rpc SOCKET [--diagnostics DIRECTORY]";
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -83,6 +86,10 @@ fn main() -> ExitCode {
         args => (Policy::Ce, args),
     };
     let command = args.first().and_then(|arg| arg.to_str());
+    #[cfg(target_os = "linux")]
+    if command == Some("rpc") {
+        return rpc_cli(&args[1..]);
+    }
     let result = match (command, args) {
         (Some("-h" | "--help"), [_]) => writeln!(io::stdout(), "{USAGE}").map_err(Into::into),
         (Some("list"), [_, archive]) if policy == Policy::Ce => list(Path::new(archive)),
@@ -92,6 +99,7 @@ fn main() -> ExitCode {
         (Some("extract"), [_, archive, resource, output]) if policy == Policy::Ce => {
             extract(Path::new(archive), resource, Path::new(output))
         }
+        (Some("world-scan"), [_, game, options @ ..]) => scan_cli(Path::new(game), options, policy),
         (Some("mounts"), [_, game]) => mounts(Path::new(game), policy),
         (Some("resolve"), [_, game, resource]) => resolve(Path::new(game), policy, resource),
         (Some("conflicts"), [_, game]) => conflicts(Path::new(game), policy),
@@ -756,6 +764,94 @@ fn modded_vfs(game: &Path, directory: &Path, selected: &[OsString]) -> Result<Vf
     Ok(plan.apply(base)?)
 }
 
+#[cfg(target_os = "linux")]
+fn rpc_cli(args: &[OsString]) -> ExitCode {
+    use arcanum_rs::developer_ipc::{Call, VERSION};
+    let result = (|| -> Result<_, Box<dyn Error>> {
+        let [socket, rest @ ..] = args else {
+            return Err("Usage: arcanum-rs rpc SOCKET [--id N] COMMAND [ARGS...]".into());
+        };
+        let (id, rest) = match rest {
+            [flag, id, rest @ ..] if flag == "--id" => (
+                id.to_str().ok_or("Request ID must be UTF-8")?.parse()?,
+                rest,
+            ),
+            _ => (1, rest),
+        };
+        let [command, args @ ..] = rest else {
+            return Err("Missing RPC command".into());
+        };
+        let command = command.to_str().ok_or("Command must be UTF-8")?;
+        let args = args
+            .iter()
+            .map(|arg| {
+                arg.to_str()
+                    .map(ToOwned::to_owned)
+                    .ok_or("Arguments must be UTF-8")
+            })
+            .collect::<Result<_, _>>()?;
+        let reply = arcanum_rs::developer_ipc::call(
+            Path::new(socket),
+            &Call {
+                version: VERSION,
+                id,
+                command: command.into(),
+                args,
+            },
+        )?;
+        serde_json::to_writer(io::stdout().lock(), &reply)?;
+        println!();
+        Ok(reply["status"] == "completed" || reply["status"] == "accepted")
+    })();
+    match result {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::from(1),
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn scan_cli(game: &Path, args: &[OsString], policy: Policy) -> Result<(), Box<dyn Error>> {
+    let mut options = content::world::ScanOptions {
+        examples: 4,
+        ..Default::default()
+    };
+    let mut args = args;
+    while let [flag, rest @ ..] = args {
+        if flag == "--mods" {
+            break;
+        }
+        if flag == "--summary" {
+            options.examples = 0;
+            args = rest;
+            continue;
+        }
+        let [value, next @ ..] = rest else {
+            return Err(format!("Missing value for {flag:?}").into());
+        };
+        let value = value.to_str().ok_or("Scan arguments must be UTF-8")?;
+        match flag.to_str() {
+            Some("--map") => options.map = Some(value.into()),
+            Some("--sector") => options.sector = Some(value.parse()?),
+            Some("--limit") => options.limit = Some(value.parse()?),
+            Some("--category") => options.category = Some(value.into()),
+            Some("--group") => options.group = Some(value.into()),
+            Some("--examples") => options.examples = value.parse()?,
+            _ => return Err(format!("Unknown scan option {flag:?}").into()),
+        }
+        args = next;
+    }
+    if options.sector.is_some() && options.map.is_none() {
+        return Err("--sector requires --map".into());
+    }
+    let report = content::world::compatibility_scan(inspection_vfs(game, args, policy)?, options)?;
+    serde_json::to_writer_pretty(io::stdout().lock(), &report)?;
+    println!();
+    Ok(())
+}
+
 fn inspection_vfs(
     game: &Path,
     options: &[OsString],
@@ -1173,6 +1269,8 @@ fn show_world(
     let mut discover_all = false;
     let mut debug = false;
     let mut console_theme = None;
+    let mut rpc = None;
+    let mut diagnostics = None;
     let mut world_args = Vec::with_capacity(options.len());
     let mut args = options.iter();
     while let Some(flag) = args.next() {
@@ -1196,6 +1294,17 @@ fn show_world(
             Some("--map-reveal") if playing => map_reveal = true,
             Some("--discover-all") if playing => discover_all = true,
             Some("--debug") if playing => debug = true,
+            Some("--rpc") if playing && rpc.is_none() => {
+                rpc = Some(std::path::PathBuf::from(
+                    args.next().ok_or("--rpc expects a socket path")?,
+                ));
+            }
+            Some("--diagnostics") if playing && diagnostics.is_none() => {
+                diagnostics = Some(std::path::PathBuf::from(
+                    args.next()
+                        .ok_or("--diagnostics expects an output directory")?,
+                ));
+            }
             Some("--console-ui") if playing && console_theme.is_none() => {
                 console_theme = Some(std::path::PathBuf::from(
                     args.next().ok_or("--console-ui expects a TOML path")?,
@@ -1204,8 +1313,8 @@ fn show_world(
             _ => world_args.push(flag.clone()),
         }
     }
-    if console_theme.is_some() && !debug {
-        return Err("--console-ui requires --debug".into());
+    if (console_theme.is_some() || rpc.is_some() || diagnostics.is_some()) && !debug {
+        return Err("--console-ui, --rpc and --diagnostics require --debug".into());
     }
     let (theme, ui_scale, stripped) = if playing {
         play_ui_options(&world_args)?
@@ -1248,13 +1357,16 @@ fn show_world(
             let console_theme = console_theme.unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/developer-console.toml")
             });
-            Some(viewer::Developer::load(
-                inspection_vfs(game, mount_options, policy)?,
-                console_theme,
-                theme,
-                path.clone(),
-                ui_scale.unwrap_or(100),
-            )?)
+            Some(
+                viewer::Developer::load(
+                    inspection_vfs(game, mount_options, policy)?,
+                    console_theme,
+                    theme,
+                    path.clone(),
+                    ui_scale.unwrap_or(100),
+                )?
+                .with_automation(rpc, diagnostics)?,
+            )
         } else {
             None
         };

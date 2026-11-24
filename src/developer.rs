@@ -1,5 +1,8 @@
 //! Typed developer commands shared by interactive and non-visual callers.
 
+use serde::Serialize;
+use serde_json::{Value, json};
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Request {
     Maps(Option<String>),
@@ -16,22 +19,72 @@ pub enum Request {
     ShowCollision,
     ShowSectors,
     Fps,
+    Sectors,
+    Objects(ObjectFilter),
+    Resource(String, Option<usize>),
+    Snapshot,
+    Restore(String),
+    Capture(String),
+    Operation(u64),
+    Events(Option<String>),
+    Trace(bool),
+    Quit,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ObjectFilter {
+    pub tile: Option<(u32, u32)>,
+    pub radius: u32,
+    pub record: Option<(u64, usize)>,
+    pub category: Option<String>,
+    pub prototype: Option<u32>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct Failure {
+    pub code: &'static str,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+}
+
+impl Failure {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            details: None,
+        }
+    }
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self::new("runtime_error", message)
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Output {
-    Lines(Vec<String>),
     Clear,
+    Data(Value),
+    Accepted(Value),
 }
 
 impl From<String> for Output {
     fn from(line: String) -> Self {
-        Self::Lines(vec![line])
+        Self::Data(json!({ "message": line }))
     }
 }
 
 pub trait Runtime {
-    fn execute(&mut self, request: Request) -> Result<Output, String>;
+    fn execute(&mut self, request: Request) -> Result<Output, Failure>;
 }
 
 struct Command {
@@ -39,15 +92,17 @@ struct Command {
     aliases: &'static [&'static str],
     syntax: &'static str,
     description: &'static str,
-    handler: fn(&mut dyn Runtime, &[String]) -> Result<Output, String>,
+    mutates: bool,
+    handler: fn(&mut dyn Runtime, &[String]) -> Result<Output, Failure>,
 }
 
 fn run(
     runtime: &mut dyn Runtime,
     args: &[String],
     parse: impl FnOnce(&[String]) -> Option<Request>,
-) -> Result<Output, String> {
-    runtime.execute(parse(args).ok_or("Invalid arguments")?)
+) -> Result<Output, Failure> {
+    runtime
+        .execute(parse(args).ok_or_else(|| Failure::new("invalid_arguments", "Invalid arguments"))?)
 }
 
 fn tile(args: &[String]) -> Option<(u32, u32)> {
@@ -69,6 +124,7 @@ macro_rules! command {
             name: $name,
             aliases: &[],
             syntax: $syntax,
+            mutates: true,
             description: $desc,
             handler: |rt, args| run(rt, args, $parse),
         }
@@ -83,8 +139,49 @@ macro_rules! simple {
     };
 }
 
+macro_rules! query {
+    ($name:literal, $syntax:literal, $desc:literal, $parse:expr) => {
+        Command {
+            mutates: false,
+            ..command!($name, $syntax, $desc, $parse)
+        }
+    };
+}
+
+fn object_filter(args: &[String]) -> Option<ObjectFilter> {
+    let mut filter = ObjectFilter::default();
+    let mut args = args.iter();
+    while let Some(key) = args.next() {
+        let value = args.next()?;
+        match key.as_str() {
+            "near" if filter.tile.is_none() => {
+                filter.tile = Some((value.parse().ok()?, args.next()?.parse().ok()?));
+                filter.radius = args.next()?.parse().ok()?;
+                if filter.radius > 8 {
+                    return None;
+                }
+            }
+            "id" if filter.record.is_none() => {
+                let (sector, record) = value.split_once(':')?;
+                filter.record = Some((sector.parse().ok()?, record.parse().ok()?));
+            }
+            "category" if filter.category.is_none() => {
+                if !["wall", "portal", "scenery", "trap", "mobile"].contains(&value.as_str()) {
+                    return None;
+                }
+                filter.category = Some(value.clone());
+            }
+            "prototype" if filter.prototype.is_none() => {
+                filter.prototype = Some(value.parse().ok()?)
+            }
+            _ => return None,
+        }
+    }
+    Some(filter)
+}
+
 const COMMANDS: &[Command] = &[
-    command!(
+    query!(
         "maps",
         "maps [filter]",
         "List original maps and matching world areas.",
@@ -101,6 +198,7 @@ const COMMANDS: &[Command] = &[
     ),
     Command {
         aliases: &["position"],
+        mutates: false,
         ..simple!(
             "pos",
             "Show current map, coordinates and collision.",
@@ -170,22 +268,113 @@ const COMMANDS: &[Command] = &[
         ShowSectors
     ),
     simple!("fps", "Toggle frame and streaming statistics.", Fps),
+    query!(
+        "sectors",
+        "sectors",
+        "Inspect cached and requested sectors.",
+        |a| a.is_empty().then_some(Request::Sectors)
+    ),
+    query!(
+        "objects",
+        "objects [near X Y RADIUS] [id ID] [category CATEGORY] [prototype PROTOTYPE]",
+        "Inspect up to 128 objects from loaded sectors.",
+        |a| object_filter(a).map(Request::Objects)
+    ),
+    query!(
+        "resource",
+        "resource PATH [FRAME]",
+        "Resolve winning resource and optionally decode an ART frame.",
+        |a| match a {
+            [path] => Some(Request::Resource(path.clone(), None)),
+            [path, frame] => Some(Request::Resource(path.clone(), Some(frame.parse().ok()?))),
+            _ => None,
+        }
+    ),
+    query!(
+        "snapshot",
+        "snapshot",
+        "Export the supported reproduction context.",
+        |a| a.is_empty().then_some(Request::Snapshot)
+    ),
+    command!(
+        "restore",
+        "restore JSON",
+        "Restore a snapshot in the current game installation.",
+        |a| match a {
+            [snapshot] => Some(Request::Restore(snapshot.clone())),
+            _ => None,
+        }
+    ),
+    command!(
+        "capture",
+        "capture FILE",
+        "Request a PNG of the presented Vulkan frame.",
+        |a| match a {
+            [file] => Some(Request::Capture(file.clone())),
+            _ => None,
+        }
+    ),
+    query!(
+        "operation",
+        "operation TOKEN",
+        "Inspect screenshot request completion.",
+        |a| match a {
+            [id] => Some(Request::Operation(id.parse().ok()?)),
+            _ => None,
+        }
+    ),
+    query!(
+        "events",
+        "events [CATEGORY]",
+        "Read the bounded diagnostic event history.",
+        |a| (a.len() <= 1).then(|| Request::Events(a.first().cloned()))
+    ),
+    command!(
+        "trace",
+        "trace <on|off>",
+        "Toggle structured runtime event recording.",
+        |a| match a {
+            [arg] if arg == "on" => Some(Request::Trace(true)),
+            [arg] if arg == "off" => Some(Request::Trace(false)),
+            _ => None,
+        }
+    ),
+    simple!("quit", "Close the running engine cleanly.", Quit),
     Command {
         name: "help",
         aliases: &["?"],
         syntax: "help [command]",
         description: "List commands or show one command's usage.",
+        mutates: false,
         handler: |_, a| match a {
-            [] => Ok(Output::Lines(
-                COMMANDS
-                    .iter()
-                    .map(|c| format!("{}  -  {}", c.syntax, c.description))
-                    .collect(),
+            [] => Ok(Output::Data(
+                json!({"commands": COMMANDS.iter().map(Command::metadata).collect::<Vec<_>>() }),
             )),
             [name] => find(name)
-                .map(|c| format!("{}  -  {}", c.syntax, c.description).into())
-                .ok_or_else(|| format!("Unknown command {name}")),
-            _ => Err("Invalid arguments".into()),
+                .map(|c| Output::Data(c.metadata()))
+                .ok_or_else(|| Failure::new("invalid_command", format!("Unknown command {name}"))),
+            _ => Err(Failure::new(
+                "invalid_arguments",
+                "Expected zero or one argument",
+            )),
+        },
+    },
+    Command {
+        name: "commands",
+        aliases: &[],
+        syntax: "commands",
+        description: "Discover command metadata and protocol capabilities.",
+        mutates: false,
+        handler: |_, args| {
+            if !args.is_empty() {
+                return Err(Failure::new("invalid_arguments", "Expected no arguments"));
+            }
+            Ok(Output::Data(
+                json!({"commands": COMMANDS.iter().map(Command::metadata).collect::<Vec<_>>(),
+                "protocol":{"version":1,"transport":"newline-delimited JSON over Unix socket",
+                    "request_limit_bytes":16384,"statuses":["completed","accepted","failed"],
+                    "capture_completion":"operation TOKEN"}}),
+            ))
         },
     },
     Command {
@@ -193,15 +382,80 @@ const COMMANDS: &[Command] = &[
         aliases: &[],
         syntax: "clear",
         description: "Clear console output.",
+        mutates: true,
         handler: |_, a| {
             if a.is_empty() {
                 Ok(Output::Clear)
             } else {
-                Err("Invalid arguments".into())
+                Err(Failure::new("invalid_arguments", "Expected no arguments"))
             }
         },
     },
 ];
+
+impl Command {
+    fn metadata(&self) -> Value {
+        let mut optional = false;
+        let arguments: Vec<_> = self
+            .syntax
+            .split_ascii_whitespace()
+            .skip(1)
+            .map(|word| {
+                let required = !optional && !word.starts_with('[');
+                optional = (optional || word.starts_with('[')) && !word.ends_with(']');
+                let name = word.trim_matches(['<', '>', '[', ']']);
+                let (kind, constraint) = match name {
+                    "X" | "Y" | "FRAME" | "PROTOTYPE" | "TOKEN" => ("integer", "unsigned"),
+                    "RADIUS" => ("integer", "0..8"),
+                    "near" | "id" | "category" | "prototype" => ("literal", name),
+                    "JSON" => ("string", "version-1 snapshot JSON object"),
+                    "0..23" | "50..300" => ("integer", name),
+                    "on|off" => ("enum", name),
+                    "ID" => ("string", "sector:record"),
+                    "CATEGORY" if self.name == "objects" => {
+                        ("enum", "wall|portal|scenery|trap|mobile")
+                    }
+                    _ => ("string", ""),
+                };
+                json!({"name":match name {"0..23"=>"hour","50..300"=>"percent","on|off"=>"mode",_=>name},"type":kind,"required":required,"constraint":constraint})
+            })
+            .collect();
+        let fields: &[&str] = match self.name {
+            "pos" | "snapshot" => &[
+                "map",
+                "player",
+                "sector",
+                "streaming",
+                "camera",
+                "ui",
+                "world",
+                "renderer",
+            ],
+            "sectors" => &["bounds", "cached", "required", "speculative", "stats"],
+            "objects" | "inspect" => &["map", "objects", "issues", "truncated"],
+            "maps" => &["maps", "areas"],
+            "resource" => &["path", "winner", "candidates", "decode"],
+            "capture" | "operation" => &["token", "path", "viewport"],
+            "events" => &["events", "dropped", "enabled"],
+            "commands" => &["commands", "protocol"],
+            "help" => &["commands"],
+            "coc" | "teleport" | "restore" => &["map", "tile", "view_ready"],
+            "tcl" => &["collision_bypass"],
+            "settime" => &["hour"],
+            "setuiscale" => &["scale_percent"],
+            "discoverall" => &["discovered", "travel_eligible"],
+            "unlock" => &["id", "unlocked", "changed"],
+            "trace" | "fps" | "showsectors" | "showcollision" => &["enabled"],
+            "reloadui" => &["status", "generation"],
+            "clear" => &["clear"],
+            _ => &["message"],
+        };
+        json!({"name":self.name,"aliases":self.aliases,"syntax":self.syntax,"description":self.description,
+            "arguments":arguments,"mutates":self.mutates,
+            "requires_world":!matches!(self.name,"help"|"commands"|"clear"),
+            "result_fields":fields})
+    }
+}
 
 fn find(name: &str) -> Option<&'static Command> {
     COMMANDS.iter().find(|c| {
@@ -217,17 +471,35 @@ pub fn complete(prefix: &str) -> impl Iterator<Item = &'static str> {
         .filter(move |name| name.starts_with(&prefix))
 }
 
+pub fn dispatch_args<'a>(
+    name: &'a str,
+    args: &[String],
+    runtime: &mut dyn Runtime,
+) -> (&'a str, Result<Output, Failure>) {
+    let Some(command) = find(name) else {
+        return (
+            name,
+            Err(Failure::new(
+                "invalid_command",
+                format!("Unknown command {name}. Try help."),
+            )),
+        );
+    };
+    let result = (command.handler)(runtime, args).map_err(|mut error| {
+        if error.code == "invalid_arguments" {
+            error.message = format!("Usage: {}", command.syntax);
+        }
+        error
+    });
+    (command.name, result)
+}
+
 pub fn dispatch(line: &str, runtime: &mut dyn Runtime) -> Result<Output, String> {
     let words = words(line)?;
     let (name, args) = words.split_first().ok_or("Enter a command. Try help.")?;
-    let command = find(name).ok_or_else(|| format!("Unknown command {name}. Try help."))?;
-    (command.handler)(runtime, args).map_err(|e| {
-        if e == "Invalid arguments" {
-            format!("Usage: {}", command.syntax)
-        } else {
-            e
-        }
-    })
+    dispatch_args(name, args, runtime)
+        .1
+        .map_err(|error| error.message)
 }
 
 fn words(line: &str) -> Result<Vec<String>, String> {
@@ -270,10 +542,68 @@ mod tests {
     #[derive(Default)]
     struct Recording(Option<Request>);
     impl Runtime for Recording {
-        fn execute(&mut self, request: Request) -> Result<Output, String> {
+        fn execute(&mut self, request: Request) -> Result<Output, Failure> {
             self.0 = Some(request);
             Ok("executed".to_owned().into())
         }
+    }
+
+    #[test]
+    fn registry_discovery_and_machine_dispatch_share_validators() {
+        let mut runtime = Recording::default();
+        let (name, result) = dispatch_args("commands", &[], &mut runtime);
+        assert_eq!(name, "commands");
+        let Output::Data(data) = result.unwrap() else {
+            panic!("expected metadata")
+        };
+        assert_eq!(data["protocol"]["version"], 1);
+        let pos = data["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "pos")
+            .unwrap();
+        assert_eq!(pos["mutates"], false);
+        let settime = data["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "settime")
+            .unwrap();
+        assert_eq!(settime["arguments"][0]["constraint"], "0..23");
+        assert_eq!(
+            dispatch_args("settime", &["24".into()], &mut runtime)
+                .1
+                .unwrap_err()
+                .code,
+            "invalid_arguments"
+        );
+        let (name, result) = dispatch_args("position", &[], &mut runtime);
+        assert_eq!(name, "pos");
+        assert!(result.is_ok());
+        assert_eq!(runtime.0, Some(Request::Position));
+    }
+
+    #[test]
+    fn object_registry_checks_combined_filters() {
+        let mut runtime = Recording::default();
+        dispatch(
+            "objects near 10 20 2 prototype 1021 category wall",
+            &mut runtime,
+        )
+        .unwrap();
+        assert_eq!(
+            runtime.0,
+            Some(Request::Objects(ObjectFilter {
+                tile: Some((10, 20)),
+                radius: 2,
+                prototype: Some(1021),
+                category: Some("wall".into()),
+                record: None,
+            }))
+        );
+        assert!(dispatch("objects near 10 20 9", &mut runtime).is_err());
+        assert!(dispatch("objects id 1:4 id 2:8", &mut runtime).is_err());
     }
 
     #[test]
@@ -300,5 +630,151 @@ mod tests {
             ["showcollision", "showsectors"]
         );
         assert_eq!(dispatch("clear", &mut rt), Ok(Output::Clear));
+    }
+}
+
+/// Diagnostic events are retained in memory with a fixed upper bound.
+#[derive(Default)]
+pub struct EventHistory {
+    pub enabled: bool,
+    next: u64,
+    dropped: u64,
+    events: std::collections::VecDeque<Value>,
+}
+
+impl EventHistory {
+    pub fn record(&mut self, category: &str, id: Option<u64>, data: Value) {
+        if !self.enabled {
+            return;
+        }
+        if self.events.len() == 128 {
+            self.events.pop_front();
+            self.dropped += 1;
+        }
+        self.next += 1;
+        self.events.push_back(
+            json!({"sequence":self.next,"category":category,"request_id":id,"data":data}),
+        );
+    }
+
+    pub fn query(&self, category: Option<&str>) -> Value {
+        let events: Vec<_> = self
+            .events
+            .iter()
+            .filter(|event| category.is_none_or(|name| event["category"] == name))
+            .collect();
+        json!({"enabled":self.enabled,"events":events,"dropped":self.dropped})
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Snapshot {
+    pub version: u16,
+    pub map: i32,
+    pub tile: (u32, u32),
+    pub facing: u8,
+    pub hour: u8,
+    pub collision_bypass: bool,
+    pub zoom: u8,
+    pub scale_percent: u16,
+    pub lighting: bool,
+    pub shadows: bool,
+    pub run: bool,
+    pub hud_theme: Option<std::path::PathBuf>,
+    pub map_theme: std::path::PathBuf,
+    pub console_theme: std::path::PathBuf,
+    pub mods: Vec<String>,
+    pub selected: Option<(u64, usize)>,
+    pub overlays: [bool; 3],
+    pub camera: (i32, i32),
+    pub viewport: (u32, u32),
+    pub loaded_sectors: Vec<u64>,
+}
+
+impl Snapshot {
+    pub fn parse(text: &str) -> Result<Self, Failure> {
+        let snapshot: Self = serde_json::from_str(text)
+            .map_err(|err| Failure::new("invalid_snapshot", err.to_string()))?;
+        if snapshot.version != 1
+            || snapshot.facing > 7
+            || snapshot.hour > 23
+            || !(1..=3).contains(&snapshot.zoom)
+            || !(50..=300).contains(&snapshot.scale_percent)
+            || snapshot.loaded_sectors.len() > 12
+            || snapshot.mods.len() > 128
+        {
+            return Err(Failure::new(
+                "invalid_snapshot",
+                "Unsupported version or out-of-range snapshot fields",
+            ));
+        }
+        Ok(snapshot)
+    }
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn event_history_is_bounded_and_filterable() {
+        let mut events = EventHistory::default();
+        events.record("disabled", Some(0), json!({}));
+        assert_eq!(events.query(None)["events"], json!([]));
+        events.enabled = true;
+        for id in 1..=130 {
+            events.record(
+                if id % 2 == 0 { "sector" } else { "command" },
+                Some(id),
+                json!({}),
+            );
+        }
+        let data = events.query(Some("sector"));
+        assert_eq!(data["dropped"], 2);
+        let matching = data["events"].as_array().unwrap();
+        assert_eq!(matching.len(), 64);
+        assert_eq!(matching[0]["request_id"], 4);
+    }
+
+    #[test]
+    fn snapshots_round_trip_and_reject_invalid_reproduction_state() {
+        let snapshot = Snapshot {
+            version: 1,
+            map: 5000,
+            tile: (28320, 31168),
+            facing: 6,
+            hour: 23,
+            collision_bypass: true,
+            zoom: 2,
+            scale_percent: 125,
+            lighting: true,
+            shadows: true,
+            run: false,
+            hud_theme: None,
+            map_theme: "theme.toml".into(),
+            console_theme: "console.toml".into(),
+            mods: vec![],
+            selected: Some((32682017210, 42)),
+            overlays: [false, true, false],
+            camera: (0, 0),
+            viewport: (1280, 720),
+            loaded_sectors: vec![32682017210],
+        };
+        let json = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(Snapshot::parse(&json.to_string()).unwrap(), snapshot);
+        for (key, value) in [
+            ("version", json!(2)),
+            ("zoom", json!(0)),
+            ("hour", json!(24)),
+            ("scale_percent", json!(301)),
+        ] {
+            let mut invalid = json.clone();
+            invalid[key] = value;
+            assert_eq!(
+                Snapshot::parse(&invalid.to_string()).unwrap_err().code,
+                "invalid_snapshot"
+            );
+        }
     }
 }

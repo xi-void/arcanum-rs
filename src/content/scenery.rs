@@ -424,6 +424,8 @@ pub struct RoomOverview {
     pub outside_floor_scenery: usize,
     pub object_issue: Option<String>,
     pub(super) traps: Vec<crate::sector::objects::TrapRecord>,
+    pub(super) decoded_records: Option<usize>,
+    pub(super) original_records: Vec<serde_json::Value>,
     pub object_list_failed: bool,
     pub(super) townmap: u32,
     pub(super) roof_words: Vec<(usize, u32)>,
@@ -511,14 +513,25 @@ pub(super) fn load_streamed_sector(
     playing: bool,
     audit: bool,
     terrain: Result<Option<&super::terrain::TerrainMap>, &str>,
+    template_path: Option<&str>,
 ) -> (Result<RoomOverview, Box<dyn Error>>, LoadStages) {
     let mut timing = LoadStages::default();
-    let mode = if playing || audit {
+    let mode = if audit {
+        LoadMode::Audited
+    } else if playing {
         LoadMode::Playable
     } else {
         LoadMode::Streamed
     };
-    let result = load_overview_timed(vfs, frames, region, mode, terrain, &mut timing);
+    let result = load_overview_timed(
+        vfs,
+        frames,
+        region,
+        mode,
+        terrain,
+        template_path,
+        &mut timing,
+    );
     frames.finish_sector();
     (result, timing)
 }
@@ -542,6 +555,7 @@ enum LoadMode {
     Navigation,
     Streamed,
     Playable,
+    Audited,
 }
 
 fn load_overview(
@@ -556,6 +570,7 @@ fn load_overview(
         region,
         mode,
         Ok(None),
+        None,
         &mut LoadStages::default(),
     )
 }
@@ -566,13 +581,17 @@ fn load_overview_timed(
     region: WorldRegion<'_>,
     mode: LoadMode,
     terrain: Result<Option<&super::terrain::TerrainMap>, &str>,
+    template_path: Option<&str>,
     timing: &mut LoadStages,
 ) -> Result<RoomOverview, Box<dyn Error>> {
     use std::time::Instant;
 
     let include_portals = !matches!(mode, LoadMode::RoomPreview);
     let initial_view_only = matches!(mode, LoadMode::RoomPreview | LoadMode::WorldPreview);
-    let partial = matches!(mode, LoadMode::Streamed | LoadMode::Playable);
+    let partial = matches!(
+        mode,
+        LoadMode::Streamed | LoadMode::Playable | LoadMode::Audited
+    );
     let WorldRegion {
         map,
         sector: coordinates,
@@ -586,30 +605,36 @@ fn load_overview_timed(
         return Err("invalid world preview viewport".into());
     }
     let start = Instant::now();
-    let base = sector::read_base_sector(vfs, map, coordinates).or_else(|error| {
-        let missing = matches!(
-            error.downcast_ref::<super::Error>(),
-            Some(super::Error::Resource {
-                error: crate::vfs::Error::NotFound(_),
-                ..
-            })
-        );
-        if !missing {
-            return Err(error);
-        }
-        match terrain {
-            Ok(Some(terrain)) => {
-                let path = terrain
-                    .template(coordinates)
-                    .map_err(|reason| format!("{error}; {reason}"))?;
-                super::read_bounded(vfs, &path, crate::sector::MAX_INPUT_BYTES).map_err(|reason| {
-                    format!("{error}; original terrain template {path}: {reason}").into()
+    let base = if let Some(path) = template_path {
+        super::read_bounded(vfs, path, crate::sector::MAX_INPUT_BYTES).map_err(Into::into)
+    } else {
+        sector::read_base_sector(vfs, map, coordinates).or_else(|error| {
+            let missing = matches!(
+                error.downcast_ref::<super::Error>(),
+                Some(super::Error::Resource {
+                    error: crate::vfs::Error::NotFound(_),
+                    ..
                 })
+            );
+            if !missing {
+                return Err(error);
             }
-            Ok(None) => Err(error),
-            Err(reason) => Err(format!("{error}; terrain lookup unavailable: {reason}").into()),
-        }
-    });
+            match terrain {
+                Ok(Some(terrain)) => {
+                    let path = terrain
+                        .template(coordinates)
+                        .map_err(|reason| format!("{error}; {reason}"))?;
+                    super::read_bounded(vfs, &path, crate::sector::MAX_INPUT_BYTES).map_err(
+                        |reason| {
+                            format!("{error}; original terrain template {path}: {reason}").into()
+                        },
+                    )
+                }
+                Ok(None) => Err(error),
+                Err(reason) => Err(format!("{error}; terrain lookup unavailable: {reason}").into()),
+            }
+        })
+    };
     timing.sector_read = start.elapsed();
     let (source, bytes) = base?;
     let start = Instant::now();
@@ -630,7 +655,7 @@ fn load_overview_timed(
         .filter(|(_, id)| *id != u32::MAX)
         .collect();
     timing.floor_parse = start.elapsed();
-    let terrain = if matches!(mode, LoadMode::Playable) {
+    let terrain = if matches!(mode, LoadMode::Playable | LoadMode::Audited) {
         let names = load_mes(vfs, "art/tile/tilename.mes")?;
         Some(super::collision::Collision::terrain(&floor, &names.mes))
     } else {
@@ -686,6 +711,8 @@ fn load_overview_timed(
                 outside_floor_scenery: 0,
                 object_issue: Some(error),
                 traps: Vec::new(),
+                decoded_records: None,
+                original_records: Vec::new(),
                 object_list_failed: true,
                 townmap,
                 roof_words,
@@ -693,6 +720,23 @@ fn load_overview_timed(
             });
         }
         Err(error) => return Err(error.into()),
+    };
+    let decoded_records = objects.count;
+    let original_records = if matches!(mode, LoadMode::Audited) {
+        use serde_json::json;
+        objects.walls.iter().chain(&objects.portals).chain(&objects.scenery)
+            .map(|r| json!({"record":r.index,"category":r.category,"tile":r.world_tile(coordinates),
+                "stored_tile":r.stored_tile,"raw_art":r.art_id,"prototype":r.prototype.0,
+                "instance_id":r.instance_id,"bytes":[r.span.start,r.span.end],"overrides":r.fields}))
+            .chain(objects.incomplete_scenery.iter().map(|r| json!({"record":r.index,"category":"scenery",
+                "stored_tile":r.stored_tile,"tile":r.stored_tile.and_then(|(x,y)|coordinates.world_tile((x&63) as u8,(y&63) as u8)),
+                "raw_art":r.art_id,"prototype":r.prototype.0,"instance_id":r.instance_id,
+                "bytes":[r.span.start,r.span.end],"overrides":r.fields})))
+            .chain(objects.traps.iter().map(|r| json!({"record":r.index,"category":"trap","prototype":r.prototype.0,
+                "stored_tile": r.stored_tile, "tile":r.stored_tile.and_then(|(x,y)|coordinates.world_tile((x&63) as u8,(y&63) as u8))})))
+            .collect()
+    } else {
+        Vec::new()
     };
     let collision = terrain.map(|terrain| terrain.with_objects(vfs, &objects));
     let counts = (
@@ -883,6 +927,8 @@ fn load_overview_timed(
         roof_words,
         collision,
         traps: objects.traps,
+        decoded_records: Some(decoded_records),
+        original_records,
         object_issue: (partial && framing_only != (0, 0)).then(|| {
             format!(
                 "{} portals lack a stored ART ID or location, {} scenery records lack an instance location",

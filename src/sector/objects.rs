@@ -10,7 +10,7 @@ const SCENERY: u32 = 3;
 const NPC: u32 = 16;
 const TRAP: u32 = 17;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct AppearanceFields {
     pub offset_x: Option<i32>,
     pub offset_y: Option<i32>,
@@ -56,7 +56,8 @@ impl StaticRecord {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum StaticCategory {
     Wall,
     Scenery,

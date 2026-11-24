@@ -131,9 +131,8 @@ impl Atlas {
         self.discovered.extend(self.areas.keys().copied());
     }
 
-    pub fn discover_near(&mut self, tile: Point) {
-        if let Some(area) = self
-            .areas
+    pub fn nearby_area(&self, tile: Point) -> Option<&Area> {
+        self.areas
             .values()
             .filter_map(|area| {
                 let distance = area
@@ -141,11 +140,15 @@ impl Atlas {
                     .0
                     .abs_diff(tile.0)
                     .max(area.tile.1.abs_diff(tile.1));
-                (distance <= area.radius?).then_some((distance, area.id))
+                (distance <= area.radius?).then_some((distance, area))
             })
-            .min()
-        {
-            self.discovered.insert(area.1);
+            .min_by_key(|(distance, area)| (*distance, area.id))
+            .map(|(_, area)| area)
+    }
+
+    pub fn discover_near(&mut self, tile: Point) {
+        if let Some(area) = self.nearby_area(tile) {
+            self.discovered.insert(area.id);
         }
     }
 

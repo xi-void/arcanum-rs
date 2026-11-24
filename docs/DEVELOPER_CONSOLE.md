@@ -81,3 +81,5 @@ With the game open, edit the selected files and issue `reloadui`. The
 console retains its session input and history. Map discovery, gameplay and
 camera state remain in their existing runtime objects. Use `--ui off` to
 run without a gameplay HUD and keep the console available in debug mode.
+
+See [machine-readable diagnostics](MACHINE_DIAGNOSTICS.md) for local RPC, snapshots, Vulkan captures and headless compatibility scans.
