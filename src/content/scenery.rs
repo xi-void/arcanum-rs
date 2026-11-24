@@ -10,8 +10,8 @@ use crate::{
     sector::{
         Coordinates,
         objects::{
-            AppearanceFields, IncompleteScenery, SceneryPrototype, StaticCategory, StaticRecord,
-            decode, decode_scenery_prototype,
+            AppearanceFields, IncompleteScenery, ListEvidence, SceneryPrototype, StaticCategory,
+            StaticRecord, decode, decode_scenery_prototype, decode_with_evidence,
         },
     },
     vfs::Vfs,
@@ -25,6 +25,9 @@ use std::{
 
 pub const ROOM_RECORDS: [usize; 7] = [35, 40, 53, 61, 70, 78, 100];
 const NAMES: &str = "art/scenery/scenery.mes";
+// Object metadata has its own per-sector budget. Input bytes and decoded ART
+// are bounded by their readers and cache independently of this charge.
+const OBJECT_PREPARATION_BUDGET: usize = 8 * 1024 * 1024;
 const FLAT: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,7 +172,18 @@ impl SceneryAppearance {
             || scenery_flags & 0x200 != 0 && flags & FLAT == 0
             || (!additive && blend != (Some(0), Some(0x00ff_ffff), Some(255)))
         {
-            return Err(format!("unsupported scenery appearance: scale {scale}, flags {flags:#x}, subtype flags {scenery_flags:#x}, blend {blend:?}").into());
+            let disallowed_subtype_flags = scenery_flags & !(0x221 | scenery_mask);
+            return Err(Box::new(super::AppearanceRejection {
+                scale,
+                flags,
+                subtype_flags: scenery_flags,
+                blend,
+                disallowed_flags: flags & !(0x0040_4c30 | FLAT | object_mask),
+                disallowed_subtype_flags,
+                requires_flat: scenery_flags & 0x200 != 0 && flags & FLAT == 0,
+                blend_rejected: !additive && blend != (Some(0), Some(0x00ff_ffff), Some(255)),
+                effective_art: None,
+            }));
         }
         Ok(Self {
             offset,
@@ -284,13 +298,17 @@ impl SceneryImport {
         coordinates: Coordinates,
         record: StaticRecord,
     ) -> Result<ImportedScenery, Box<dyn Error>> {
-        let index = record.index;
         let (source, parent) = self.prototype(vfs, record.prototype)?;
         let source = source.clone();
         let parent = *parent;
         let appearance =
             SceneryAppearance::resolve_for_world(record.fields, parent.appearance, self.effects)
-                .map_err(|err| format!("scenery record {index}: {err}"))?;
+                .map_err(|mut err| {
+                    if let Some(rejection) = err.downcast_mut::<super::AppearanceRejection>() {
+                        rejection.effective_art = Some(record.art_id);
+                    }
+                    err
+                })?;
         let art = SceneryArt::decode(record.art_id).map_err(super::ObjectArtFailure::from_error)?;
         let path = frames
             .resolve(|| art.resource_path(&self.names.mes))
@@ -423,6 +441,8 @@ pub struct RoomOverview {
     pub outside_floor_walls: usize,
     pub outside_floor_scenery: usize,
     pub object_issue: Option<String>,
+    pub(super) object_rejection: Option<(&'static str, ListEvidence)>,
+    pub(super) object_preparation_bytes: usize,
     pub(super) traps: Vec<crate::sector::objects::TrapRecord>,
     pub(super) decoded_records: Option<usize>,
     pub(super) original_records: Vec<serde_json::Value>,
@@ -430,6 +450,27 @@ pub struct RoomOverview {
     pub(super) townmap: u32,
     pub(super) roof_words: Vec<(usize, u32)>,
     pub(super) collision: Option<super::collision::Collision>,
+}
+
+fn object_preparation_bytes(list: &crate::sector::objects::ObjectList, audit: bool) -> usize {
+    use std::mem::size_of;
+    let render_candidates =
+        list.walls.len() + list.portals.len() + list.scenery.len() + list.incomplete_scenery.len();
+    let imported = list.walls.len() * size_of::<wall::ImportedWall>()
+        + list.portals.len() * size_of::<portal::ImportedPortal>()
+        + (list.scenery.len() + list.incomplete_scenery.len()) * size_of::<ImportedScenery>();
+    let decoded = (list.walls.capacity() + list.portals.capacity() + list.scenery.capacity())
+        * size_of::<StaticRecord>()
+        + list.incomplete_scenery.capacity() * size_of::<IncompleteScenery>()
+        + list.traps.capacity() * size_of::<crate::sector::objects::TrapRecord>();
+    // Include sector and merged draw descriptors and the alternative failure
+    // path. Debug mode also retains JSON values and human-readable provenance.
+    let diagnostics = if audit { 2048 * list.count } else { 0 };
+    decoded
+        + imported
+        + render_candidates
+            * (super::world::OBJECT_RENDER_DESCRIPTOR_BYTES + size_of::<SceneIssue>())
+        + diagnostics
 }
 
 pub struct CulledPortal {
@@ -447,6 +488,9 @@ pub struct SceneIssue {
     pub art_id: u32,
     pub reason: String,
     pub art_failure: bool,
+    pub(super) prototype: u32,
+    pub(super) appearance: Option<super::AppearanceRejection>,
+    pub(super) opening: Option<OpeningRejection>,
 }
 
 pub const OVERVIEW_SIZE: (u32, u32) = (1280, 720);
@@ -682,12 +726,24 @@ fn load_overview_timed(
     }
     timing.surfaces = start.elapsed();
     let start = Instant::now();
-    let objects = decode(&bytes)
-        .map_err(|err| format!("{} from {source}: {err}", source.virtual_path))
+    let (objects, mut evidence) = decode_with_evidence(&bytes);
+    let mut preparation_bytes = 0;
+    let objects = objects
+        .map_err(|err| {
+            (
+                err.code,
+                format!("{} from {source}: {err}", source.virtual_path),
+            )
+        })
         .and_then(|objects| {
-            let limit = if partial { 1024 } else { 512 };
-            if objects.count > limit {
-                Err(format!("sector exceeds {limit} original object records"))
+            preparation_bytes = object_preparation_bytes(&objects, matches!(mode, LoadMode::Audited));
+            if preparation_bytes > OBJECT_PREPARATION_BUDGET {
+                evidence.preparation_bytes = Some(preparation_bytes);
+                evidence.preparation_budget_bytes = Some(OBJECT_PREPARATION_BUDGET);
+                Err((
+                    "sector_preparation_memory_budget",
+                    format!("object preparation charge {preparation_bytes} exceeds the {OBJECT_PREPARATION_BUDGET}-byte metadata budget"),
+                ))
             } else {
                 Ok(objects)
             }
@@ -696,7 +752,7 @@ fn load_overview_timed(
     let start = Instant::now();
     let objects = match objects {
         Ok(objects) => objects,
-        Err(error) if partial => {
+        Err((code, error)) if partial => {
             return Ok(RoomOverview {
                 room: Room {
                     floor,
@@ -710,6 +766,8 @@ fn load_overview_timed(
                 outside_floor_walls: 0,
                 outside_floor_scenery: 0,
                 object_issue: Some(error),
+                object_rejection: Some((code, evidence)),
+                object_preparation_bytes: preparation_bytes,
                 traps: Vec::new(),
                 decoded_records: None,
                 original_records: Vec::new(),
@@ -719,7 +777,7 @@ fn load_overview_timed(
                 collision: None,
             });
         }
-        Err(error) => return Err(error.into()),
+        Err((_, error)) => return Err(error.into()),
     };
     let decoded_records = objects.count;
     let original_records = if matches!(mode, LoadMode::Audited) {
@@ -767,8 +825,8 @@ fn load_overview_timed(
             let tile = wall.world_tile(coordinates).ok_or("invalid wall tile")?;
             openings
                 .entry(tile)
-                .and_modify(|pair| *pair = None)
-                .or_insert(Some((wall.index, wall.art_id)));
+                .and_modify(|(count, _, _)| *count += 1)
+                .or_insert((1usize, wall.index, wall.art_id));
         }
     }
     let mut wall_import = wall::WallImport::new(vfs, &source, objects.start, counts)?;
@@ -785,28 +843,36 @@ fn load_overview_timed(
                 .checked_sub(first.1)
                 .is_some_and(|y| y < u32::from(side))
     };
-    let mut report = |record, category, tile, art_id, reason, art_failure| {
-        // Unresolved artwork has no reliable bounds. Report records on
-        // the selected floor or with a tile anchor near the overview.
-        let on_floor = inside_floor(tile);
-        let near_view = project_world_tile(tile, center).is_some_and(|(x, y)| {
-            x.abs_diff(0) < width / 2 + 128 && y.abs_diff(0) < height / 2 + 128
-        });
-        if !initial_view_only
-            || on_floor
-            || near_view
-            || (include_portals && category == StaticCategory::Portal)
-        {
-            issues.push(SceneIssue {
-                record,
-                category,
-                tile,
-                art_id,
-                reason,
-                art_failure,
+    let mut report =
+        |(record, category, art_id, prototype), tile, inherited, error: Box<dyn Error>| {
+            // Unresolved artwork has no reliable bounds. Report records on
+            // the selected floor or with a tile anchor near the overview.
+            let on_floor = inside_floor(tile);
+            let near_view = project_world_tile(tile, center).is_some_and(|(x, y)| {
+                x.abs_diff(0) < width / 2 + 128 && y.abs_diff(0) < height / 2 + 128
             });
-        }
-    };
+            if !initial_view_only
+                || on_floor
+                || near_view
+                || (include_portals && category == StaticCategory::Portal)
+            {
+                issues.push(SceneIssue {
+                    record,
+                    category,
+                    tile,
+                    art_id,
+                    reason: if inherited {
+                        format!("inherited scenery ART: {error}")
+                    } else {
+                        error.to_string()
+                    },
+                    art_failure: error.is::<super::ObjectArtFailure>(),
+                    prototype,
+                    appearance: error.downcast_ref::<super::AppearanceRejection>().copied(),
+                    opening: error.downcast_ref::<OpeningRejection>().copied(),
+                });
+            }
+        };
     for record in objects
         .walls
         .into_iter()
@@ -816,7 +882,12 @@ fn load_overview_timed(
         let tile = record
             .world_tile(coordinates)
             .ok_or("invalid overview object tile")?;
-        let (index, category, art_id) = (record.index, record.category, record.art_id);
+        let (index, category, art_id, prototype) = (
+            record.index,
+            record.category,
+            record.art_id,
+            record.prototype.0,
+        );
         let result = match category {
             StaticCategory::Wall => {
                 wall_import
@@ -843,7 +914,7 @@ fn load_overview_timed(
                     }
                 }),
             StaticCategory::Portal => match &mut portal_import {
-                Some(importer) => matched_opening(openings.get(&tile).copied().flatten(), art_id)
+                Some(importer) => matched_opening(openings.get(&tile).copied(), art_id)
                     .and_then(|wall| importer.resolve(vfs, frames, coordinates, record, wall))
                     .map(|leaf| {
                         if !initial_view_only
@@ -866,14 +937,7 @@ fn load_overview_timed(
             },
         };
         if let Err(error) = result {
-            report(
-                index,
-                category,
-                tile,
-                art_id,
-                error.to_string(),
-                error.is::<super::ObjectArtFailure>(),
-            );
+            report((index, category, art_id, prototype), tile, false, error);
         }
     }
     for record in objects.incomplete_scenery {
@@ -883,7 +947,7 @@ fn load_overview_timed(
         let tile = coordinates
             .world_tile((stored_tile.0 & 63) as u8, (stored_tile.1 & 63) as u8)
             .ok_or("invalid inherited scenery tile")?;
-        let index = record.index;
+        let (index, prototype) = (record.index, record.prototype.0);
         match scenery_import.resolve_inherited(vfs, frames, coordinates, record, stored_tile) {
             Ok(prop)
                 if !initial_view_only
@@ -895,12 +959,10 @@ fn load_overview_timed(
             }
             Ok(_) => {}
             Err(error) => report(
-                index,
-                StaticCategory::Scenery,
+                (index, StaticCategory::Scenery, 0, prototype),
                 tile,
-                0,
-                format!("inherited scenery ART: {error}"),
-                error.is::<super::ObjectArtFailure>(),
+                true,
+                error,
             ),
         }
     }
@@ -929,6 +991,8 @@ fn load_overview_timed(
         traps: objects.traps,
         decoded_records: Some(decoded_records),
         original_records,
+        object_rejection: None,
+        object_preparation_bytes: preparation_bytes,
         object_issue: (partial && framing_only != (0, 0)).then(|| {
             format!(
                 "{} portals lack a stored ART ID or location, {} scenery records lack an instance location",
@@ -947,12 +1011,65 @@ fn intersects_viewport(draw: SpriteDraw<'_>, viewport: (u32, u32)) -> bool {
         && y + i64::from(draw.frame.height) > -height
 }
 
-fn matched_opening(wall: Option<(usize, u32)>, raw_portal: u32) -> Result<usize, Box<dyn Error>> {
-    let (index, wall_art) = wall.ok_or("expected one same-tile wall opening for portal")?;
-    let wall_art = WallArtId(wall_art).fields()?;
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub(super) struct OpeningRejection {
+    pub code: &'static str,
+    wall_count: usize,
+    wall_record: Option<usize>,
+    wall_art: Option<u32>,
+    wall_piece: Option<u8>,
+    wall_rotation: Option<u8>,
+    portal_rotation: Option<u8>,
+}
+
+impl std::fmt::Display for OpeningRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.wall_count == 1 {
+            "portal does not match the wall opening's piece and rotation"
+        } else {
+            "expected one same-tile wall opening for portal"
+        })
+    }
+}
+
+impl Error for OpeningRejection {}
+
+fn matched_opening(
+    wall: Option<(usize, usize, u32)>,
+    raw_portal: u32,
+) -> Result<usize, Box<dyn Error>> {
+    let (count, index, raw_wall) = wall.unwrap_or_default();
+    let mut evidence = OpeningRejection {
+        code: if count == 0 {
+            "portal_without_same_tile_wall"
+        } else {
+            "portal_with_multiple_same_tile_walls"
+        },
+        wall_count: count,
+        wall_record: (count == 1).then_some(index),
+        wall_art: (count == 1).then_some(raw_wall),
+        wall_piece: None,
+        wall_rotation: None,
+        portal_rotation: None,
+    };
+    if count != 1 {
+        return Err(Box::new(evidence));
+    }
+    let wall_art = WallArtId(raw_wall).fields()?;
     let portal_art = portal::PortalArt::decode(raw_portal)?;
-    if !(21..=33).contains(&wall_art.piece) || wall_art.rotation != portal_art.rotation {
-        return Err("portal does not match the wall opening's piece and rotation".into());
+    let piece_matches = (21..=33).contains(&wall_art.piece);
+    let rotation_matches = wall_art.rotation == portal_art.rotation;
+    if !piece_matches || !rotation_matches {
+        evidence.code = match (piece_matches, rotation_matches) {
+            (false, false) => "portal_wall_piece_and_rotation_mismatch",
+            (false, true) => "portal_wall_piece_outside_range",
+            (true, false) => "portal_wall_rotation_mismatch",
+            (true, true) => unreachable!(),
+        };
+        evidence.wall_piece = Some(wall_art.piece);
+        evidence.wall_rotation = Some(wall_art.rotation);
+        evidence.portal_rotation = Some(portal_art.rotation);
+        return Err(Box::new(evidence));
     }
     Ok(index)
 }
@@ -1111,6 +1228,44 @@ impl Room {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preparation_budget_admits_dense_original_scale_but_bounds_metadata() {
+        let mut record = vec![0u8; 70];
+        record[0..4].copy_from_slice(&119u32.to_le_bytes());
+        record[4] = 1;
+        record[12..16].copy_from_slice(&4000u32.to_le_bytes());
+        record[52] = 3; // Scenery.
+        record[56] = 2;
+        record[58] = 3; // Explicit current ART and location.
+        record.extend_from_slice(&0x4000_0000u32.to_le_bytes());
+        record.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let list = |count: u32| {
+            let mut bytes = vec![0; 4 + 64 * 64 * 4];
+            bytes.extend(1u32.to_le_bytes()); // No roof words.
+            bytes.extend(0xaa0000u32.to_le_bytes());
+            for _ in 0..count {
+                bytes.extend(&record);
+            }
+            bytes.extend(count.to_le_bytes());
+            decode(&bytes).unwrap()
+        };
+        let dense = list(2_000);
+        assert_eq!(dense.scenery.len(), 2_000);
+        assert!(object_preparation_bytes(&dense, true) < OBJECT_PREPARATION_BUDGET);
+        assert!(object_preparation_bytes(&list(25_000), false) > OBJECT_PREPARATION_BUDGET);
+    }
+
+    #[test]
+    fn portal_opening_rejection_preserves_window_piece_evidence() {
+        // Serialized window and its same-tile piece 17 wall, both rotation 5.
+        let error = matched_opening(Some((1, 128, 300181760)), 928524288).unwrap_err();
+        let evidence = error.downcast_ref::<OpeningRejection>().unwrap();
+        assert_eq!(evidence.code, "portal_wall_piece_outside_range");
+        assert_eq!(evidence.wall_piece, Some(17));
+        assert_eq!(evidence.wall_rotation, evidence.portal_rotation);
+        assert_eq!(evidence.wall_record, Some(128));
+    }
     use crate::mes::parse_source;
 
     #[test]

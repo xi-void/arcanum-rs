@@ -136,6 +136,7 @@ pub struct SectorReport {
     /// When set, serialized object counts are unknown and the diagnostics explain why.
     pub object_list_failed: bool,
     pub object_raster_rejections: usize,
+    pub object_preparation_bytes: usize,
     pub object_art_failures: usize,
     pub object_audit: Vec<(usize, String)>,
     pub diagnostics: Vec<String>,
@@ -239,6 +240,9 @@ struct Raster {
     animation: Option<RasterAnimation>,
     click_through: bool,
 }
+
+pub(super) const OBJECT_RENDER_DESCRIPTOR_BYTES: usize =
+    2 * size_of::<Raster>() + size_of::<PreparedShade>();
 
 impl Raster {
     fn new(key: WorldOrder, frame: &Arc<LoadedFrame>, anchor: (i32, i32)) -> Self {
@@ -416,6 +420,7 @@ impl CachedSector {
                 original_object_counts: (0, 0, 0),
                 object_list_failed: true,
                 object_raster_rejections: 0,
+                object_preparation_bytes: 0,
                 object_art_failures: 0,
                 object_audit: Vec::new(),
                 diagnostics: vec![error],
@@ -480,6 +485,7 @@ impl CachedSector {
             original_object_counts: world.sector_object_counts,
             object_list_failed: world.object_list_failed,
             object_raster_rejections: 0,
+            object_preparation_bytes: world.object_preparation_bytes,
             object_art_failures: world
                 .issues
                 .iter()
@@ -494,14 +500,11 @@ impl CachedSector {
             roofs: (world.roof_words.len(), 0),
         };
         if let Some(error) = world.object_issue {
-            report.structured_issues.push(scan::Issue::new(
-                if world.object_list_failed {
-                    "object_list_rejected"
-                } else {
-                    "object_placement_incomplete"
-                },
-                &error,
-            ));
+            let issue = match &world.object_rejection {
+                Some((code, evidence)) => scan::Issue::list_rejection(&error, code, evidence),
+                None => scan::Issue::new("object_placement_incomplete", &error),
+            };
+            report.structured_issues.push(issue);
             report.diagnostics.insert(0, error);
         }
         report.structured_issues.extend(
@@ -2521,6 +2524,52 @@ impl SectorLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires the installed original game"]
+    fn dense_original_sectors_enter_the_normal_scene_and_collision_paths() {
+        let root = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+        let mut loader = SectorLoader {
+            terrain: Ok(None),
+            map: "castle s'nel n'fa".into(),
+            reference: (0, 0),
+            vfs: Vfs::from_game(root, crate::vfs::Policy::Ce).unwrap(),
+            frames: FrameCache::default(),
+            lighting: None,
+            walking: false,
+            playing: true,
+            audit: true,
+            roofs: true,
+        };
+        for (path, id, count, doors) in [
+            (None, 67_108_871, 1_915, 21),
+            (
+                Some("terrain/plains to broad leaf forest/3.sec"),
+                3,
+                1_845,
+                0,
+            ),
+        ] {
+            loader.reference = Coordinates::from_id(id)
+                .unwrap()
+                .world_tile(32, 32)
+                .unwrap();
+            let (sector, _) = loader.load_source(id, path);
+            let report = &sector.report;
+            assert!(!report.object_list_failed, "{:?}", report.diagnostics);
+            assert_eq!(report.decoded_records, Some(count));
+            assert!(sector.collision.is_some());
+            assert!(
+                sector
+                    .draws
+                    .iter()
+                    .any(|draw| draw.key.0 && draw.key.1.6.unwrap_or(draw.key.1.5) >= 1024),
+                "late original records must produce scene rasters in {id}"
+            );
+            assert!(report.original_records.keys().any(|&record| record >= 1024));
+            assert_eq!(sector.doors_at.values().map(Vec::len).sum::<usize>(), doors);
+        }
+    }
 
     #[test]
     #[ignore = "requires the installed original game"]

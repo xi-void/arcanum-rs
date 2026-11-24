@@ -148,14 +148,15 @@ the ignored `target/` directory. The full scan needs no running game.
 
 ```sh
 game="$HOME/Work/arcanum-ce-test"
-out=target/visual-checks/milestone-59
+out=target/visual-checks/milestone-60
 mkdir -p "$out"
-/usr/bin/time -f 'elapsed_seconds=%e max_rss_kib=%M' -o "$out/current.time" \
-  "$bin" world-scan "$game" > "$out/current.json"
+"$bin" world-scan "$game" --examples 32 > "$out/current.json"
 
 "$bin" world-scan "$game" --map "Tulla Interior" --summary
 "$bin" world-scan "$game" --map 5000 --sector 32682017212
 "$bin" world-scan "$game" --category portal --group portal_opening_unsupported --examples 3
+"$bin" world-scan "$game" --group object_list_rejected --examples 32
+"$bin" world-scan "$game" --map 5061 --sector 67108871 | jq '.research.explicit_locations'
 jq '{scope, coverage, elapsed_ms}' "$out/current.json"
 jq -r '.issues[] | [.code, .occurrences, .affected_resources, .affected_world_sectors] | @tsv' \
   "$out/current.json"
@@ -164,37 +165,35 @@ jq -r '.issues[] | [.code, .occurrences, .affected_resources, .affected_world_se
 `--limit N` bounds authored and template load attempts independently.
 `--category` and `--group` filter issues. `--summary` omits representative
 examples. Compare unfiltered runs to evaluate changes across the installed data.
-If the original Milestone 59 report is still present as `compatibility.json`
-in this directory, use it as the baseline. Otherwise save the first comparable
-report as `baseline.json` before collecting `current.json` again.
+Choose a saved report with the same scan scope and original resource set.
+Schema 2 preserves the meanings of schema 1 coverage counters and parent
+issue codes. The new metadata charge and door target counters have no
+schema 1 equivalent. New cause subdivisions need a schema 2 baseline.
+Keep changes in evaluated coverage separate from changes in issue counts.
 
 ```bash
 # Compare coverage before interpreting issue-count changes.
-baseline="$out/compatibility.json" # Or "$out/baseline.json"
+baseline=target/visual-checks/milestone-59/compatibility.json
 diff -u <(jq -S '.coverage' "$baseline") \
         <(jq -S '.coverage' "$out/current.json")
 diff -u <(jq -r '.issues[] | [.code, .occurrences] | @tsv' "$baseline" | sort) \
         <(jq -r '.issues[] | [.code, .occurrences] | @tsv' "$out/current.json" | sort)
 ```
 
-### Milestone 59 installed-data baseline
+Use `.issues[].causes[]` to compare subtype counts by parent code, cause code,
+and category. Use `.research.mobile_headers` to distinguish mobile discovery,
+header observations, and render-prefix acceptance. A falling issue count can
+result from reduced evaluated coverage. Check `.coverage`, `.scope`, and
+verification labels before reporting recovery.
 
-| Report field or issue code | Count | Unit |
-| --- | ---: | --- |
-| `coverage.authored_attempted` | 1,663 | Authored sector resources |
-| `coverage.templates_attempted` | 413 | Template sector resources |
-| `coverage.object_lists_decoded` | 2,055 | Successfully decoded object lists |
-| `coverage.serialized_records_decoded` | 289,553 | Decoded serialized object records |
-| `mobile_format_rejected` | 10,541 | Mobile files outside the supported decoder format |
-| `object_appearance_unsupported` | 1,593 | Object appearance issue occurrences |
-| `portal_opening_unsupported` | 1,035 | Portal-opening mismatch occurrences |
-| `coverage.object_lists_rejected` | 21 | Rejected object lists |
+```sh
+jq -r '.issues[] | .code as $parent | .causes[]? |
+  [$parent, .code, .category, .occurrences] | @tsv' "$out/current.json"
+```
 
-The release scan took **44.5 seconds** with **124 MiB peak RSS** on the
-validation machine. To reproduce the baseline, run the unfiltered scan above
-against the same installed resources and compare coverage and timings.
-Issue counts measure occurrences and can overlap across groups. Keep the
-generated JSON local under `target/`.
+See the [tracked baseline summaries](WORLD_COMPATIBILITY_BASELINES.json) if the
+full reports are unavailable, and [world compatibility research](WORLD_COMPATIBILITY_RESEARCH.md)
+for count definitions, scope, and interpretation.
 
 ## Known limitations
 

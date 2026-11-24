@@ -204,7 +204,17 @@ impl WallImport {
             || blit_color != 0x00ff_ffff
             || alpha != 255
         {
-            return Err(format!("unsupported wall appearance at record {record_index}: scale {scale}, object flags {flags:#x}, wall flags {wall_flags:#x}, blit flags {blit_flags:#x}, color {blit_color:#x}, alpha {alpha}").into());
+            return Err(Box::new(super::AppearanceRejection {
+                scale,
+                flags,
+                subtype_flags: wall_flags,
+                blend: (Some(blit_flags), Some(blit_color), Some(alpha)),
+                disallowed_flags: flags & !0x0040_4430,
+                disallowed_subtype_flags: wall_flags,
+                requires_flat: false,
+                blend_rejected: blit_flags != 0 || blit_color != 0x00ff_ffff || alpha != 255,
+                effective_art: Some(record.art_id),
+            }));
         }
         let art_id = WallArtId(record.art_id);
         let orientation = art_id

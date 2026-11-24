@@ -162,3 +162,23 @@ Use `--limit N` to bound authored and template load attempts independently,
 to the selected resources. Group codes and ordering are stable for report
 comparison. Representative examples expose original resource paths and
 record numbers where the loader can determine them.
+
+World scan schema 2 retains schema 1 parent issue codes and coverage counters.
+The RPC protocol remains version 1. For the four principal compatibility
+groups, `.issues[].causes[]` adds a stable code, stage, category, verification
+label, related pipeline checks, counts, variants where available, and up to two
+examples per cause and category. Each parent keeps the requested representative
+examples up to 32. `--group` accepts a parent code or a cause code. A cause
+filter limits the parent count to matching occurrences. `--summary` omits both
+sets of examples.
+
+Individual examples carry input evidence in `.issue.research.evidence`. For a
+rejected object list this includes the declared count, decoded prefix length,
+and the first failure position when known, or the post-decode metadata charge
+and budget. A scan with `--map` and `--sector` adds
+`.research.explicit_locations` with preparation counts and stage timings.
+For standalone mobiles, `.research.mobile_headers` reports structural
+observations separately from the engine's render-prefix decode. The
+`.research.coverage_model` names evaluated and unevaluated stages. See the
+[research report](WORLD_COMPATIBILITY_RESEARCH.md) for source evidence and
+interpretation, including visibility flags and portal association.

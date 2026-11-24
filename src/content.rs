@@ -46,6 +46,31 @@ impl ObjectArtFailure {
     }
 }
 
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+struct AppearanceRejection {
+    scale: i32,
+    flags: u32,
+    subtype_flags: u32,
+    blend: (Option<u32>, Option<u32>, Option<u32>),
+    disallowed_flags: u32,
+    disallowed_subtype_flags: u32,
+    requires_flat: bool,
+    blend_rejected: bool,
+    effective_art: Option<u32>,
+}
+
+impl fmt::Display for AppearanceRejection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "unsupported object appearance: scale {}, flags {:#x}, subtype flags {:#x}, blend {:?}",
+            self.scale, self.flags, self.subtype_flags, self.blend,
+        )
+    }
+}
+
+impl std::error::Error for AppearanceRejection {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Source {
     pub virtual_path: String,
