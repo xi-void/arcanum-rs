@@ -100,6 +100,7 @@ impl InteractiveWorld {
                 "door_targets":sector.doors_at.values().map(Vec::len).sum::<usize>(),
                 "interaction_targets":sector.interactions.len(),
                 "imported":{"walls":r.wall_count,"scenery":r.scenery_count,"portals":r.portal_count},
+                "resident_mobiles":sector.mobiles.len(),
                 "roof_entries":r.roofs.0,"roof_rasters":r.roofs.1,
                 "light_counts":r.light_counts.map(|(serialized, prepared, off)|json!({"serialized":serialized,"prepared":prepared,"switched_off":off})),
                 "object_lights":r.object_lights,
@@ -118,14 +119,24 @@ impl InteractiveWorld {
         size: (u32, u32),
         now: Duration,
     ) -> Value {
-        let mut result = sector
-            .report
-            .original_records
-            .get(&record)
-            .cloned()
-            .unwrap_or_else(|| json!({"record":record,"category":"mobile"}));
+        let mobile = sector
+            .mobiles
+            .iter()
+            .find(|entry| entry.raster == Some(record));
+        let mut result = if let Some(entry) = mobile {
+            entry.diagnostic()
+        } else {
+            sector
+                .report
+                .original_records
+                .get(&record)
+                .cloned()
+                .unwrap_or_else(|| json!({"record":record}))
+        };
         let id = sector.report.id;
-        result["id"] = json!(format!("{id}:{record}"));
+        if mobile.is_none() {
+            result["id"] = json!(format!("{id}:{record}"));
+        }
         result["sector"] = json!(id);
         result["sector_source"] = sector.report.source_details.clone().unwrap_or(Value::Null);
         result["issues"] = json!(
@@ -225,13 +236,15 @@ impl InteractiveWorld {
                 let tile = data["tile"]
                     .as_array()
                     .and_then(|t| Some((t.first()?.as_u64()? as u32, t.get(1)?.as_u64()? as u32)));
-                if matches(
-                    id,
-                    record,
-                    tile,
-                    data["category"].as_str(),
-                    data["prototype"].as_u64(),
-                ) {
+                if filter.original.is_none()
+                    && matches(
+                        id,
+                        record,
+                        tile,
+                        data["category"].as_str(),
+                        data["prototype"].as_u64(),
+                    )
+                {
                     if objects.len() == 128 {
                         truncated = true;
                         break;
@@ -246,29 +259,41 @@ impl InteractiveWorld {
                     ));
                 }
             }
-            for (&record, &raster) in &rasters {
-                if record >= usize::MAX - 3
-                    && matches(
+            for entry in &sector.mobiles {
+                if filter.record.is_some()
+                    || filter
+                        .original
+                        .as_ref()
+                        .is_some_and(|id| *id != entry.id.key())
+                    || !matches(
                         id,
-                        record,
-                        Some((raster.key.1.2, raster.key.1.1)),
-                        Some("mobile"),
-                        None,
+                        0,
+                        entry.tile,
+                        if filter.category.as_deref() == Some("mobile") {
+                            Some("mobile")
+                        } else {
+                            crate::sector::objects::category_name(entry.category)
+                        },
+                        Some(u64::from(entry.prototype_id)),
                     )
                 {
-                    if objects.len() == 128 {
-                        truncated = true;
-                        break;
-                    }
-                    objects.push(self.debug_record(
-                        sector,
-                        record,
-                        Some(raster),
-                        camera,
-                        size,
-                        now,
-                    ));
+                    continue;
                 }
+                if objects.len() == 128 {
+                    truncated = true;
+                    break;
+                }
+                let info = if let Some((record, raster)) = entry
+                    .raster
+                    .and_then(|record| rasters.get(&record).copied().map(|raster| (record, raster)))
+                {
+                    self.debug_record(sector, record, Some(raster), camera, size, now)
+                } else {
+                    let mut info = entry.diagnostic();
+                    info["sector"] = json!(id);
+                    info
+                };
+                objects.push(info);
             }
             if truncated {
                 break;
@@ -285,9 +310,10 @@ impl InteractiveWorld {
                     .structured_issues
                     .iter()
                     .filter(move |issue| {
-                        filter
-                            .record
-                            .is_none_or(|(s, r)| s == id && issue.record == Some(r))
+                        filter.original.is_none()
+                            && filter
+                                .record
+                                .is_none_or(|(s, r)| s == id && issue.record == Some(r))
                             && filter.tile.is_none_or(|target| {
                                 issue.tile.is_some_and(|tile| {
                                     tile.0.abs_diff(target.0).max(tile.1.abs_diff(target.1))

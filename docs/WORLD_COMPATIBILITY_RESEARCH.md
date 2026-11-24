@@ -1,5 +1,8 @@
 # Original world compatibility research
 
+This is the Milestone 60 baseline. See [original mobile objects](ORIGINAL_MOBILE_OBJECTS.md)
+for the Milestone 61 implementation and schema 3 interpretation.
+
 Milestone 60 follows original data from discovery through preparation. The [agent workflow](AGENT_WORKFLOW.md) gives reproducible scan, comparison, and RPC commands. The [compatibility history](WORLD_COMPATIBILITY_BASELINES.json) preserves small comparable summaries. Full reports and runtime evidence belong under the ignored `target/visual-checks/` directory.
 
 ## How to read the counts

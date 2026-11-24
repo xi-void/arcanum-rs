@@ -370,6 +370,7 @@ impl Raster {
 }
 
 struct CachedSector {
+    mobiles: Vec<mobile::population::Resident>,
     townmap: u32,
     report: SectorReport,
     draws: Vec<Raster>,
@@ -404,6 +405,7 @@ impl CachedSector {
     fn missing(id: u64, error: String) -> Self {
         Self {
             townmap: 0,
+            mobiles: Vec::new(),
             report: SectorReport {
                 id,
                 source_details: None,
@@ -639,6 +641,7 @@ impl CachedSector {
         report.diagnostics.extend(lights.issues);
         Self {
             townmap: world.townmap,
+            mobiles: Vec::new(),
             report,
             draws,
             lights: lights.grid,
@@ -659,15 +662,21 @@ impl CachedSector {
     fn add_mobiles(&mut self, mobiles: mobile::PreparedMobiles, reference: (u32, u32)) {
         self.mobile_shadows = mobiles.shadows;
         self.report.diagnostics.extend(mobiles.issues);
-        for (index, mobile) in mobiles.frames.into_iter().enumerate() {
-            if mobile.blocking
-                && let Some(collision) = &mut self.collision
+        self.mobiles = mobiles.objects;
+        for entry in &mut self.mobiles {
+            if entry.blocks
+                && let (Some(tile), Some(collision)) = (entry.tile, &mut self.collision)
             {
-                collision.occupy(mobile.caster.tile);
+                collision.occupy(tile);
+            } else {
+                entry.blocks = false;
             }
+        }
+        for mobile in mobiles.frames {
             let caster = mobile.caster;
-            let key =
-                super::scenery::order(caster.tile, mobile.offset, false, usize::MAX - 3 + index);
+            let index = mobile.object_index;
+            let record = mobile_draw_slot(index);
+            let key = super::scenery::order(caster.tile, mobile.offset, mobile.flat, record);
             let mut raster = Raster::new((true, key), &mobile.asset, caster.anchor);
             if let Some(fidget) = mobile.fidget {
                 raster.set_fidget(fidget);
@@ -675,6 +684,7 @@ impl CachedSector {
             let tile =
                 project_world_tile(caster.tile, reference).expect("prepared mobile position");
             if !within_overhang(raster.bounds, tile) {
+                self.mobiles[index].render_issue = Some("mobile exceeds sector overhang".into());
                 self.report.diagnostics.push(format!(
                     "{}; mobile exceeds sector overhang",
                     mobile.diagnostic
@@ -715,6 +725,7 @@ impl CachedSector {
             if let Some(walk) = walk {
                 self.walk = Some((raster.key, walk));
             }
+            self.mobiles[index].raster = Some(record);
             self.draws.push(raster);
             if mobile.casts_shadow {
                 self.casters.push(caster);
@@ -1954,6 +1965,8 @@ impl WorldStream {
         Ok(Self {
             region,
             loader: SectorLoader {
+                mobile_index: Default::default(),
+                mobile_prototypes: Default::default(),
                 terrain,
                 map,
                 reference,
@@ -1994,6 +2007,14 @@ impl WorldStream {
         self.loader.roofs = true;
         self.cache.roof_state = Some(roof::State::default());
         Ok(self)
+    }
+
+    /// Reuse immutable discovery when replacing the active view of the same
+    /// map with the same mounted content. Resident state remains sector-local.
+    pub fn reuse_mobile_discovery(&mut self, previous: &InteractiveWorld) {
+        if self.loader.map == previous.map {
+            self.loader.mobile_index.clone_from(&previous.mobile_index);
+        }
     }
 
     /// Start at the original game's authored hour.
@@ -2343,7 +2364,14 @@ impl WorldStream {
     }
 }
 
+// Internal ordering only. The persistent identity is held by Resident.
+fn mobile_draw_slot(index: usize) -> usize {
+    usize::MAX / 2 + index
+}
+
 struct SectorLoader {
+    mobile_index: Arc<std::sync::OnceLock<mobile::population::Index>>,
+    mobile_prototypes: mobile::population::Prototypes,
     terrain: Result<Option<super::terrain::TerrainMap>, String>,
     map: String,
     reference: (u32, u32),
@@ -2402,17 +2430,27 @@ impl SectorLoader {
                 });
                 timing.lighting = start.elapsed();
                 let start = Instant::now();
-                let mobiles = mobile::supports(&self.map, id).then(|| {
-                    mobile::prepare(
-                        &mut self.vfs,
-                        &mut self.frames,
-                        &self.map,
-                        id,
-                        self.reference,
-                        self.lighting.is_some(),
-                        self.walking,
-                    )
-                });
+                let diagnostic_walk = mobile::supports_walk(&self.map, id);
+                let mobiles =
+                    (template_path.is_none() && (self.playing || diagnostic_walk)).then(|| {
+                        let index = self.mobile_index.get_or_init(|| {
+                            mobile::population::Index::load(&mut self.vfs, &self.map)
+                        });
+                        mobile::prepare(
+                            &mut self.vfs,
+                            &mut self.frames,
+                            mobile::Prepare {
+                                index,
+                                prototypes: &mut self.mobile_prototypes,
+                                excluded: &room.object_ids,
+                                sector: id,
+                                reference: self.reference,
+                                lighting: self.lighting.is_some(),
+                                fidget: diagnostic_walk,
+                                walking: self.walking && diagnostic_walk,
+                            },
+                        )
+                    });
                 let roofs = if self.roofs {
                     super::roof::prepare(
                         &mut self.vfs,
@@ -2530,6 +2568,8 @@ mod tests {
     fn dense_original_sectors_enter_the_normal_scene_and_collision_paths() {
         let root = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
         let mut loader = SectorLoader {
+            mobile_index: Default::default(),
+            mobile_prototypes: Default::default(),
             terrain: Ok(None),
             map: "castle s'nel n'fa".into(),
             reference: (0, 0),

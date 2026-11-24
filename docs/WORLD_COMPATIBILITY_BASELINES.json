@@ -164,6 +164,190 @@
           "portal_without_same_tile_wall": 1
         }
       }
+    },
+    {
+      "milestone": 61,
+      "phase": "typed_mobile_instances",
+      "scanner_schema": 3,
+      "examples_per_parent": 12,
+      "elapsed_seconds": 22.518,
+      "peak_rss_kib": 134184,
+      "coverage": {
+        "authored_attempted": 1663,
+        "collision_prepared": 2076,
+        "door_targets_prepared": 997,
+        "imported_portals": 1054,
+        "imported_scenery": 218422,
+        "imported_walls": 93607,
+        "mobile_collision_registered": 4213,
+        "mobile_contained": 7639,
+        "mobile_contained_owner_resolved": 7474,
+        "mobile_duplicate_identities": 0,
+        "mobile_explicit_art": 2770,
+        "mobile_inherited_art": 9941,
+        "mobile_prototypes_resolved": 12708,
+        "mobile_rasters_prepared": 1859,
+        "mobile_records_decoded": 12711,
+        "mobile_residents_in_scanned_sectors": 12691,
+        "mobile_resources_attempted": 12711,
+        "mobile_typed_fields": 118395,
+        "mobile_world_placement_candidates": 5072,
+        "mobile_world_residents_without_raster": 3212,
+        "object_lists_decoded": 2076,
+        "object_lists_rejected": 0,
+        "object_preparation_peak_bytes": 2362792,
+        "serialized_records_decoded": 317864,
+        "templates_attempted": 413,
+        "use_transitions_prepared": 234
+      },
+      "prepared_mobile_kinds": {
+        "ammo": {
+          "prototype": 2
+        },
+        "armor": {
+          "prototype": 9
+        },
+        "container": {
+          "instance": 144,
+          "prototype": 444
+        },
+        "food": {
+          "prototype": 232
+        },
+        "generic": {
+          "instance": 9,
+          "prototype": 67
+        },
+        "gold": {
+          "prototype": 31
+        },
+        "key": {
+          "prototype": 1
+        },
+        "npc": {
+          "instance": 511,
+          "prototype": 376
+        },
+        "scroll": {
+          "prototype": 4
+        },
+        "weapon": {
+          "instance": 2,
+          "prototype": 14
+        },
+        "written": {
+          "instance": 1,
+          "prototype": 12
+        }
+      },
+      "occurrences": {
+        "art_unresolved_or_rejected": 2,
+        "interaction_unsupported": 168,
+        "map_metadata_failed": 2,
+        "mobile_prototype_unresolved": 3,
+        "mobile_raster_unprepared": 3212,
+        "object_appearance_unsupported": 1640,
+        "object_import_rejected": 7,
+        "portal_opening_unsupported": 1042,
+        "portal_variant_unsupported": 8,
+        "surface_unavailable": 12,
+        "trap_runtime_unsupported": 2063,
+        "wall_art_variant_unsupported": 19,
+        "object_list_rejected": 0,
+        "mobile_format_rejected": 0
+      }
+    },
+    {
+      "milestone": 61,
+      "phase": "standing_population_followup",
+      "scanner_schema": 3,
+      "examples_per_parent": 12,
+      "elapsed_seconds": 26.859,
+      "peak_rss_kib": 135760,
+      "coverage": {
+        "authored_attempted": 1663,
+        "collision_prepared": 2076,
+        "door_targets_prepared": 997,
+        "imported_portals": 1054,
+        "imported_scenery": 218422,
+        "imported_walls": 93607,
+        "mobile_collision_registered": 4213,
+        "mobile_contained": 7639,
+        "mobile_contained_owner_resolved": 7474,
+        "mobile_duplicate_identities": 0,
+        "mobile_explicit_art": 2770,
+        "mobile_inherited_art": 9941,
+        "mobile_prototypes_resolved": 12708,
+        "mobile_rasters_prepared": 2498,
+        "mobile_records_decoded": 12711,
+        "mobile_residents_in_scanned_sectors": 12691,
+        "mobile_resources_attempted": 12711,
+        "mobile_typed_fields": 118395,
+        "mobile_world_placement_candidates": 5072,
+        "mobile_world_residents_without_raster": 2573,
+        "object_lists_decoded": 2076,
+        "object_lists_rejected": 0,
+        "object_preparation_peak_bytes": 2362792,
+        "serialized_records_decoded": 317864,
+        "templates_attempted": 413,
+        "use_transitions_prepared": 234
+      },
+      "prepared_mobile_kinds": {
+        "ammo": {
+          "prototype": 2
+        },
+        "armor": {
+          "prototype": 9
+        },
+        "container": {
+          "instance": 144,
+          "prototype": 444
+        },
+        "food": {
+          "prototype": 232
+        },
+        "generic": {
+          "instance": 9,
+          "prototype": 67
+        },
+        "gold": {
+          "prototype": 31
+        },
+        "key": {
+          "prototype": 1
+        },
+        "npc": {
+          "instance": 1099,
+          "prototype": 427
+        },
+        "scroll": {
+          "prototype": 4
+        },
+        "weapon": {
+          "instance": 2,
+          "prototype": 14
+        },
+        "written": {
+          "instance": 1,
+          "prototype": 12
+        }
+      },
+      "occurrences": {
+        "art_unresolved_or_rejected": 2,
+        "interaction_unsupported": 168,
+        "map_metadata_failed": 2,
+        "mobile_prototype_unresolved": 3,
+        "mobile_raster_unprepared": 2573,
+        "object_appearance_unsupported": 1640,
+        "object_import_rejected": 7,
+        "portal_opening_unsupported": 1042,
+        "portal_variant_unsupported": 8,
+        "surface_unavailable": 12,
+        "trap_runtime_unsupported": 2063,
+        "wall_art_variant_unsupported": 19,
+        "object_list_rejected": 0,
+        "mobile_format_rejected": 0
+      }
     }
   ],
   "interpretation": {
@@ -174,6 +358,8 @@
       "Verified window behavior for all association failures",
       "Original dynamic appearance and script behavior",
       "Visual fidelity outside targeted Vulkan fixtures"
-    ]
+    ],
+    "typed_mobile_instances": "Schema 3 retains comparable discovery and static coverage. Mobile decode now counts whole standalone instances, and mobile raster preparation is reported separately. The original unprepared appearance and portal issues remain. The compiled stream, complete prototype bodies, dynamic mobile behavior, and gameplay inventory remain unevaluated.",
+    "standing_population_followup": "Same standalone decode, placement, containment, and collision counts. Original standing clothing and unique-NPC ART rules prepare 639 more NPC rasters. Tulla Interior rises from 1 to 31 prepared NPCs out of 34 placed."
   }
 }

@@ -242,6 +242,8 @@ pub enum DeveloperAction {
 
 /// Owns prepared raster resources on the presentation thread.
 pub struct InteractiveWorld {
+    pub(super) map: String,
+    pub(super) mobile_index: Arc<std::sync::OnceLock<mobile::population::Index>>,
     pub(super) region: SectorRegion,
     pub(super) reference: (u32, u32),
     pub(super) cache: SectorCache,
@@ -278,6 +280,8 @@ impl InteractiveWorld {
             cache,
         } = world;
         let reference = loader.reference;
+        let map = loader.map.clone();
+        let mobile_index = loader.mobile_index.clone();
         let resources = loader.stats();
         let worker = Worker::start(
             move |id| {
@@ -287,6 +291,8 @@ impl InteractiveWorld {
             wake,
         )?;
         Ok(Self {
+            map,
+            mobile_index,
             region,
             reference,
             cache,

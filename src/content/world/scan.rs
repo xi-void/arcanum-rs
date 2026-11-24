@@ -287,6 +287,18 @@ struct Coverage {
     facade_cells_prepared: usize,
     mobile_resources_attempted: usize,
     mobile_records_decoded: usize,
+    mobile_typed_fields: usize,
+    mobile_prototypes_resolved: usize,
+    mobile_explicit_art: usize,
+    mobile_inherited_art: usize,
+    mobile_world_placement_candidates: usize,
+    mobile_contained: usize,
+    mobile_contained_owner_resolved: usize,
+    mobile_duplicate_identities: usize,
+    mobile_residents_in_scanned_sectors: usize,
+    mobile_rasters_prepared: usize,
+    mobile_collision_registered: usize,
+    mobile_world_residents_without_raster: usize,
     use_transitions_prepared: usize,
     door_targets_prepared: usize,
     map_jump_records_decoded: usize,
@@ -334,7 +346,7 @@ struct MobileHeaders {
 #[derive(Default, Serialize)]
 struct MobileCategory {
     resources: usize,
-    render_prefix_decoded: usize,
+    structurally_decoded: usize,
     explicit_location_bit: usize,
     explicit_art_bit: usize,
     location_value_decoded: usize,
@@ -365,7 +377,7 @@ impl MobileHeaders {
             .unwrap_or("unknown");
         let category = self.by_category.entry(name).or_default();
         category.resources += 1;
-        category.render_prefix_decoded += usize::from(decoded);
+        category.structurally_decoded += usize::from(decoded);
         category.location_value_decoded += usize::from(header.location.is_some());
         category.nonzero_location_value +=
             usize::from(header.location.is_some_and(|tile| tile != (0, 0)));
@@ -494,10 +506,14 @@ pub fn compatibility_scan(
     let map_source = super::super::diagnostics::source(&catalog.source);
     let mut groups = BTreeMap::new();
     let mut mobile_headers = MobileHeaders::default();
+    let mut prepared_mobile_kinds = BTreeMap::<&str, BTreeMap<&str, usize>>::new();
+    let mut prepared_mobile_examples = BTreeMap::<&str, BTreeMap<&str, Vec<Value>>>::new();
     let mut scanned_maps = Vec::new();
     let mut locations = Vec::new();
     let mut templates_seen = BTreeSet::new();
     let mut loader = SectorLoader {
+        mobile_index: Default::default(),
+        mobile_prototypes: Default::default(),
         terrain: Ok(None),
         map: String::new(),
         reference: (0, 0),
@@ -511,6 +527,7 @@ pub fn compatibility_scan(
     };
     for map in maps {
         loader.map.clone_from(&map.directory);
+        loader.mobile_index = Default::default();
         let files = match map.files(&mut loader.vfs) {
             Ok(files) => files,
             Err(error) => {
@@ -589,70 +606,11 @@ pub fn compatibility_scan(
             ),
             Ok(None) => {}
         }
-        let selected: Vec<_> = options
-            .sector
-            .map_or_else(|| files.sectors.iter().copied().collect(), |id| vec![id]);
-        coverage.authored_resources_selected += selected
-            .iter()
-            .filter(|id| files.sectors.contains(id))
-            .count();
-        for id in selected {
-            if options
-                .limit
-                .is_some_and(|limit| coverage.authored_attempted >= limit)
-            {
-                break;
-            }
-            let coordinates = Coordinates::from_id(id).ok_or("Invalid sector ID")?;
-            loader.reference = coordinates
-                .world_tile(0, 0)
-                .ok_or("Sector reference outside engine coordinate range")?;
-            let (sector, stages) = loader.load(id);
-            coverage.authored_attempted += usize::from(files.sectors.contains(&id));
-            coverage.explicit_location_attempted += usize::from(options.sector.is_some());
-            account(&mut coverage, &sector.report);
-            coverage.use_transitions_prepared += sector
-                .interactions
-                .values()
-                .filter(|target| matches!(target.action, interaction::Action::Travel(_)))
-                .count();
-            let doors = sector.doors_at.values().map(Vec::len).sum::<usize>();
-            coverage.door_targets_prepared += doors;
-            if options.sector.is_some() {
-                let r = &sector.report;
-                locations.push(json!({"map":map.id,"sector":id,"source":r.source_details,
-                    "decoded_records":r.decoded_records,"collision_prepared":r.collision_available,
-                    "object_preparation_bytes":r.object_preparation_bytes,
-                    "prepared_objects":{"walls":r.wall_count,"scenery":r.scenery_count,"portals":r.portal_count},
-                    "door_targets":doors,"interaction_targets":sector.interactions.len(),
-                    "timing_us":{"sector_read":stages.sector_read.as_micros(),"object_parse":stages.object_parse.as_micros(),
-                        "object_import":stages.object_import.as_micros(),"raster_prepare":stages.rasters.as_micros()}}));
-            }
-            let source = sector
-                .report
-                .source_details
-                .unwrap_or_else(|| json!(format!("maps/{}/{id}.sec", map.directory)));
-            for issue in &sector.report.structured_issues {
-                add(
-                    &mut groups,
-                    &options,
-                    Some(map.id),
-                    Some(id),
-                    &source,
-                    issue,
-                );
-            }
-        }
         if options.sector.is_none() {
-            let prefix = format!("maps/{}/", map.directory);
-            let mobiles: Vec<_> = loader
-                .vfs
-                .paths_with_prefix(&prefix)
-                .into_iter()
-                .filter(|path| path.ends_with(".mob"))
-                .map(str::to_owned)
-                .collect();
-            for path in mobiles {
+            use crate::sector::objects::{InstanceHeader, category_name, decode_instance};
+            use mobile::population::{self, Effective, Index, Property};
+            let mut index = Index::default();
+            for path in population::paths(&loader.vfs, &map.directory) {
                 coverage.mobile_resources_attempted += 1;
                 match super::super::read_bounded(
                     &mut loader.vfs,
@@ -660,47 +618,62 @@ pub fn compatibility_scan(
                     crate::prototype::MAX_PROTOTYPE_BYTES,
                 ) {
                     Ok((source, bytes)) => {
-                        use crate::sector::objects::{
-                            InstanceHeader, category_name, decode_mobile,
-                        };
-                        let mobile = decode_mobile(&bytes);
+                        let instance = decode_instance(&bytes);
                         let header = InstanceHeader::observe(&bytes);
-                        mobile_headers.observe(header.as_ref(), mobile.is_ok());
-                        match mobile {
-                            Ok(_) => coverage.mobile_records_decoded += 1,
-                            Err(error) => {
-                                let category = header
-                                    .as_ref()
-                                    .and_then(|h| h.category)
-                                    .and_then(category_name);
-                                add(
-                                    &mut groups,
-                                    &options,
-                                    Some(map.id),
-                                    None,
-                                    &super::super::diagnostics::source(&source),
-                                    &Issue {
-                                        category: Some("mobile"),
-                                        prototype: header.as_ref().and_then(|h| h.prototype),
-                                        research: Some(Research::new(
-                                            error.code,
-                                            "mobile_render_prefix_decode",
-                                            if matches!(
-                                                error.code,
-                                                "mobile_instance_category_unsupported"
-                                                    | "mobile_instance_identity_unsupported"
-                                            ) {
-                                                "confirmed_engine_limitation"
-                                            } else {
-                                                "unclassified_original_representation"
-                                            },
-                                            &["shared_instance_fields", "mobile_world_discovery"],
-                                            json!({"header":header,"object_category":category,"file_bytes":bytes.len(),"error_offset":error.offset}),
-                                        )),
-                                        ..Issue::new("mobile_format_rejected", &error.to_string())
-                                    },
+                        mobile_headers.observe(header.as_ref(), instance.is_ok());
+                        match instance {
+                            Ok(object) => {
+                                coverage.mobile_records_decoded += 1;
+                                coverage.mobile_typed_fields += object.fields.len();
+                                let prototype =
+                                    loader.mobile_prototypes.get(&mut loader.vfs, &object);
+                                coverage.mobile_prototypes_resolved +=
+                                    usize::from(prototype.is_ok());
+                                if let Err(error) = &prototype {
+                                    add(
+                                        &mut groups,
+                                        &options,
+                                        Some(map.id),
+                                        None,
+                                        &super::super::diagnostics::source(&source),
+                                        &Issue {
+                                            category: Some("mobile"),
+                                            prototype: Some(object.prototype.0),
+                                            ..Issue::new("mobile_prototype_unresolved", error)
+                                        },
+                                    );
+                                }
+                                let effective = Effective::new(
+                                    &object,
+                                    prototype.as_ref().ok().map(AsRef::as_ref),
                                 );
+                                match effective.current_art {
+                                    Property::Instance(_) => coverage.mobile_explicit_art += 1,
+                                    Property::Prototype(_) => coverage.mobile_inherited_art += 1,
+                                    Property::Unresolved => {}
+                                }
+                                index.add(path, &object);
                             }
+                            Err(error) => add(
+                                &mut groups,
+                                &options,
+                                Some(map.id),
+                                None,
+                                &super::super::diagnostics::source(&source),
+                                &Issue {
+                                    category: Some("mobile"),
+                                    prototype: header.as_ref().and_then(|h| h.prototype),
+                                    research: Some(Research::new(
+                                        error.code,
+                                        "mobile_instance_decode",
+                                        "unclassified_original_representation",
+                                        &["shared_instance_fields"],
+                                        json!({"object_category":header.as_ref().and_then(|h|h.category).and_then(category_name),
+                                            "header":header,"file_bytes":bytes.len(),"error_offset":error.offset}),
+                                    )),
+                                    ..Issue::new("mobile_format_rejected", &error.to_string())
+                                },
+                            ),
                         }
                     }
                     Err(error) => {
@@ -725,6 +698,123 @@ pub fn compatibility_scan(
                         );
                     }
                 }
+            }
+            index.finish();
+            let (placed, contained, resolved, duplicates) = index.summary();
+            coverage.mobile_world_placement_candidates += placed;
+            coverage.mobile_contained += contained;
+            coverage.mobile_contained_owner_resolved += resolved;
+            coverage.mobile_duplicate_identities += duplicates;
+            loader.mobile_index = Arc::new(std::sync::OnceLock::from(index));
+        }
+        let selected: Vec<_> = options
+            .sector
+            .map_or_else(|| files.sectors.iter().copied().collect(), |id| vec![id]);
+        coverage.authored_resources_selected += selected
+            .iter()
+            .filter(|id| files.sectors.contains(id))
+            .count();
+        for id in selected {
+            if options
+                .limit
+                .is_some_and(|limit| coverage.authored_attempted >= limit)
+            {
+                break;
+            }
+            let coordinates = Coordinates::from_id(id).ok_or("Invalid sector ID")?;
+            loader.reference = coordinates
+                .world_tile(0, 0)
+                .ok_or("Sector reference outside engine coordinate range")?;
+            let (sector, stages) = loader.load(id);
+            coverage.authored_attempted += usize::from(files.sectors.contains(&id));
+            coverage.explicit_location_attempted += usize::from(options.sector.is_some());
+            coverage.mobile_residents_in_scanned_sectors += sector.mobiles.len();
+            for object in &sector.mobiles {
+                if let Some(slot) = object.raster {
+                    coverage.mobile_rasters_prepared += 1;
+                    let kind =
+                        crate::sector::objects::category_name(object.category).unwrap_or("unknown");
+                    let origin = match object.current_art {
+                        mobile::population::Property::Instance(_) => "instance",
+                        mobile::population::Property::Prototype(_) => "prototype",
+                        mobile::population::Property::Unresolved => "unresolved",
+                    };
+                    *prepared_mobile_kinds
+                        .entry(kind)
+                        .or_default()
+                        .entry(origin)
+                        .or_default() += 1;
+                    let examples = prepared_mobile_examples
+                        .entry(kind)
+                        .or_default()
+                        .entry(origin)
+                        .or_default();
+                    if examples.len() < options.examples.min(2) {
+                        let asset = sector
+                            .draws
+                            .iter()
+                            .find(|draw| draw.key.1.5 == slot)
+                            .map(|draw| &draw.frame.source.virtual_path);
+                        examples.push(json!({"map":map.id,"sector":id,"original_id":object.id.key(),"prototype":object.prototype_id,
+                            "tile":object.tile,"art":object.current_art,"asset":asset}));
+                    }
+                }
+                coverage.mobile_collision_registered += usize::from(object.blocks);
+                if object.placement == "world" && object.raster.is_none() {
+                    coverage.mobile_world_residents_without_raster += 1;
+                    let issue = Issue {
+                        category: Some("mobile"),
+                        prototype: Some(object.prototype_id),
+                        tile: object.tile,
+                        ..Issue::new(
+                            "mobile_raster_unprepared",
+                            object
+                                .render_issue
+                                .as_deref()
+                                .unwrap_or("no raster prepared"),
+                        )
+                    };
+                    add(
+                        &mut groups,
+                        &options,
+                        Some(map.id),
+                        Some(id),
+                        &super::super::diagnostics::source(&object.source),
+                        &issue,
+                    );
+                }
+            }
+            account(&mut coverage, &sector.report);
+            coverage.use_transitions_prepared += sector
+                .interactions
+                .values()
+                .filter(|target| matches!(target.action, interaction::Action::Travel(_)))
+                .count();
+            let doors = sector.doors_at.values().map(Vec::len).sum::<usize>();
+            coverage.door_targets_prepared += doors;
+            if options.sector.is_some() {
+                let r = &sector.report;
+                locations.push(json!({"map":map.id,"sector":id,"source":r.source_details,
+                    "decoded_records":r.decoded_records,"collision_prepared":r.collision_available,
+                    "object_preparation_bytes":r.object_preparation_bytes,
+                    "prepared_objects":{"walls":r.wall_count,"scenery":r.scenery_count,"portals":r.portal_count,"mobiles":sector.mobiles.iter().filter(|mobile| mobile.raster.is_some()).count()},
+                    "door_targets":doors,"interaction_targets":sector.interactions.len(),
+                    "timing_us":{"sector_read":stages.sector_read.as_micros(),"object_parse":stages.object_parse.as_micros(),
+                        "object_import":stages.object_import.as_micros(),"raster_prepare":stages.rasters.as_micros()}}));
+            }
+            let source = sector
+                .report
+                .source_details
+                .unwrap_or_else(|| json!(format!("maps/{}/{id}.sec", map.directory)));
+            for issue in &sector.report.structured_issues {
+                add(
+                    &mut groups,
+                    &options,
+                    Some(map.id),
+                    Some(id),
+                    &source,
+                    issue,
+                );
             }
         }
     }
@@ -782,8 +872,9 @@ pub fn compatibility_scan(
     }).collect();
     let (reads, art) = loader.stats();
     Ok(
-        json!({"version":2,"map_catalog":map_source,"maps":scanned_maps,"coverage":coverage,"issues":issues,
+        json!({"version":3,"map_catalog":map_source,"maps":scanned_maps,"coverage":coverage,"issues":issues,
         "research":{"mobile_headers":mobile_headers,"explicit_locations":locations,
+            "prepared_mobile_kinds":prepared_mobile_kinds,"prepared_mobile_examples":prepared_mobile_examples,
             "coverage_model":{"discovery":"counted_in_selected_vfs_scope","structural_decode":"partial",
                 "semantic_interpretation":"partial","prototype_and_art_resolution":"partial",
                 "placement_and_appearance_preparation":"partial","rendering":"not_evaluated",

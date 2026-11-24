@@ -167,6 +167,7 @@ pub fn show_camera(
 pub type TravelLoader<'a> = Box<
     dyn Fn(
             &str,
+            &InteractiveWorld,
             Destination,
             u8,
             (u32, u32),
@@ -504,6 +505,7 @@ impl Viewer<'_> {
         let size = view.window.inner_size();
         let (map, next, next_camera) = (travel.loader)(
             &travel.map,
+            world,
             target,
             facing,
             logical_size(size, self.settings.zoom),

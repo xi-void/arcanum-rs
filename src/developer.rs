@@ -36,6 +36,7 @@ pub struct ObjectFilter {
     pub tile: Option<(u32, u32)>,
     pub radius: u32,
     pub record: Option<(u64, usize)>,
+    pub original: Option<String>,
     pub category: Option<String>,
     pub prototype: Option<u32>,
 }
@@ -165,8 +166,20 @@ fn object_filter(args: &[String]) -> Option<ObjectFilter> {
                 let (sector, record) = value.split_once(':')?;
                 filter.record = Some((sector.parse().ok()?, record.parse().ok()?));
             }
+            "original" if filter.original.is_none() => {
+                let payload = value.strip_prefix("2:")?;
+                if payload.len() != 32 || !payload.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return None;
+                }
+                filter.original = Some(value.to_ascii_lowercase());
+            }
             "category" if filter.category.is_none() => {
-                if !["wall", "portal", "scenery", "trap", "mobile"].contains(&value.as_str()) {
+                if value.is_empty()
+                    || value.len() > 32
+                    || !value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                {
                     return None;
                 }
                 filter.category = Some(value.clone());
@@ -276,7 +289,7 @@ const COMMANDS: &[Command] = &[
     ),
     query!(
         "objects",
-        "objects [near X Y RADIUS] [id ID] [category CATEGORY] [prototype PROTOTYPE]",
+        "objects [near X Y RADIUS] [id SECTOR:RECORD] [original ORIGINAL_ID] [category CATEGORY] [prototype PROTOTYPE]",
         "Inspect up to 128 objects from loaded sectors.",
         |a| object_filter(a).map(Request::Objects)
     ),
@@ -407,13 +420,14 @@ impl Command {
                 let (kind, constraint) = match name {
                     "X" | "Y" | "FRAME" | "PROTOTYPE" | "TOKEN" => ("integer", "unsigned"),
                     "RADIUS" => ("integer", "0..8"),
-                    "near" | "id" | "category" | "prototype" => ("literal", name),
+                    "near" | "id" | "original" | "category" | "prototype" => ("literal", name),
                     "JSON" => ("string", "version-1 snapshot JSON object"),
                     "0..23" | "50..300" => ("integer", name),
                     "on|off" => ("enum", name),
-                    "ID" => ("string", "sector:record"),
+                    "ID" | "SECTOR:RECORD" => ("string", "sector:record"),
+                    "ORIGINAL_ID" => ("string", "2: followed by 32 hexadecimal digits in serialized GUID-byte order"),
                     "CATEGORY" if self.name == "objects" => {
-                        ("enum", "wall|portal|scenery|trap|mobile")
+                        ("string", "mobile or a canonical category such as npc, container, armor, or wall")
                     }
                     _ => ("string", ""),
                 };
@@ -597,6 +611,7 @@ mod tests {
             Some(Request::Objects(ObjectFilter {
                 tile: Some((10, 20)),
                 radius: 2,
+                original: None,
                 prototype: Some(1021),
                 category: Some("wall".into()),
                 record: None,
