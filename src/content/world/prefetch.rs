@@ -527,6 +527,13 @@ impl InteractiveWorld {
         }
     }
 
+    /// Player's committed world tile and its authored sector town-map ID.
+    pub fn player_map_position(&self) -> Option<((u32, u32), u32)> {
+        let tile = self.cache.player.as_ref()?.tile();
+        let (sector, _) = self.cache.entries.get(&tile_sector_id(tile))?;
+        Some((tile, sector.townmap))
+    }
+
     pub fn player_moving(&self) -> bool {
         self.pending_use.is_some()
             || self.wait_for_door.is_some()

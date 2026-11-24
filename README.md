@@ -58,6 +58,11 @@ Pass `--ui ui/field-notes` for the example replacement,
 `--ui /path/to/package` for your own, or `--ui off` to play without a HUD.
 [Theme format and controls](docs/UI_THEMES.md)
 
+Press **M** or click the Classic map icon to open the in-game atlas.
+Use **Z** for the continent overview and **Shift+Z** for the detailed
+world map. Selecting a discovered location records a destination.
+[Map controls, original data and theme configuration](docs/MAP_UI.md)
+
 The alpha uses original human standing, walking and running sprites.
 The shipped walk and run clips use 17 and 20 FPS respectively, with
 movement speed derived from their stored per-frame strides.

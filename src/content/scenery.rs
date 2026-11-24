@@ -424,6 +424,7 @@ pub struct RoomOverview {
     pub outside_floor_scenery: usize,
     pub object_issue: Option<String>,
     pub object_list_failed: bool,
+    pub(super) townmap: u32,
     pub(super) roof_words: Vec<(usize, u32)>,
     pub(super) collision: Option<super::collision::Collision>,
 }
@@ -579,6 +580,7 @@ fn load_overview_timed(
     let (source, bytes) = base?;
     let start = Instant::now();
     let floor = sector::parse_surface(&source, &bytes)?;
+    let townmap = crate::sector::objects::townmap(&bytes, floor.tile_offset).unwrap_or(0);
     let roof_words = crate::sector::objects::roof_words(&bytes, floor.tile_offset)
         .unwrap_or_default()
         .iter()
@@ -638,6 +640,7 @@ fn load_overview_timed(
                 outside_floor_scenery: 0,
                 object_issue: Some(error),
                 object_list_failed: true,
+                townmap,
                 roof_words,
                 collision: None,
             });
@@ -829,6 +832,7 @@ fn load_overview_timed(
         culled_portals,
         sector_object_counts: counts,
         object_list_failed: false,
+        townmap,
         roof_words,
         collision,
         object_issue: (partial && framing_only != (0, 0)).then(|| {

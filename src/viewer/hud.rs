@@ -19,6 +19,12 @@ pub(super) enum Action {
     Pause,
     ToggleRun,
     ResetZoom,
+    OpenMap,
+    MapLocal,
+    MapWorld,
+    MapZoomIn,
+    MapOverview,
+    MapRecenter,
 }
 
 #[derive(Clone, Copy, Deserialize, Default)]
@@ -52,6 +58,7 @@ struct Theme {
     author: Option<String>,
     #[serde(default = "default_scale")]
     scale: u16,
+    fit_viewport: Option<[u32; 2]>,
     #[serde(default)]
     fonts: BTreeMap<String, Font>,
     #[serde(default)]
@@ -75,6 +82,54 @@ struct Font {
     fallback: Option<String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum Binding {
+    MapCanvas,
+    PlayerLens,
+    MapTitle,
+    MapWest,
+    MapSouth,
+    MapStatus,
+    PlaceLabel,
+    PlaceMarker,
+    SelectedMarker,
+    ContinentPlaceMarker,
+    ContinentPlayerMarker,
+    ContinentSelectedMarker,
+    PlayerMarker,
+}
+
+impl Binding {
+    fn is_label(self) -> bool {
+        matches!(
+            self,
+            Self::MapTitle | Self::MapWest | Self::MapSouth | Self::MapStatus | Self::PlaceLabel
+        )
+    }
+
+    fn is_marker(self) -> bool {
+        matches!(
+            self,
+            Self::PlaceLabel
+                | Self::PlaceMarker
+                | Self::SelectedMarker
+                | Self::PlayerMarker
+                | Self::ContinentPlaceMarker
+                | Self::ContinentPlayerMarker
+                | Self::ContinentSelectedMarker
+        )
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum MapView {
+    Local,
+    World,
+    Continent,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Element {
@@ -86,13 +141,20 @@ struct Element {
     offset: [i32; 2],
     size: [u32; 2],
     image: Option<String>,
+    binding: Option<Binding>,
+    #[serde(default)]
+    map_views: Vec<MapView>,
     source_rect: Option<[u32; 4]>,
     #[serde(default)]
     frame: usize,
     fill: Option<Color>,
     hover_fill: Option<Color>,
+    hover_frame: Option<usize>,
+    pressed_frame: Option<usize>,
+    selected_frame: Option<usize>,
     text: Option<String>,
     font: Option<String>,
+    text_shadow: Option<Color>,
     #[serde(default)]
     align: Align,
     #[serde(default)]
@@ -107,15 +169,15 @@ struct Element {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Rect {
-    x: i32,
-    y: i32,
-    w: u32,
-    h: u32,
+pub(super) struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
 }
 
 impl Rect {
-    fn contains(self, (x, y): (u32, u32)) -> bool {
+    pub(super) fn contains(self, (x, y): (u32, u32)) -> bool {
         let (x, y) = (
             i64::from(x) - i64::from(self.x),
             i64::from(y) - i64::from(self.y),
@@ -139,7 +201,9 @@ struct Component {
     config: Element,
     parent: Option<usize>,
     base: SpriteFrame,
+    state_frames: [Option<SpriteFrame>; 3],
     text: Option<Text>,
+    label: Option<Label>,
 }
 
 struct Text {
@@ -148,10 +212,43 @@ struct Text {
     native_height: u32,
 }
 
+struct Label {
+    glyphs: BTreeMap<char, Arc<SpriteFrame>>,
+    font: Font,
+    native_height: u32,
+    value: String,
+}
+
+impl Label {
+    fn text(&self, value: &str) -> Text {
+        let glyphs = value
+            .chars()
+            .take(128)
+            .map(|ch| {
+                if ch == '\n' {
+                    None
+                } else {
+                    Some((
+                        Arc::clone(self.glyphs.get(&ch).unwrap_or(&self.glyphs[&'?'])),
+                        ch,
+                    ))
+                }
+            })
+            .collect();
+        Text {
+            glyphs,
+            font: self.font.clone(),
+            native_height: self.native_height,
+        }
+    }
+}
+
 struct Placement {
+    full: Rect,
+    scale: u32,
     rect: Rect,
     art: Arc<LoadedFrame>,
-    hover_art: Option<Arc<LoadedFrame>>,
+    state_art: [Option<Arc<LoadedFrame>>; 3],
 }
 
 pub(crate) struct Hud {
@@ -159,8 +256,12 @@ pub(crate) struct Hud {
     placed: Vec<Option<Placement>>,
     size: (u32, u32),
     scale: u16,
+    fit_viewport: Option<[u32; 2]>,
     hover: Option<usize>,
+    pressed: Option<usize>,
+    selected_action: Option<Action>,
     focus: Option<usize>,
+    map_view: Option<MapView>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -206,15 +307,30 @@ impl Hud {
                 return Err(format!("duplicate UI component {}", config.id).into());
             }
             let mut base = sprite(config.size, config.fill.unwrap_or([0; 4]));
+            let mut state_frames = [None, None, None];
             let mut prepared_text = None;
+            let mut label = None;
             if !config.hidden {
                 if let Some(asset) = &config.image {
-                    let art = resource(game, &mut files, asset, config.frame)
-                        .map_err(|error| format!("{}: {error}", config.id))?;
-                    scale_into(&art.decoded.frame, &mut base, config.source_rect)
-                        .map_err(|error| format!("{}: {error}", config.id))?;
+                    let mut load = |frame| -> Result<SpriteFrame, Box<dyn Error>> {
+                        let art = resource(game, &mut files, asset, frame)
+                            .map_err(|error| format!("{}: {error}", config.id))?;
+                        let mut raster = sprite(config.size, config.fill.unwrap_or([0; 4]));
+                        scale_into(&art.decoded.frame, &mut raster, config.source_rect)
+                            .map_err(|error| format!("{}: {error}", config.id))?;
+                        Ok(raster)
+                    };
+                    base = load(config.frame)?;
+                    for (out, frame) in state_frames.iter_mut().zip([
+                        config.hover_frame,
+                        config.pressed_frame,
+                        config.selected_frame,
+                    ]) {
+                        *out = frame.map(&mut load).transpose()?;
+                    }
                 }
-                if let Some(text) = &config.text {
+                let dynamic = config.binding.is_some_and(Binding::is_label);
+                if let Some(text) = config.text.as_deref().or(dynamic.then_some("")) {
                     let id = config
                         .font
                         .as_deref()
@@ -260,6 +376,25 @@ impl Hud {
                         },
                         |space| space.height,
                     );
+                    if dynamic {
+                        let mut alphabet = BTreeMap::new();
+                        for ch in ' '..='~' {
+                            if let Ok(frame) = glyph(ch) {
+                                alphabet.insert(ch, frame);
+                            }
+                        }
+                        if !alphabet.contains_key(&'?') {
+                            return Err(
+                                format!("{}: map label font needs a '?' glyph", config.id).into()
+                            );
+                        }
+                        label = Some(Label {
+                            glyphs: alphabet,
+                            font: font.clone(),
+                            native_height,
+                            value: String::new(),
+                        });
+                    }
                     prepared_text = Some(Text {
                         glyphs,
                         font: font.clone(),
@@ -271,7 +406,9 @@ impl Hud {
                 config,
                 parent,
                 base,
+                state_frames,
                 text: prepared_text,
+                label,
             });
         }
         if let Some(author) = &theme.author {
@@ -283,8 +420,12 @@ impl Hud {
             placed: Vec::new(),
             size: (0, 0),
             scale,
+            fit_viewport: theme.fit_viewport,
             hover: None,
+            pressed: None,
+            selected_action: None,
             focus: None,
+            map_view: None,
         })
     }
 
@@ -309,8 +450,12 @@ impl Hud {
             .unwrap_or(1);
         // Keep wide stock panels usable on narrow windows. Both hit testing and
         // raster placement use this exact effective scale.
+        let fit = self.fit_viewport.map_or(u32::MAX, |[width, height]| {
+            (size.0.saturating_mul(100) / width).min(size.1.saturating_mul(100) / height)
+        });
         let scale = u32::from(self.scale)
             .min(size.0.saturating_mul(100) / widest)
+            .min(fit)
             .max(1);
         let mut bounds = Vec::with_capacity(self.components.len());
         for component in &self.components {
@@ -318,7 +463,12 @@ impl Hud {
                 .parent
                 .map_or(Some((viewport, viewport)), |id| bounds[id]);
             let placement = parent.and_then(|(parent, clip)| {
-                if component.config.hidden {
+                if self.map_view.is_some_and(|mode| {
+                    !component.config.map_views.is_empty()
+                        && !component.config.map_views.contains(&mode)
+                }) || component.config.hidden
+                    || component.config.binding.is_some_and(Binding::is_marker)
+                {
                     return None;
                 }
                 let rect = layout_rect(&component.config, parent, scale);
@@ -326,18 +476,192 @@ impl Hud {
             });
             bounds.push(placement);
             self.placed.push(placement.map(|(rect, clip)| {
-                let art = raster(component, rect, clip, scale, None);
-                let hover_art = component
-                    .config
-                    .hover_fill
-                    .filter(|_| !component.config.disabled && component.config.action.is_some())
-                    .map(|color| raster(component, rect, clip, scale, Some(color)));
+                let art = raster(component, &component.base, rect, clip, scale, None);
+                let state_art = std::array::from_fn(|i| {
+                    if component.config.disabled || component.config.action.is_none() {
+                        return None;
+                    }
+                    if let Some(frame) = &component.state_frames[i] {
+                        return Some(raster(component, frame, rect, clip, scale, None));
+                    }
+                    if i == 0 {
+                        return component.config.hover_fill.map(|color| {
+                            raster(component, &component.base, rect, clip, scale, Some(color))
+                        });
+                    }
+                    None
+                });
                 Placement {
+                    full: rect,
+                    scale,
                     rect: clip,
                     art,
-                    hover_art,
+                    state_art,
                 }
             }));
+        }
+    }
+
+    pub(super) fn scale(&self) -> u16 {
+        self.scale
+    }
+
+    pub(super) fn set_scale(&mut self, scale: u16) {
+        if self.scale != scale {
+            self.scale = scale.clamp(50, 300);
+            self.clear_layout();
+        }
+    }
+
+    pub(super) fn set_map_view(&mut self, mode: MapView) {
+        if self.map_view != Some(mode) {
+            self.map_view = Some(mode);
+            self.clear_layout();
+        }
+    }
+
+    pub(super) fn lens_size(&self) -> Option<[u32; 2]> {
+        Some(
+            self.components[self.bound(Binding::PlayerLens)?]
+                .config
+                .size,
+        )
+    }
+
+    pub(super) fn set_lens(&mut self, frame: &SpriteFrame) {
+        if let Some(index) = self.bound(Binding::PlayerLens) {
+            let _ = scale_into(frame, &mut self.components[index].base, None);
+            self.clear_layout();
+        }
+    }
+
+    pub(super) fn has_canvas(&self) -> bool {
+        self.bound(Binding::MapCanvas)
+            .is_some_and(|index| !self.components[index].config.hidden)
+    }
+
+    pub(super) fn clear_layout(&mut self) {
+        self.placed.clear();
+        self.size = (0, 0);
+    }
+
+    fn bound(&self, binding: Binding) -> Option<usize> {
+        self.components
+            .iter()
+            .position(|c| c.config.binding == Some(binding))
+    }
+
+    pub(super) fn bounds(&self, binding: Binding) -> Option<(Rect, u32)> {
+        let place = self.placed.get(self.bound(binding)?)?.as_ref()?;
+        Some((place.rect, place.scale))
+    }
+
+    pub(super) fn marker(&self, binding: Binding) -> Option<&SpriteFrame> {
+        Some(&self.components[self.bound(binding)?].base)
+    }
+
+    pub(super) fn set_canvas(&mut self, frame: SpriteFrame) {
+        if let Some(index) = self.bound(Binding::MapCanvas)
+            && let Some(place) = self.placed[index].as_mut()
+        {
+            place.art = generated_frame(&self.components[index].config.id, frame);
+        }
+    }
+
+    pub(super) fn set_label(&mut self, binding: Binding, value: &str) {
+        if let Some(index) = self.bound(binding)
+            && let Some(label) = &mut self.components[index].label
+            && label.value != value
+        {
+            label.value = value.into();
+            self.components[index].text = Some(label.text(value));
+            if let Some(place) = self.placed[index].as_mut() {
+                place.art = raster(
+                    &self.components[index],
+                    &self.components[index].base,
+                    place.full,
+                    place.rect,
+                    place.scale,
+                    None,
+                );
+            }
+        }
+    }
+
+    pub(super) fn draw_map_label(
+        &self,
+        canvas: &mut SpriteFrame,
+        point: (i32, i32),
+        scale: u32,
+        value: &str,
+    ) {
+        let Some(component) = self
+            .bound(Binding::PlaceLabel)
+            .map(|index| &self.components[index])
+        else {
+            return;
+        };
+        let Some(label) = component.label.as_ref() else {
+            return;
+        };
+        let config = &component.config;
+        let scaled = |value: i32| value * scale as i32 / 100;
+        let full = Rect {
+            x: point.0 + scaled(config.offset[0]),
+            y: point.1 + scaled(config.offset[1]),
+            w: (config.size[0] * scale / 100).max(1),
+            h: (config.size[1] * scale / 100).max(1),
+        };
+        let canvas_bounds = Rect {
+            x: 0,
+            y: 0,
+            w: canvas.width,
+            h: canvas.height,
+        };
+        let Some(clip) = full.intersect(canvas_bounds) else {
+            return;
+        };
+        let mut layer = sprite([clip.w, clip.h], [0; 4]);
+        let mut text = label.text(value);
+        if let Some(shadow) = config.text_shadow {
+            let offset = scaled(1).max(1);
+            let shifted = Rect {
+                x: full.x + offset,
+                y: full.y + offset,
+                ..full
+            };
+            // The shared rasterizer assumes the output rectangle is inside the label.
+            if let Some(shadow_clip) = clip.intersect(shifted) {
+                let mut shadow_layer = sprite([shadow_clip.w, shadow_clip.h], [0; 4]);
+                let color = std::mem::replace(&mut text.font.color, shadow);
+                draw_text(
+                    &mut shadow_layer,
+                    &text,
+                    config,
+                    shifted,
+                    shadow_clip,
+                    scale,
+                );
+                text.font.color = color;
+                for y in 0..shadow_clip.h {
+                    let base = (y + (shadow_clip.y - clip.y) as u32) * clip.w
+                        + (shadow_clip.x - clip.x) as u32;
+                    let pixels = &shadow_layer.pixels
+                        [(y * shadow_clip.w) as usize..((y + 1) * shadow_clip.w) as usize];
+                    layer.pixels[base as usize..(base + shadow_clip.w) as usize]
+                        .copy_from_slice(pixels);
+                }
+            }
+        }
+        draw_text(&mut layer, &text, config, full, clip, scale);
+        for (index, color) in layer.pixels.into_iter().enumerate() {
+            let x = index as u32 % clip.w + clip.x as u32;
+            let y = index as u32 / clip.w + clip.y as u32;
+            blend_glyph(
+                &mut canvas.pixels[(y * canvas.width + x) as usize],
+                color,
+                255,
+            );
         }
     }
 
@@ -369,13 +693,33 @@ impl Hud {
         })
     }
     pub fn hover(&mut self, point: Option<(u32, u32)>) -> bool {
-        let hover = point.and_then(|point| self.select(point)).filter(|&i| {
-            self.placed[i]
-                .as_ref()
-                .is_some_and(|p| p.hover_art.is_some())
-        });
+        let hover = point
+            .and_then(|point| self.select(point))
+            .filter(|&index| self.available_action(index).is_some());
         std::mem::replace(&mut self.hover, hover) != hover
     }
+
+    pub(super) fn press(&mut self, point: (u32, u32)) -> bool {
+        self.hover(Some(point));
+        self.pressed = self.hover;
+        self.pressed.is_some()
+    }
+
+    pub(super) fn release(&mut self, point: (u32, u32)) -> Option<Action> {
+        let index = self.pressed.take()?;
+        (self.select(point) == Some(index))
+            .then(|| self.available_action(index))
+            .flatten()
+    }
+
+    pub(super) fn cancel_press(&mut self) {
+        self.pressed = None;
+    }
+
+    pub(super) fn set_selected_action(&mut self, action: Action) {
+        self.selected_action = Some(action);
+    }
+
     pub fn advance_focus(&mut self, backwards: bool) {
         let len = self.components.len();
         if len == 0 {
@@ -412,14 +756,22 @@ impl Hud {
             .enumerate()
             .filter_map(move |(index, placement)| {
                 let p = placement.as_ref()?;
-                let asset = if self.hover == Some(index)
-                    || self.focus == Some(index)
-                    || (running && self.components[index].config.action == Some(Action::ToggleRun))
-                {
-                    p.hover_art.as_ref().unwrap_or(&p.art)
+                let action = self.components[index].config.action;
+                let hot = self.hover == Some(index);
+                let state = if hot && self.pressed == Some(index) {
+                    p.state_art[1].as_ref()
                 } else {
-                    &p.art
+                    None
                 };
+                let selected = (action.is_some() && action == self.selected_action)
+                    .then_some(p.state_art[2].as_ref())
+                    .flatten();
+                let highlighted = (hot
+                    || self.focus == Some(index)
+                    || (running && action == Some(Action::ToggleRun)))
+                .then_some(p.state_art[0].as_ref())
+                .flatten();
+                let asset = state.or(selected).or(highlighted).unwrap_or(&p.art);
                 Some((
                     asset,
                     SpriteDraw {
@@ -439,6 +791,9 @@ fn parse(source: &str) -> Result<Theme, Box<dyn Error>> {
     if theme.name.trim().is_empty()
         || theme.hud.len() > 64
         || theme.fonts.len() > 16
+        || theme
+            .fit_viewport
+            .is_some_and(|size| size.into_iter().any(|value| !(1..=4096).contains(&value)))
         || !(50..=300).contains(&theme.scale)
     {
         return Err("invalid theme name, scale or component count".into());
@@ -448,14 +803,22 @@ fn parse(source: &str) -> Result<Theme, Box<dyn Error>> {
         if e.id.is_empty()
             || e.size.iter().any(|&v| !(1..=1024).contains(&v))
             || e.offset.iter().any(|v| v.unsigned_abs() > 4096)
-            || (e.source_rect.is_some() && e.image.is_none())
+            || (e.image.is_none()
+                && (e.source_rect.is_some()
+                    || [e.hover_frame, e.pressed_frame, e.selected_frame]
+                        .into_iter()
+                        .any(|frame| frame.is_some())))
             || e.text.as_ref().is_some_and(|s| s.len() > 256)
         {
             return Err(format!("invalid size, offset or text in component {}", e.id).into());
         }
-        pixels += e.size[0] * e.size[1];
+        let variants = [e.hover_frame, e.pressed_frame, e.selected_frame]
+            .into_iter()
+            .flatten()
+            .count() as u32;
+        pixels += e.size[0] * e.size[1] * (1 + variants);
     }
-    if pixels > 512 * 1024
+    if pixels > 768 * 1024
         || theme.fonts.values().any(|font| {
             !(5..=48).contains(&font.size)
                 || font.line_gap > 32
@@ -544,13 +907,13 @@ fn scale_into(
 
 fn raster(
     c: &Component,
+    src: &SpriteFrame,
     full: Rect,
     clip: Rect,
     scale: u32,
     hover: Option<Color>,
 ) -> Arc<LoadedFrame> {
     let mut frame = sprite([clip.w, clip.h], [0; 4]);
-    let src = &c.base;
     for y in 0..clip.h {
         for x in 0..clip.w {
             let sx = ((clip.x - full.x) as u32 + x) * src.width / full.w;
@@ -571,9 +934,13 @@ fn raster(
     if let Some(text) = &c.text {
         draw_text(&mut frame, text, &c.config, full, clip, scale);
     }
+    generated_frame(&c.config.id, frame)
+}
+
+fn generated_frame(id: &str, frame: SpriteFrame) -> Arc<LoadedFrame> {
     Arc::new(LoadedFrame {
         source: Source {
-            virtual_path: format!("ui/{}", c.config.id),
+            virtual_path: format!("ui/{id}"),
             mount_id: MountId::GENERATED,
             mount_path: Default::default(),
             loose_path: None,
@@ -847,17 +1214,77 @@ mod tests {
         for scale in [100, 125, 150, 200] {
             let mut hud = Hud::load(&path, &mut game, Some(scale)).unwrap();
             hud.layout((1920, 1080));
-            assert_eq!(hud.draws(false).count(), 26);
+            assert_eq!(hud.draws(false).count(), 33);
             let left = (1920 - 8 * u32::from(scale)) / 2;
             let button = hud.placed[2].as_ref().unwrap().rect;
             assert_eq!(button.x as u32, left + 4 * u32::from(scale) / 100);
             assert_eq!(button.y as u32, 2 * u32::from(scale) / 100);
             assert_eq!(button.w, 34 * u32::from(scale) / 100);
             assert_eq!(hud.hit((button.x as u32, button.y as u32)), Hit::Panel);
+            let map = hud.placed[4].as_ref().unwrap().rect;
+            assert_eq!(
+                hud.hit((map.x as u32, map.y as u32)),
+                Hit::Button(Action::OpenMap)
+            );
+            for id in [
+                "maintained-spell-slot-1",
+                "maintained-spell-slot-5",
+                "clock-face",
+            ] {
+                let part = hud
+                    .components
+                    .iter()
+                    .find(|part| part.config.id == id)
+                    .unwrap();
+                let center =
+                    (part.base.height / 2 * part.base.width + part.base.width / 2) as usize;
+                assert_eq!(part.base.pixels[center][3], 255, "{id}");
+            }
             assert_eq!(hud.hit((left - 1, 5)), Hit::World);
             hud.advance_focus(false);
-            assert_eq!(hud.focused_action(), None);
+            assert_eq!(hud.focused_action(), Some(Action::OpenMap));
         }
+    }
+
+    #[test]
+    #[ignore = "requires installed Arcanum data"]
+    fn atlas_controls_use_authored_frames_and_cancel_press_outside() {
+        let root = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+        let mut game = Vfs::from_game(root, Policy::Ce).unwrap();
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/classic-map/theme.toml");
+        let mut hud = Hud::load(&path, &mut game, Some(125)).unwrap();
+        hud.set_map_view(MapView::Local);
+        hud.layout((1920, 1080));
+        let index = hud
+            .components
+            .iter()
+            .position(|c| c.config.id == "zoom")
+            .unwrap();
+        let bounds = hud.placed[index].as_ref().unwrap().rect;
+        let point = (bounds.x as u32 + 4, bounds.y as u32 + 4);
+        let current = |hud: &Hud| {
+            Arc::clone(
+                hud.draws(false)
+                    .find(|(art, _)| art.source.virtual_path == "ui/zoom")
+                    .unwrap()
+                    .0,
+            )
+        };
+        let idle = current(&hud);
+        hud.hover(Some(point));
+        assert!(Arc::ptr_eq(&idle, &current(&hud)));
+        assert!(hud.press(point));
+        let pressed = current(&hud);
+        assert_ne!(idle.decoded.frame.pixels, pressed.decoded.frame.pixels);
+        assert_eq!(hud.release((0, 0)), None);
+        assert!(Arc::ptr_eq(&idle, &current(&hud)));
+        hud.set_selected_action(Action::MapLocal);
+        assert_eq!(
+            current(&hud).decoded.frame.pixels,
+            pressed.decoded.frame.pixels
+        );
+        assert!(hud.press(point));
+        assert_eq!(hud.release(point), Some(Action::MapLocal));
     }
 
     #[test]

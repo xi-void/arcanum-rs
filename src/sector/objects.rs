@@ -110,17 +110,16 @@ pub(crate) fn roof_words(input: &[u8], tile_offset: usize) -> Result<&[[u8; 4]],
     reader.roof_words()
 }
 
-pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
-    let floor = decode_floor(input).map_err(|error| Error {
-        offset: 0,
-        message: error.to_string(),
-    })?;
-    let start = floor.tile_offset + SIDE * SIDE * 4;
-    let count_offset = input.len() - 4; // A valid floor already requires over 4 bytes.
+/// Authored town map association, independent of object-list validity.
+pub(crate) fn townmap(input: &[u8], tile_offset: usize) -> Result<u32, Error> {
     let mut reader = Reader {
-        input: &input[..count_offset],
-        offset: start,
+        input: &input[..input.len().saturating_sub(4)],
+        offset: tile_offset + SIDE * SIDE * 4,
     };
+    Ok(metadata(&mut reader)?.1)
+}
+
+fn metadata(reader: &mut Reader<'_>) -> Result<(u32, u32), Error> {
     reader.roof_words()?;
     let marker = reader.u32("sector metadata marker")?;
     if !(0xaa0000..=0xaa0004).contains(&marker) {
@@ -133,9 +132,28 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
     if marker >= 0xaa0002 {
         reader.take(12, "sector script record")?;
     }
-    if marker >= 0xaa0003 {
-        reader.take(24, "townmap, aptitude, light scheme and sound fields")?;
-    }
+    let townmap = if marker >= 0xaa0003 {
+        let id = reader.u32("townmap ID")?;
+        reader.take(20, "aptitude, light scheme and sound fields")?;
+        id
+    } else {
+        0
+    };
+    Ok((marker, townmap))
+}
+
+pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
+    let floor = decode_floor(input).map_err(|error| Error {
+        offset: 0,
+        message: error.to_string(),
+    })?;
+    let start = floor.tile_offset + SIDE * SIDE * 4;
+    let count_offset = input.len() - 4; // A valid floor already requires over 4 bytes.
+    let mut reader = Reader {
+        input: &input[..count_offset],
+        offset: start,
+    };
+    let (marker, _) = metadata(&mut reader)?;
     let tile_blocks = if marker >= 0xaa0004 {
         reader.fixed("tile-block mask")?
     } else {

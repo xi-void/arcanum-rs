@@ -132,8 +132,8 @@ run preference for feedback and emits typed actions. Layout,
 coordinates and artwork live in the package. Both CPU and GPU draw the
 same unlit overlay after the world pass.
 
-Classic's original buttons and action slots are decorative and do not
-issue gameplay actions. Alpha controls remain on the keyboard and in
+Classic’s map icon opens the atlas. Its other original buttons and
+action slots are decorative. Alpha controls remain on the keyboard and in
 the Escape menu. Health, fatigue, poison, currency, fate values,
 party portraits, and recent-action or item overlays require
 gameplay state that the HUD does not expose. The original day/night
@@ -143,3 +143,12 @@ fills, or hotbar assignments. Inventory, character, maps and dialogue remain
 independent future interfaces. The HUD foundation currently covers
 panels, labels, buttons, layout and focus. Tooltips, general theme
 modals and arbitrary gameplay-state binding remain future work.
+
+The atlas is an independent package. See [Map UI](MAP_UI.md) for its
+data bindings, map-specific actions and the `--map-ui` option.
+
+Image-backed actions can use zero-based `hover_frame`, `pressed_frame`
+and `selected_frame` from their existing `image`. Frame artwork takes
+precedence over a configured hover fill. The Classic top panel uses
+the original empty spell-slot artwork and a fixed daytime crop of
+`Clk_timestrip.ART`. Clock simulation remains deferred.

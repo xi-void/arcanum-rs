@@ -356,6 +356,7 @@ impl Raster {
 }
 
 struct CachedSector {
+    townmap: u32,
     report: SectorReport,
     draws: Vec<Raster>,
     lights: LightGrid,
@@ -375,6 +376,7 @@ struct CachedSector {
 impl CachedSector {
     fn missing(id: u64, error: String) -> Self {
         Self {
+            townmap: 0,
             report: SectorReport {
                 id,
                 source: None,
@@ -545,6 +547,7 @@ impl CachedSector {
         let lights = lights.unwrap_or_default();
         report.diagnostics.extend(lights.issues);
         Self {
+            townmap: world.townmap,
             report,
             draws,
             lights: lights.grid,
