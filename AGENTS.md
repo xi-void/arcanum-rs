@@ -10,87 +10,6 @@
 - Leave implementation changes uncommitted for review.
 - Minimize unnecessary repository administration, planning and status narration.
 - Avoid expanding the requested milestone beyond its defined scope.
-- Avoid excessive investigation or repeated verification when sufficient evidence has already been collected.
-- Prioritize implementation and functional improvements over lengthy reports.
-
-## Project philosophy
-
-- Arcanum-RS is an independent native Rust replacement engine, not a recreation of individual Arcanum locations.
-- The engine must interpret original game data through generic, reusable systems.
-- Arcanum-CE and TIG are read-only implementation references.
-- Original game resources and verified original engine behavior are the primary sources of truth.
-- Preserve compatibility with original game data and legitimate content overrides.
-- Never commit original copyrighted game assets.
-- Prefer functional gameplay over isolated technical demonstrations.
-- Treat incomplete functionality as an explicit limitation rather than concealing it through workarounds.
-- Preserve original gameplay semantics while allowing optional modern enhancements.
-- Moddability, configurability, performance and maintainability are fundamental architectural requirements.
-
-## Generic world reconstruction
-
-- The engine must reconstruct original locations from installed game data without prior knowledge of their individual architecture.
-- Treat location-specific defects as potential symptoms of missing or incorrect generic engine behavior.
-- Trace defects to the responsible subsystem before implementing corrections.
-- Derive terrain, sectors, walls, roofs, portals, scenery, mobiles, lighting, collision and transitions from original resources and verified interpretation rules.
-- Reproduce original default-sector, wilderness and terrain-generation behavior wherever applicable.
-- Determine original world-loading behavior from reference source and resources rather than assuming how it works.
-- Do not invent terrain or geometry where original data or verified engine rules do not support it.
-- Never manually assemble original buildings or environments.
-- Never introduce location-specific rendering paths, coordinate overrides, object-placement corrections or artificial traversal exceptions to compensate for incomplete engine functionality.
-- Map names, sector IDs, coordinates and object identifiers may be used in regression fixtures and diagnostics, but must not become special cases in general engine logic.
-- Preserve genuine location-specific behavior encoded in original scripts, object properties and game resources.
-- Use Arcanum-CE source to investigate missing format interpretation and runtime behavior rather than guessing from screenshots.
-- Do not silently discard entire sectors or object collections because an individual record is unsupported.
-- Preserve strict binary-format validation. Never skip unknown variable-length records using guessed offsets or lengths.
-- When safe parsing cannot continue, report the failure explicitly rather than presenting an incomplete sector as correctly reconstructed.
-- Report unsupported records, missing resources, incomplete collision data and unresolved rendering behavior.
-- Maintain traceability from rendered and interactive objects back to their original records, prototypes, ART resources and applicable rules.
-- Verify generic corrections against multiple original locations whenever practical, including previously untested content.
-
-## Engineering principles
-
-- Prefer reusable engine systems over milestone-specific demonstrations.
-- Avoid speculative fixes, arbitrary offsets and hardcoded object positions.
-- Prefer targeted investigation and minimal verified changes.
-- Fix root causes rather than individual visual symptoms.
-- Reuse established systems instead of introducing parallel implementations.
-- Keep gameplay, world loading, rendering, input and presentation responsibilities appropriately separated.
-- Gameplay and diagnostic viewers should share the same underlying world reconstruction and rendering systems.
-- Preserve meaningful regression tests and performance baselines.
-- Remove obsolete implementations once their replacements are verified.
-- Avoid maintaining redundant systems solely for historical compatibility with earlier development milestones.
-- Do not undertake broad architectural rewrites without a demonstrated technical requirement.
-- Prefer explicit, maintainable abstractions over speculative generalization.
-- Keep original compatibility behavior separate from optional engine enhancements.
-
-## Rendering architecture
-
-- Arcanum-RS uses Vulkan as its sole production rendering backend through the existing wgpu infrastructure.
-- Retire the existing CPU software renderer, OpenGL/GLES backend and automatic backend-selection mechanisms.
-- Do not introduce additional graphics backends unless explicitly requested.
-- Do not maintain redundant rendering implementations or backend-specific compatibility workarounds.
-- Remove obsolete renderer-selection options and dependencies once migration is complete.
-- Preserve CPU-side asset decoding, world reconstruction, collision, gameplay logic and other appropriate non-graphics workloads.
-- Retain isolated software reference functions only when necessary for meaningful automated tests.
-- Integrate world rendering, lighting, shadows, animation, roof fading, map rendering and UI composition into one shared Vulkan rendering pipeline.
-- Prefer GPU execution for compositing, scaling, blending and other suitable graphics workloads.
-- Avoid unnecessary GPU readbacks, repeated texture uploads and redundant CPU-side rasterization.
-- Preserve efficient resource caching, asynchronous asset preparation and sector streaming.
-- Maintain event-driven presentation and avoid unnecessary idle rendering.
-- Prioritize frame pacing, low memory consumption and resource reuse.
-- Maintain compatibility with low-end Vulkan-capable integrated GPUs, particularly Intel HD 520.
-# Arcanum-RS — Codex Instructions
-
-## Development workflow
-
-- Focus on implementation, debugging, testing and benchmarks.
-- Do not inspect Git state at the beginning of a task.
-- Do not run Git commands unless explicitly requested or strictly necessary for a specific development issue.
-- Never commit, push, merge, rebase, reset, create branches or open pull requests unless explicitly instructed.
-- Assume the current working branch is already prepared.
-- Leave implementation changes uncommitted for review.
-- Minimize unnecessary repository administration, planning and status narration.
-- Avoid expanding the requested milestone beyond its defined scope.
 - Stop investigating once sufficient evidence exists to implement a verified correction.
 - Prioritize functional improvements over lengthy reports and repetitive demonstrations.
 - Avoid unnecessary token consumption.
@@ -108,6 +27,23 @@
 - Preserve original gameplay semantics while allowing optional modern enhancements.
 - Moddability, configurability, performance and maintainability are fundamental architectural requirements.
 - Do not reproduce limitations of the original executable unless required for genuine content or gameplay compatibility.
+
+## Architectural completeness before exhaustive fidelity
+
+During foundational engine development, prioritize implementing missing mechanics and establishing coherent interactions between gameplay subsystems.
+
+- Establish functional, extensible implementations grounded in original-data semantics.
+- Resolve foundational decoding errors, crashes, data loss and architectural blockers immediately. Avoid arbitrary resource limits that discard legitimate original content; use justified, bounded preparation and explicit diagnostics.
+- Do not pursue exhaustive behavioral or cosmetic fidelity while relevant dependent systems remain unimplemented.
+- Record unresolved compatibility discrepancies and their dependencies through the existing diagnostic infrastructure.
+- Extend machine-readable observability alongside each new subsystem, without allowing diagnostic refinement to dominate implementation.
+- Avoid temporary assumptions and workarounds that duplicate functionality intended for future subsystems.
+- Prefer completing interconnected gameplay foundations over repeatedly refining isolated mechanics. Prioritize missing dependencies over exhaustive fixes to their downstream symptoms.
+- Maintain focused regression coverage and basic integration checks as systems are added; defer exhaustive cross-system fidelity audits until the relevant mechanics are connected.
+
+Once the principal gameplay systems are implemented and interconnected, undertake dedicated comprehensive compatibility sweeps using the expanded machine-readable diagnostic infrastructure.
+
+The objective is a coherent, extensible reconstruction of Arcanum, followed by systematic convergence toward original behavior.
 
 ## Generic world reconstruction
 
@@ -154,10 +90,7 @@
 - Vulkan is the sole production rendering backend for Arcanum-RS.
 - Use the existing wgpu infrastructure configured exclusively for Vulkan.
 - Do not introduce alternative production rendering backends unless explicitly instructed.
-- Retire the existing CPU software renderer, OpenGL/GLES backend and automatic backend-selection mechanisms through a dedicated migration task.
-- Remove obsolete renderer-selection options, dependencies, feature flags and backend-specific code once migration is complete.
-- Do not maintain deprecated rendering paths merely for compatibility with earlier development milestones.
-- Do not extend the software renderer or OpenGL/GLES implementation with new functionality.
+- Do not restore the retired CPU software renderer, OpenGL/GLES backend, automatic backend selection or their obsolete options, dependencies and feature flags.
 - Do not silently fall back to software rendering or another graphics backend.
 - Report Vulkan initialization failures with clear, actionable diagnostics.
 - Preserve CPU-side asset decoding, world reconstruction, collision, gameplay logic and other appropriate non-graphics workloads.
@@ -176,7 +109,6 @@
 - Do not require pixel parity with retired rendering backends.
 - Preserve meaningful asset-free and GPU-independent regression coverage.
 - Keep hardware-dependent rendering tests focused on Vulkan.
-- Vulkan consolidation is an immediate project priority. Do not maintain or extend deprecated rendering backends during ongoing development. Complete their removal while preserving existing functionality.
 
 ## Moddability and configuration
 
@@ -245,7 +177,7 @@
 - Preserve original object and resource provenance in diagnostic output.
 - Make relevant engine state inspectable without requiring source modifications.
 - Reuse existing map-loading, interaction and rendering systems for developer commands.
-- Future console commands should use a reusable command registry rather than a monolithic parser.
+- Extend the existing shared command registry rather than introducing another command parser.
 - Developer commands must not require permanent changes to original content or gameplay rules.
 - Prefer diagnostics that help identify root causes during actual gameplay.
 - Do not introduce developer overlays into the default Classic interface.
@@ -280,7 +212,12 @@
 - Use the local `rpc` client as the first tool for runtime reproduction and state inspection. Use the headless `world-scan` command for original-data compatibility investigations.
 - Share the developer command registry across the console and automation interfaces.
 - Preserve actionable source provenance and group compatibility failures by their underlying engine or format cause.
-- Extend the existing diagnostics alongside gameplay subsystems and support deterministic reproduction through versioned diagnostic snapshots.
+- Extend the existing diagnostics alongside each new or substantially expanded gameplay subsystem. Treat relevant state inspection, reproducible developer control and focused behavioral verification as part of implementation, not a later retrofit.
+- Expose meaningful state, transitions, rejected operations and unresolved dependencies through structured results. Use the same gameplay mechanisms as normal play, not parallel testing implementations.
+- Support reproducible diagnostic contexts through versioned snapshots; document what is and is not restored.
+- Extend `world-scan` coverage where meaningful static verification becomes possible. Keep structural decoding, semantic interpretation, preparation and actual runtime behavior distinct.
+- Preserve compatibility history and comparable baselines. Distinguish recovered content, diagnostic reclassification, newly evaluated coverage and regressions; never suppress warnings merely to reduce counts.
+- Keep command discovery, result schemas, focused regression tests and the agent workflow documentation synchronized with implemented capabilities.
 - Prefer headless validation for nonvisual behavior and screenshots for actual visual verification.
 - Keep automation local, explicitly developer-enabled, disabled in ordinary play and independent of external AI providers.
 - Use bounded event histories and on-demand capture. Avoid redundant readers, continuous diagnostic logging and unnecessary GPU readbacks.

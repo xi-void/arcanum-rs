@@ -102,6 +102,128 @@ pub struct ObjectList {
 pub struct Error {
     pub offset: usize,
     pub message: String,
+    pub(crate) code: &'static str,
+}
+
+impl Error {
+    fn classified(mut self, code: &'static str) -> Self {
+        self.code = code;
+        self
+    }
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+pub(crate) struct ListEvidence {
+    pub file_bytes: usize,
+    pub metadata_marker: Option<u32>,
+    pub declared_records: Option<usize>,
+    pub decoded_prefix_records: usize,
+    pub record: Option<usize>,
+    pub record_start: Option<usize>,
+    pub header: Option<InstanceHeader>,
+    pub field: Option<usize>,
+    pub field_start: Option<usize>,
+    pub error_offset: Option<usize>,
+    pub unsupported_bitmap: Option<[u32; 3]>,
+    pub preparation_bytes: Option<usize>,
+    pub preparation_budget_bytes: Option<usize>,
+}
+
+// Fixed prefix shared by version 119 object instances in sectors and mobiles.
+// This observes the header only. Subtype fields and record boundaries require
+// the appropriate field table and validated field decoding.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct InstanceHeader {
+    pub version: u32,
+    pub prototype_kind: Option<u16>,
+    pub prototype: Option<u32>,
+    pub instance_kind: Option<u16>,
+    pub category: Option<u32>,
+    pub field_count: Option<u16>,
+    pub common_bitmap: Option<[u32; 2]>,
+    pub bitmap: Option<Vec<u32>>,
+    pub current_art: Option<u32>,
+    pub location: Option<(u32, u32)>,
+}
+
+impl InstanceHeader {
+    pub(crate) fn observe(input: &[u8]) -> Option<Self> {
+        fn word<const N: usize>(input: &[u8], at: usize) -> Option<[u8; N]> {
+            input.get(at..at + N)?.try_into().ok()
+        }
+        let u16_at = |at| word(input, at).map(u16::from_le_bytes);
+        let u32_at = |at| word(input, at).map(u32::from_le_bytes);
+        let version = u32_at(0)?;
+        let prototype_kind = (version == 119).then(|| u16_at(4)).flatten();
+        let instance = prototype_kind == Some(1);
+        let category = instance.then(|| u32_at(52)).flatten();
+        let bitmap_words = match category {
+            // CE obj.c sub_40C030 and sub_40B8E0. Common fields take
+            // two words, and each inherited section starts on a new word.
+            Some(0..=4 | TRAP) => Some(3),
+            Some(5..=14) => Some(4),
+            Some(15 | NPC) => Some(5),
+            _ => None,
+        };
+        let field_count = instance.then(|| u16_at(56)).flatten();
+        let bitmap: Option<Vec<u32>> =
+            bitmap_words.and_then(|words| (0..words).map(|i| u32_at(58 + 4 * i)).collect());
+        let prefix = bitmap.as_ref().and_then(|bitmap| {
+            if field_count.map(u32::from) != Some(bitmap.iter().map(|n| n.count_ones()).sum()) {
+                return None;
+            }
+            let mut reader = Reader {
+                input,
+                offset: 58 + 4 * bitmap.len(),
+            };
+            let mut fields = Fields::default();
+            for index in 0..2 {
+                if bitmap[0] & (1 << index) != 0 {
+                    fields.read(&mut reader, index, category?).ok()?;
+                }
+            }
+            Some(fields)
+        });
+        Some(Self {
+            version,
+            prototype_kind,
+            prototype: instance.then(|| u32_at(12)).flatten(),
+            instance_kind: instance.then(|| u16_at(28)).flatten(),
+            category,
+            field_count,
+            common_bitmap: instance.then(|| Some([u32_at(58)?, u32_at(62)?])).flatten(),
+            bitmap,
+            current_art: prefix.as_ref().and_then(|fields| fields.art_id),
+            location: prefix.and_then(|fields| fields.tile),
+        })
+    }
+}
+
+pub(crate) fn category_name(category: u32) -> Option<&'static str> {
+    [
+        "wall",
+        "portal",
+        "container",
+        "scenery",
+        "projectile",
+        "weapon",
+        "ammo",
+        "armor",
+        "gold",
+        "food",
+        "scroll",
+        "key",
+        "key_ring",
+        "written",
+        "generic",
+        "pc",
+        "npc",
+        "trap",
+        "monster",
+        "unique_npc",
+    ]
+    .get(category as usize)
+    .copied()
 }
 
 impl fmt::Display for Error {
@@ -154,9 +276,35 @@ fn metadata(reader: &mut Reader<'_>) -> Result<(u32, u32), Error> {
 }
 
 pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
+    decode_with_evidence(input).0
+}
+
+pub(crate) fn decode_with_evidence(input: &[u8]) -> (Result<ObjectList, Error>, ListEvidence) {
+    let mut evidence = ListEvidence {
+        file_bytes: input.len(),
+        ..ListEvidence::default()
+    };
+    let result = decode_list(input, &mut evidence);
+    if let Err(error) = &result {
+        evidence.error_offset = Some(error.offset);
+        if let Some(start) = evidence.record_start {
+            evidence.header = InstanceHeader::observe(&input[start..input.len() - 4]);
+        }
+    } else if let Ok(list) = &result {
+        evidence.decoded_prefix_records = list.count;
+        evidence.record = None;
+        evidence.record_start = None;
+        evidence.field = None;
+        evidence.field_start = None;
+    }
+    (result, evidence)
+}
+
+fn decode_list(input: &[u8], evidence: &mut ListEvidence) -> Result<ObjectList, Error> {
     let floor = decode_floor(input).map_err(|error| Error {
         offset: 0,
         message: error.to_string(),
+        code: "sector_floor_decode_failed",
     })?;
     let start = floor.tile_offset + SIDE * SIDE * 4;
     let count_offset = input.len() - 4; // A valid floor already requires over 4 bytes.
@@ -164,7 +312,9 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
         input: &input[..count_offset],
         offset: start,
     };
-    let (marker, _) = metadata(&mut reader)?;
+    let (marker, _) =
+        metadata(&mut reader).map_err(|error| error.classified("sector_metadata_decode_failed"))?;
+    evidence.metadata_marker = Some(marker);
     let tile_blocks = if marker >= 0xaa0004 {
         reader.fixed("tile-block mask")?
     } else {
@@ -177,6 +327,7 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
         offset: count_offset,
     };
     let count = trailer.count("final object count")?;
+    evidence.declared_records = Some(count);
     if count > (count_offset - start) / 70 {
         return Err(trailer.error("object count exceeds the available record headers"));
     }
@@ -194,24 +345,35 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
     };
     for index in 0..count {
         let start = reader.offset;
+        evidence.record = Some(index);
+        evidence.record_start = Some(start);
+        evidence.decoded_prefix_records = index;
+        evidence.field = None;
+        evidence.field_start = None;
         let version = reader.u32("object version")?;
         if version != 119 {
-            return Err(reader.error(format!(
-                "unsupported object version {version} at record {index}"
-            )));
+            return Err(reader
+                .error(format!(
+                    "unsupported object version {version} at record {index}"
+                ))
+                .classified("instance_version_unsupported"));
         }
         let prototype = reader.fixed::<24>("object prototype identity")?;
         let proto_kind = u16::from_le_bytes(prototype[..2].try_into().unwrap());
         let proto_id = u32::from_le_bytes(prototype[8..12].try_into().unwrap());
         if proto_kind != 1 || !(1..=i32::MAX as u32).contains(&proto_id) {
-            return Err(reader.error(format!("unsupported prototype identity at record {index}")));
+            return Err(reader
+                .error(format!("unsupported prototype identity at record {index}"))
+                .classified("instance_prototype_identity_unsupported"));
         }
         let instance_id = reader.fixed::<24>("object identity")?;
         let identity = u16::from_le_bytes(instance_id[..2].try_into().unwrap());
         if !matches!(identity, 0 | 2 | 3) {
-            return Err(reader.error(format!(
-                "unsupported instance identity {identity} at record {index}"
-            )));
+            return Err(reader
+                .error(format!(
+                    "unsupported instance identity {identity} at record {index}"
+                ))
+                .classified("instance_identity_unsupported"));
         }
         let category = reader.u32("object category")?;
         let valid = match category {
@@ -223,9 +385,11 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
             PORTAL => [u32::MAX, 0xf, 0xff],
             TRAP => [u32::MAX, 0xf, 0x1f],
             _ => {
-                return Err(reader.error(format!(
-                    "unsupported object category {category} at record {index}"
-                )));
+                return Err(reader
+                    .error(format!(
+                        "unsupported object category {category} at record {index}"
+                    ))
+                    .classified("sector_instance_category_unsupported"));
             }
         };
         let count = u16::from_le_bytes(reader.fixed("object field count")?);
@@ -239,22 +403,32 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
             .zip(valid)
             .any(|(bits, valid)| bits & !valid != 0)
         {
-            return Err(reader.error(format!(
-                "unsupported object fields {bitmap:08x?} at record {index}"
-            )));
+            evidence.unsupported_bitmap = Some(std::array::from_fn(|i| bitmap[i] & !valid[i]));
+            return Err(reader
+                .error(format!(
+                    "unsupported object fields {bitmap:08x?} at record {index}"
+                ))
+                .classified("sector_instance_fields_unsupported"));
         }
         if bitmap.iter().map(|n| n.count_ones()).sum::<u32>() != u32::from(count) {
-            return Err(reader.error(format!("field count and bitmap disagree at record {index}")));
+            return Err(reader
+                .error(format!("field count and bitmap disagree at record {index}"))
+                .classified("instance_bitmap_count_mismatch"));
         }
 
         let mut fields = Fields::default();
         for (word, bits) in bitmap.into_iter().enumerate() {
             for bit in 0..32 {
                 if bits & (1 << bit) != 0 {
-                    fields.read(&mut reader, word * 32 + bit, category)?;
+                    let field = word * 32 + bit;
+                    evidence.field = Some(field);
+                    evidence.field_start = Some(reader.offset);
+                    fields.read(&mut reader, field, category)?;
                 }
             }
         }
+        evidence.field = None;
+        evidence.field_start = None;
         if category == TRAP {
             list.traps.push(TrapRecord {
                 index,
@@ -310,8 +484,13 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
             StaticCategory::Portal => list.portals.push(record),
         }
     }
+    evidence.record = None;
+    evidence.record_start = None;
+    evidence.decoded_prefix_records = count;
     if reader.offset != count_offset {
-        return Err(reader.error("object records do not end at the final count"));
+        return Err(reader
+            .error("object records do not end at the final count")
+            .classified("sector_object_list_end_mismatch"));
     }
     Ok(list)
 }
@@ -356,6 +535,7 @@ pub fn decode_portal_prototype(
         art_id: fields.art_id.ok_or_else(|| Error {
             offset: HEADER_SIZE + 12,
             message: "missing portal prototype ART ID".into(),
+            code: "prototype_art_missing",
         })?,
         appearance: fields.appearance,
     })
@@ -374,6 +554,7 @@ fn decode_static_prototype(
     let header = decode_header(input).map_err(|error| Error {
         offset: error.offset,
         message: error.to_string(),
+        code: "prototype_header_rejected",
     })?;
     if header.object_type != category || header.id != id {
         return Err(reader.error("static prototype type or identity mismatch"));
@@ -478,6 +659,7 @@ impl<'a> Reader<'a> {
         Error {
             offset: self.offset,
             message: message.into(),
+            code: "object_data_unclassified",
         }
     }
 
@@ -524,7 +706,9 @@ impl<'a> Reader<'a> {
         match self.fixed("optional field marker")? {
             [0] => Ok(false),
             [1] => Ok(true),
-            [flag] => Err(self.error(format!("invalid optional field marker {flag}"))),
+            [flag] => Err(self
+                .error(format!("invalid optional field marker {flag}"))
+                .classified("object_optional_marker_invalid")),
         }
     }
 
@@ -546,7 +730,9 @@ impl<'a> Reader<'a> {
         }
         let actual = self.u32("array element width")?;
         if actual as usize != width {
-            return Err(self.error(format!("array element width {actual}; expected {width}")));
+            return Err(self
+                .error(format!("array element width {actual}; expected {width}"))
+                .classified("object_array_width_mismatch"));
         }
         let count = self.count("array element count")?;
         self.take(4, "opaque array header word")?;
@@ -596,16 +782,27 @@ pub struct Mobile {
 pub fn decode_mobile(input: &[u8]) -> Result<Mobile, Error> {
     let mut reader = Reader { input, offset: 0 };
     if input.len() > MAX_PROTOTYPE_BYTES || reader.u32("mobile version")? != 119 {
-        return Err(reader.error("expected bounded version 119 mobile"));
+        return Err(reader
+            .error("expected bounded version 119 mobile")
+            .classified("mobile_version_or_size_unsupported"));
     }
     let prototype = reader.fixed::<24>("mobile prototype identity")?;
     let id = u32::from_le_bytes(prototype[8..12].try_into().unwrap());
     if prototype[..2] != [1, 0] || !(1..=i32::MAX as u32).contains(&id) {
-        return Err(reader.error("unsupported mobile prototype identity"));
+        return Err(reader
+            .error("unsupported mobile prototype identity")
+            .classified("instance_prototype_identity_unsupported"));
     }
     let identity = reader.fixed::<24>("mobile identity")?;
-    if identity[..2] != [2, 0] || reader.u32("mobile object type")? != NPC {
-        return Err(reader.error("expected original permanent NPC mobile"));
+    if identity[..2] != [2, 0] {
+        return Err(reader
+            .error("expected original permanent NPC mobile")
+            .classified("mobile_instance_identity_unsupported"));
+    }
+    if reader.u32("mobile object type")? != NPC {
+        return Err(reader
+            .error("expected original permanent NPC mobile")
+            .classified("mobile_instance_category_unsupported"));
     }
     let count = u16::from_le_bytes(reader.fixed("mobile field count")?);
     let mut bitmap = [0u32; 5];
@@ -615,7 +812,9 @@ pub fn decode_mobile(input: &[u8]) -> Result<Mobile, Error> {
     if bitmap.iter().map(|x| x.count_ones()).sum::<u32>() != u32::from(count)
         || bitmap[1] & !0xf != 0
     {
-        return Err(reader.error("invalid mobile field bitmap"));
+        return Err(reader
+            .error("invalid mobile field bitmap")
+            .classified("mobile_prefix_bitmap_unsupported"));
     }
     let mut fields = Fields::default();
     for index in 0..=65 {
@@ -629,17 +828,23 @@ pub fn decode_mobile(input: &[u8]) -> Result<Mobile, Error> {
         None
     };
     if (bitmap[2] & !7 != 0 || bitmap[3] != 0 || bitmap[4] != 0) && reader.offset == input.len() {
-        return Err(reader.error("missing mobile subtype data"));
+        return Err(reader
+            .error("missing mobile subtype data")
+            .classified("mobile_subtype_data_missing"));
     }
     Ok(Mobile {
         identity,
         prototype: SerializedPrototypeId(id),
-        art: fields
-            .art_id
-            .ok_or_else(|| reader.error("missing mobile current ART"))?,
-        tile: fields
-            .tile
-            .ok_or_else(|| reader.error("missing mobile location"))?,
+        art: fields.art_id.ok_or_else(|| {
+            reader
+                .error("missing mobile current ART")
+                .classified("mobile_current_art_missing")
+        })?,
+        tile: fields.tile.ok_or_else(|| {
+            reader
+                .error("missing mobile location")
+                .classified("mobile_instance_location_missing")
+        })?,
         fields: fields.appearance,
         dexterity,
     })
@@ -670,6 +875,7 @@ fn npc_prototype_fields(
     let header = decode_header(input).map_err(|error| Error {
         offset: error.offset,
         message: error.to_string(),
+        code: "prototype_header_rejected",
     })?;
     if header.object_type != NPC || header.id != id {
         return Err(reader.error("NPC prototype type or identity mismatch"));

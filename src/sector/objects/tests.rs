@@ -142,6 +142,49 @@ fn rejects_unsupported_types_and_fields_and_invalid_record_boundaries() {
 }
 
 #[test]
+fn rejection_evidence_stops_at_the_first_unsupported_record() {
+    let mut bytes = sector_header(0xaa0004);
+    bytes.extend(wall());
+    let record_start = bytes.len();
+    bytes.extend(instance(SCENERY, [0, 0, 1 << 6], &[0; 4]));
+    bytes.extend(wall());
+    bytes.extend(3u32.to_le_bytes());
+    let (decoded, evidence) = decode_with_evidence(&bytes);
+    assert_eq!(
+        decoded.unwrap_err().code,
+        "sector_instance_fields_unsupported"
+    );
+    assert_eq!(evidence.declared_records, Some(3));
+    assert_eq!(evidence.decoded_prefix_records, 1);
+    assert_eq!(evidence.record, Some(1));
+    assert_eq!(evidence.record_start, Some(record_start));
+    assert_eq!(evidence.error_offset, Some(record_start + 70));
+    assert_eq!(evidence.unsupported_bitmap, Some([0, 0, 64]));
+    let header = evidence.header.unwrap();
+    assert_eq!(header.category, Some(SCENERY));
+    assert_eq!(header.prototype, Some(1021));
+}
+
+#[test]
+fn mobile_observation_uses_category_specific_bitmap_width() {
+    let mut item = instance(5, [3, 0, 2], &[]);
+    item.extend(0u32.to_le_bytes());
+    let observed = InstanceHeader::observe(&item).unwrap();
+    assert_eq!(observed.category, Some(5));
+    assert_eq!(observed.bitmap.as_deref(), Some([3, 0, 2, 0].as_slice()));
+    assert_eq!(
+        decode_mobile(&item).unwrap_err().code,
+        "mobile_instance_category_unsupported"
+    );
+    assert!(
+        InstanceHeader::observe(&item[..70])
+            .unwrap()
+            .bitmap
+            .is_none()
+    );
+}
+
+#[test]
 fn trap_fields_preserve_the_following_static_record() {
     let mut data = vec![1]; // Present location.
     for value in [2056u32, 1991, 0, 0, 0, 20, 0] {

@@ -14,6 +14,35 @@ pub struct Issue {
     pub tile: Option<(u32, u32)>,
     pub raw_art: Option<u32>,
     pub prototype: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub research: Option<Research>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Research {
+    pub cause: &'static str,
+    pub stage: &'static str,
+    pub verification: &'static str,
+    pub related: &'static [&'static str],
+    pub evidence: Value,
+}
+
+impl Research {
+    fn new(
+        cause: &'static str,
+        stage: &'static str,
+        verification: &'static str,
+        related: &'static [&'static str],
+        evidence: Value,
+    ) -> Self {
+        Self {
+            cause,
+            stage,
+            verification,
+            related,
+            evidence,
+        }
+    }
 }
 
 impl Issue {
@@ -39,6 +68,7 @@ impl Issue {
             tile: None,
             raw_art: None,
             prototype: None,
+            research: None,
         }
     }
 
@@ -68,6 +98,50 @@ impl Issue {
         }
     }
 
+    pub(super) fn list_rejection(
+        detail: &str,
+        cause: &'static str,
+        evidence: &crate::sector::objects::ListEvidence,
+    ) -> Self {
+        let header = evidence.header.as_ref();
+        let decoded = evidence.preparation_budget_bytes.is_some();
+        Self {
+            record: evidence.record,
+            category: header
+                .and_then(|h| h.category)
+                .and_then(crate::sector::objects::category_name),
+            prototype: header.and_then(|h| h.prototype),
+            research: Some(Research::new(
+                cause,
+                if decoded {
+                    "sector_preparation"
+                } else {
+                    "sector_object_decode"
+                },
+                if decoded
+                    || matches!(
+                        cause,
+                        "sector_instance_category_unsupported"
+                            | "sector_instance_fields_unsupported"
+                    )
+                {
+                    "confirmed_engine_limitation"
+                } else {
+                    "unclassified_original_representation"
+                },
+                &[
+                    "object_placement",
+                    "collision",
+                    "appearance",
+                    "interaction",
+                    "object_lighting",
+                ],
+                json!(evidence),
+            )),
+            ..Self::new("object_list_rejected", detail)
+        }
+    }
+
     pub(super) fn scene(issue: &super::super::scenery::SceneIssue) -> Self {
         use crate::sector::objects::StaticCategory::*;
         let category = match issue.category {
@@ -86,22 +160,78 @@ impl Issue {
             "prototype_missing"
         } else if reason.contains("unsupported wall ART fields") {
             "wall_art_variant_unsupported"
-        } else if reason.contains("same-tile wall opening") || reason.contains("wall opening's") {
+        } else if issue.opening.is_some() {
             "portal_opening_unsupported"
         } else if reason.contains("unsupported portal") {
             "portal_variant_unsupported"
-        } else if reason.contains("unsupported scenery appearance")
-            || reason.contains("unsupported wall appearance")
-        {
+        } else if issue.appearance.is_some() {
             "object_appearance_unsupported"
         } else if issue.art_failure {
             "art_unresolved_or_rejected"
         } else {
             "object_import_rejected"
         };
+        let research = if let Some(appearance) = issue.appearance {
+            let (cause, verification) = if appearance.flags & 0x103 != 0 {
+                (
+                    "appearance_authored_suppression_flag",
+                    "reference_draw_suppression",
+                )
+            } else if appearance.flags & 0x200 != 0 {
+                (
+                    "appearance_detect_invisible_state",
+                    "runtime_verification_required",
+                )
+            } else if appearance.flags & 0x20000 != 0 {
+                ("appearance_wading_state", "runtime_verification_required")
+            } else if appearance.flags & 0x1000 != 0 {
+                (
+                    "appearance_inventory_state",
+                    "runtime_verification_required",
+                )
+            } else if appearance.blend_rejected || appearance.scale != 100 {
+                (
+                    "appearance_blend_or_scale_gate",
+                    "confirmed_engine_limitation",
+                )
+            } else if appearance.disallowed_flags != 0 {
+                (
+                    "appearance_other_object_flag_gate",
+                    "unclassified_original_representation",
+                )
+            } else {
+                (
+                    "appearance_subtype_or_flat_gate",
+                    "unclassified_original_representation",
+                )
+            };
+            Some(Research::new(
+                cause,
+                "appearance_preparation",
+                verification,
+                &["prototype_inheritance", "art_lookup_not_reached"],
+                json!(appearance),
+            ))
+        } else {
+            issue.opening.map(|opening| {
+                Research::new(
+                    opening.code,
+                    "portal_wall_association",
+                    "runtime_verification_required",
+                    &[
+                        "wall_art",
+                        "portal_art_lookup_not_reached",
+                        "interaction_preparation",
+                    ],
+                    json!(opening),
+                )
+            })
+        };
         Self {
             category: Some(category),
             raw_art: Some(issue.art_id),
+            prototype: Some(issue.prototype),
+            research,
             ..Self::record(code, issue.record, issue.tile, reason)
         }
     }
@@ -150,6 +280,7 @@ struct Coverage {
     imported_scenery: usize,
     imported_portals: usize,
     rasters_rejected: usize,
+    object_preparation_peak_bytes: usize,
     authored_roof_entries: usize,
     roof_rasters_prepared: usize,
     surface_cells_prepared: usize,
@@ -157,6 +288,7 @@ struct Coverage {
     mobile_resources_attempted: usize,
     mobile_records_decoded: usize,
     use_transitions_prepared: usize,
+    door_targets_prepared: usize,
     map_jump_records_decoded: usize,
 }
 
@@ -168,6 +300,94 @@ struct Group {
     sectors: BTreeSet<(Option<i32>, u64)>,
     resources: BTreeSet<String>,
     examples: Vec<Value>,
+    causes: BTreeMap<(&'static str, Option<&'static str>), CauseGroup>,
+}
+
+struct CauseGroup {
+    stage: &'static str,
+    verification: &'static str,
+    related: &'static [&'static str],
+    counts: Group,
+    variants: BTreeMap<&'static str, usize>,
+}
+
+impl Group {
+    fn count(&mut self, map: Option<i32>, sector: Option<u64>, resource: &Value) {
+        self.count += 1;
+        self.maps.extend(map);
+        if let Some(path) = resource.as_str().or_else(|| resource["path"].as_str()) {
+            self.resources.insert(path.to_owned());
+        }
+        self.sectors.extend(sector.map(|id| (map, id)));
+    }
+}
+
+#[derive(Default, Serialize)]
+struct MobileHeaders {
+    version: BTreeMap<u32, usize>,
+    prototype_kind: BTreeMap<u16, usize>,
+    instance_kind: BTreeMap<u16, usize>,
+    by_category: BTreeMap<&'static str, MobileCategory>,
+    unavailable: usize,
+}
+
+#[derive(Default, Serialize)]
+struct MobileCategory {
+    resources: usize,
+    render_prefix_decoded: usize,
+    explicit_location_bit: usize,
+    explicit_art_bit: usize,
+    location_value_decoded: usize,
+    current_art_value_decoded: usize,
+    nonzero_location_value: usize,
+    parent_field_bit: usize,
+    inventory_list_bit: usize,
+    field_bitmap_observed: usize,
+    field_count_differs_from_bitmap: usize,
+}
+
+impl MobileHeaders {
+    fn observe(&mut self, header: Option<&crate::sector::objects::InstanceHeader>, decoded: bool) {
+        let Some(header) = header else {
+            self.unavailable += 1;
+            return;
+        };
+        *self.version.entry(header.version).or_default() += 1;
+        if let Some(kind) = header.prototype_kind {
+            *self.prototype_kind.entry(kind).or_default() += 1;
+        }
+        if let Some(kind) = header.instance_kind {
+            *self.instance_kind.entry(kind).or_default() += 1;
+        }
+        let name = header
+            .category
+            .and_then(crate::sector::objects::category_name)
+            .unwrap_or("unknown");
+        let category = self.by_category.entry(name).or_default();
+        category.resources += 1;
+        category.render_prefix_decoded += usize::from(decoded);
+        category.location_value_decoded += usize::from(header.location.is_some());
+        category.nonzero_location_value +=
+            usize::from(header.location.is_some_and(|tile| tile != (0, 0)));
+        category.current_art_value_decoded += usize::from(header.current_art.is_some());
+        if let Some(bitmap) = header.common_bitmap {
+            category.explicit_art_bit += usize::from(bitmap[0] & 1 != 0);
+            category.explicit_location_bit += usize::from(bitmap[0] & 2 != 0);
+        }
+        if let Some(bitmap) = &header.bitmap {
+            category.field_bitmap_observed += 1;
+            let set = bitmap.iter().map(|word| word.count_ones()).sum::<u32>();
+            category.field_count_differs_from_bitmap +=
+                usize::from(header.field_count.map(u32::from) != Some(set));
+            category.parent_field_bit +=
+                usize::from(matches!(header.category, Some(5..=14)) && bitmap[2] & 2 != 0);
+            category.inventory_list_bit += usize::from(match header.category {
+                Some(2) => bitmap[2] & (1 << 4) != 0,
+                Some(15 | 16) => bitmap[2] & (1 << 20) != 0,
+                _ => false,
+            });
+        }
+    }
 }
 
 fn add(
@@ -182,25 +402,56 @@ fn add(
         .category
         .as_deref()
         .is_some_and(|category| issue.category != Some(category))
-        || options
-            .group
-            .as_deref()
-            .is_some_and(|code| issue.code != code)
+        || options.group.as_deref().is_some_and(|code| {
+            issue.code != code && issue.research.as_ref().is_none_or(|r| r.cause != code)
+        })
     {
         return;
     }
     let group = groups.entry(issue.code).or_default();
     group.impact = issue.impact;
-    group.count += 1;
-    group.maps.extend(map);
-    if let Some(path) = resource.as_str().or_else(|| resource["path"].as_str()) {
-        group.resources.insert(path.to_owned());
+    group.count(map, sector, resource);
+    let limit = options.examples.min(32);
+    let example = || json!({"map":map,"sector":sector,"resource":resource,"issue":issue});
+    if group.examples.len() < limit {
+        group.examples.push(example());
     }
-    group.sectors.extend(sector.map(|id| (map, id)));
-    if group.examples.len() < options.examples.min(32) {
-        group
-            .examples
-            .push(json!({"map":map,"sector":sector,"resource":resource,"issue":issue}));
+    if let Some(research) = &issue.research {
+        let cause = group
+            .causes
+            .entry((research.cause, issue.category))
+            .or_insert_with(|| CauseGroup {
+                stage: research.stage,
+                verification: research.verification,
+                related: research.related,
+                counts: Group::default(),
+                variants: BTreeMap::new(),
+            });
+        cause.counts.count(map, sector, resource);
+        let variant = if issue.code == "portal_opening_unsupported" {
+            issue.raw_art.map(|art| {
+                if art >> 28 != 3 {
+                    "unclassified_art"
+                } else if art & 0x400 != 0 {
+                    "door_art"
+                } else {
+                    "window_art"
+                }
+            })
+        } else if issue.code == "mobile_format_rejected" {
+            research.evidence["header"]["category"]
+                .as_u64()
+                .and_then(|category| u32::try_from(category).ok())
+                .and_then(crate::sector::objects::category_name)
+        } else {
+            None
+        };
+        if let Some(variant) = variant {
+            *cause.variants.entry(variant).or_default() += 1;
+        }
+        if cause.counts.examples.len() < limit.min(2) {
+            cause.counts.examples.push(example());
+        }
     }
 }
 
@@ -215,6 +466,9 @@ fn account(coverage: &mut Coverage, report: &SectorReport) {
     coverage.imported_scenery += report.scenery_count;
     coverage.imported_portals += report.portal_count;
     coverage.rasters_rejected += report.object_raster_rejections;
+    coverage.object_preparation_peak_bytes = coverage
+        .object_preparation_peak_bytes
+        .max(report.object_preparation_bytes);
     coverage.authored_roof_entries += report.roofs.0;
     coverage.roof_rasters_prepared += report.roofs.1;
     coverage.surface_cells_prepared += report.surfaces;
@@ -239,7 +493,9 @@ pub fn compatibility_scan(
     };
     let map_source = super::super::diagnostics::source(&catalog.source);
     let mut groups = BTreeMap::new();
+    let mut mobile_headers = MobileHeaders::default();
     let mut scanned_maps = Vec::new();
+    let mut locations = Vec::new();
     let mut templates_seen = BTreeSet::new();
     let mut loader = SectorLoader {
         terrain: Ok(None),
@@ -351,7 +607,7 @@ pub fn compatibility_scan(
             loader.reference = coordinates
                 .world_tile(0, 0)
                 .ok_or("Sector reference outside engine coordinate range")?;
-            let (sector, _) = loader.load(id);
+            let (sector, stages) = loader.load(id);
             coverage.authored_attempted += usize::from(files.sectors.contains(&id));
             coverage.explicit_location_attempted += usize::from(options.sector.is_some());
             account(&mut coverage, &sector.report);
@@ -360,6 +616,18 @@ pub fn compatibility_scan(
                 .values()
                 .filter(|target| matches!(target.action, interaction::Action::Travel(_)))
                 .count();
+            let doors = sector.doors_at.values().map(Vec::len).sum::<usize>();
+            coverage.door_targets_prepared += doors;
+            if options.sector.is_some() {
+                let r = &sector.report;
+                locations.push(json!({"map":map.id,"sector":id,"source":r.source_details,
+                    "decoded_records":r.decoded_records,"collision_prepared":r.collision_available,
+                    "object_preparation_bytes":r.object_preparation_bytes,
+                    "prepared_objects":{"walls":r.wall_count,"scenery":r.scenery_count,"portals":r.portal_count},
+                    "door_targets":doors,"interaction_targets":sector.interactions.len(),
+                    "timing_us":{"sector_read":stages.sector_read.as_micros(),"object_parse":stages.object_parse.as_micros(),
+                        "object_import":stages.object_import.as_micros(),"raster_prepare":stages.rasters.as_micros()}}));
+            }
             let source = sector
                 .report
                 .source_details
@@ -386,28 +654,76 @@ pub fn compatibility_scan(
                 .collect();
             for path in mobiles {
                 coverage.mobile_resources_attempted += 1;
-                let mobile = super::super::read_bounded(
+                match super::super::read_bounded(
                     &mut loader.vfs,
                     &path,
                     crate::prototype::MAX_PROTOTYPE_BYTES,
-                )
-                .map_err(|e| e.to_string())
-                .and_then(|(_, bytes)| {
-                    crate::sector::objects::decode_mobile(&bytes).map_err(|e| e.to_string())
-                });
-                match mobile {
-                    Ok(_) => coverage.mobile_records_decoded += 1,
-                    Err(error) => add(
-                        &mut groups,
-                        &options,
-                        Some(map.id),
-                        None,
-                        &json!(path),
-                        &Issue {
-                            category: Some("mobile"),
-                            ..Issue::new("mobile_format_rejected", &error)
-                        },
-                    ),
+                ) {
+                    Ok((source, bytes)) => {
+                        use crate::sector::objects::{
+                            InstanceHeader, category_name, decode_mobile,
+                        };
+                        let mobile = decode_mobile(&bytes);
+                        let header = InstanceHeader::observe(&bytes);
+                        mobile_headers.observe(header.as_ref(), mobile.is_ok());
+                        match mobile {
+                            Ok(_) => coverage.mobile_records_decoded += 1,
+                            Err(error) => {
+                                let category = header
+                                    .as_ref()
+                                    .and_then(|h| h.category)
+                                    .and_then(category_name);
+                                add(
+                                    &mut groups,
+                                    &options,
+                                    Some(map.id),
+                                    None,
+                                    &super::super::diagnostics::source(&source),
+                                    &Issue {
+                                        category: Some("mobile"),
+                                        prototype: header.as_ref().and_then(|h| h.prototype),
+                                        research: Some(Research::new(
+                                            error.code,
+                                            "mobile_render_prefix_decode",
+                                            if matches!(
+                                                error.code,
+                                                "mobile_instance_category_unsupported"
+                                                    | "mobile_instance_identity_unsupported"
+                                            ) {
+                                                "confirmed_engine_limitation"
+                                            } else {
+                                                "unclassified_original_representation"
+                                            },
+                                            &["shared_instance_fields", "mobile_world_discovery"],
+                                            json!({"header":header,"object_category":category,"file_bytes":bytes.len(),"error_offset":error.offset}),
+                                        )),
+                                        ..Issue::new("mobile_format_rejected", &error.to_string())
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        mobile_headers.observe(None, false);
+                        add(
+                            &mut groups,
+                            &options,
+                            Some(map.id),
+                            None,
+                            &json!(path),
+                            &Issue {
+                                category: Some("mobile"),
+                                research: Some(Research::new(
+                                    "mobile_resource_unreadable",
+                                    "resource_read",
+                                    "resource_unavailable",
+                                    &[],
+                                    Value::Null,
+                                )),
+                                ..Issue::new("mobile_format_rejected", &error.to_string())
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -453,13 +769,29 @@ pub fn compatibility_scan(
             add(&mut groups, &options, None, None, &source, issue);
         }
     }
-    let issues: Vec<_> = groups.into_iter().map(|(code, group)| json!({"code":code,"impact":group.impact,
-        "occurrences":group.count,"affected_maps":group.maps.len(),"affected_world_sectors":group.sectors.len(),"affected_resources":group.resources.len(),"examples":group.examples})).collect();
+    let issues: Vec<_> = groups.into_iter().map(|(code, group)| {
+        let causes: Vec<_> = group.causes.into_iter().map(|((cause, category), group)| {
+            let counts = group.counts;
+            json!({"code":cause,"category":category,"stage":group.stage,"verification":group.verification,
+                "related":group.related,"occurrences":counts.count,"affected_maps":counts.maps.len(),
+                "affected_world_sectors":counts.sectors.len(),"affected_resources":counts.resources.len(),
+                "variants":group.variants,"examples":counts.examples})
+        }).collect();
+        json!({"code":code,"impact":group.impact,"occurrences":group.count,"affected_maps":group.maps.len(),
+            "affected_world_sectors":group.sectors.len(),"affected_resources":group.resources.len(),"examples":group.examples,"causes":causes})
+    }).collect();
     let (reads, art) = loader.stats();
     Ok(
-        json!({"version":1,"map_catalog":map_source,"maps":scanned_maps,"coverage":coverage,"issues":issues,
+        json!({"version":2,"map_catalog":map_source,"maps":scanned_maps,"coverage":coverage,"issues":issues,
+        "research":{"mobile_headers":mobile_headers,"explicit_locations":locations,
+            "coverage_model":{"discovery":"counted_in_selected_vfs_scope","structural_decode":"partial",
+                "semantic_interpretation":"partial","prototype_and_art_resolution":"partial",
+                "placement_and_appearance_preparation":"partial","rendering":"not_evaluated",
+                "collision_preparation":"partial","traversal":"not_evaluated","interaction_preparation":"partial",
+                "dynamic_and_scripted_behavior":"not_evaluated"}},
         "elapsed_ms":start.elapsed().as_millis(),"vfs_reads":reads,"art_cache":art,
         "scope":{"map":options.map,"sector":options.sector,"limit_per_sector_kind":options.limit,
+            "issue_filters":{"category":options.category,"group":options.group},
             "excluded":["dynamic template placement at every overworld coordinate","actual GPU submission during scan",
                 "general scripts and mobile simulation","unparsed objects and unreferenced prototype or ART variants"]}}),
     )
@@ -512,5 +844,42 @@ mod tests {
         assert_eq!(group.examples.len(), 2);
         assert_eq!(group.sectors.len(), 8);
         assert_eq!(group.maps.len(), 1);
+    }
+
+    #[test]
+    fn cause_filters_keep_parent_accounting_and_bound_evidence() {
+        let mut groups = BTreeMap::new();
+        let options = ScanOptions {
+            group: Some("sector_preparation_memory_budget".into()),
+            examples: 4,
+            ..ScanOptions::default()
+        };
+        for sector in 0..5 {
+            let evidence = crate::sector::objects::ListEvidence {
+                declared_records: Some(1025),
+                decoded_prefix_records: 1025,
+                preparation_bytes: Some(9 * 1024 * 1024),
+                preparation_budget_bytes: Some(8 * 1024 * 1024),
+                ..Default::default()
+            };
+            add(
+                &mut groups,
+                &options,
+                Some(5000),
+                Some(sector),
+                &json!("fixture"),
+                &Issue::list_rejection(
+                    "arbitrary human text",
+                    "sector_preparation_memory_budget",
+                    &evidence,
+                ),
+            );
+        }
+        let group = &groups["object_list_rejected"];
+        assert_eq!(group.count, 5);
+        assert_eq!(group.examples.len(), 4);
+        let cause = &group.causes[&("sector_preparation_memory_budget", None)];
+        assert_eq!(cause.counts.count, 5);
+        assert_eq!(cause.counts.examples.len(), 2);
     }
 }

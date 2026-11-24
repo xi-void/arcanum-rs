@@ -1,0 +1,179 @@
+{
+  "history_schema": 1,
+  "dataset": {
+    "name": "Installed Arcanum CE test dataset",
+    "vfs_policy": "ce",
+    "module_archive": "modules/Arcanum.dat",
+    "module_sha256": "8bddf7ae4b8f0606efd64f9137f904cfa4787d80ef85fa04d06a3def9dadc76f",
+    "map_catalog": "rules/maplist.mes",
+    "archive_fingerprint_scope": "One module fingerprint. Built-in mounted archives and installation loose overrides also influence results."
+  },
+  "scan_scope": {
+    "maps": "all",
+    "authored_sectors": "all",
+    "indexed_templates": "all",
+    "limit": null,
+    "external_package_arguments": []
+  },
+  "entries": [
+    {
+      "milestone": 59,
+      "phase": "baseline",
+      "scanner_schema": 1,
+      "examples_per_parent": 4,
+      "elapsed_seconds": 44.497,
+      "peak_rss_kib": 126676,
+      "coverage": {
+        "authored_attempted": 1663,
+        "templates_attempted": 413,
+        "object_lists_decoded": 2055,
+        "object_lists_rejected": 21,
+        "serialized_records_decoded": 289553,
+        "imported_walls": 87899,
+        "imported_scenery": 196966,
+        "imported_portals": 980,
+        "collision_prepared": 2055,
+        "mobile_resources_attempted": 12711,
+        "mobile_records_decoded": 2170,
+        "use_transitions_prepared": 230
+      },
+      "occurrences": {
+        "art_unresolved_or_rejected": 2,
+        "interaction_unsupported": 167,
+        "map_metadata_failed": 2,
+        "mobile_format_rejected": 10541,
+        "object_appearance_unsupported": 1593,
+        "object_import_rejected": 7,
+        "object_list_rejected": 21,
+        "portal_opening_unsupported": 1035,
+        "portal_variant_unsupported": 8,
+        "surface_unavailable": 12,
+        "trap_runtime_unsupported": 1044,
+        "wall_art_variant_unsupported": 19
+      }
+    },
+    {
+      "milestone": 60,
+      "phase": "classification_before_recovery",
+      "scanner_schema": 2,
+      "examples_per_parent": 32,
+      "elapsed_seconds": 29.543,
+      "peak_rss_kib": 129312,
+      "coverage": {
+        "authored_attempted": 1663,
+        "templates_attempted": 413,
+        "object_lists_decoded": 2055,
+        "object_lists_rejected": 21,
+        "serialized_records_decoded": 289553,
+        "imported_walls": 87899,
+        "imported_scenery": 196966,
+        "imported_portals": 980,
+        "collision_prepared": 2055,
+        "mobile_resources_attempted": 12711,
+        "mobile_records_decoded": 2170,
+        "use_transitions_prepared": 230
+      },
+      "occurrences": {
+        "art_unresolved_or_rejected": 2,
+        "interaction_unsupported": 167,
+        "map_metadata_failed": 2,
+        "mobile_format_rejected": 10541,
+        "object_appearance_unsupported": 1593,
+        "object_import_rejected": 7,
+        "object_list_rejected": 21,
+        "portal_opening_unsupported": 1035,
+        "portal_variant_unsupported": 8,
+        "surface_unavailable": 12,
+        "trap_runtime_unsupported": 1044,
+        "wall_art_variant_unsupported": 19
+      },
+      "cause_occurrences": {
+        "mobile_format_rejected": {
+          "mobile_current_art_missing": 1611,
+          "mobile_instance_category_unsupported": 8930
+        },
+        "object_appearance_unsupported": {
+          "appearance_authored_suppression_flag": 371,
+          "appearance_blend_or_scale_gate": 198,
+          "appearance_other_object_flag_gate": 4,
+          "appearance_subtype_or_flat_gate": 258,
+          "appearance_wading_state": 762
+        },
+        "object_list_rejected": {
+          "sector_preparation_record_limit": 21
+        },
+        "portal_opening_unsupported": {
+          "portal_wall_piece_outside_range": 1030,
+          "portal_with_multiple_same_tile_walls": 4,
+          "portal_without_same_tile_wall": 1
+        }
+      }
+    },
+    {
+      "milestone": 60,
+      "phase": "preparation_budget",
+      "scanner_schema": 2,
+      "examples_per_parent": 32,
+      "elapsed_seconds": 19.188,
+      "peak_rss_kib": 131320,
+      "coverage": {
+        "authored_attempted": 1663,
+        "templates_attempted": 413,
+        "object_lists_decoded": 2076,
+        "object_lists_rejected": 0,
+        "serialized_records_decoded": 317864,
+        "imported_walls": 93607,
+        "imported_scenery": 218422,
+        "imported_portals": 1054,
+        "collision_prepared": 2076,
+        "mobile_resources_attempted": 12711,
+        "mobile_records_decoded": 2170,
+        "use_transitions_prepared": 234,
+        "door_targets_prepared": 997,
+        "object_preparation_peak_bytes": 2362792
+      },
+      "occurrences": {
+        "art_unresolved_or_rejected": 2,
+        "interaction_unsupported": 168,
+        "map_metadata_failed": 2,
+        "mobile_format_rejected": 10541,
+        "object_appearance_unsupported": 1640,
+        "object_import_rejected": 7,
+        "portal_opening_unsupported": 1042,
+        "portal_variant_unsupported": 8,
+        "surface_unavailable": 12,
+        "trap_runtime_unsupported": 2063,
+        "wall_art_variant_unsupported": 19,
+        "object_list_rejected": 0
+      },
+      "cause_occurrences": {
+        "mobile_format_rejected": {
+          "mobile_current_art_missing": 1611,
+          "mobile_instance_category_unsupported": 8930
+        },
+        "object_appearance_unsupported": {
+          "appearance_authored_suppression_flag": 373,
+          "appearance_blend_or_scale_gate": 217,
+          "appearance_other_object_flag_gate": 4,
+          "appearance_subtype_or_flat_gate": 284,
+          "appearance_wading_state": 762
+        },
+        "portal_opening_unsupported": {
+          "portal_wall_piece_outside_range": 1036,
+          "portal_with_multiple_same_tile_walls": 5,
+          "portal_without_same_tile_wall": 1
+        }
+      }
+    }
+  ],
+  "interpretation": {
+    "classification_before_recovery": "Every Milestone 59 coverage field and parent occurrence count matched. Schema 2 adds cause and mobile prefix evidence.",
+    "preparation_budget": "21 admitted lists, 28311 more accepted records, 27238 more prepared static objects, 21 more collision preparations and 4 more recognized Use transitions. Additional warnings cover previously unevaluated records.",
+    "unknowns": [
+      "Complete mobile payload and compiled stream compatibility",
+      "Verified window behavior for all association failures",
+      "Original dynamic appearance and script behavior",
+      "Visual fidelity outside targeted Vulkan fixtures"
+    ]
+  }
+}
