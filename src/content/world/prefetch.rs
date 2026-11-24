@@ -242,9 +242,9 @@ pub enum DeveloperAction {
 
 /// Owns prepared raster resources on the presentation thread.
 pub struct InteractiveWorld {
-    region: SectorRegion,
-    reference: (u32, u32),
-    cache: SectorCache,
+    pub(super) region: SectorRegion,
+    pub(super) reference: (u32, u32),
+    pub(super) cache: SectorCache,
     worker: Worker,
     resources: (u64, FrameCacheStats),
     required: Vec<u64>,
@@ -593,7 +593,9 @@ impl InteractiveWorld {
             i64::from(y) + i64::from(screen.1) - i64::from(size.1 / 2),
         );
         self.cancel_player_route();
-        if let Some(key) = self.cache.pick(point, self.reference, elapsed) {
+        if !self.cache.collision_disabled
+            && let Some(key) = self.cache.pick(point, self.reference, elapsed)
+        {
             let steps = self.cache.approach(key, run);
             self.pending_use = steps.map(|_| key);
             if steps.is_none() {
@@ -675,6 +677,10 @@ impl InteractiveWorld {
 
     pub fn take_transition(&mut self) -> Option<(Destination, u8)> {
         self.transition.take()
+    }
+
+    pub fn collision_bypassed(&self) -> bool {
+        self.cache.collision_disabled
     }
 
     /// Returns whether collision is disabled after the action.
@@ -861,6 +867,63 @@ impl InteractiveWorld {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires the installed original game"]
+    fn developer_collision_bypass_crosses_original_tulla_wall_by_key_and_mouse() {
+        let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+        let mut vfs = Vfs::from_game(game, crate::vfs::Policy::Ce).unwrap();
+        let catalog = crate::content::maps::Catalog::load(&mut vfs).unwrap();
+        let map = catalog.find("5000").unwrap();
+        let region = map.files(&mut vfs).unwrap().bounds();
+        let outside = (28447, 31171);
+        let wall = (28446, 31171);
+        let inside = (28445, 31171);
+        let viewport = (1280, 720);
+        let mut camera = region.camera(outside).unwrap();
+        let mut stream = WorldStream::new(vfs, map.directory.clone(), region, outside)
+            .unwrap()
+            .with_player()
+            .unwrap();
+        stream.prepare(&camera, viewport).unwrap();
+        let mut world = stream.into_interactive(|| {}, false).unwrap();
+        world.start_player().unwrap();
+        let player = |world: &InteractiveWorld| world.player_map_position().unwrap().0;
+
+        assert!(
+            world.debug_collision(wall).unwrap().edges[2],
+            "original wall edge"
+        );
+        world.move_player((1, -1), false, Duration::ZERO, &mut camera);
+        world.move_player((0, 0), false, Duration::from_secs(1), &mut camera);
+        assert_eq!(player(&world), outside);
+        assert!(
+            world
+                .developer_action(DeveloperAction::ToggleCollision)
+                .unwrap()
+        );
+        world.move_player((1, -1), false, Duration::from_secs(2), &mut camera);
+        world.move_player((1, -1), false, Duration::from_secs(3), &mut camera);
+        world.move_player((0, 0), false, Duration::from_secs(4), &mut camera);
+        assert_eq!(player(&world), inside);
+        assert!(world.pending_use.is_none());
+
+        // Screen pick of the original outside tile, now across the wall.
+        world.set_player_destination((560, 400), viewport, &camera, false, Duration::from_secs(4));
+        assert!(world.player_moving() && world.pending_use.is_none());
+        for t in 5..9 {
+            world.move_player((0, 0), false, Duration::from_secs(t), &mut camera);
+        }
+        assert_eq!(player(&world), outside);
+        assert!(
+            !world
+                .developer_action(DeveloperAction::ToggleCollision)
+                .unwrap()
+        );
+        world.move_player((1, -1), false, Duration::from_secs(9), &mut camera);
+        world.move_player((0, 0), false, Duration::from_secs(10), &mut camera);
+        assert_eq!(player(&world), outside);
+    }
 
     #[test]
     #[ignore = "requires the installed original game"]

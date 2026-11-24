@@ -943,6 +943,8 @@ pub(super) struct ObjectAuditSource<'a> {
     pub rotation: u8,
     pub frame: u8,
     pub offset: (i32, i32),
+    pub flags: u32,
+    pub use_script: Option<i32>,
 }
 
 type SharedObject<'a> = (
@@ -964,6 +966,8 @@ impl Room {
                 rotation: wall.orientation.rotation,
                 frame: 0,
                 offset: wall.placement.pixel_offset,
+                flags: wall.flags,
+                use_script: wall.record.fields.use_script,
             })
             .chain(self.portals.iter().map(|portal| ObjectAuditSource {
                 record: &portal.record,
@@ -972,6 +976,8 @@ impl Room {
                 rotation: portal.art.rotation,
                 frame: portal.art.frame,
                 offset: portal.placement.pixel_offset,
+                flags: portal.appearance.flags,
+                use_script: Some(portal.use_script),
             }))
             .chain(self.scenery.iter().map(|scenery| ObjectAuditSource {
                 record: &scenery.record,
@@ -980,6 +986,8 @@ impl Room {
                 rotation: scenery.art.rotation,
                 frame: scenery.art.frame,
                 offset: scenery.appearance.offset,
+                flags: scenery.appearance.flags,
+                use_script: Some(scenery.use_script),
             }))
             .map(|source| (source.record.index, source))
             .collect()

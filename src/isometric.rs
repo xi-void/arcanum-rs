@@ -23,11 +23,19 @@ pub fn project_world_tile(tile: (u32, u32), center: (u32, u32)) -> Option<(i32, 
 }
 
 /// Invert the same centered projection used to rasterize the floor.
-pub fn world_tile_at_pixel((x, y): (i64, i64), (cx, cy): (u32, u32)) -> Option<(u32, u32)> {
+pub fn world_tile_at_pixel(pixel: (i64, i64), center: (u32, u32)) -> Option<(u32, u32)> {
+    let (x, y) = world_tile_at_pixel_signed(pixel, center)?;
+    Some((x.try_into().ok()?, y.try_into().ok()?))
+}
+
+pub(crate) fn world_tile_at_pixel_signed(
+    (x, y): (i64, i64),
+    (cx, cy): (u32, u32),
+) -> Option<(i64, i64)> {
     let twice_y = y.checked_mul(2)?.checked_add(40)?;
     Some((
-        u32::try_from(i64::from(cx) + twice_y.checked_sub(x)?.div_euclid(80)).ok()?,
-        u32::try_from(i64::from(cy) + twice_y.checked_add(x)?.div_euclid(80)).ok()?,
+        i64::from(cx).checked_add(twice_y.checked_sub(x)?.div_euclid(80))?,
+        i64::from(cy).checked_add(twice_y.checked_add(x)?.div_euclid(80))?,
     ))
 }
 

@@ -1223,7 +1223,7 @@ fn draw_text(
     }
 }
 
-fn blend_glyph(dst: &mut Color, color: Color, coverage: u8) {
+pub(super) fn blend_glyph(dst: &mut Color, color: Color, coverage: u8) {
     let alpha = (u32::from(color[3]) * u32::from(coverage) + 127) / 255;
     if alpha == 0 {
         return;
@@ -1235,6 +1235,38 @@ fn blend_glyph(dst: &mut Color, color: Color, coverage: u8) {
         dst[i] = ((sum + total / 2) / total) as u8;
     }
     dst[3] = ((total + 127) / 255) as u8;
+}
+
+pub(super) fn console_font(
+    game: &mut Vfs,
+    path: &Path,
+    source: &str,
+) -> Result<BTreeMap<char, SpriteFrame>, Box<dyn Error>> {
+    let mut files = Vfs::new(Policy::Ordered);
+    files.mount_directory(
+        path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+    )?;
+    let font = Font {
+        source: source.into(),
+        size: 16,
+        color: [255; 4],
+        bold: false,
+        line_gap: 0,
+        fallback: None,
+    };
+    let mut glyphs = BTreeMap::new();
+    for ch in ' '..='ÿ' {
+        match font_glyph(game, &mut files, &font, ch) {
+            Ok(glyph) => {
+                glyphs.insert(ch, glyph);
+            }
+            Err(error) if source != "bitmap" && ch.is_ascii_alphanumeric() => return Err(error),
+            Err(_) => {}
+        }
+    }
+    Ok(glyphs)
 }
 
 #[cfg(test)]

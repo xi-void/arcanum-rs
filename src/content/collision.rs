@@ -21,6 +21,7 @@ const NO_BLOCK: u32 = 0x400;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Cell {
     blocked: bool,
+    pub(super) terrain_blocked: bool,
     edges: u8,
     portals: [u16; 4],
 }
@@ -36,7 +37,7 @@ impl Cell {
         self
     }
 
-    fn blocks_edge(self, direction: u8) -> bool {
+    pub(super) fn blocks_edge(self, direction: u8) -> bool {
         self.edges & (1 << direction) != 0 || self.portals[usize::from(direction / 2)] != 0
     }
 }
@@ -91,13 +92,15 @@ impl Collision {
             } else {
                 true
             };
+            cell.terrain_blocked = cell.blocked;
         }
         Self { cells }
     }
 
     pub(super) fn with_objects(mut self, vfs: &mut Vfs, list: &ObjectList) -> Self {
         for (i, cell) in self.cells.iter_mut().enumerate() {
-            cell.blocked |= list.tile_blocks[i / 8] & (1 << (i % 8)) != 0;
+            cell.terrain_blocked |= list.tile_blocks[i / 8] & (1 << (i % 8)) != 0;
+            cell.blocked |= cell.terrain_blocked;
         }
         let mut prototypes = BTreeMap::new();
         for record in list.walls.iter().chain(&list.portals).chain(&list.scenery) {
@@ -270,9 +273,8 @@ mod tests {
         let b = (64, 10);
         let blocked = |tile| {
             Some(Cell {
-                blocked: false,
                 edges: if tile == b { 1 << 1 } else { 0 },
-                portals: [0; 4],
+                ..Cell::default()
             })
         };
         assert_eq!(step(a, 5, blocked), None);

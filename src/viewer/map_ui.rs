@@ -114,7 +114,7 @@ impl MapUi {
     ) -> Result<Self, Box<dyn Error>> {
         let mut atlas = Atlas::load(&mut vfs)?;
         if discover_all {
-            atlas.discovered.extend(atlas.areas.keys().copied());
+            atlas.discover_all();
         }
         let travel_map = TravelMap::load(&mut vfs, &atlas.catalog.new_game()?.directory)
             .map_err(|err| err.to_string());
@@ -159,6 +159,35 @@ impl MapUi {
             bitmaps: BTreeMap::new(),
             bitmap_bytes: 0,
         })
+    }
+
+    pub(super) fn world_width(&self) -> u32 {
+        self.world.size().0
+    }
+
+    pub(super) fn discover_all(&mut self) -> usize {
+        self.atlas.discover_all();
+        self.dirty = true;
+        self.atlas.discovered.len()
+    }
+
+    pub(super) fn prepare_theme(&mut self, path: &Path, scale: u16) -> Result<Hud, String> {
+        let hud = Hud::load(path, &mut self.vfs, Some(scale)).map_err(|e| e.to_string())?;
+        if !hud.has_canvas() {
+            return Err("map theme needs a visible map-canvas binding".into());
+        }
+        Ok(hud)
+    }
+
+    pub(super) fn replace_theme(&mut self, mut hud: Hud) {
+        hud.set_map_view(self.mode);
+        self.hud = hud;
+        self.invalidate_sheet();
+    }
+
+    pub(super) fn set_scale(&mut self, scale: u16) {
+        self.hud.set_scale(scale);
+        self.dirty = true;
     }
 
     pub(super) fn observe(&mut self, map: &str, tile: Point, town_id: u32) {

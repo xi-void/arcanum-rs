@@ -127,6 +127,10 @@ impl Atlas {
         town_id == 0 && map_id == self.start_map && self.keyed_maps.get(&world_id) == Some(&map_id)
     }
 
+    pub fn discover_all(&mut self) {
+        self.discovered.extend(self.areas.keys().copied());
+    }
+
     pub fn discover_near(&mut self, tile: Point) {
         if let Some(area) = self
             .areas
