@@ -351,7 +351,7 @@ learned and found schematics.
 
 ### Matched workloads
 
-Measurements use two offline optimized `--features gpu` binaries from
+Measurements use two offline optimized `--features windowed` binaries from
 immediately before and after the three stabilization changes. The same
 ThinkPad X270 ran both builds with its i5-6300U, Intel HD Graphics 520,
 16 GiB RAM, kernel 7.2.15-1-omarchy, Rust 1.100.0 and Mesa 26.2.5 over
@@ -397,9 +397,9 @@ Run the headless regression suites with `cargo test --offline --locked`
 and `cargo test --offline --locked --all-features`. Use
 `ARCANUM_GAME_DIR` and `ARCANUM_MODS_DIR` with `cargo test --offline
 --locked -- --ignored` for installed-data checks. On a hardware Wayland
-host, run `cargo test --offline --locked --release --features gpu --lib
+host, run `cargo test --offline --locked --release --features windowed --lib
 gpu::tests -- --ignored --test-threads=1` with `ARCANUM_GAME_DIR` and
-`ARCANUM_GPU_BACKEND` set to `vulkan` or `gles`. Parity tests report the
+the prototype’s historical backend selector. Those parity tests reported the
 fixture, animation time, coordinate and colors of the first wrong pixel.
 Native captures and per-stage timing traces belong under
 `target/visual-checks/` and stay local.

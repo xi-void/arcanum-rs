@@ -129,8 +129,8 @@ The roof pass draws the authored sector cells and preserves their gaps.
 Direct play inspection from the mansion side of the pedestrian gate:
 
 ```sh
-cargo run --locked --release --features gpu -- play "$HOME/Work/arcanum-ce-test" \
-  --map 5000 --center 61997 65660 --renderer vulkan
+cargo run --locked --release --features windowed -- play "$HOME/Work/arcanum-ce-test" \
+  --map 5000 --center 61997 65660
 ```
 
 ## New game and click-to-move
@@ -168,12 +168,9 @@ currently displayed pose.
 
 ## Viewer settings
 
-Integer zoom uses the same logical pixel transform for scene
-selection, mouse picking, and both compositors. CPU expands nearest
-pixels for presentation and GPU expands sprite quads and loads exact
-texels. Pause stops player and animation time. Lighting, shadow
-visibility, movement preference and current zoom are session options.
-Change the backend at launch using `--renderer cpu|vulkan|gles`.
+Integer zoom uses the same logical transform for scene selection and mouse
+picking. Vulkan expands the quads and samples exact texels. Pause, lighting,
+shadow visibility, movement preference and current zoom remain session options.
 
 Native tests opened Bates billiard-room door record 244, walked through
 it, left for Tarant, and closed the still-open leaf after returning.

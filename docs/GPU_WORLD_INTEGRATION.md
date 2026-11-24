@@ -42,21 +42,18 @@ path. It does not simulate a kernel or driver reset.
 
 ## Reproduce
 
-Use `--renderer vulkan` for the primary backend, `--renderer gles` for
-OpenGL compatibility or `--renderer cpu` for the CPU reference. The GPU
-feature is optional. Vulkan and OpenGL hardware tests are separately opt-in.
+The windowed build now uses Vulkan throughout. The measurements below describe
+the original integration milestone before backend consolidation.
 
 ```sh
 game="$HOME/Work/arcanum-ce-test"
-cargo run --offline --locked --release --features gpu -- \
+cargo run --offline --locked --release --features windowed -- \
   art world "$game" --sectors "bates mansion lev 1" 1 1 1 1 101 83 1280 720 \
-  --renderer vulkan --lighting 12 --trace
+  --lighting 12 --trace
 
-for backend in vulkan gles; do
-  ARCANUM_GAME_DIR="$game" ARCANUM_GPU_BACKEND="$backend" \
-    cargo test --offline --locked --release --features gpu --lib gpu::tests \
-      -- --ignored --nocapture --test-threads=1
-done
+ARCANUM_GAME_DIR="$game" \
+  cargo test --offline --locked --release --features windowed --lib gpu::tests \
+  -- --ignored --test-threads=1
 ```
 
 For the populated K’na Tha seam, use `--sectors "k'na tha" 5 14 6 14 341 928
@@ -69,7 +66,7 @@ submission, present-call and completed-frame timings. The Vulkan sprite-pass
 timestamp excludes texture upload and presentation. Completion includes the
 traced wait for GPU work and does not measure when pixels reach the display.
 Ordinary viewing does not wait for GPU timestamps. A build with
-`--features gpu,wgpu/counters` also logs supported driver allocation counters
+`--features windowed,wgpu/counters` also logs supported driver allocation counters
 on frames that change residency. Linux i915 process fdinfo gives a broader
 driver memory estimate, including shared presentation allocations.
 
@@ -83,9 +80,9 @@ position is `(575 + (2dy − dx)/80, 928 + (2dy + dx)/80)`. Round to the
 nearest tile center away from a diamond edge.
 
 ```sh
-cargo run --offline --locked --release --features gpu -- \
+cargo run --offline --locked --release --features windowed -- \
   art world "$HOME/Work/arcanum-ce-test" --sectors "k'na tha" 5 14 18 14 575 928 1280 720 \
-  --renderer vulkan --trace
+  --trace
 ```
 
 | Screen pixel | World tile | Original sector | Evidence |

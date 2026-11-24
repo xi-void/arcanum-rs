@@ -162,3 +162,14 @@ fn resolves_verified_exterior_and_doorway_piece_without_adjusting_placement() {
     assert_eq!(id.fields().unwrap().pivot(&frame), (39, 132));
     assert_eq!(id.fields().unwrap().order_key(), (-2, 38));
 }
+
+#[test]
+fn resolves_original_wall_end_caps() {
+    let structures = Mes::parse_text("{0}{In40 WoD0 nul nul}").unwrap();
+    let names = Mes::parse_text("{0}{in40}{1}{wod0}").unwrap();
+    for (piece, name) in [(7, "art/wall/woduecu0.art"), (8, "art/wall/wodlecu0.art")] {
+        let id = WallArtId(0x1000_1811 | (piece << 14));
+        assert_eq!(id.resolve(&structures, &names).unwrap(), name);
+        assert!(id.fields().unwrap().mirror_x());
+    }
+}

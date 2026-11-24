@@ -23,6 +23,8 @@ pub struct MapFiles {
     pub start: Option<((u32, u32), Source)>,
     game_entry: (u32, u32),
     pub region: SectorRegion,
+    pub properties: Option<(SectorRegion, Source)>,
+    pub terrain_lookup: bool,
     pub sectors: BTreeSet<u64>,
 }
 
@@ -179,12 +181,49 @@ impl Map {
             last.y = last.y.max(coordinates.y);
             sectors.insert(id);
         }
+        let terrain_lookup = vfs
+            .resolve(&format!("{prefix}terrain.tdf"))?
+            .winner()
+            .is_some();
+        let path = format!("{prefix}map.prp");
+        let properties = if vfs.resolve(&path)?.winner().is_some() {
+            let (source, data) = read_bounded(vfs, &path, 24)?;
+            let [_, width, height] = data.as_chunks::<8>().0 else {
+                return Err(format!("invalid map properties length in {source}").into());
+            };
+            let end = |value| {
+                let dimension = i64::from_le_bytes(value) >> 6;
+                (1..=4096)
+                    .contains(&dimension)
+                    .then_some((dimension - 1) as u32)
+            };
+            let bounds = end(*width)
+                .zip(end(*height))
+                .ok_or_else(|| format!("invalid original map dimensions in {source}"))?;
+            Some((
+                SectorRegion {
+                    first: Coordinates { x: 0, y: 0 },
+                    last: Coordinates {
+                        x: bounds.0,
+                        y: bounds.1,
+                    },
+                },
+                source,
+            ))
+        } else {
+            None
+        };
         if sectors.is_empty() {
-            return Err(format!(
-                "{} has no available base sector resources under {prefix}",
-                self.name
-            )
-            .into());
+            if let Some((region, _)) = properties.as_ref().filter(|_| terrain_lookup) {
+                first = region.first;
+                last = region.last;
+            } else {
+                return Err(format!(
+                    "{} has no available base sectors or bounded terrain grid under {prefix}",
+                    self.name
+                )
+                .into());
+            }
         }
         let path = format!("{prefix}startloc.txt");
         let start = if vfs.resolve(&path)?.winner().is_some() {
@@ -203,29 +242,20 @@ impl Map {
             start,
             game_entry: self.map_list_center,
             region: SectorRegion { first, last },
+            properties,
+            terrain_lookup,
             sectors,
         })
     }
 }
 
 impl MapFiles {
-    /// Large maps use a local streaming rectangle around the arrival point.
-    pub fn region_at(&self, center: (u32, u32)) -> SectorRegion {
-        if self.region.camera(center).is_some() {
-            return self.region;
-        }
-        let x = center.0 / 64;
-        let y = center.1 / 64;
-        SectorRegion {
-            first: Coordinates {
-                x: self.region.first.x.max(x.saturating_sub(15)),
-                y: self.region.first.y.max(y.saturating_sub(15)),
-            },
-            last: Coordinates {
-                x: self.region.last.x.min(x.saturating_add(15)),
-                y: self.region.last.y.min(y.saturating_add(15)),
-            },
-        }
+    /// CE takes the playable map limits from map.prp, independently of the
+    /// rectangle occupied by explicit sector files.
+    pub fn bounds(&self) -> SectorRegion {
+        self.properties
+            .as_ref()
+            .map_or(self.region, |(region, _)| *region)
     }
 
     pub fn center(&self, center: Option<(u32, u32)>) -> Result<(u32, u32), String> {
@@ -236,7 +266,12 @@ impl MapFiles {
             x: point.0 / 64,
             y: point.1 / 64,
         };
-        if !sector.id().is_some_and(|id| self.sectors.contains(&id)) {
+        let bounds = self.bounds();
+        let within_map = (bounds.first.x..=bounds.last.x).contains(&sector.x)
+            && (bounds.first.y..=bounds.last.y).contains(&sector.y);
+        if !within_map
+            || !(self.terrain_lookup || sector.id().is_some_and(|id| self.sectors.contains(&id)))
+        {
             return Err(format!(
                 "world tile {point:?} is in unavailable sector {sector:?}; specify --center in a discovered sector"
             ));

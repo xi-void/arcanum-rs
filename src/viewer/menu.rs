@@ -262,6 +262,30 @@ fn print(frame: &mut SpriteFrame, x: u32, y: u32, text: &str) {
     }
 }
 
+pub(super) fn developer_status(text: &str) -> Arc<LoadedFrame> {
+    let width = text.len() as u32 * 12 + 16;
+    let mut frame = SpriteFrame {
+        width,
+        height: 28,
+        hotspot: (0, 0),
+        offset: (0, 0),
+        pixels: vec![[31, 26, 22, 255]; width as usize * 28],
+    };
+    for (index, glyph) in text.bytes().enumerate() {
+        for (y, row) in glyph_rows(glyph).into_iter().enumerate() {
+            for x in 0..5 {
+                if row & (16 >> x) != 0 {
+                    let at = (7 + y * 2) * width as usize + 8 + index * 12 + x * 2;
+                    for offset in [0, 1, width as usize, width as usize + 1] {
+                        frame.pixels[at + offset] = [245, 226, 187, 255];
+                    }
+                }
+            }
+        }
+    }
+    super::hud::generated_frame("developer/status", frame)
+}
+
 pub(super) fn glyph_rows(c: u8) -> [u8; 7] {
     match c {
         b'A' => [14, 17, 17, 31, 17, 17, 17],

@@ -32,11 +32,22 @@ image = "vfs:art/interface/log_but.art"
 disabled = true
 
 [[hud]]
-id = "map"
+id = "local-map"
+travel_available = false
 parent = "top"
 offset = [78, 2]
 size = [34, 34]
 image = "vfs:art/interface/tmap_but.art"
+hover_frame = 2
+action = "open-map"
+
+[[hud]]
+id = "world-map"
+travel_available = true
+parent = "top"
+offset = [78, 2]
+size = [34, 34]
+image = "vfs:art/interface/wmap_but.art"
 hover_frame = 2
 action = "open-map"
 
@@ -111,7 +122,13 @@ id = "clock-daylight"
 parent = "clock-face"
 size = [128, 29]
 image = "vfs:art/interface/clk_timestrip.art"
-source_rect = [35, 0, 128, 29]
+binding = "game-clock"
+clock_phases = [
+    "vfs:art/interface/clk_moon1.art", "vfs:art/interface/clk_moon2.art",
+    "vfs:art/interface/clk_moon3.art", "vfs:art/interface/clk_moon4.art",
+    "vfs:art/interface/clk_moon5.art", "vfs:art/interface/clk_moon6.art",
+    "vfs:art/interface/clk_moon7.art", "vfs:art/interface/clk_moon8.art",
+]
 
 [[hud]]
 id = "slot-1"

@@ -8,6 +8,7 @@ const WALL: u32 = 0;
 const PORTAL: u32 = 1;
 const SCENERY: u32 = 3;
 const NPC: u32 = 16;
+const TRAP: u32 = 17;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AppearanceFields {
@@ -74,6 +75,14 @@ pub struct IncompleteScenery {
     pub fields: AppearanceFields,
 }
 
+/// A parsed trap that the alpha does not simulate or draw.
+#[derive(Debug)]
+pub struct TrapRecord {
+    pub index: usize,
+    pub prototype: SerializedPrototypeId,
+    pub stored_tile: Option<(u32, u32)>,
+}
+
 #[derive(Debug)]
 pub struct ObjectList {
     pub start: usize,
@@ -84,6 +93,7 @@ pub struct ObjectList {
     pub portals: Vec<StaticRecord>,
     pub scenery_count: usize,
     pub portal_count: usize,
+    pub traps: Vec<TrapRecord>,
     pub(crate) tile_blocks: [u8; SIDE * SIDE / 8],
 }
 
@@ -178,6 +188,7 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
         portals: Vec::new(),
         scenery_count: 0,
         portal_count: 0,
+        traps: Vec::new(),
         tile_blocks,
     };
     for index in 0..count {
@@ -209,6 +220,7 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
             SCENERY => [u32::MAX, 0xf, 0x3f],
             // CE defines portal flags, difficulty, key ID, notification and pads.
             PORTAL => [u32::MAX, 0xf, 0xff],
+            TRAP => [u32::MAX, 0xf, 0x1f],
             _ => {
                 return Err(reader.error(format!(
                     "unsupported object category {category} at record {index}"
@@ -241,6 +253,14 @@ pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
                     fields.read(&mut reader, word * 32 + bit, category)?;
                 }
             }
+        }
+        if category == TRAP {
+            list.traps.push(TrapRecord {
+                index,
+                prototype: SerializedPrototypeId(proto_id),
+                stored_tile: fields.tile,
+            });
+            continue;
         }
         let category = match category {
             WALL => StaticCategory::Wall,
@@ -415,8 +435,8 @@ impl Fields {
             }
             68 if category == SCENERY => reader.array(4)?,
             69 if category == SCENERY => reader.array(8)?,
-            67 if category == WALL => reader.array(4)?,
-            68 if category == WALL => reader.array(8)?,
+            67 if matches!(category, WALL | TRAP) => reader.array(4)?,
+            68 if matches!(category, WALL | TRAP) => reader.array(8)?,
             70 if category == PORTAL => reader.array(4)?,
             71 if category == PORTAL => reader.array(8)?,
             _ => {

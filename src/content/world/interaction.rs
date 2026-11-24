@@ -579,7 +579,7 @@ mod tests {
         let exterior = catalog.find("5000").unwrap();
         let files = exterior.files(&mut vfs).unwrap();
         let center = files.center(Some(dst.tile)).unwrap();
-        let region = files.region_at(center);
+        let region = files.bounds();
         let mut camera = region.camera(center).unwrap();
         camera.follow((0, 0));
         let mut outside = WorldStream::new(vfs, exterior.directory.clone(), region, center)

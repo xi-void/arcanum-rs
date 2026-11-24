@@ -9,9 +9,9 @@ still work.
 
 ```sh
 game="$HOME/Work/arcanum-ce-test"
-cargo run --offline --locked --release --features gpu -- \
+cargo run --offline --locked --release --features windowed -- \
   art world "$game" --sectors "k'na tha" 6 12 6 12 420 814 1280 720 \
-  --lighting 12 --renderer vulkan
+  --lighting 12
 ```
 
 For a deterministic frame, add `--fidget --animation-ms 300`.

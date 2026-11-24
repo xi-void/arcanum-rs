@@ -4,7 +4,7 @@ use super::{LoadedMes, Source, art, load_mes, read_bounded};
 use crate::{
     compositor::SpriteDraw,
     facade::FacadeId,
-    isometric::floor_draw,
+    isometric::surface_draw,
     sector::{self, ArtError, Coordinates, TileArtId, TileResolution},
     vfs::Vfs,
 };
@@ -267,9 +267,9 @@ pub(super) fn resolve_surface(
     let mut flipped = BTreeMap::new();
     for (path, index, mirror) in requests {
         let result = cache.load(vfs, path, index, 0, mirror).and_then(|frame| {
-            if floor_draw(&frame.decoded.frame, 0, 0).is_none() {
+            if surface_draw(&frame.decoded.frame, 0, 0).is_none() {
                 return Err(format!(
-                    "{path} frame {index} from {} requires a 78 × 40 surface with hotspot (39, 39)",
+                    "{path} frame {index} from {} requires a 78 × 40 surface",
                     frame.source
                 )
                 .into());
@@ -302,7 +302,7 @@ pub(super) fn resolve_surface(
         }
         let x = (i64::from(tile.world.0) - i64::from(center.0)) as i32;
         let y = (i64::from(tile.world.1) - i64::from(center.1)) as i32;
-        tile.anchor = floor_draw(&frame.decoded.frame, x, y)
+        tile.anchor = surface_draw(&frame.decoded.frame, x, y)
             .expect("validated surface frame and bounded region")
             .anchor;
         true
@@ -423,7 +423,7 @@ pub fn audit_floor(
         if let Ok(tile) = &resolution {
             artwork.entry(tile.path.clone()).or_insert_with(|| {
                 match art::load_frame(vfs, &tile.path, 0) {
-                    Ok(frame) if floor_draw(&frame.decoded.frame, 0, 0).is_some() => {
+                    Ok(frame) if surface_draw(&frame.decoded.frame, 0, 0).is_some() => {
                         ArtworkCheck::Ready(frame.source)
                     }
                     Ok(_) => ArtworkCheck::Invalid(

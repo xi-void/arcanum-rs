@@ -235,7 +235,12 @@ struct ViewPlan {
     direction: (i32, i32),
 }
 
-/// Owns only prepared, immutable raster resources on the presentation thread.
+/// Runtime actions exposed only through developer-enabled input.
+pub enum DeveloperAction {
+    ToggleCollision,
+}
+
+/// Owns prepared raster resources on the presentation thread.
 pub struct InteractiveWorld {
     region: SectorRegion,
     reference: (u32, u32),
@@ -307,7 +312,7 @@ impl InteractiveWorld {
 
     /// Consume one complete import. Only an import needed by the requested view wakes rendering.
     pub fn receive(&mut self) -> bool {
-        let Some(done) = self.worker.take() else {
+        let Some(mut done) = self.worker.take() else {
             return false;
         };
         // A completion can change available entries and speculative eviction.
@@ -320,6 +325,9 @@ impl InteractiveWorld {
         let accepted = wanted && self.cache.evict(MAX_SECTORS, &self.required, true);
         let (reads, art) = done.resources;
         if accepted {
+            if let Some((ambient, _)) = self.cache.ambient {
+                done.sector.retint_lights(ambient);
+            }
             self.cache
                 .entries
                 .insert(id, (done.sector, required.then_some(self.cache.step)));
@@ -521,6 +529,19 @@ impl InteractiveWorld {
     }
 
     /// Compose the camera and player raster at the same simulation timestamp.
+    pub fn game_clock(&self) -> Option<crate::content::travel::Clock> {
+        self.playing()
+            .then(|| crate::content::travel::Clock::new(self.cache.hour))
+    }
+
+    pub fn player_facing(&self) -> Option<u8> {
+        self.cache.player.as_ref().map(Player::facing)
+    }
+
+    pub fn set_game_hour(&mut self, hour: u8) -> bool {
+        self.cache.set_game_hour(hour)
+    }
+
     pub fn follow_player(&self, elapsed: Duration, camera: &mut Camera) {
         if let Some(player) = &self.cache.player {
             camera.follow(player.sample(elapsed).anchor);
@@ -656,6 +677,31 @@ impl InteractiveWorld {
         self.transition.take()
     }
 
+    /// Returns whether collision is disabled after the action.
+    pub fn developer_action(&mut self, action: DeveloperAction) -> Result<bool, String> {
+        match action {
+            DeveloperAction::ToggleCollision => {
+                let player = self.cache.player.as_ref().ok_or("player is unavailable")?;
+                if self.cache.collision_disabled
+                    && !collision::can_stand(SectorCache::player_cell(
+                        &self.cache.entries,
+                        &self.cache.door_states,
+                        player.route_origin(),
+                    ))
+                {
+                    return Err(
+                        "Collision disabled: move onto a traversable tile before restoring it"
+                            .into(),
+                    );
+                }
+                self.cancel_player_route();
+                self.cache.hover = None;
+                self.cache.collision_disabled = !self.cache.collision_disabled;
+                Ok(self.cache.collision_disabled)
+            }
+        }
+    }
+
     pub fn move_player(
         &mut self,
         input: (i32, i32),
@@ -695,12 +741,14 @@ impl InteractiveWorld {
         if let Some((_, _, tile, facing)) = before
             && tile != player.tile()
         {
-            self.transition = self
-                .cache
-                .jumps
-                .get(&player.tile())
-                .copied()
-                .map(|dst| (dst, facing));
+            if !self.cache.collision_disabled {
+                self.transition = self
+                    .cache
+                    .jumps
+                    .get(&player.tile())
+                    .copied()
+                    .map(|dst| (dst, facing));
+            }
             if self.trace {
                 eprintln!(
                     "Player entered tile {:?}, camera {anchor:?}, ART {}",

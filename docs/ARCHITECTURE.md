@@ -185,8 +185,9 @@ aptitude formula, script interpreter, slot rules or serialized state.
   DAT's lexical index, then resolves each name through the ordinary VFS
   lookup. [ART](../src/art.rs) validates and decodes bounded RGBA frames
   with signed placement metadata.
-- [World preparation](../src/content/world.rs) reads original sector
-  surfaces, embedded facades, supported objects and lights. It resolves ART
+- [World preparation](../src/content/world.rs) uses original map bounds,
+  authored sectors and [terrain templates](MULTI_SECTOR_WORLD.md).
+  It reads surfaces, embedded facades, supported objects and lights. It resolves ART
   and constructs globally positioned rasters. Floor parsing can still
   produce a reported floor-only result when object import is unsupported.
   Object-list failures retain the floor and report unavailable object
@@ -205,14 +206,13 @@ aptitude formula, script interpreter, slot rules or serialized state.
   [GPU textures](../src/gpu.rs) track frame identity through `Weak` and have
   a separate residency budget. The GPU retires stale entries between frame
   preparations and can evict invisible textures under pressure.
-- Both backends consume ordered `WorldDraw` values with shared geometry,
+- Vulkan consumes ordered `WorldDraw` values with shared geometry,
   pivots, clipping, frame selection and pixel modulation. Surfaces and flat
-  objects are followed by verified subtractive mobile shadow masks and
-  upright objects, including walls, portals, scenery and supported mobiles.
-  The CPU [compositor](../src/compositor.rs) is the pixel reference. The GPU
-  derives blending from the same draw intent and only encodes a successfully
-  prepared frame. Window acquisition, submission and presentation stay in
-  the corresponding [viewer](../src/viewer.rs) backend.
+  objects are followed by subtractive mobile shadow masks and upright
+  objects. The [window renderer](../src/viewer/gpu.rs) owns acquisition,
+  submission and presentation. The map inset uses the same compositor
+  with a resident render target. Isolated software pixel operations remain
+  available to the asset-free reference tests.
 - The viewer uses one monotonic scene clock, or an explicit fixed timestamp
   for captures. Visible looping flames, finite rabbit fidgets and the
   rabbit walk contribute next-frame deadlines. Input and visible sector

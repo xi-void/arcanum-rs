@@ -19,7 +19,7 @@ use std::{collections::BTreeMap, error::Error as StdError, sync::Arc};
 type Rgb = [u8; 3];
 type Point = (i32, i32);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Ambient {
     pub indoor: Rgb,
     pub outdoor: Rgb,
@@ -27,6 +27,22 @@ pub(super) struct Ambient {
 
 impl Ambient {
     pub fn load(vfs: &mut vfs::Vfs, map: &str, hour: u8) -> Result<Self, Box<dyn StdError>> {
+        let resource = Self::resource(vfs, map)?;
+        Self::at_hour(&resource.mes, hour).map_err(Into::into)
+    }
+
+    pub fn schedule(vfs: &mut vfs::Vfs, map: &str) -> Result<[Self; 24], Box<dyn StdError>> {
+        let resource = Self::resource(vfs, map)?;
+        let mut hours = [Self::at_hour(&resource.mes, 0)?; 24];
+        for (hour, ambient) in hours.iter_mut().enumerate().skip(1) {
+            *ambient = Self::at_hour(&resource.mes, hour as u8).map_err(|error| {
+                format!("{} at hour {hour}: {error}", resource.source.virtual_path)
+            })?;
+        }
+        Ok(hours)
+    }
+
+    fn resource(vfs: &mut vfs::Vfs, map: &str) -> Result<super::LoadedMes, Box<dyn StdError>> {
         let path = format!("maps/{map}/mapinfo.txt");
         let scheme = match read_bounded(vfs, &path, 65536) {
             Ok((source, bytes)) => {
@@ -52,14 +68,7 @@ impl Ambient {
         if name.contains('/') || scheme <= 0 {
             return Err("invalid ambient light scheme name".into());
         }
-        let resource = load_mes(vfs, &format!("rules/{name}.mes"))?;
-        Self::at_hour(&resource.mes, hour).map_err(|error| {
-            format!(
-                "{} from {}: {error}",
-                resource.source.virtual_path, resource.source
-            )
-            .into()
-        })
+        Ok(load_mes(vfs, &format!("rules/{name}.mes"))?)
     }
 
     fn at_hour(table: &Mes, hour: u8) -> Result<Self, &'static str> {
@@ -248,6 +257,15 @@ impl StaticLight {
             dark,
             flags: if dark { 2 } else { 0 },
         })
+    }
+
+    pub fn retint(&mut self, ambient: Ambient) -> bool {
+        let tint = match self.flags & 0x18 {
+            8 => ambient.indoor,
+            16 => ambient.outdoor,
+            _ => return false,
+        };
+        std::mem::replace(&mut self.tint, tint) != tint
     }
 
     pub fn shadow_candidate(&self) -> Option<crate::shadow::Candidate> {

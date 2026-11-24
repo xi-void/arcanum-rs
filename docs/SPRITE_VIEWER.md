@@ -61,28 +61,13 @@ and order. With the stock winners the alignment frame covers 128 opaque
 bread pixels while 1,311 opaque bread pixels remain visible. Its other
 37 opaque pixels extend beyond the bread silhouette.
 
-## Window lifecycle and dependencies
+## Window lifecycle
 
-`winit` 0.30.13 handles the window and events. `softbuffer` 0.4.8 presents
-a CPU buffer. Both use the raw-window-handle 0.6 interface. The optional
-build enables Wayland and X11 support. Ordinary builds and tests exclude
-both graphical crates from the active dependency graph.
-[Winit crate](https://docs.rs/crate/winit/0.30.13)
-· [Softbuffer crate](https://docs.rs/crate/softbuffer/0.4.8)
+The `windowed` feature uses winit for native events and wgpu Vulkan for
+presentation. Fixed diagnostic sprites and camera scenes use the same sprite
+compositor as gameplay. Window expose, resize and input events request redraws.
 
-The app creates the window and surface on resume. It requests an
-initial redraw and reacts to resize, scale changes and desktop
-redraw events. A zero-sized surface skips presentation. On a drawable
-redraw, engine code clears one RGB8 buffer, draws every sprite in order,
-and packs the completed pixels once into softbuffer's contiguous
-`0x00RRGGBB` words. The viewer uses no per-sprite framebuffer. The
-event loop waits between events and exits on close or a reported
-presentation error. [Viewer](../src/viewer.rs)
-· [Softbuffer pixel format](https://docs.rs/softbuffer/latest/softbuffer/struct.Buffer.html#data-representation)
-
-The viewer presents static frames with caller-supplied ordering.
-Animation, depth sorting, filtering, color-managed blending, GPU
-rendering, and world or camera coordinates are outside this milestone.
+The measurements below describe historical implementations.
 
 ## Milestone 27 verification and performance
 

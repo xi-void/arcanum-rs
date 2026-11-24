@@ -7,19 +7,18 @@ remains available with or without the HUD.
 
 ```sh
 # Classic, using installed Arcanum UI artwork.
-cargo run --locked --release --features windowed,gpu -- \
-  play "$HOME/Work/arcanum-ce-test" --ui classic --renderer vulkan
+cargo run --locked --release --features windowed -- \
+  play "$HOME/Work/arcanum-ce-test" --ui classic
 
 # Replacement package. The path can also name the manifest itself.
 target/release/arcanum-rs play "$HOME/Work/arcanum-ce-test" \
-  --ui ui/field-notes --ui-scale 175 --renderer cpu
+  --ui ui/field-notes --ui-scale 175
 
 # World controls and Escape menu, with no HUD instance.
 target/release/arcanum-rs play "$HOME/Work/arcanum-ce-test" --ui off
 ```
 
-Omit `--ui` for Classic and omit `--renderer` for the normal renderer
-default. OpenGL uses `--renderer gles` with the GPU feature. Press **[** or
+Omit `--ui` for Classic. The windowed build presents through Vulkan. Press **[** or
 **]** to adjust UI scale by 25 percentage points during play. Use **Tab**
 or **Shift+Tab** to move between available HUD actions and **Enter** or
 **Space** to activate the focused action. The mouse can activate the same

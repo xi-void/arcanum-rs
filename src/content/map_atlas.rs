@@ -30,8 +30,7 @@ pub fn world_pixel(tile: Point, width: u32) -> Option<Point> {
     Some((width.checked_sub(tile.0 / 64)?, tile.1 / 64))
 }
 
-/// A selection is session state for future travel. An available sector is only
-/// a data check. Route eligibility and arrival collision belong to travel.
+/// A selection identifies an authored destination. The sector flag describes an explicit authored resource. Route eligibility and arrival collision belong to travel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
     pub area: i32,
@@ -46,6 +45,7 @@ pub struct Atlas {
     pub discovered: BTreeSet<i32>,
     pub destination: Option<Selection>,
     towns: BTreeMap<u32, (String, bool)>,
+    keyed_maps: BTreeMap<i32, i32>,
     pub offset: (i32, i32),
     pub start_map: i32,
 }
@@ -82,6 +82,30 @@ impl Atlas {
             .ok_or("missing world atlas offsets")?
             .split_once(',')
             .ok_or("invalid world atlas offsets")?;
+        // CE's MapKeyedTo is a one-based index into consecutive MapList
+        // rows starting at 5000. The native catalog exposes the MES IDs.
+        let keyed_maps = world
+            .mes
+            .entries()
+            .filter_map(|(row, fields)| {
+                let index = row.checked_sub(50).filter(|&i| i >= 0)?;
+                let keyed = fields
+                    .split(',')
+                    .filter_map(|field| field.split_once(':'))
+                    .find(|(key, _)| key.trim().eq_ignore_ascii_case("MapKeyedTo"))?;
+                let ce_index = keyed.1.trim().parse::<i32>().ok().filter(|&i| i > 0)?;
+                let id = 4999i32.checked_add(ce_index)?;
+                let valid = catalog
+                    .maps
+                    .iter()
+                    .map(|map| map.id)
+                    .zip(5000..=id)
+                    .take_while(|(found, expected)| found == expected)
+                    .count()
+                    == ce_index as usize;
+                valid.then_some((index, id))
+            })
+            .collect();
         let discovered = BTreeSet::new();
         let mut atlas = Self {
             catalog,
@@ -89,12 +113,18 @@ impl Atlas {
             discovered,
             destination: None,
             towns,
+            keyed_maps,
             offset: (offset.0.trim().parse()?, offset.1.trim().parse()?),
             start_map,
         };
         let start = atlas.catalog.new_game()?.map_list_center;
         atlas.discover_near(start);
         Ok(atlas)
+    }
+
+    pub fn travel_available_from(&self, world_id: i32, map_id: i32, town_id: u32) -> bool {
+        // The original travel action arrives in the module's START_MAP.
+        town_id == 0 && map_id == self.start_map && self.keyed_maps.get(&world_id) == Some(&map_id)
     }
 
     pub fn discover_near(&mut self, tile: Point) {

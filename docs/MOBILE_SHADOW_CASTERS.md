@@ -2,9 +2,9 @@
 
 ```sh
 game="$HOME/Work/arcanum-ce-test"
-cargo run --offline --locked --release --features gpu -- art world "$game" --sectors "bates mansion lev 1" \
+cargo run --offline --locked --release --features windowed -- art world "$game" --sectors "bates mansion lev 1" \
   1 1 1 1 91 79 1280 720 --lighting 12 --light-probe 90 79 \
-  --renderer vulkan --animation-ms 90 --trace
+  --animation-ms 90 --trace
 ```
 
 In the sector viewer, **I/J/K/L** move probe 1, **1** switches that
@@ -12,7 +12,7 @@ probe on or off, **3** switches its directional-shadow eligibility,
 and **S** switches both ambient and directional mobile shadows on or
 off. Use **Home** to restore the camera. Probe illumination stays
 enabled when only eligibility changes. Omit `--animation-ms` for live
-fire. The same scene is available with `--renderer cpu`.
+fire.
 
 [Milestone 49 adds the original K’na Tha fidget using this shadow pass](CRITTER_FIDGET.md).
 

@@ -71,6 +71,7 @@ pub struct Preparation {
 pub struct Compositor {
     pub device: Device,
     pub queue: Queue,
+    format: TextureFormat,
     over: RenderPipeline,
     add: RenderPipeline,
     subtract: RenderPipeline,
@@ -91,9 +92,9 @@ pub struct Compositor {
     failure: Arc<Mutex<Option<String>>>,
 }
 
-pub fn instance(backends: Backends) -> Instance {
+pub fn instance() -> Instance {
     Instance::new(&InstanceDescriptor {
-        backends,
+        backends: Backends::VULKAN,
         ..Default::default()
     })
 }
@@ -101,10 +102,9 @@ pub fn instance(backends: Backends) -> Instance {
 /// Keep hardware identification explicit, including for offscreen tests.
 pub fn hardware_adapter(
     instance: &Instance,
-    backends: Backends,
     surface: Option<&Surface<'_>>,
 ) -> Result<Adapter, String> {
-    let adapters = instance.enumerate_adapters(backends);
+    let adapters = instance.enumerate_adapters(Backends::VULKAN);
     let mut diagnostics = Vec::new();
     for adapter in adapters {
         let info = adapter.get_info();
@@ -137,7 +137,7 @@ pub fn hardware_adapter(
         }
     }
     Err(format!(
-        "no compatible hardware GPU for {backends:?} (found: {}); select --renderer cpu for software presentation",
+        "no compatible Vulkan hardware adapter (found: {}); check that a Vulkan-capable graphics driver and ICD are installed",
         diagnostics.join(", ")
     ))
 }
@@ -285,6 +285,7 @@ impl Compositor {
         let compositor = Self {
             device,
             queue,
+            format,
             over,
             add,
             subtract,
@@ -344,6 +345,16 @@ impl Compositor {
         if !(1..=3).contains(&zoom) {
             return Err("zoom must be 1, 2 or 3".into());
         }
+        self.prepare_draws(size, f32::from(zoom), input, overlay)
+    }
+
+    fn prepare_draws<'a>(
+        &mut self,
+        size: (u32, u32),
+        scale: f32,
+        input: impl IntoIterator<Item = WorldDraw<'a>>,
+        overlay: impl IntoIterator<Item = WorldDraw<'a>>,
+    ) -> Result<Preparation, String> {
         self.prepared = false;
         self.check_health()?;
         let start = Instant::now();
@@ -421,7 +432,7 @@ impl Compositor {
         self.queue.write_buffer(
             &self.viewport,
             0,
-            bytes_of(&[size.0 as f32, size.1 as f32, f32::from(zoom), 0.]),
+            bytes_of(&[size.0 as f32, size.1 as f32, scale, 0.]),
         );
         if !self.draws.is_empty() {
             self.queue
@@ -490,13 +501,27 @@ impl Compositor {
             },
             extent((frame.width, frame.height)),
         );
-        let view = texture.create_view(&TextureViewDescriptor::default());
+        self.retain_texture(
+            id,
+            asset,
+            &texture.create_view(&TextureViewDescriptor::default()),
+            bytes,
+        );
+    }
+
+    fn retain_texture(
+        &mut self,
+        id: TextureId,
+        asset: &Arc<LoadedFrame>,
+        view: &TextureView,
+        bytes: usize,
+    ) {
         let bind = self.device.create_bind_group(&BindGroupDescriptor {
             label: None,
             layout: &self.texture_layout,
             entries: &[BindGroupEntry {
                 binding: 0,
-                resource: BindingResource::TextureView(&view),
+                resource: BindingResource::TextureView(view),
             }],
         });
         self.textures.insert(
@@ -509,6 +534,56 @@ impl Compositor {
             },
         );
         self.texture_bytes += bytes;
+    }
+
+    /// Capture a cropped scene directly into a resident sprite texture.
+    /// The caller supplies the logical sprite dimensions and a physical scale.
+    pub fn render_sprite<'a>(
+        &mut self,
+        asset: &Arc<LoadedFrame>,
+        scale: f32,
+        background: [u8; 3],
+        draws: impl IntoIterator<Item = WorldDraw<'a>>,
+    ) -> Result<(), String> {
+        let frame = &asset.decoded.frame;
+        let size = (frame.width, frame.height);
+        let limit = self.device.limits().max_texture_dimension_2d;
+        let bytes = u64::from(size.0) * u64::from(size.1) * 4;
+        if size.0 == 0
+            || size.1 == 0
+            || size.0 > limit
+            || size.1 > limit
+            || bytes > self.texture_budget.0 as u64
+            || !scale.is_finite()
+            || scale <= 0.
+        {
+            return Err("invalid Vulkan inset dimensions or scale".into());
+        }
+        self.prepare_draws(size, scale, draws, std::iter::empty())?;
+        let texture = self.device.create_texture(&TextureDescriptor {
+            label: Some("Arcanum map player inset"),
+            size: extent(size),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: self.format,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor::default());
+        self.encode(&mut encoder, &view, background)?;
+        // Submit before a subsequent prepare writes the shared draw buffers.
+        self.queue.submit([encoder.finish()]);
+        let id = Arc::as_ptr(asset) as usize;
+        if let Some(old) = self.textures.remove(&id) {
+            self.texture_bytes -= old.bytes;
+        }
+        self.make_room(1, bytes as usize);
+        self.retain_texture(id, asset, &view, bytes as usize);
+        self.check_health()
     }
 
     pub fn encode(
