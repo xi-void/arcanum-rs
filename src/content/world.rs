@@ -29,7 +29,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod debug;
 mod interaction;
+pub use debug::{DebugCollision, DebugObject};
 mod prefetch;
 pub use super::jumps::Destination;
 pub use interaction::DoorStates;
@@ -541,12 +543,12 @@ impl CachedSector {
                             i64::from(tile.1) + i64::from(source.offset.1) - y,
                         );
                         report.object_audit.push((record.index, format!(
-                            "record {} {:?} bytes {:?}, identity {:02x?}, prototype {} from {}, tile {:?} (stored {:?}), ART {:#010x} (stored {:x?}), {} from {}, direction {} (stored {}), frame {}, palette {}, offset {:?}, pivot {pivot:?}, order {key:?}",
+                            "record {} {:?} bytes {:?}, identity {:02x?}, prototype {} from {}, tile {:?} (stored {:?}), ART {:#010x} (stored {:x?}), {} from {}, direction {} (stored {}), frame {}, palette {}, offset {:?}, pivot {pivot:?}, order {key:?}; effective object flags {:#010x}, Use script {:?}; instance overrides {:?}",
                             record.index, record.category, record.span, record.instance_id,
                             record.prototype.0, source.prototype, (key.2, key.1), record.stored_tile,
                             record.art_id, source.stored_art, frame.source.virtual_path, frame.source,
                             source.rotation, frame_info.stored_rotation, source.frame,
-                            frame_info.stored_palette, source.offset,
+                            frame_info.stored_palette, source.offset, source.flags, source.use_script, record.fields,
                         )));
                     }
                     draws.push(raster);
@@ -612,7 +614,9 @@ impl CachedSector {
                 ));
                 continue;
             }
-            self.report.diagnostics.push(mobile.diagnostic);
+            self.report
+                .diagnostics
+                .push(format!("mobile runtime {}: {}", key.5, mobile.diagnostic));
             raster.object_light = ObjectLight::Point;
             let walk = mobile.walk.filter(|walk| {
                 let fits = walk.steps.iter().all(|&step| {
@@ -1683,6 +1687,9 @@ impl SectorCache {
     }
 
     fn validate_arrival(&self, tile: (u32, u32)) -> Result<(), String> {
+        if self.collision_disabled && Self::available_tile(&self.entries, tile) {
+            return Ok(());
+        }
         let cell = Self::collision_cell(&self.entries, tile);
         if collision::can_stand(cell) {
             return Ok(());
@@ -1698,6 +1705,15 @@ impl SectorCache {
         Err(format!("cannot enter tile {tile:?}: {detail}"))
     }
 
+    fn available_tile(
+        entries: &BTreeMap<u64, (CachedSector, Option<u64>)>,
+        tile: (u32, u32),
+    ) -> bool {
+        entries
+            .get(&tile_sector_id(tile))
+            .is_some_and(|(sector, _)| sector.report.source.is_some())
+    }
+
     fn unrestricted_step(
         entries: &BTreeMap<u64, (CachedSector, Option<u64>)>,
         (x, y): (u32, u32),
@@ -1705,9 +1721,7 @@ impl SectorCache {
     ) -> Option<(u32, u32)> {
         let (dx, dy) = collision::DIRECTIONS[usize::from(facing)];
         let next = (x.checked_add_signed(dx)?, y.checked_add_signed(dy)?);
-        let (sector, _) = entries.get(&tile_sector_id(next))?;
-        sector.report.source.as_ref()?;
-        Some(next)
+        Self::available_tile(entries, next).then_some(next)
     }
 
     fn update_player(&mut self, input: (i32, i32), run: bool, now: Duration) -> Option<(i32, i32)> {
@@ -1716,7 +1730,7 @@ impl SectorCache {
         let states = &self.door_states;
         let player = self.player.as_mut()?;
         player.update(input, run, now, |tile, facing| {
-            if self.collision_disabled && input != (0, 0) {
+            if self.collision_disabled {
                 Self::unrestricted_step(entries, tile, facing)
             } else {
                 collision::step(tile, facing, |tile| {
@@ -1929,6 +1943,11 @@ impl WorldStream {
         if let Some(player) = &mut self.cache.player {
             player.set_facing(facing & 7);
         }
+    }
+
+    pub fn with_collision_bypass(mut self, enabled: bool) -> Self {
+        self.cache.collision_disabled = enabled;
+        self
     }
 
     pub fn validate_arrival(&self, tile: (u32, u32)) -> Result<(), String> {

@@ -5,6 +5,7 @@ pub mod camera;
 pub mod compositor;
 pub mod content;
 pub mod dat;
+pub mod developer;
 pub mod facade;
 #[cfg(feature = "windowed")]
 pub mod gpu;

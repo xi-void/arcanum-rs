@@ -41,7 +41,7 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] mes get <game-directory> <resource-path> <entry-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art inspect <game-directory> <resource-path> <frame> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art export <game-directory> <resource-path> <frame> <output.pam> [--mods <mods-directory> <mod-id> ...]
-  arcanum-rs [--ordered] play <game-directory> [--map <map-name-or-id>] [--center X Y] [--ui classic|off|PATH] [--ui-scale PERCENT] [--map-ui PATH] [--map-reveal] [--discover-all] [--debug] [--lighting <hour>] (requires --features windowed)
+  arcanum-rs [--ordered] play <game-directory> [--map <map-name-or-id>] [--center X Y] [--ui classic|off|PATH] [--ui-scale PERCENT] [--map-ui PATH] [--map-reveal] [--discover-all] [--debug] [--console-ui PATH] [--lighting <hour>] (requires --features windowed)
   arcanum-rs art demo                          (requires --features windowed)
   arcanum-rs [--ordered] art sector-audit <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art sector-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
@@ -1172,6 +1172,7 @@ fn show_world(
     let mut map_reveal = false;
     let mut discover_all = false;
     let mut debug = false;
+    let mut console_theme = None;
     let mut world_args = Vec::with_capacity(options.len());
     let mut args = options.iter();
     while let Some(flag) = args.next() {
@@ -1195,8 +1196,16 @@ fn show_world(
             Some("--map-reveal") if playing => map_reveal = true,
             Some("--discover-all") if playing => discover_all = true,
             Some("--debug") if playing => debug = true,
+            Some("--console-ui") if playing && console_theme.is_none() => {
+                console_theme = Some(std::path::PathBuf::from(
+                    args.next().ok_or("--console-ui expects a TOML path")?,
+                ));
+            }
             _ => world_args.push(flag.clone()),
         }
+    }
+    if console_theme.is_some() && !debug {
+        return Err("--console-ui requires --debug".into());
     }
     let (theme, ui_scale, stripped) = if playing {
         play_ui_options(&world_args)?
@@ -1204,14 +1213,14 @@ fn show_world(
         (None, None, world_args)
     };
     let options = stripped.as_slice();
-    let hud = if let Some(theme) = theme {
+    let hud = if let Some(theme) = &theme {
         let mods = options
             .iter()
             .position(|arg| arg == "--mods")
             .map_or(&[][..], |index| &options[index..]);
         let mut vfs = inspection_vfs(game, mods, policy)?;
         Some(Box::new(
-            viewer::Hud::load(&theme, &mut vfs, ui_scale)
+            viewer::Hud::load(theme, &mut vfs, ui_scale)
                 .map_err(|error| format!("UI theme {}: {error}", theme.display()))?,
         ))
     } else {
@@ -1221,17 +1230,36 @@ fn show_world(
         streaming_world(game, options, policy, playing)?
     {
         let world = if playing { world.with_player()? } else { world };
+        let world = if debug {
+            world.with_object_audit()
+        } else {
+            world
+        };
         let hour = world.lighting_hour();
         let mount_options = options
             .iter()
             .position(|arg| arg == "--mods")
             .map_or(&[][..], |index| &options[index..]);
+        let custom = map_theme.is_some();
+        let path = map_theme.unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/classic-map/theme.toml")
+        });
+        let developer = if debug {
+            let console_theme = console_theme.unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/developer-console.toml")
+            });
+            Some(viewer::Developer::load(
+                inspection_vfs(game, mount_options, policy)?,
+                console_theme,
+                theme,
+                path.clone(),
+                ui_scale.unwrap_or(100),
+            )?)
+        } else {
+            None
+        };
         let map_ui = if playing {
             let vfs = inspection_vfs(game, mount_options, policy)?;
-            let custom = map_theme.is_some();
-            let path = map_theme.unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/classic-map/theme.toml")
-            });
             match viewer::MapUi::load(&path, vfs, ui_scale, map_reveal, discover_all) {
                 Ok(map) => Some(Box::new(map)),
                 Err(error) if !custom => {
@@ -1245,7 +1273,7 @@ fn show_world(
         };
         let travel: Option<viewer::TravelLoader<'_>> = if playing {
             Some(Box::new(
-                move |current, dst, facing, viewport, current_hour| {
+                move |current, dst, facing, viewport, current_hour, bypass| {
                     let load = || -> Result<_, Box<dyn Error>> {
                         let mut vfs = inspection_vfs(game, mount_options, policy)?;
                         let catalog = content::maps::Catalog::load(&mut vfs)?;
@@ -1266,7 +1294,10 @@ fn show_world(
                         if let Some(hour) = hour {
                             world = world.with_lighting(current_hour.unwrap_or(hour))?;
                         }
-                        world = world.with_player()?;
+                        world = world.with_player()?.with_collision_bypass(bypass);
+                        if debug {
+                            world = world.with_object_audit();
+                        }
                         world.set_arrival_facing(facing);
                         world.prepare(&camera, viewport)?;
                         world.validate_arrival(center)?;
@@ -1289,6 +1320,7 @@ fn show_world(
                 animation_ms,
                 explore,
                 debug,
+                developer,
                 travel: travel.map(|loader| (map, loader)),
                 map_ui,
                 hud,

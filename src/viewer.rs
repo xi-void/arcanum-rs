@@ -2,6 +2,9 @@
 
 use arcanum_rs::art::SpriteFrame;
 
+mod console;
+mod development;
+pub(super) use development::Developer;
 mod gpu;
 mod hud;
 mod map_ui;
@@ -168,6 +171,7 @@ pub type TravelLoader<'a> = Box<
             u8,
             (u32, u32),
             Option<u8>,
+            bool,
         ) -> Result<(String, WorldStream, Camera), String>
         + 'a,
 >;
@@ -184,6 +188,7 @@ pub struct StreamOptions<'a> {
     pub animation_ms: Option<u64>,
     pub explore: bool,
     pub debug: bool,
+    pub developer: Option<Developer>,
     pub travel: Option<(String, TravelLoader<'a>)>,
     pub hud: Option<Box<Hud>>,
     pub map_ui: Option<Box<MapUi>>,
@@ -201,6 +206,7 @@ pub fn show_stream(
         animation_ms,
         explore,
         debug,
+        developer,
         travel,
         hud,
         map_ui,
@@ -243,6 +249,7 @@ pub fn show_stream(
         },
         PhysicalSize::<u32>::from(size).into(),
         event_loop,
+        developer,
     )
 }
 
@@ -274,7 +281,7 @@ enum ViewContent<'a> {
 }
 
 fn show_content(title: String, content: ViewContent<'_>, size: Size) -> Result<(), String> {
-    run_content(title, content, size, make_loop()?)
+    run_content(title, content, size, make_loop()?, None)
 }
 
 fn make_loop() -> Result<EventLoop<()>, String> {
@@ -288,6 +295,7 @@ fn run_content(
     content: ViewContent<'_>,
     size: Size,
     event_loop: EventLoop<()>,
+    developer: Option<Developer>,
 ) -> Result<(), String> {
     event_loop.set_control_flow(ControlFlow::Wait);
     let clock = match &content {
@@ -311,6 +319,8 @@ fn run_content(
         clock_paused_for: Duration::ZERO,
         map_since: None,
         clock,
+        developer,
+        modifiers: Default::default(),
     };
     event_loop
         .run_app(&mut app)
@@ -338,6 +348,8 @@ struct Viewer<'a> {
     clock_paused_for: Duration,
     map_since: Option<Instant>,
     clock: Option<Clock>,
+    developer: Option<Developer>,
+    modifiers: winit::keyboard::ModifiersState,
 }
 
 const CAMERA_TICK: Duration = Duration::from_millis(16);
@@ -427,6 +439,10 @@ struct WindowSurface {
     renderer: gpu::WindowRenderer,
     map_inset: Option<Arc<LoadedFrame>>,
     developer_status: Option<Arc<LoadedFrame>>,
+    last_frame_time: Duration,
+    frame_presented_at: Option<Instant>,
+    last_frame_interval: Option<Duration>,
+    submitted_frames: u64,
     window: Arc<Window>,
     occluded: bool,
 }
@@ -454,6 +470,15 @@ impl Viewer<'_> {
     }
 
     fn change_location(&mut self, target: Destination, facing: u8) -> Result<(), String> {
+        self.load_location(target, facing, false)
+    }
+
+    fn load_location(
+        &mut self,
+        target: Destination,
+        facing: u8,
+        bypass: bool,
+    ) -> Result<(), String> {
         let hour = self
             .clock
             .as_ref()
@@ -474,8 +499,14 @@ impl Viewer<'_> {
             return Err("World transition is unavailable".into());
         };
         let size = view.window.inner_size();
-        let (map, next, next_camera) =
-            (travel.loader)(&travel.map, target, facing, (size.width, size.height), hour)?;
+        let (map, next, next_camera) = (travel.loader)(
+            &travel.map,
+            target,
+            facing,
+            (size.width, size.height),
+            hour,
+            bypass,
+        )?;
         let wake = travel.wake.clone();
         let mut next = next
             .into_interactive(
@@ -493,7 +524,7 @@ impl Viewer<'_> {
         }
         eprintln!("Entered {map} at {:?}, game hour {hour:?}", target.tile);
         view.window.set_title(&format!("Arcanum-RS | {map} play"));
-        view.developer_status = None;
+        view.developer_status = bypass.then(|| menu::developer_status("COLLISION OFF"));
         travel.map = map;
         **world = next;
         *camera = next_camera;
@@ -505,6 +536,7 @@ impl Viewer<'_> {
         self.player_deadline = None;
         self.animation_deadline = None;
         view.window.request_redraw();
+        self.reset_developer_location();
         Ok(())
     }
 
@@ -944,6 +976,10 @@ impl Viewer<'_> {
             renderer,
             map_inset: None,
             developer_status: None,
+            last_frame_time: Duration::ZERO,
+            frame_presented_at: None,
+            last_frame_interval: None,
+            submitted_frames: 0,
             window,
             occluded: false,
         })
@@ -1079,8 +1115,9 @@ impl ApplicationHandler for Viewer<'_> {
     }
 
     fn user_event(&mut self, _: &ActiveEventLoop, _: ()) {
+        let paste = self.developer_paste();
         if let ViewContent::Stream { world, .. } = &mut self.content
-            && world.receive()
+            && (world.receive() || paste)
             && self.map_since.is_none()
             && let Some(view) = &self.view
         {
@@ -1117,7 +1154,7 @@ impl ApplicationHandler for Viewer<'_> {
         if self.view.as_ref().is_none_or(|view| view.window.id() != id) {
             return;
         }
-        if self.map_event(event_loop, &event) {
+        if self.developer_event(event_loop, &event) || self.map_event(event_loop, &event) {
             return;
         }
         let playing = matches!(&self.content, ViewContent::Stream { world, .. } if world.playing());
@@ -1653,6 +1690,7 @@ impl Viewer<'_> {
                                 menu: menu.as_ref(),
                                 cursor: self.cursor,
                                 hud: hud.as_deref_mut(),
+                                developer: self.developer.as_mut(),
                             },
                         )
                         .map(|ready| {
@@ -1744,6 +1782,7 @@ struct FrameOptions<'a> {
     settings: Settings,
     menu: Option<&'a Arc<arcanum_rs::content::art::LoadedFrame>>,
     hud: Option<&'a mut Hud>,
+    developer: Option<&'a mut Developer>,
     cursor: Option<(u32, u32)>,
 }
 
@@ -1762,6 +1801,7 @@ impl WindowSurface {
             settings,
             menu,
             hud,
+            mut developer,
             cursor,
         } = options;
         let zoom = settings.zoom;
@@ -1805,13 +1845,32 @@ impl WindowSurface {
                 start.elapsed()
             );
         }
-        let draws =
-            scene_draws(world, camera, viewport, elapsed, settings).chain(menu.map(|asset| {
-                arcanum_rs::content::world::WorldDraw {
-                    asset,
-                    sprite: menu::layer(asset, viewport),
-                    modulation: Modulation::Unlit,
-                }
+        let scale = hud.map(|hud| hud.scale());
+        let (console, status) = developer.as_deref_mut().map_or((None, None), |dev| {
+            let scale = scale.unwrap_or(dev.ui_scale());
+            (
+                dev.console_frame((size.width, size.height), scale),
+                dev.status_frame(
+                    self.last_frame_time,
+                    self.last_frame_interval,
+                    self.submitted_frames,
+                    world,
+                    scale,
+                    size.width.saturating_sub(24),
+                ),
+            )
+        });
+        let developer = developer.as_deref();
+        let draws = scene_draws(world, camera, viewport, elapsed, settings)
+            .chain(
+                developer
+                    .into_iter()
+                    .flat_map(|dev| dev.world_marks(world, camera, viewport)),
+            )
+            .chain(menu.map(|asset| WorldDraw {
+                asset,
+                sprite: menu::layer(asset, viewport),
+                modulation: Modulation::Unlit,
             }));
         if trace {
             eprintln!(
@@ -1823,6 +1882,7 @@ impl WindowSurface {
                 prepared.shading,
             );
         }
+        let frame_start = Instant::now();
         self.renderer.redraw(
             ((size.width, size.height), zoom),
             background,
@@ -1834,10 +1894,16 @@ impl WindowSurface {
                     self.developer_status
                         .iter()
                         .map(|asset| unlit(asset, (12, 52))),
-                ),
+                )
+                .chain(status.iter().map(|asset| unlit(asset, (12, 85))))
+                .chain(console.iter().map(|(asset, anchor)| unlit(asset, *anchor))),
             &self.window,
             trace,
         )?;
+        self.last_frame_time = frame_start.elapsed();
+        let now = Instant::now();
+        self.last_frame_interval = self.frame_presented_at.replace(now).map(|prev| now - prev);
+        self.submitted_frames += 1;
         Ok(true)
     }
 

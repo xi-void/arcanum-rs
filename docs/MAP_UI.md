@@ -128,12 +128,9 @@ cargo run --locked --release --features windowed -- \
   play "$HOME/Work/arcanum-ce-test" --map 5000 --center 28455 31171
 ```
 
-For developer exploration, add `--debug` and press **F6** to toggle
-collision for keyboard movement. The status appears in the window.
-This works within loaded original or template sectors. Click-to-move and
-object Use retain their ordinary rules. Automatic jump points are suspended
-during bypass. To restore collision, come to a walkable tile and press **F6**.
-A map transition resets bypass.
+For developer exploration, add `--debug` and press **F10** to open the
+[developer console](DEVELOPER_CONSOLE.md). The `tcl` command and **F6**
+shortcut share the same collision toggle.
 
 Crash Site is initially known. Overworld proximity discovery uses the
 authored `GameArea` radius. Virgil's introductory dialogue

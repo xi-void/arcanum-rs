@@ -274,6 +274,21 @@
 - Do not treat successful compilation or passing automated tests as proof that a feature works correctly during gameplay.
 - Record unresolved issues honestly instead of introducing speculative fixes to satisfy acceptance criteria.
 
+## Machine-readable diagnostics and automation
+
+- Treat machine-readable engine inspection as a core development capability.
+- Prefer structured diagnostic output over exclusively human-readable logs.
+- Expose meaningful runtime state through reusable inspection APIs.
+- Reuse the developer command registry for interactive and automated diagnostics.
+- Support headless resource and world-format validation wherever practical.
+- Preserve original resource provenance in structured diagnostic results.
+- Group compatibility failures by generic underlying cause rather than individual location.
+- Support deterministic reproduction of gameplay and rendering defects.
+- Prefer direct engine-state inspection over simulated keyboard and mouse navigation.
+- Keep runtime automation interfaces local, explicitly developer-enabled and disabled during normal gameplay.
+- Do not introduce unnecessary continuous diagnostic logging or expensive GPU readbacks.
+- Use screenshots when visual verification is necessary, not as a substitute for accessible engine state.
+
 ## Completion reports
 
 - Summarize implemented changes and verified behavior.

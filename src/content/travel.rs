@@ -58,6 +58,7 @@ pub fn starting_hour(vfs: &mut Vfs) -> Result<u8, Box<dyn StdError>> {
 pub struct Clock {
     start_hour: u8,
     travel_hours: u64,
+    hour_offset: i64,
 }
 
 impl Clock {
@@ -65,7 +66,13 @@ impl Clock {
         Self {
             start_hour,
             travel_hours: 0,
+            hour_offset: 0,
         }
+    }
+
+    pub fn set_hour(&mut self, hour: u8, play: Duration) {
+        let offset = i64::from(hour % 24) - i64::from(self.hour(play));
+        self.hour_offset = self.hour_offset.saturating_add(offset);
     }
 
     pub fn step_travel(&mut self, steps: usize) {
@@ -73,9 +80,10 @@ impl Clock {
     }
 
     pub fn hours(&self, play: Duration) -> u64 {
-        u64::from(self.start_hour)
-            + self.travel_hours
-            + (play.as_millis() * 8 / u128::from(HOUR)) as u64
+        let normal = u64::from(self.start_hour)
+            .saturating_add(self.travel_hours)
+            .saturating_add((play.as_millis() * 8 / u128::from(HOUR)) as u64);
+        normal.saturating_add_signed(self.hour_offset)
     }
 
     pub fn hour(&self, play: Duration) -> u8 {
@@ -349,6 +357,17 @@ impl Journey {
 mod tests {
     use super::*;
     use crate::content::map_atlas::Atlas;
+
+    #[test]
+    fn set_time_keeps_day_and_elapsed_progression() {
+        let mut clock = Clock::new(15);
+        clock.step_travel(25);
+        let elapsed = Duration::from_millis(HOUR / 8);
+        assert_eq!(clock.hours(elapsed), 41);
+        clock.set_hour(2, elapsed);
+        assert_eq!(clock.hours(elapsed), 26);
+        assert_eq!(clock.hour(elapsed * 2), 3);
+    }
 
     #[test]
     fn routing_honors_terrain_blocks_and_local_detours() {
