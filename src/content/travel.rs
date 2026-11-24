@@ -348,6 +348,11 @@ impl Journey {
         self.done == self.steps.len()
     }
 
+    pub fn diagnostic(&self) -> serde_json::Value {
+        serde_json::json!({"steps_total":self.steps.len(),"steps_traversed":self.done,
+            "current_sector":self.traversed().last(),"destination_sector":self.steps.last()})
+    }
+
     pub fn traversed(&self) -> &[Point] {
         &self.steps[..self.done]
     }

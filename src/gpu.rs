@@ -53,7 +53,7 @@ struct SpriteTexture {
     used: u64,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
 pub struct Preparation {
     pub commands: Duration,
     pub uploads: Duration,
@@ -830,7 +830,7 @@ impl Timestamps {
     }
 }
 
-fn read_buffer(
+pub fn read_buffer(
     device: &Device,
     buffer: &Buffer,
     submission: SubmissionIndex,

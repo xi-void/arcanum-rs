@@ -137,6 +137,19 @@ impl TerrainMap {
         }))
     }
 
+    pub(super) fn unique_template_references(
+        &self,
+    ) -> impl Iterator<Item = (u16, Result<String, &'static str>)> + '_ {
+        self.grid
+            .cells
+            .iter()
+            .copied()
+            .filter(|&word| word != u16::MAX)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|word| (word, template(word, &self.names)))
+    }
+
     pub fn passable(&self, sector: (i32, i32)) -> bool {
         self.grid.at(sector).is_some_and(|word| {
             word != 0xffff

@@ -5,9 +5,11 @@ use arcanum_rs::{
         map_atlas::{Atlas, world_pixel},
         world::{DebugObject, DeveloperAction},
     },
-    developer::{self, Output, Request},
+    developer::{self, EventHistory, Failure, ObjectFilter, Output, Request, Snapshot},
+    developer_ipc::{Job, Reply, Server},
     vfs::Vfs,
 };
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 pub(crate) struct Developer {
@@ -24,6 +26,14 @@ pub(crate) struct Developer {
     fps: bool,
     marks: Marks,
     status: Option<(String, Arc<LoadedFrame>)>,
+    socket: Option<PathBuf>,
+    server: Option<Server>,
+    captures: Option<(PathBuf, Arc<cap_std::fs::Dir>)>,
+    events: EventHistory,
+    correlation: Option<u64>,
+    quit: bool,
+    reloads: u64,
+    reload_status: Option<Value>,
 }
 
 impl Developer {
@@ -50,7 +60,57 @@ impl Developer {
             fps: false,
             marks: Marks::new(),
             status: None,
+            socket: None,
+            server: None,
+            captures: None,
+            events: EventHistory::default(),
+            correlation: None,
+            quit: false,
+            reloads: 0,
+            reload_status: None,
         })
+    }
+
+    pub(crate) fn with_automation(
+        mut self,
+        socket: Option<PathBuf>,
+        directory: Option<PathBuf>,
+    ) -> std::io::Result<Self> {
+        self.socket = socket;
+        if let Some(path) = directory {
+            let path = path.canonicalize()?;
+            let directory =
+                cap_std::fs::Dir::open_ambient_dir(&path, cap_std::ambient_authority())?;
+            self.captures = Some((path, Arc::new(directory)));
+        }
+        Ok(self)
+    }
+
+    pub(super) fn start_automation(&mut self, proxy: EventLoopProxy<()>) -> Result<(), String> {
+        if let Some(socket) = self.socket.take() {
+            self.server = Some(
+                Server::bind(&socket, move || {
+                    let _ = proxy.send_event(());
+                })
+                .map_err(|err| format!("Developer socket {}: {err}", socket.display()))?,
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) fn capture_enabled(&self) -> bool {
+        self.captures.is_some()
+    }
+
+    pub(super) fn event(&mut self, category: &str, id: Option<u64>, data: Value) {
+        self.events.record(category, id.or(self.correlation), data);
+    }
+
+    fn mods(&self) -> Vec<String> {
+        self.vfs
+            .mounts()
+            .filter_map(|mount| mount.mod_id.as_ref().map(ToString::to_string))
+            .collect()
     }
 
     fn resolve(
@@ -400,6 +460,40 @@ impl Viewer<'_> {
         true
     }
 
+    pub(super) fn pump_automation(&mut self, event_loop: &ActiveEventLoop) {
+        let job = self
+            .developer
+            .as_ref()
+            .and_then(|dev| dev.server.as_ref()?.jobs.try_recv().ok());
+        if let Some(Job { call, reply }) = job {
+            if let Some(dev) = &mut self.developer {
+                dev.correlation = Some(call.id);
+            }
+            let (name, result) = developer::dispatch_args(&call.command, &call.args, self);
+            let clear = matches!(&result, Ok(Output::Clear));
+            let response = Reply::result(call.id, name, result);
+            if let Some(dev) = &mut self.developer {
+                if clear {
+                    dev.console.output(Ok(Output::Clear));
+                }
+                dev.event(
+                    "command",
+                    Some(call.id),
+                    json!({"command":name,"status":response.status,"error":response.error}),
+                );
+                dev.correlation = None;
+            }
+            let _ = reply.try_send(response);
+            if clear && let Some(view) = &self.view {
+                view.window.request_redraw();
+            }
+        }
+        if self.developer.as_ref().is_some_and(|dev| dev.quit) {
+            event_loop.exit();
+        }
+        self.update_control_flow(event_loop);
+    }
+
     fn dispatch_console(&mut self, command: Option<String>) {
         if let Some(command) = command {
             let result = developer::dispatch(&command, self);
@@ -432,7 +526,31 @@ fn load_hud(path: Option<&Path>, vfs: &mut Vfs, scale: u16) -> Result<Option<Box
 }
 
 impl developer::Runtime for Viewer<'_> {
-    fn execute(&mut self, request: Request) -> Result<Output, String> {
+    fn execute(&mut self, request: Request) -> Result<Output, Failure> {
+        let mutating = !matches!(
+            &request,
+            Request::Maps(_)
+                | Request::Position
+                | Request::Sectors
+                | Request::Objects(_)
+                | Request::Resource(..)
+                | Request::Snapshot
+                | Request::Events(_)
+                | Request::Operation(_)
+        );
+        let result = self.execute_developer(request);
+        if result.is_ok()
+            && mutating
+            && let Some(view) = &self.view
+        {
+            view.window.request_redraw();
+        }
+        result
+    }
+}
+
+impl Viewer<'_> {
+    fn execute_developer(&mut self, request: Request) -> Result<Output, Failure> {
         let now = Instant::now();
         let elapsed = self.play_elapsed(now);
         let game = self.game_elapsed(now);
@@ -445,101 +563,268 @@ impl developer::Runtime for Viewer<'_> {
             travel: Some(travel),
             hud,
             map_ui,
+            camera,
+            last_presented,
+            waiting,
             ..
         } = &mut self.content
         else {
             return Err("No active playable world".into());
         };
         let scale = hud.as_ref().map_or(dev.scale, |theme| theme.scale());
-        let line = match request {
+        let viewport = self
+            .view
+            .as_ref()
+            .map(|view| {
+                let size = view.window.inner_size();
+                (size.width, size.height)
+            })
+            .unwrap_or_default();
+        let logical = (
+            viewport.0.div_ceil(u32::from(self.settings.zoom)),
+            viewport.1.div_ceil(u32::from(self.settings.zoom)),
+        );
+        let map = dev.atlas.catalog.find(&travel.map)?;
+        let current_hour = self.clock.as_ref().map(|clock| clock.hour(game));
+        let map_state =
+            json!({"id":map.id,"name":map.name,"directory":map.directory,"area_id":map.area});
+        let result = match request {
             Request::Maps(filter) => {
                 let query = filter.unwrap_or_default().to_lowercase();
-                let mut lines: Vec<_> = dev
-                    .atlas
-                    .catalog
-                    .maps
-                    .iter()
-                    .filter(|map| {
-                        map.name.to_lowercase().contains(&query)
-                            || map.id.to_string().contains(&query)
-                    })
-                    .map(|map| format!("{}  {}", map.id, map.name))
+                let maps:Vec<_> = dev.atlas.catalog.maps.iter()
+                    .filter(|map|map.name.to_lowercase().contains(&query)||map.id.to_string().contains(&query))
+                    .map(|map|json!({"id":map.id,"name":map.name,"directory":map.directory,"entry":map.map_list_center}))
                     .collect();
-                lines.extend(
-                    dev.atlas
-                        .areas
-                        .values()
-                        .filter(|area| area.name.to_lowercase().contains(&query))
-                        .map(|area| format!("Area {}  {}  at {:?}", area.id, area.name, area.tile)),
-                );
-                if lines.is_empty() {
-                    return Err(format!("No original maps or areas match {query:?}"));
-                }
-                return Ok(Output::Lines(lines));
+                let areas: Vec<_> = dev
+                    .atlas
+                    .areas
+                    .values()
+                    .filter(|area| area.name.to_lowercase().contains(&query))
+                    .map(|area| json!({"id":area.id,"name":area.name,"tile":area.tile}))
+                    .collect();
+                json!({"maps":maps,"areas":areas})
             }
             Request::Load(name, tile) => {
                 let (target, label) = dev.resolve(&name, tile)?;
                 let facing = world.player_facing().unwrap_or(0);
                 let bypass = world.collision_bypassed();
+                if self.map_since.is_some() || self.pause.is_some() {
+                    return Err(Failure::new(
+                        "busy",
+                        "Close the map or pause menu before changing locations",
+                    ));
+                }
                 self.load_location(target, facing, bypass)?;
-                format!("Loaded {label} at {:?}", target.tile)
+                json!({"message":format!("Loaded {label} at {:?}",target.tile),"map":target.map,"tile":target.tile,"view_ready":false})
             }
             Request::Teleport(tile) => {
                 let facing = world.player_facing().unwrap_or(0);
                 let bypass = world.collision_bypassed();
+                if self.map_since.is_some() || self.pause.is_some() {
+                    return Err(Failure::new(
+                        "busy",
+                        "Close the map or pause menu before changing locations",
+                    ));
+                }
+                let id = map.id;
                 self.load_location(Destination { map: None, tile }, facing, bypass)?;
-                format!("Player moved to {tile:?}")
+                json!({"message":format!("Player moved to {tile:?}"),"map":id,"tile":tile,"view_ready":false})
             }
             Request::Position => {
-                let map = dev.atlas.catalog.find(&travel.map)?;
-                let (tile, town) = world
-                    .player_map_position()
-                    .ok_or("Player sector is not loaded")?;
-                let sector = arcanum_rs::sector::Coordinates {
-                    x: tile.0 / 64,
-                    y: tile.1 / 64,
-                };
+                let position = world.player_map_position();
+                let tile = position.map(|(tile, _)| tile);
+                let coordinates = tile.map(|(x, y)| arcanum_rs::sector::Coordinates {
+                    x: x / 64,
+                    y: y / 64,
+                });
                 let mapped = if map.id == dev.atlas.start_map {
-                    Some(tile)
+                    tile
                 } else {
                     map.area
                         .and_then(|id| dev.atlas.areas.get(&id))
                         .map(|area| area.tile)
                 };
-                let world_location = mapped
-                    .map(|tile| {
-                        let pixels = map_ui
-                            .as_ref()
-                            .and_then(|ui| world_pixel(tile, ui.world_width()));
-                        format!("World tile {tile:?}, atlas pixel {pixels:?}")
+                let source = tile.and_then(|tile| world.debug_source(tile));
+                let navigation = world.debug_navigation();
+                let area = map
+                    .area
+                    .and_then(|id| dev.atlas.areas.get(&id))
+                    .or_else(|| mapped.and_then(|tile| dev.atlas.nearby_area(tile)))
+                    .map(|area| json!({"id":area.id,"name":area.name,"tile":area.tile}));
+                json!({
+                    "map":map_state,
+                    "player":{"tile":tile,"facing":world.player_facing(),"collision_bypass":world.collision_bypassed(),
+                        "collision":tile.and_then(|tile|world.debug_collision(tile)),"navigation":navigation},
+                    "sector":{"coordinates":coordinates,"id":coordinates.and_then(|sector|sector.id()),
+                        "town_map":position.map(|(_,town)|town),"terrain_source_summary":source},
+                    "world":{"hour":current_hour,"world_tile":mapped,"area":area,
+                        "atlas_pixel":mapped.and_then(|tile|world_pixel(tile,map_ui.as_ref()?.world_width())),
+                        "travel":map_ui.as_ref().map(|map|map.diagnostic())},
+                    "camera":{"projected":camera.position(),"viewport":viewport,"zoom":self.settings.zoom,
+                        "view_ready":last_presented.is_some() && !*waiting},
+                    "streaming":world.stats(),
+                    "ui":{"hud_theme":dev.hud_theme,"map_theme":dev.map_theme,"console_theme":dev.console_theme,
+                        "hud":hud.as_ref().map(|hud|hud.diagnostics()),"scale_percent":scale,"console_open":dev.console.open,
+                        "paused":self.pause.is_some(),"reload_generation":dev.reloads,"reload_status":dev.reload_status,
+                        "selected":dev.selected.map(InteractiveWorld::debug_selection_id)},
+                    "renderer":{"stats":self.view.as_ref().and_then(|view|view.renderer.stats.as_ref()),
+                        "frames_presented":self.view.as_ref().map(|view|view.submitted_frames),
+                        "host_frame_time":self.view.as_ref().map(|view|view.last_frame_time)},
+                })
+            }
+            Request::Sectors => world.debug_sectors(),
+            Request::Objects(filter) => {
+                let mut data = world.debug_objects(&filter, camera, logical, elapsed);
+                data["map"] = map_state;
+                data
+            }
+            Request::Resource(path, frame) => {
+                let data = arcanum_rs::content::diagnostics::resource(&mut dev.vfs, &path, frame)
+                    .map_err(|err| Failure::new("invalid_resource_path", err.to_string()))?;
+                if data["winner"].is_null() {
+                    let mut failure = Failure::new(
+                        "missing_resource",
+                        format!("No winning source for {}", data["path"]),
+                    );
+                    failure.details = Some(data);
+                    return Err(failure);
+                }
+                if let Some(code) = data["decode"]["code"].as_str() {
+                    let mut failure = Failure::new(
+                        if code == "frame_requires_art" {
+                            "unsupported_operation"
+                        } else {
+                            "resource_decode_failed"
+                        },
+                        data["decode"]["message"]
+                            .as_str()
+                            .unwrap_or("Frame selection requires ART"),
+                    );
+                    failure.details = Some(data);
+                    return Err(failure);
+                }
+                data
+            }
+            Request::Snapshot => {
+                let tile = world
+                    .player_map_position()
+                    .ok_or("Player sector is not loaded")?
+                    .0;
+                let loaded_sectors = world.debug_sectors()["cached"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|r| r["id"].as_u64())
+                    .collect();
+                return Ok(Output::Data(
+                    serde_json::to_value(Snapshot {
+                        version: 1,
+                        map: map.id,
+                        tile,
+                        facing: world.player_facing().ok_or("Player unavailable")?,
+                        hour: current_hour.ok_or("Clock unavailable")?,
+                        collision_bypass: world.collision_bypassed(),
+                        zoom: self.settings.zoom,
+                        scale_percent: scale,
+                        lighting: self.settings.lighting,
+                        shadows: self.settings.shadows,
+                        run: self.settings.run,
+                        hud_theme: dev.hud_theme.clone(),
+                        map_theme: dev.map_theme.clone(),
+                        console_theme: dev.console_theme.clone(),
+                        mods: dev.mods(),
+                        selected: dev.selected.map(InteractiveWorld::debug_selection_id),
+                        overlays: [dev.collision, dev.sectors, dev.fps],
+                        camera: camera.position(),
+                        viewport,
+                        loaded_sectors,
                     })
-                    .unwrap_or_else(|| "World atlas position unavailable".into());
-                return Ok(Output::Lines(vec![
-                    format!(
-                        "{} ({})  player {tile:?}  facing {:?}",
-                        map.name,
-                        map.id,
-                        world.player_facing()
-                    ),
-                    format!(
-                        "Sector ({}, {}), id {}, town map {town}",
-                        sector.x,
-                        sector.y,
-                        sector
-                            .id()
-                            .map_or_else(|| "unavailable".into(), |id| id.to_string())
-                    ),
-                    world_location,
-                    format!(
-                        "Terrain {}",
-                        world.debug_source(tile).unwrap_or("unavailable")
-                    ),
-                    format!(
-                        "Collision {:?}, bypass {}",
-                        world.debug_collision(tile),
-                        world.collision_bypassed()
-                    ),
-                ]));
+                    .expect("snapshot contains serializable fields"),
+                ));
+            }
+            Request::Restore(text) => {
+                if self.map_since.is_some() || self.pause.is_some() {
+                    return Err(Failure::new(
+                        "busy",
+                        "Close the map or pause menu before restoring",
+                    ));
+                }
+                let snapshot = Snapshot::parse(&text)?;
+                if snapshot.mods != dev.mods()
+                    || snapshot.hud_theme != dev.hud_theme
+                    || snapshot.map_theme != dev.map_theme
+                    || snapshot.console_theme != dev.console_theme
+                {
+                    return Err(Failure::new(
+                        "snapshot_environment_mismatch",
+                        "Use the snapshot's UI packages and content mounts",
+                    ));
+                }
+                let target = Destination {
+                    map: Some(snapshot.map),
+                    tile: snapshot.tile,
+                };
+                let previous = self.settings.zoom;
+                self.settings.zoom = snapshot.zoom;
+                if let Err(err) =
+                    self.load_location(target, snapshot.facing, snapshot.collision_bypass)
+                {
+                    self.settings.zoom = previous;
+                    return Err(err.into());
+                }
+                self.settings.lighting = snapshot.lighting;
+                self.settings.shadows = snapshot.shadows;
+                self.settings.run = snapshot.run;
+                self.execute_developer(Request::Scale(snapshot.scale_percent))?;
+                self.execute_developer(Request::SetTime(snapshot.hour))?;
+                if let Some(dev) = &mut self.developer {
+                    [dev.collision, dev.sectors, dev.fps] = snapshot.overlays;
+                    if let ViewContent::Stream { world, .. } = &self.content {
+                        dev.selected = snapshot.selected.and_then(|id| world.debug_select(id));
+                    }
+                    dev.event("snapshot_restored", None, json!({"target":target}));
+                }
+                json!({"map":snapshot.map,"tile":snapshot.tile,"view_ready":false})
+            }
+            Request::Capture(file) => {
+                if !valid_capture_name(&file) {
+                    return Err(Failure::new(
+                        "invalid_arguments",
+                        "Capture requires a simple .png filename",
+                    ));
+                }
+                let (path, directory) = dev.captures.as_ref().ok_or_else(|| {
+                    Failure::new(
+                        "unsupported_operation",
+                        "Set --diagnostics DIRECTORY at launch",
+                    )
+                })?;
+                let view = self.view.as_mut().ok_or("Window unavailable")?;
+                if view.occluded || viewport.0 == 0 || viewport.1 == 0 {
+                    return Err(Failure::new("busy", "Capture requires a drawable window"));
+                }
+                return view.renderer.request_capture(
+                    Arc::clone(directory),
+                    path.join(&file),
+                    file,
+                );
+            }
+            Request::Operation(token) => {
+                return self
+                    .view
+                    .as_ref()
+                    .ok_or("Window unavailable")?
+                    .renderer
+                    .operation(token);
+            }
+            Request::Events(category) => dev.events.query(category.as_deref()),
+            Request::Trace(enabled) => {
+                dev.events.enabled = enabled;
+                json!({"enabled":enabled})
+            }
+            Request::Quit => {
+                dev.quit = true;
+                json!({"message":"Engine exit requested"})
             }
             Request::ToggleCollision => {
                 let disabled = world.developer_action(DeveloperAction::ToggleCollision)?;
@@ -550,37 +835,35 @@ impl developer::Runtime for Viewer<'_> {
                         "COLLISION ON"
                     }));
                 }
-                format!(
-                    "Collision {}",
-                    if disabled {
-                        "disabled for keyboard and mouse"
-                    } else {
-                        "enabled"
-                    }
-                )
+                json!({"collision_bypass":disabled,"message":if disabled {"Collision disabled for keyboard and mouse"} else {"Collision enabled"}})
             }
             Request::Inspect(tile) => {
-                let map = dev.atlas.catalog.find(&travel.map)?;
-                let mut result = vec![format!("Map {} ({})", map.name, map.id)];
-                result.extend(if let Some(tile) = tile {
+                let filter = if let Some(tile) = tile {
                     dev.selected = world.debug_door_at(tile);
-                    world.debug_inspect_tile(tile)?
+                    ObjectFilter {
+                        tile: Some(tile),
+                        ..Default::default()
+                    }
                 } else {
-                    world.debug_inspect(
-                        dev.selected
-                            .ok_or("Click an object beneath the console or use inspect X Y")?,
-                        elapsed,
-                    )?
-                });
-                return Ok(Output::Lines(result));
+                    let object = dev
+                        .selected
+                        .ok_or("Click an object beneath the console or use inspect X Y")?;
+                    ObjectFilter {
+                        record: Some(InteractiveWorld::debug_selection_id(object)),
+                        ..Default::default()
+                    }
+                };
+                let mut data = world.debug_objects(&filter, camera, logical, elapsed);
+                data["map"] = map_state;
+                data
             }
             Request::Unlock => {
                 let selected = dev.selected.ok_or("Select a door first")?;
-                if world.debug_unlock(selected)? {
-                    "Door unlocked for this session. Use it normally to open it.".into()
-                } else {
-                    "Door already has the developer unlock override".into()
-                }
+                let changed = world
+                    .debug_unlock(selected)
+                    .map_err(|err| Failure::new("unsupported_operation", err))?;
+                json!({"unlocked":true,"changed":changed,"id":InteractiveWorld::debug_selection_id(selected),
+                    "message":"Use the door normally to open it."})
             }
             Request::SetTime(hour) => {
                 let clock = self.clock.as_mut().ok_or("Game clock unavailable")?;
@@ -589,23 +872,29 @@ impl developer::Runtime for Viewer<'_> {
                 if let Some(hud) = hud {
                     hud.set_game_time(clock.hours(game));
                 }
-                format!("Game hour set to {hour:02}:00")
+                dev.event("game_time", None, json!({"hour":hour}));
+                json!({"hour":hour})
             }
             Request::DiscoverAll => {
                 let ui = map_ui.as_mut().ok_or("World map unavailable")?;
-                format!(
-                    "Discovered {} original destinations. Travel eligibility is unchanged.",
-                    ui.discover_all()
-                )
+                json!({"discovered":ui.discover_all(),"travel_eligible":ui.can_travel()})
             }
             Request::ReloadUi => {
-                let next_hud = load_hud(dev.hud_theme.as_deref(), &mut dev.vfs, scale)?;
-                let next_map = map_ui
-                    .as_mut()
-                    .map(|map| map.prepare_theme(&dev.map_theme, scale))
-                    .transpose()?;
-                let next_console =
-                    Console::load(&dev.console_theme, &mut dev.vfs).map_err(|e| e.to_string())?;
+                let loaded = (|| -> Result<_, String> {
+                    let next_hud = load_hud(dev.hud_theme.as_deref(), &mut dev.vfs, scale)?;
+                    let next_map = map_ui
+                        .as_mut()
+                        .map(|map| map.prepare_theme(&dev.map_theme, scale))
+                        .transpose()?;
+                    let next_console = Console::load(&dev.console_theme, &mut dev.vfs)
+                        .map_err(|err| err.to_string())?;
+                    Ok((next_hud, next_map, next_console))
+                })();
+                let (next_hud, next_map, next_console) = loaded.map_err(|err| {
+                    dev.reload_status = Some(json!({"status":"failed","message":err}));
+                    dev.event("ui_reload", None, json!({"status":"failed"}));
+                    Failure::new("ui_reload_failed", err)
+                })?;
                 *hud = next_hud;
                 if let (Some(ui), Some(theme)) = (map_ui, next_map) {
                     ui.replace_theme(theme);
@@ -613,7 +902,11 @@ impl developer::Runtime for Viewer<'_> {
                 dev.console.replace_theme(next_console);
                 dev.scale = scale;
                 dev.status = None;
-                "Reloaded available UI themes".into()
+                dev.reloads += 1;
+                let outcome = json!({"status":"completed","generation":dev.reloads});
+                dev.reload_status = Some(outcome.clone());
+                dev.event("ui_reload", None, outcome.clone());
+                outcome
             }
             Request::Scale(scale) => {
                 dev.scale = scale;
@@ -623,21 +916,30 @@ impl developer::Runtime for Viewer<'_> {
                 if let Some(map) = map_ui {
                     map.set_scale(scale);
                 }
-                format!("UI scale {scale}%")
+                json!({"scale_percent":scale})
             }
             Request::ShowCollision => {
                 dev.collision = !dev.collision;
-                format!("Collision overlay {}", dev.collision)
+                json!({"enabled":dev.collision})
             }
             Request::ShowSectors => {
                 dev.sectors = !dev.sectors;
-                format!("Sector overlay {}", dev.sectors)
+                json!({"enabled":dev.sectors})
             }
             Request::Fps => {
                 dev.fps = !dev.fps;
-                format!("Vulkan frame statistics {}", dev.fps)
+                json!({"enabled":dev.fps})
             }
         };
-        Ok(line.into())
+        Ok(Output::Data(result))
     }
+}
+
+fn valid_capture_name(file: &str) -> bool {
+    file.len() <= 96
+        && file.ends_with(".png")
+        && !file.starts_with('.')
+        && file
+            .bytes()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'.' | b'_' | b'-'))
 }

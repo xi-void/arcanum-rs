@@ -10,7 +10,7 @@ const LIGHT_BYTES: usize = 0x30;
 const TILE_BYTES: usize = SIDE * SIDE * 4;
 const SECTOR_MASK: u32 = (1 << 26) - 1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Coordinates {
     pub x: u32,
     pub y: u32,

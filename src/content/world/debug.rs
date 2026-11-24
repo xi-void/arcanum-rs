@@ -1,7 +1,8 @@
 //! Inspection of the same records, rasters and collision cells used during play.
 
 use super::*;
-use crate::isometric::world_tile_at_pixel_signed;
+use crate::{developer::ObjectFilter, isometric::world_tile_at_pixel_signed};
+use serde_json::{Value, json};
 
 type Tile = (u32, u32);
 
@@ -11,7 +12,7 @@ pub struct DebugObject {
     key: WorldOrder,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct DebugCollision {
     pub standable: bool,
     pub terrain_blocked: bool,
@@ -69,55 +70,82 @@ impl InteractiveWorld {
         Some(DebugObject { sector, key: *key })
     }
 
-    pub fn debug_inspect(&self, object: DebugObject, now: Duration) -> Result<Vec<String>, String> {
-        let (sector, _) = self
-            .cache
-            .entries
-            .get(&object.sector)
-            .ok_or("Selected sector was evicted")?;
-        let raster = sector
+    pub fn debug_selection_id(object: DebugObject) -> (u64, usize) {
+        (object.sector, object.key.1.6.unwrap_or(object.key.1.5))
+    }
+
+    pub fn debug_select(&self, id: (u64, usize)) -> Option<DebugObject> {
+        let (sector, _) = self.cache.entries.get(&id.0)?;
+        sector
             .draws
             .iter()
-            .find(|r| r.key == object.key)
-            .ok_or("Selected raster is unavailable")?;
-        let (_, (_, y, x, _, _, index, portal)) = object.key;
-        let record = portal.unwrap_or(index);
-        let tile = (x, y);
-        let asset = self.cache.door_frame(raster, now).map_or_else(
-            || raster.asset_at(now, self.cache.fidget),
-            |(asset, _)| asset,
-        );
-        let mut lines = vec![
-            format!("Runtime {}:{record} at {tile:?}", object.sector),
-            format!(
-                "Effective ART {} palette {}",
-                asset.source.virtual_path, asset.decoded.stored_palette
-            ),
-            format!(
-                "Roof/wall visibility {}, collision {:?}",
-                self.cache.raster_revealed(raster),
-                self.debug_collision(tile)
-            ),
-        ];
-        if let Some((_, text)) = sector
+            .filter(|raster| raster.key.0 && !matches!(raster.object_light, ObjectLight::Roof))
+            .find(|r| r.key.1.6.unwrap_or(r.key.1.5) == id.1)
+            .map(|r| DebugObject {
+                sector: id.0,
+                key: r.key,
+            })
+    }
+
+    pub fn debug_sectors(&self) -> Value {
+        let cached: Vec<_> = self.cache.entries.values().map(|(sector, _)| {
+            let r = &sector.report;
+            json!({"id":r.id,"coordinates":Coordinates::from_id(r.id),
+                "active":self.cache.active.contains(&r.id),
+                "source":r.source_details,"kind":r.source_details.as_ref().and_then(|source|source["path"].as_str())
+                    .map(|path|if path.starts_with("terrain/") {"template"} else {"authored"}),
+                "terrain_available":r.source.is_some(),"collision_available":r.collision_available,
+                "surfaces":r.surfaces,"decoded_records":r.decoded_records,
+                "imported":{"walls":r.wall_count,"scenery":r.scenery_count,"portals":r.portal_count},
+                "roof_entries":r.roofs.0,"roof_rasters":r.roofs.1,
+                "light_counts":r.light_counts.map(|(serialized, prepared, off)|json!({"serialized":serialized,"prepared":prepared,"switched_off":off})),
+                "object_lights":r.object_lights,
+                "issue_count":r.structured_issues.len(),"issues":r.structured_issues.iter().take(12).collect::<Vec<_>>()})
+        }).collect();
+        json!({"bounds":self.region,"cached":cached,"required":self.required,
+            "speculative":self.speculative,"stats":self.stats()})
+    }
+
+    fn debug_record(
+        &self,
+        sector: &CachedSector,
+        record: usize,
+        raster: Option<&Raster>,
+        camera: &Camera,
+        size: (u32, u32),
+        now: Duration,
+    ) -> Value {
+        let mut result = sector
             .report
-            .object_audit
-            .iter()
-            .find(|(i, _)| *i == record)
-        {
-            lines.push(text.clone());
-        }
-        if let Some(mobile) = {
-            let prefix = format!("mobile runtime {record}:");
+            .original_records
+            .get(&record)
+            .cloned()
+            .unwrap_or_else(|| json!({"record":record,"category":"mobile"}));
+        let id = sector.report.id;
+        result["id"] = json!(format!("{id}:{record}"));
+        result["sector"] = json!(id);
+        result["sector_source"] = sector.report.source_details.clone().unwrap_or(Value::Null);
+        result["issues"] = json!(
             sector
                 .report
-                .diagnostics
+                .structured_issues
                 .iter()
-                .find(|line| line.starts_with(&prefix))
-        } {
-            lines.push(mobile.clone());
-        }
-        let frame_index = match &raster.animation {
+                .filter(|issue| issue.record == Some(record))
+                .collect::<Vec<_>>()
+        );
+        result["rendering"] = json!({"state":"no_raster"});
+        let Some(raster) = raster else { return result };
+        let key = raster.key;
+        let tile = (key.1.2, key.1.1);
+        let (asset, sprite) = self.cache.door_frame(raster, now).unwrap_or_else(|| {
+            let asset = raster.asset_at(now, self.cache.fidget);
+            (asset, raster.frame_draw(asset))
+        });
+        let visible = self.cache.raster_revealed(raster);
+        let intersects =
+            Viewport::new(camera.position(), size).intersects(RasterBounds::new(sprite));
+        let active = self.cache.active.contains(&id);
+        let frame = match &raster.animation {
             Some(RasterAnimation::Loop(clip, initial)) => Some(clip.index(*initial, now)),
             Some(RasterAnimation::Fidget(poses)) => Some(
                 self.cache
@@ -130,78 +158,154 @@ impl InteractiveWorld {
                     })
                     .unwrap_or(0),
             ),
-            None => None,
+            None => result["effective"]["authored_frame"]
+                .as_u64()
+                .map(|f| f as usize),
         };
-        if let Some(index) = frame_index {
-            lines.push(format!(
-                "Current animation frame {index}, stored direction {}",
-                asset.decoded.stored_rotation
-            ));
-        }
-        if let Some(target) = sector.interactions.get(&object.key) {
-            lines.push(match &target.action {
+        result["tile"] = json!(tile);
+        result["collision"] = json!(self.debug_collision(tile));
+        result["rendering"] = json!({"state": if !active {"inactive_sector"} else if !visible {"roof_or_wall_hidden"}
+                else if !intersects {"outside_viewport"} else {"eligible_for_scene_submission"},
+            "asset":super::super::diagnostics::source(&asset.source),"frame":frame,"stored_rotation":asset.decoded.stored_rotation,
+            "palette":asset.decoded.stored_palette,"anchor":sprite.anchor});
+        if let Some(target) = sector.interactions.get(&key) {
+            result["interaction"] = match &target.action {
                 interaction::Action::Door(door) => {
-                    self.cache.door_states.describe(door, self.cache.hour)
+                    self.cache.door_states.diagnostic(door, self.cache.hour)
                 }
-                interaction::Action::Travel(dst) => format!("Original Use transition: {dst:?}"),
-                interaction::Action::Unsupported(reason) => reason.clone(),
-            });
+                interaction::Action::Travel(dst) => json!({"kind":"transition","destination":dst}),
+                interaction::Action::Unsupported(reason) => {
+                    json!({"kind":"unsupported","reason":reason})
+                }
+            };
         }
-        Ok(lines)
+        result
     }
 
-    pub fn debug_inspect_tile(&self, tile: Tile) -> Result<Vec<String>, String> {
-        let id = tile_sector_id(tile);
-        let (sector, _) = self
+    pub fn debug_objects(
+        &self,
+        filter: &ObjectFilter,
+        camera: &Camera,
+        size: (u32, u32),
+        now: Duration,
+    ) -> Value {
+        let mut objects = Vec::new();
+        let mut truncated = false;
+        let matches = |id: u64,
+                       record: usize,
+                       tile: Option<(u32, u32)>,
+                       category: Option<&str>,
+                       prototype: Option<u64>| {
+            filter.record.is_none_or(|wanted| wanted == (id, record))
+                && filter.tile.is_none_or(|target| {
+                    tile.is_some_and(|tile| {
+                        tile.0.abs_diff(target.0).max(tile.1.abs_diff(target.1)) <= filter.radius
+                    })
+                })
+                && filter
+                    .category
+                    .as_deref()
+                    .is_none_or(|wanted| Some(wanted) == category)
+                && filter
+                    .prototype
+                    .is_none_or(|wanted| Some(u64::from(wanted)) == prototype)
+        };
+        for (sector, _) in self.cache.entries.values() {
+            let id = sector.report.id;
+            let rasters: BTreeMap<_, _> = sector
+                .draws
+                .iter()
+                .filter(|r| r.key.0 && !matches!(r.object_light, ObjectLight::Roof))
+                .map(|r| (r.key.1.6.unwrap_or(r.key.1.5), r))
+                .collect();
+            for (&record, data) in &sector.report.original_records {
+                let tile = data["tile"]
+                    .as_array()
+                    .and_then(|t| Some((t.first()?.as_u64()? as u32, t.get(1)?.as_u64()? as u32)));
+                if matches(
+                    id,
+                    record,
+                    tile,
+                    data["category"].as_str(),
+                    data["prototype"].as_u64(),
+                ) {
+                    if objects.len() == 128 {
+                        truncated = true;
+                        break;
+                    }
+                    objects.push(self.debug_record(
+                        sector,
+                        record,
+                        rasters.get(&record).copied(),
+                        camera,
+                        size,
+                        now,
+                    ));
+                }
+            }
+            for (&record, &raster) in &rasters {
+                if record >= usize::MAX - 3
+                    && matches(
+                        id,
+                        record,
+                        Some((raster.key.1.2, raster.key.1.1)),
+                        Some("mobile"),
+                        None,
+                    )
+                {
+                    if objects.len() == 128 {
+                        truncated = true;
+                        break;
+                    }
+                    objects.push(self.debug_record(
+                        sector,
+                        record,
+                        Some(raster),
+                        camera,
+                        size,
+                        now,
+                    ));
+                }
+            }
+            if truncated {
+                break;
+            }
+        }
+        let issues: Vec<_> = self
             .cache
             .entries
-            .get(&id)
-            .ok_or("Sector is outside the loaded area")?;
-        let mut lines = vec![format!(
-            "Tile {tile:?}, sector {id}, collision {:?}",
-            self.debug_collision(tile)
-        )];
-        let location = format!("at {tile:?}");
-        let stored = format!("stored tile Some({tile:?})");
-        lines.extend(
-            sector
-                .report
-                .diagnostics
-                .iter()
-                .filter(|s| s.contains(&location) || s.contains(&stored))
-                .cloned(),
-        );
-        let records: Vec<_> = sector
-            .draws
-            .iter()
-            .filter(|r| {
-                r.key.0
-                    && (r.key.1.2, r.key.1.1) == tile
-                    && !matches!(r.object_light, ObjectLight::Roof)
+            .values()
+            .flat_map(|(sector, _)| {
+                let id = sector.report.id;
+                sector
+                    .report
+                    .structured_issues
+                    .iter()
+                    .filter(move |issue| {
+                        filter
+                            .record
+                            .is_none_or(|(s, r)| s == id && issue.record == Some(r))
+                            && filter.tile.is_none_or(|target| {
+                                issue.tile.is_some_and(|tile| {
+                                    tile.0.abs_diff(target.0).max(tile.1.abs_diff(target.1))
+                                        <= filter.radius
+                                })
+                            })
+                            && filter
+                                .category
+                                .as_deref()
+                                .is_none_or(|category| issue.category == Some(category))
+                            && filter
+                                .prototype
+                                .is_none_or(|prototype| issue.prototype == Some(prototype))
+                    })
+                    .map(move |issue| json!({"sector":id,"issue":issue}))
             })
+            .take(129)
             .collect();
-        lines.extend(
-            records
-                .into_iter()
-                .filter_map(|r| {
-                    self.debug_inspect(
-                        DebugObject {
-                            sector: id,
-                            key: r.key,
-                        },
-                        Duration::ZERO,
-                    )
-                    .ok()
-                })
-                .flatten(),
-        );
-        if sector.report.object_list_failed {
-            lines.push("Original object list incomplete".into());
-            lines.extend(sector.report.diagnostics.first().cloned());
-        } else if lines.len() == 1 {
-            lines.push("No supported objects or reported failures at this tile".into());
-        }
-        Ok(lines)
+        truncated |= issues.len() > 128;
+        json!({"objects":objects,"issues":&issues[..issues.len().min(128)],"truncated":truncated,
+            "coverage":"decoded records and available rasters in cached sectors"})
     }
 
     pub fn debug_unlock(&mut self, object: DebugObject) -> Result<bool, String> {

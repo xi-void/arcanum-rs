@@ -2,6 +2,7 @@
 
 pub mod art;
 mod collision;
+pub mod diagnostics;
 pub mod effects;
 pub mod items;
 mod jumps;

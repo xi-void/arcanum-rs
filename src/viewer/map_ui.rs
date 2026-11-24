@@ -161,6 +161,13 @@ impl MapUi {
         })
     }
 
+    pub(super) fn diagnostic(&self) -> serde_json::Value {
+        serde_json::json!({"open":self.open,"mode":match self.mode { Mode::Local=>"local",Mode::World=>"world",Mode::Continent=>"continent" },"travel_eligible":self.can_travel,
+            "journey":self.journey.as_ref().map(Journey::diagnostic),
+            "waypoints":self.waypoints.iter().map(|point|point.tile).collect::<Vec<_>>(),
+            "hud":self.hud.diagnostics()})
+    }
+
     pub(super) fn world_width(&self) -> u32 {
         self.world.size().0
     }

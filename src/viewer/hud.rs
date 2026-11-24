@@ -297,6 +297,7 @@ struct Placement {
 
 pub(crate) struct Hud {
     components: Vec<Component>,
+    font_profiles: BTreeMap<String, serde_json::Value>,
     placed: Vec<Option<Placement>>,
     size: (u32, u32),
     scale: u16,
@@ -337,6 +338,8 @@ impl Hud {
         if !(50..=300).contains(&scale) {
             return Err("UI scale must be 50–300 percent".into());
         }
+        let font_profiles = theme.fonts.iter().map(|(name,font)|
+            (name.clone(), serde_json::json!({"source":font.source,"size":font.size,"fallback":font.fallback}))).collect();
         let mut components = Vec::new();
         let mut indices = BTreeMap::new();
         let mut glyphs = BTreeMap::new();
@@ -489,6 +492,7 @@ impl Hud {
         eprintln!("HUD {} from {} at {}%", theme.name, path.display(), scale);
         Ok(Self {
             components,
+            font_profiles,
             placed: Vec::new(),
             size: (0, 0),
             scale,
@@ -581,6 +585,23 @@ impl Hud {
                 }
             }));
         }
+    }
+
+    pub(super) fn diagnostics(&self) -> serde_json::Value {
+        let control = |index: Option<usize>| {
+            index.and_then(|index| {
+                self.components
+                    .get(index)
+                    .map(|component| component.config.id.as_str())
+            })
+        };
+        let images: std::collections::BTreeSet<_> = self
+            .components
+            .iter()
+            .filter_map(|component| component.config.image.as_deref())
+            .collect();
+        serde_json::json!({"scale_percent":self.scale,"fonts":self.font_profiles,"image_references":images,
+            "focused":control(self.focus),"hovered":control(self.hover),"pressed":control(self.pressed)})
     }
 
     pub(super) fn scale(&self) -> u16 {
