@@ -35,7 +35,13 @@ impl Camera {
     pub fn rectangle(reference: (u32, u32), first: (u32, u32), size: (u32, u32)) -> Option<Self> {
         let axis = |first: u32, center: u32, size: u32| {
             let last = first.checked_add(size.checked_sub(1)?)?;
-            if first.abs_diff(center) > 2047 || last.abs_diff(center) > 2047 || size > 2048 {
+            // Bound the projected coordinates even when the original map spans
+            // the whole 4096-sector limit of the terrain decoder.
+            const MAX_TILES: u32 = 4096 * 64;
+            if first.abs_diff(center) >= MAX_TILES
+                || last.abs_diff(center) >= MAX_TILES
+                || size > MAX_TILES
+            {
                 return None;
             }
             Some((
@@ -163,6 +169,10 @@ impl<'a> CameraScene<'a> {
 
     pub fn cache(&self) -> CacheStats {
         self.cache
+    }
+
+    pub fn frames(&self) -> impl Iterator<Item = &'a SpriteFrame> + '_ {
+        self.rasters.iter().map(|raster| raster.draw.frame)
     }
 
     pub fn visible(

@@ -16,6 +16,8 @@ pub mod scenery;
 pub mod schematics;
 pub mod sector;
 pub mod shadow;
+mod terrain;
+pub mod travel;
 pub mod wall;
 pub mod world;
 

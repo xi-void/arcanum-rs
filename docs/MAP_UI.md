@@ -1,8 +1,8 @@
 # Local and world maps
 
 ```sh
-cargo run --locked --release --features windowed,gpu -- \
-  play "$HOME/Work/arcanum-ce-test" --renderer vulkan
+cargo run --locked --release --features windowed -- \
+  play "$HOME/Work/arcanum-ce-test" --discover-all
 ```
 
 - **M** or the Classic map icon opens the map. **M** or **Escape** closes it.
@@ -17,9 +17,15 @@ cargo run --locked --release --features windowed,gpu -- \
   enters the detailed sheet. **Home** and the original navigate button
   recenter the detailed views. Use **Tab**, **Enter** and **Space** to
   operate map buttons with the keyboard.
-- Hover over a known location for its authored description. Click a
-  discovered marker to select it. Selection lasts for the session, and
-  closing the map restores the existing movement and camera controls.
+- Hover over a known location for its authored description. In the detailed
+  world map, click terrain or discovered locations to add waypoints in order.
+  Click an existing waypoint and then another position to move it. Right-click
+  a waypoint to remove it, or right-click elsewhere to remove the selected
+  or final waypoint. On the continent overview, click an area to center the
+  detailed map there.
+- Click the green travel button on the lower right to start the route. Use
+  the same button, right-click, **M** or **Escape** to cancel a journey.
+  Closing the atlas restores on-foot controls.
 - **[** and **]** adjust UI scale independently of gameplay zoom. Map
   input stays modal. The viewer samples the player's scene for the
   circular inset when opening the map and suspends gameplay deadlines
@@ -27,10 +33,9 @@ cargo run --locked --release --features windowed,gpu -- \
   behind the map at the current camera zoom.
 
 The Classic frame is loaded through the same public component loader as
-a third-party package. The inset samples the existing world scene at
-twice its authored display dimensions and draws `PCWinCvr.ART` over the
-scaled result. The world compositor supplies the inset, including the
-current lighting and shadow settings. Gameplay is frozen in this alpha
+a third-party package. The inset uses the current world draw list at twice its authored display
+dimensions. The Vulkan compositor writes it to a resident texture, and the
+theme draws `PCWinCvr.ART` over it. The same lighting and shadow settings apply. Gameplay is frozen in this alpha
 map view. CE may continue rendering and updating the gameplay inset.
 
 ## Original data and coordinates
@@ -78,23 +83,100 @@ All metadata and artwork use the winning resource in the installed VFS,
 including selected mod packages. The map bitmap decoder is bounded and
 supports the installed uncompressed indexed Windows BMP format.
 
-## Discovery, diagnostics and future travel
+## Discovery and world travel
 
-A new session seeds discovery from the authored starting tile and
-`GameArea` proximity. Entering a town-mapped sector on the overworld can
-reveal a matching nearby location. Negative radii are excluded from
-proximity discovery. Quest, dialogue and script-driven discovery remain
-unsupported. `--map-reveal` allows inspection of undiscovered markers
-without enabling their selection. `--trace` reports raw current
-player tiles and town-map IDs in the terminal.
+The new game still starts at the Crash Site at (92958, 82592). Its sector has
+town-map ID 2. World travel becomes available when the player reaches an
+outdoor overworld sector with no town-map association and no original
+sector block. On the installed atlas, `MapKeyedTo: 1` refers to CE's
+one-based map-list index. The first row, MES ID 5000, is the original
+overworld and `START_MAP`. The Classic HUD switches between
+`TMap_But.ART` and `WMap_But.ART` as eligibility changes. The same
+rules apply when opening the atlas from the keyboard. The alpha allows
+read-only world-map inspection from local views, including interiors
+with a world atlas. CE also checks combat, party readiness, and active
+encounters, which the alpha does not simulate.
 
-A discovered destination creates an `Atlas::destination` selection with
-the area ID, its authored overworld tile, the `START_MAP` ID, and an original
-sector availability check. This follows CE's arrival map selection in
-`wmap_ui_teleport`. It does not check a route or promise passability.
-Travel remains disabled. The future travel layer must validate route
-eligibility, advance time, check the arrival tile and perform the map
-transition. This milestone adds no teleport shortcut.
+Verified launch points for testing are on the **overworld**. Tulla Interior
+(map 5031) and the separate K’na Tha map (5067) have different coordinate
+systems and are not valid overland departure maps.
+
+```sh
+# Tulla western outskirts, an eligible developer departure point
+cargo run --locked --release --features windowed -- \
+  play "$HOME/Work/arcanum-ce-test" --discover-all \
+  --map 5000 --center 28320 31168
+
+# K’na Tha approach, using GameArea row 58 exactly
+cargo run --locked --release --features windowed -- \
+  play "$HOME/Work/arcanum-ce-test" --discover-all \
+  --map 5000 --center 91902 39305
+
+# Crash Site outskirts, beyond the town-mapped sector. Travel to Shrouded Hills.
+cargo run --locked --release --features windowed -- \
+  play "$HOME/Work/arcanum-ce-test" --discover-all \
+  --map 5000 --center 92960 82692
+```
+
+To inspect Tulla's actual exterior arrival, launch at the `GameArea` row 11
+coordinates. The three positions serve different purposes. The western starting
+tile is walkable and travel-eligible, the authored exterior arrival is beside
+the city's walls, and map 5031 is a separate interior.
+
+```sh
+cargo run --locked --release --features windowed -- \
+  play "$HOME/Work/arcanum-ce-test" --map 5000 --center 28455 31171
+```
+
+For developer exploration, add `--debug` and press **F6** to toggle
+collision for keyboard movement. The status appears in the window.
+This works within loaded original or template sectors. Click-to-move and
+object Use retain their ordinary rules. Automatic jump points are suspended
+during bypass. To restore collision, come to a walkable tile and press **F6**.
+A map transition resets bypass.
+
+Crash Site is initially known. Overworld proximity discovery uses the
+authored `GameArea` radius. Virgil's introductory dialogue
+`dlg/01324virgil.dlg` contains the `mm 1` action. CE's
+`DIALOG_ACTION_MM` calls `area_set_known` with area ID 1 for Shrouded Hills.
+That dialogue is outside the alpha. `--map-reveal` only shows otherwise
+undiscovered markers for inspection. `--discover-all` makes the original
+locations known for testing while preserving every departure and routing
+restriction. `--trace` reports player tiles and town-map IDs.
+
+CE's `wmap_path_make` uses eight directions, directly approaches each
+waypoint, and detours in a 16×16 sector grid around authored barriers.
+The alpha follows those rules with deterministic tie-breaking. The winning
+`terrain.tdf` uses a 1.2 header and length-prefixed zlib rows of 16-bit
+terrain words. A `/b` on either terrain type in `terrain/terrain.mes`
+blocks sectors without authored `.sec` data. `map.sbf` blocks override
+both. The route supports 30 waypoints and 5,000 sector steps. Wilderness
+waypoints can cross passable original terrain. A final arrival requires an authored sector or a resolved original terrain
+template, followed by valid on-foot collision. Named destinations use
+the exact `GameArea` tile. An unnamed waypoint uses the original sector
+center. World loading follows the original terrain-template lookup for wilderness
+sectors without a map-local `.sec`.
+
+Results advance one sector per travel event (50 ms first step and 62 ms
+thereafter, before presentation delays). Each traversed sector adds one
+game hour, including a final step. The original source computes travel
+time from the Chebyshev distance in 64-tile units. Outside the pause
+menu, real elapsed time advances game time at CE's 8× rate. The original
+initial hour is read from `rules/gameinit.mes`, entry 5. Arrival and
+normal play use the same clock and ambient schemes, and the HUD clock
+uses the original day strip and moon phase artwork. The modal map freezes
+on-foot movement, keeps the gameplay scene behind the window, and updates
+the party marker while travelling. An original portal and an overland
+arrival share the same streaming and collision preparation.
+
+Cancellation attempts to resume on foot at the current route sector
+center. If the center is blocked or has no authored on-foot data, the
+player resumes where they departed and keeps the elapsed game time.
+The route step that advances the party marker and discovers areas is
+the extension point for future encounter checks. CE's source exposes
+encounter state and access restrictions. Encounter generation, arbitrary
+terrain synthesis, and script-driven changes to sector travel blocks are
+outside this slice.
 
 ## External layout
 
@@ -122,10 +204,17 @@ dimensions and color. The `place-label` template styles authored world
 location names using their original offsets. `map_views` restricts drawing and input to named
 views (`local`, `world`, `continent`). The public map actions are
 `open-map`, `map-local`, `map-world`, `map-overview`,
-`map-zoom-in` and `map-recenter`.
+`map-zoom-in`, `map-recenter` and `map-travel`. The optional
+`waypoint-marker` binding and top-level `route_color` and
+`selected_route_color` style straight dashed segments from the live party
+marker through each outstanding waypoint. The terrain-aware route and its
+journey timing remain independent of these visual connections. A component can use `travel_available = true`
+or `false` to select the enabled or local form of the map icon. The
+`game-clock` binding takes the day strip in `image` plus eight original
+moon strips in `clock_phases`.
 
-The alpha currently omits route overlays, party markers, in-map notes,
-map music and full travel controls. The Classic window keeps the
+The alpha currently omits multi-member party markers, in-map notes,
+and map music. The Classic window keeps the
 authored canvas, compass, coordinate plates and control artwork. Its
 buttons use indexed ART for pressed and selected states. Two-frame
 buttons retain their idle artwork on hover when unselected. Its

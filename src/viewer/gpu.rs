@@ -1,45 +1,31 @@
-//! Wayland surface presentation for the experimental sprite compositor.
+//! Native presentation for the Vulkan sprite compositor.
 
-use crate::RenderBackend;
 use arcanum_rs::{
-    content::world::WorldDraw,
+    content::{art::LoadedFrame, world::WorldDraw},
     gpu::{self, Compositor},
 };
 use std::{sync::Arc, time::Instant};
 use wgpu::{
-    Backends, CommandEncoderDescriptor, CompositeAlphaMode, Device, PresentMode, Surface,
+    CommandEncoderDescriptor, CompositeAlphaMode, Device, PresentMode, Surface,
     SurfaceConfiguration, SurfaceError, TextureFormat, TextureUsages, TextureViewDescriptor,
 };
-use winit::{event_loop::OwnedDisplayHandle, window::Window};
+use winit::window::Window;
 
 pub(super) struct WindowRenderer {
     surface: Surface<'static>,
     config: SurfaceConfiguration,
     compositor: Compositor,
     configured: bool,
-    // EGL termination may issue Wayland calls even after the surface drops.
-    // Keep the display alive through destruction of all wgpu resources.
-    _display: OwnedDisplayHandle,
 }
 
 impl WindowRenderer {
-    pub fn new(
-        window: Arc<Window>,
-        display: OwnedDisplayHandle,
-        backend: RenderBackend,
-        trace: bool,
-    ) -> Result<Self, String> {
+    pub fn new(window: Arc<Window>, trace: bool) -> Result<Self, String> {
         let start = Instant::now();
-        let backends = match backend {
-            RenderBackend::Vulkan => Backends::VULKAN,
-            RenderBackend::Gles => Backends::GL,
-            RenderBackend::Cpu => return Err("expected a GPU renderer".into()),
-        };
-        let instance = gpu::instance(backends);
+        let instance = gpu::instance();
         let surface = instance
             .create_surface(window)
             .map_err(|e| format!("cannot create GPU surface: {e}"))?;
-        let adapter = gpu::hardware_adapter(&instance, backends, Some(&surface))?;
+        let adapter = gpu::hardware_adapter(&instance, Some(&surface))?;
         let caps = surface.get_capabilities(&adapter);
         let format = [TextureFormat::Bgra8Unorm, TextureFormat::Rgba8Unorm]
             .into_iter()
@@ -79,8 +65,18 @@ impl WindowRenderer {
             config,
             compositor,
             configured: false,
-            _display: display,
         })
+    }
+
+    pub fn render_inset<'a>(
+        &mut self,
+        asset: &Arc<LoadedFrame>,
+        scale: f32,
+        background: [u8; 3],
+        draws: impl IntoIterator<Item = WorldDraw<'a>>,
+    ) -> Result<(), String> {
+        self.compositor
+            .render_sprite(asset, scale, background, draws)
     }
 
     pub fn redraw<'a>(

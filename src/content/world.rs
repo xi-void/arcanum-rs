@@ -34,7 +34,7 @@ mod prefetch;
 pub use super::jumps::Destination;
 pub use interaction::DoorStates;
 pub use lighting::DynamicLightState;
-pub use prefetch::{InteractiveWorld, PrefetchStats};
+pub use prefetch::{DeveloperAction, InteractiveWorld, PrefetchStats};
 
 const MAX_SECTORS: usize = 12;
 const OVERHANG: i64 = 640;
@@ -117,6 +117,7 @@ impl Required {
 pub struct SectorReport {
     pub id: u64,
     pub source: Option<String>,
+    pub collision_available: bool,
     pub surfaces: usize,
     pub facades: usize,
     pub wall_count: usize,
@@ -374,12 +375,26 @@ struct CachedSector {
 }
 
 impl CachedSector {
+    fn retint_lights(&mut self, ambient: Ambient) {
+        let mut changed = false;
+        for light in &mut self.emitters {
+            changed |= light.retint(ambient);
+        }
+        if changed {
+            self.lights.clear();
+            for light in &self.emitters {
+                self.lights.insert_light(light);
+            }
+        }
+    }
+
     fn missing(id: u64, error: String) -> Self {
         Self {
             townmap: 0,
             report: SectorReport {
                 id,
                 source: None,
+                collision_available: false,
                 surfaces: 0,
                 facades: 0,
                 wall_count: 0,
@@ -425,6 +440,7 @@ impl CachedSector {
                 "{} from {}",
                 room.floor.source.virtual_path, room.floor.source
             )),
+            collision_available: world.collision.is_some(),
             surfaces: room.floor.tiles().len(),
             facades: room
                 .floor
@@ -471,6 +487,12 @@ impl CachedSector {
                     issue.reason
                 )
             }));
+        report.diagnostics.extend(world.traps.iter().map(|trap| {
+            format!(
+                "record {} Trap, prototype {}, stored tile {:?}: parsed, trap detection and gameplay are unsupported",
+                trap.index, trap.prototype.0, trap.stored_tile
+            )
+        }));
         let (dx, dy) =
             project_world_tile(room.floor.center, reference).expect("bounded sector projection");
         let shift = |(x, y): (i32, i32)| Some((x.checked_add(dx)?, y.checked_add(dy)?));
@@ -646,8 +668,8 @@ fn light_receiver(raster: &Raster, reference: (u32, u32)) -> Option<RasterBounds
     let (x, y) = raster.anchor;
     if !raster.key.0 {
         return Some(RasterBounds {
-            min: (i64::from(x) - 40, i64::from(y) - 39),
-            max: (i64::from(x) + 41, i64::from(y) + 2),
+            min: (raster.bounds.min.0 - 1, raster.bounds.min.1),
+            max: (raster.bounds.max.0 + 2, raster.bounds.max.1 + 1),
         });
     }
     let tile = (raster.key.1.2, raster.key.1.1);
@@ -700,6 +722,7 @@ struct SectorCache {
     hits: u64,
     evictions: u64,
     ambient: Option<(Ambient, (u32, u32))>,
+    light_schedule: Option<[Ambient; 24]>,
     lights: LightGrid,
     shades: Vec<PreparedShade>,
     dynamic: Vec<DynamicLight>,
@@ -714,6 +737,7 @@ struct SectorCache {
     walk_facing: Option<u8>,
     walking: Option<MovingDraw>,
     player: Option<Player>,
+    collision_disabled: bool,
     player_shadows: Option<MobileShadows>,
     jumps: super::jumps::Jumps,
     door_states: DoorStates,
@@ -836,6 +860,45 @@ impl SectorCache {
         self.refresh_shades(None);
         self.refresh_shadows();
         start.elapsed()
+    }
+
+    fn set_game_hour(&mut self, hour: u8) -> bool {
+        let Some((ambient, reference)) = self.ambient else {
+            return false;
+        };
+        let Some(next) = self
+            .light_schedule
+            .and_then(|hours| hours.get(usize::from(hour)).copied())
+        else {
+            return false;
+        };
+        if self.hour == hour {
+            return false;
+        }
+        let nocturnal_changed = self.dynamic.iter().any(|light| {
+            light.nocturnal
+                && light.state.active
+                && lighting::nocturnal_active(self.hour, self.outdoor(light.state.tile))
+                    != lighting::nocturnal_active(hour, self.outdoor(light.state.tile))
+        });
+        self.hour = hour;
+        if ambient != next {
+            self.ambient = Some((next, reference));
+            for (sector, _) in self.entries.values_mut() {
+                sector.retint_lights(next);
+            }
+            self.lights.clear();
+            for id in self.active.iter().rev() {
+                self.lights.merge(&self.entries[id].0.lights);
+            }
+        }
+        if ambient == next && !nocturnal_changed {
+            return false;
+        }
+        self.refresh_dynamic_grid();
+        self.refresh_shades(None);
+        self.refresh_shadows();
+        true
     }
 
     fn outdoor(&self, tile: (u32, u32)) -> bool {
@@ -1318,10 +1381,10 @@ impl SectorCache {
         let tile = (raster.key.1.2, raster.key.1.1);
         let base = ambient_at(tile);
         if !raster.key.0 {
-            let (x, y) = raster.anchor;
+            let center = project_world_tile(tile, reference).expect("prepared surface projection");
             return PreparedShade::Tint(Modulation::floor(self.lights.surface(
                 &self.dynamic_grid,
-                (x, y - 19),
+                center,
                 base,
             )));
         }
@@ -1635,15 +1698,31 @@ impl SectorCache {
         Err(format!("cannot enter tile {tile:?}: {detail}"))
     }
 
+    fn unrestricted_step(
+        entries: &BTreeMap<u64, (CachedSector, Option<u64>)>,
+        (x, y): (u32, u32),
+        facing: u8,
+    ) -> Option<(u32, u32)> {
+        let (dx, dy) = collision::DIRECTIONS[usize::from(facing)];
+        let next = (x.checked_add_signed(dx)?, y.checked_add_signed(dy)?);
+        let (sector, _) = entries.get(&tile_sector_id(next))?;
+        sector.report.source.as_ref()?;
+        Some(next)
+    }
+
     fn update_player(&mut self, input: (i32, i32), run: bool, now: Duration) -> Option<(i32, i32)> {
         // Borrow the cache entries only while considering the next tile.
         let entries = &self.entries;
         let states = &self.door_states;
         let player = self.player.as_mut()?;
         player.update(input, run, now, |tile, facing| {
-            collision::step(tile, facing, |tile| {
-                Self::player_cell(entries, states, tile)
-            })
+            if self.collision_disabled && input != (0, 0) {
+                Self::unrestricted_step(entries, tile, facing)
+            } else {
+                collision::step(tile, facing, |tile| {
+                    Self::player_cell(entries, states, tile)
+                })
+            }
         });
         Some(player.sample(now).anchor)
     }
@@ -1778,7 +1857,7 @@ pub struct WorldStream {
 
 impl WorldStream {
     pub fn new(
-        vfs: Vfs,
+        mut vfs: Vfs,
         map: String,
         region: SectorRegion,
         reference: (u32, u32),
@@ -1789,9 +1868,12 @@ impl WorldStream {
         region
             .camera(reference)
             .ok_or("invalid world sector bounds or camera reference")?;
+        let terrain =
+            super::terrain::TerrainMap::load(&mut vfs, &map).map_err(|error| error.to_string());
         Ok(Self {
             region,
             loader: SectorLoader {
+                terrain,
                 map,
                 reference,
                 vfs,
@@ -1815,6 +1897,8 @@ impl WorldStream {
         let reference = self.loader.reference;
         let player = Player::load(&mut self.loader.vfs, &mut self.loader.frames, reference)?;
         if self.loader.lighting.is_some() {
+            self.cache.light_schedule =
+                Some(Ambient::schedule(&mut self.loader.vfs, &self.loader.map)?);
             // CE proto.c uses light ART (6,0,0,1) for its generic biped PC too.
             let art = shadow::Art::decode(mobile::VERIFIED_SHADOW)?;
             self.cache.player_shadows = Some(MobileShadows::load(
@@ -1831,19 +1915,9 @@ impl WorldStream {
         Ok(self)
     }
 
-    /// Start at the original game's authored hour, without advancing a gameplay clock.
+    /// Start at the original game's authored hour.
     pub fn with_starting_lighting(mut self) -> Result<Self, Box<dyn std::error::Error>> {
-        let hour = match load_mes(&mut self.loader.vfs, "rules/gameinit.mes") {
-            Ok(table) => table
-                .mes
-                .get(5)
-                .map_or(Ok(10), |value| value.trim().parse::<u8>())?,
-            Err(super::Error::Resource {
-                error: crate::vfs::Error::NotFound(_),
-                ..
-            }) => 15,
-            Err(error) => return Err(error.into()),
-        };
+        let hour = super::travel::starting_hour(&mut self.loader.vfs)?;
         self.with_lighting(hour)
     }
 
@@ -2184,6 +2258,7 @@ impl WorldStream {
 }
 
 struct SectorLoader {
+    terrain: Result<Option<super::terrain::TerrainMap>, String>,
     map: String,
     reference: (u32, u32),
     vfs: Vfs,
@@ -2209,8 +2284,17 @@ impl SectorLoader {
             // Full-sector import is independent of the current viewport.
             viewport: (1, 1),
         };
-        let (room, mut timing) =
-            load_streamed_sector(&mut self.vfs, &mut self.frames, region, self.playing);
+        let (room, mut timing) = load_streamed_sector(
+            &mut self.vfs,
+            &mut self.frames,
+            region,
+            self.playing,
+            self.audit,
+            self.terrain
+                .as_ref()
+                .map(Option::as_ref)
+                .map_err(String::as_str),
+        );
         let sector = match room {
             Ok(room) => {
                 let start = Instant::now();
@@ -2338,6 +2422,133 @@ mod tests {
 
     #[test]
     #[ignore = "requires the installed original game"]
+    fn original_terrain_templates_supply_neighboring_world_sectors_and_collision() {
+        let root = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+        let open = || Vfs::from_game(&root, crate::vfs::Policy::Ce).unwrap();
+        let mut atlas_vfs = open();
+        let atlas = super::super::map_atlas::Atlas::load(&mut atlas_vfs).unwrap();
+        let map = atlas.catalog.new_game().unwrap();
+        let bounds = map.files(&mut atlas_vfs).unwrap().bounds();
+        assert_eq!(bounds.last, Coordinates { x: 1999, y: 1999 });
+        for (center, sector, template) in [
+            (
+                (28320, 31168),
+                Coordinates { x: 441, y: 487 },
+                "terrain/desert island/67108864.sec",
+            ),
+            (
+                (19704, 37452),
+                Coordinates { x: 308, y: 585 },
+                "terrain/desert island/0.sec",
+            ),
+        ] {
+            let mut camera = bounds.camera(center).unwrap();
+            camera.follow((0, 0));
+            let mut world = WorldStream::new(open(), map.directory.clone(), bounds, center)
+                .unwrap()
+                .with_player()
+                .unwrap();
+            world.prepare(&camera, (1280, 720)).unwrap();
+            world.validate_arrival(center).unwrap();
+            let report = world
+                .reports()
+                .find(|report| Some(report.id) == sector.id())
+                .unwrap();
+            assert!(report.source.as_deref().unwrap().starts_with(template));
+            assert_eq!(report.surfaces, 4096);
+            assert!(report.facades > 0 && report.scenery_count > 0);
+            assert!(report.collision_available && !report.object_list_failed);
+            let corner = sector.world_tile(0, 0).unwrap();
+            let walkable = (0..64)
+                .flat_map(|y| (0..64).map(move |x| (corner.0 + x, corner.1 + y)))
+                .any(|tile| world.validate_arrival(tile).is_ok());
+            assert!(
+                walkable,
+                "{template} should include original walkable tiles"
+            );
+        }
+
+        let roseborough = atlas
+            .areas
+            .values()
+            .find(|area| area.name.eq_ignore_ascii_case("roseborough"))
+            .unwrap();
+        let center = roseborough.tile;
+        let mut camera = bounds.camera(center).unwrap();
+        camera.follow((0, 0));
+        let mut world = WorldStream::new(open(), map.directory.clone(), bounds, center)
+            .unwrap()
+            .with_object_audit();
+        world.prepare(&camera, (1280, 720)).unwrap();
+        assert!(world.reports().any(|sector| {
+            sector
+                .source
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("terrain/")
+                && sector.surfaces > 0
+        }));
+    }
+
+    #[test]
+    #[ignore = "requires the installed original game"]
+    fn overland_arrival_has_collision_and_hourly_lighting_without_asset_reads() {
+        let root = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+        let mut vfs = Vfs::from_game(root, crate::vfs::Policy::Ce).unwrap();
+        let atlas = super::super::map_atlas::Atlas::load(&mut vfs).unwrap();
+        let map = atlas.catalog.new_game().unwrap();
+        let entry = atlas
+            .areas
+            .values()
+            .find(|area| area.name == "Qintarra")
+            .unwrap()
+            .tile;
+        let region = map.files(&mut vfs).unwrap().bounds();
+        let mut camera = region.camera(entry).unwrap();
+        camera.follow((0, 0));
+        let size = (1280, 720);
+        let mut scene = WorldStream::new(vfs, map.directory.clone(), region, entry)
+            .unwrap()
+            .with_lighting(15)
+            .unwrap()
+            .with_player()
+            .unwrap();
+        scene.prepare(&camera, size).unwrap();
+        scene.validate_arrival(entry).unwrap();
+
+        let reads = scene.loader.stats();
+        let geometry = scene.cache.ordered.as_ptr();
+        let pixels = |scene: &WorldStream| {
+            let mut target = vec![[0; 3]; size.0 as usize * size.1 as usize];
+            crate::compositor::blit_modulated(
+                &mut target,
+                size,
+                size.0 as usize,
+                scene
+                    .visible_assets_at(&camera, size, Duration::ZERO)
+                    .map(|draw| (draw.sprite, draw.modulation)),
+            )
+            .unwrap();
+            target
+        };
+        let day = pixels(&scene);
+        assert!(scene.cache.set_game_hour(5));
+        assert!(pixels(&scene) != day, "night must change visible pixels");
+        assert!(scene.cache.set_game_hour(15));
+        assert!(
+            pixels(&scene) == day,
+            "returning to the same hour must reproduce pixels"
+        );
+        assert_eq!(scene.cache.ordered.as_ptr(), geometry);
+        let after = scene.loader.stats();
+        assert_eq!(
+            (after.0, after.1.reads, after.1.decodes),
+            (reads.0, reads.1.reads, reads.1.decodes)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the installed original game"]
     fn original_new_game_entry_and_crash_site_content() {
         let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
         let mut vfs = Vfs::from_game(game, crate::vfs::Policy::Ce).unwrap();
@@ -2346,7 +2557,7 @@ mod tests {
         let files = map.files(&mut vfs).unwrap();
         let center = files.center(None).unwrap();
         assert_eq!((map.id, center), (5000, (92958, 82592)));
-        let region = files.region_at(center);
+        let region = files.bounds();
         let camera = region.camera(center).unwrap();
         let mut world = WorldStream::new(vfs, map.directory.clone(), region, center)
             .unwrap()
@@ -2407,7 +2618,7 @@ mod tests {
         .unwrap();
         let map = catalog.find("5078").unwrap();
         let files = map.files(&mut vfs).unwrap();
-        let region = files.region_at(dst.tile);
+        let region = files.bounds();
         let camera = region.camera(dst.tile).unwrap();
         let mut cave = WorldStream::new(vfs, map.directory.clone(), region, dst.tile)
             .unwrap()
@@ -2439,6 +2650,132 @@ mod tests {
 
     #[test]
     #[ignore = "requires the installed original game"]
+    fn tulla_authored_arrival_retains_wall_end_caps() {
+        let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+        let mut vfs = Vfs::from_game(game, crate::vfs::Policy::Ce).unwrap();
+        let atlas = super::super::map_atlas::Atlas::load(&mut vfs).unwrap();
+        let entry = atlas.areas[&11].tile;
+        assert_eq!(entry, (28455, 31171));
+        let map = atlas.catalog.find("5000").unwrap();
+        let region = map.files(&mut vfs).unwrap().bounds();
+        let mut world = WorldStream::new(vfs, map.directory.clone(), region, entry)
+            .unwrap()
+            .with_player()
+            .unwrap();
+        world
+            .prepare(&region.camera(entry).unwrap(), (1280, 720))
+            .unwrap();
+        world.validate_arrival(entry).unwrap();
+        for tile in [(28438, 31162), (28438, 31178)] {
+            assert!(
+                world.cache.ordered.iter().any(|raster| {
+                    (raster.key.1.2, raster.key.1.1) == tile
+                        && raster.frame.source.virtual_path.ends_with("uecu0.art")
+                }),
+                "missing wall end cap at {tile:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the installed original game"]
+    fn vendigroth_entrance_uses_original_transition_and_loads_past_the_trap() {
+        let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+        let open = || Vfs::from_game(&game, crate::vfs::Policy::Ce).unwrap();
+        let mut vfs = open();
+        let catalog = super::super::maps::Catalog::load(&mut vfs).unwrap();
+        let map = catalog.find("5000").unwrap();
+        let region = map.files(&mut vfs).unwrap().bounds();
+        let start = (19689, 37487);
+        let viewport = (1280, 720);
+        let mut world = WorldStream::new(vfs, map.directory.clone(), region, start)
+            .unwrap()
+            .with_player()
+            .unwrap();
+        world
+            .prepare(&region.camera(start).unwrap(), viewport)
+            .unwrap();
+        let raster = world
+            .cache
+            .ordered
+            .iter()
+            .find(|raster| {
+                raster.frame.source.virtual_path == "art/scenery/vendigroth-belltower-door.art"
+            })
+            .unwrap();
+        assert_eq!(raster.key.1.5, 256);
+        let origin = crate::compositor::sprite_origin(&raster.frame.decoded.frame, raster.anchor);
+        assert!(
+            (0..raster.frame.decoded.frame.height).any(|y| (0..raster.frame.decoded.frame.width)
+                .any(|x| {
+                    world.cache.pick(
+                        (origin.0 + i64::from(x), origin.1 + i64::from(y)),
+                        start,
+                        Duration::ZERO,
+                    ) == Some(raster.key)
+                })),
+            "the serialized entrance must be pickable"
+        );
+        let key = raster.key;
+        assert_eq!(world.cache.approach(key, false), Some(0));
+        let destination = world
+            .cache
+            .use_target(key, Duration::ZERO)
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (destination.map, destination.tile),
+            (Some(5032), (2051, 2038))
+        );
+
+        let mut vfs = open();
+        let map = catalog.find("5032").unwrap();
+        let region = map.files(&mut vfs).unwrap().bounds();
+        let mut underground =
+            WorldStream::new(vfs, map.directory.clone(), region, destination.tile)
+                .unwrap()
+                .with_player()
+                .unwrap();
+        underground
+            .prepare(&region.camera(destination.tile).unwrap(), viewport)
+            .unwrap();
+        underground.validate_arrival(destination.tile).unwrap();
+        let report = underground
+            .reports()
+            .find(|report| report.id == 2080374816)
+            .unwrap();
+        assert!(!report.object_list_failed && report.collision_available);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|text| text.contains("record 91 Trap, prototype 26021"))
+        );
+        assert!(underground.cache.ordered.iter().any(|raster| {
+            raster.key.0
+                && raster.key.1.5 > 91
+                && tile_sector_id((raster.key.1.2, raster.key.1.1)) == report.id
+        }));
+    }
+
+    #[test]
+    fn developer_step_requires_available_world_coordinates() {
+        let mut sector = CachedSector::missing(0, "fixture".into());
+        sector.report.source = Some("fixture".into());
+        let entries = BTreeMap::from([(0, (sector, None))]);
+        assert_eq!(SectorCache::unrestricted_step(&entries, (0, 0), 1), None);
+        assert_eq!(SectorCache::unrestricted_step(&entries, (63, 63), 5), None);
+        let start = (10, 10);
+        assert!(SectorCache::unrestricted_step(&entries, start, 1).is_some());
+        assert_eq!(
+            collision::step(start, 1, |tile| SectorCache::collision_cell(&entries, tile)),
+            None
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the installed original game"]
     fn tarant_pedestrian_gate_and_both_gatehouses_load_in_play() {
         let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
         let mut vfs = Vfs::from_game(game, crate::vfs::Policy::Ce).unwrap();
@@ -2460,7 +2797,7 @@ mod tests {
         assert_eq!(original.stored_tile, (61998, 65660));
         let start = (61997, 65660);
         let size = (1280, 720);
-        let region = files.region_at(start);
+        let region = files.bounds();
         let camera = region.camera(start).unwrap();
         let mut world = WorldStream::new(vfs, map.directory.clone(), region, start)
             .unwrap()

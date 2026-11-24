@@ -25,6 +25,7 @@ pub(super) enum Action {
     MapZoomIn,
     MapOverview,
     MapRecenter,
+    MapTravel,
 }
 
 #[derive(Clone, Copy, Deserialize, Default)]
@@ -59,6 +60,8 @@ struct Theme {
     #[serde(default = "default_scale")]
     scale: u16,
     fit_viewport: Option<[u32; 2]>,
+    route_color: Option<Color>,
+    selected_route_color: Option<Color>,
     #[serde(default)]
     fonts: BTreeMap<String, Font>,
     #[serde(default)]
@@ -98,6 +101,8 @@ pub(super) enum Binding {
     ContinentPlayerMarker,
     ContinentSelectedMarker,
     PlayerMarker,
+    WaypointMarker,
+    GameClock,
 }
 
 impl Binding {
@@ -115,6 +120,7 @@ impl Binding {
                 | Self::PlaceMarker
                 | Self::SelectedMarker
                 | Self::PlayerMarker
+                | Self::WaypointMarker
                 | Self::ContinentPlaceMarker
                 | Self::ContinentPlayerMarker
                 | Self::ContinentSelectedMarker
@@ -144,6 +150,8 @@ struct Element {
     binding: Option<Binding>,
     #[serde(default)]
     map_views: Vec<MapView>,
+    travel_available: Option<bool>,
+    clock_phases: Option<[String; 8]>,
     source_rect: Option<[u32; 4]>,
     #[serde(default)]
     frame: usize,
@@ -204,6 +212,42 @@ struct Component {
     state_frames: [Option<SpriteFrame>; 3],
     text: Option<Text>,
     label: Option<Label>,
+    clock: Option<ClockArt>,
+}
+
+struct ClockArt {
+    day: LoadedFrame,
+    moon: Vec<LoadedFrame>,
+    hours: Option<u64>,
+}
+
+impl ClockArt {
+    fn paint(&self, dst: &mut SpriteFrame, hours: u64, fill: Color) {
+        let day = &self.day.decoded.frame;
+        let seconds = hours * 3600;
+        let age = (seconds + 43200) / 84600 % 28;
+        let phase = [0, 4, 9, 13, 14, 18, 23, 27].partition_point(|&end| end < age);
+        let moon = &self.moon[phase].decoded.frame;
+        let width = u64::from(day.width) + u64::from(moon.width);
+        let center = ((seconds + 73800) % 86400) * width / 86400 + width;
+        let start = (center - u64::from(dst.width / 2) % width) % width;
+        for y in 0..dst.height {
+            for x in 0..dst.width {
+                let col = ((start + u64::from(x)) % width) as u32;
+                let (image, sx) = if col < day.width {
+                    (day, col)
+                } else {
+                    (moon, col - day.width)
+                };
+                let pixel = if y < image.height {
+                    image.pixels[(y * image.width + sx) as usize]
+                } else {
+                    fill
+                };
+                dst.pixels[(y * dst.width + x) as usize] = if pixel[3] == 0 { fill } else { pixel };
+            }
+        }
+    }
 }
 
 struct Text {
@@ -259,9 +303,14 @@ pub(crate) struct Hud {
     fit_viewport: Option<[u32; 2]>,
     hover: Option<usize>,
     pressed: Option<usize>,
+    route_color: Option<Color>,
+    selected_route_color: Option<Color>,
     selected_action: Option<Action>,
+    active_action: Option<Action>,
+    unavailable_action: Option<Action>,
     focus: Option<usize>,
     map_view: Option<MapView>,
+    travel_available: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -310,8 +359,30 @@ impl Hud {
             let mut state_frames = [None, None, None];
             let mut prepared_text = None;
             let mut label = None;
+            let mut clock = None;
             if !config.hidden {
-                if let Some(asset) = &config.image {
+                if config.binding == Some(Binding::GameClock) {
+                    let asset = config
+                        .image
+                        .as_ref()
+                        .ok_or("game-clock is missing its day strip")?;
+                    let phases = config
+                        .clock_phases
+                        .as_ref()
+                        .ok_or("game-clock requires eight moon strips")?;
+                    let day = resource(game, &mut files, asset, config.frame)?;
+                    let moon = phases
+                        .iter()
+                        .map(|path| resource(game, &mut files, path, 0))
+                        .collect::<Result<_, _>>()?;
+                    let art = ClockArt {
+                        day,
+                        moon,
+                        hours: None,
+                    };
+                    art.paint(&mut base, 0, config.fill.unwrap_or([0; 4]));
+                    clock = Some(art);
+                } else if let Some(asset) = &config.image {
                     let mut load = |frame| -> Result<SpriteFrame, Box<dyn Error>> {
                         let art = resource(game, &mut files, asset, frame)
                             .map_err(|error| format!("{}: {error}", config.id))?;
@@ -409,6 +480,7 @@ impl Hud {
                 state_frames,
                 text: prepared_text,
                 label,
+                clock,
             });
         }
         if let Some(author) = &theme.author {
@@ -423,9 +495,14 @@ impl Hud {
             fit_viewport: theme.fit_viewport,
             hover: None,
             pressed: None,
+            route_color: theme.route_color,
+            selected_route_color: theme.selected_route_color,
             selected_action: None,
+            active_action: None,
+            unavailable_action: None,
             focus: None,
             map_view: None,
+            travel_available: false,
         })
     }
 
@@ -467,6 +544,10 @@ impl Hud {
                     !component.config.map_views.is_empty()
                         && !component.config.map_views.contains(&mode)
                 }) || component.config.hidden
+                    || component
+                        .config
+                        .travel_available
+                        .is_some_and(|available| available != self.travel_available)
                     || component.config.binding.is_some_and(Binding::is_marker)
                 {
                     return None;
@@ -513,6 +594,15 @@ impl Hud {
         }
     }
 
+    pub(super) fn set_travel_available(&mut self, available: bool) -> bool {
+        if self.travel_available == available {
+            return false;
+        }
+        self.travel_available = available;
+        self.clear_layout();
+        true
+    }
+
     pub(super) fn set_map_view(&mut self, mode: MapView) {
         if self.map_view != Some(mode) {
             self.map_view = Some(mode);
@@ -528,10 +618,11 @@ impl Hud {
         )
     }
 
-    pub(super) fn set_lens(&mut self, frame: &SpriteFrame) {
-        if let Some(index) = self.bound(Binding::PlayerLens) {
-            let _ = scale_into(frame, &mut self.components[index].base, None);
-            self.clear_layout();
+    pub(super) fn set_lens_asset(&mut self, frame: Arc<LoadedFrame>) {
+        if let Some(index) = self.bound(Binding::PlayerLens)
+            && let Some(Some(place)) = self.placed.get_mut(index)
+        {
+            place.art = frame;
         }
     }
 
@@ -556,6 +647,14 @@ impl Hud {
         Some((place.rect, place.scale))
     }
 
+    pub(super) fn route_color(&self, selected: bool) -> Option<[u8; 4]> {
+        if selected {
+            self.selected_route_color.or(self.route_color)
+        } else {
+            self.route_color
+        }
+    }
+
     pub(super) fn marker(&self, binding: Binding) -> Option<&SpriteFrame> {
         Some(&self.components[self.bound(binding)?].base)
     }
@@ -566,6 +665,36 @@ impl Hud {
         {
             place.art = generated_frame(&self.components[index].config.id, frame);
         }
+    }
+
+    pub(super) fn set_game_time(&mut self, hours: u64) -> bool {
+        let Some(index) = self.bound(Binding::GameClock) else {
+            return false;
+        };
+        let component = &mut self.components[index];
+        let Some(clock) = &mut component.clock else {
+            return false;
+        };
+        if clock.hours == Some(hours) {
+            return false;
+        }
+        clock.hours = Some(hours);
+        clock.paint(
+            &mut component.base,
+            hours,
+            component.config.fill.unwrap_or([0; 4]),
+        );
+        if let Some(Some(place)) = self.placed.get_mut(index) {
+            place.art = raster(
+                component,
+                &component.base,
+                place.full,
+                place.rect,
+                place.scale,
+                None,
+            );
+        }
+        true
     }
 
     pub(super) fn set_label(&mut self, binding: Binding, value: &str) {
@@ -685,11 +814,7 @@ impl Hud {
     }
     pub(super) fn hit(&self, point: (u32, u32)) -> Hit {
         self.select(point).map_or(Hit::World, |index| {
-            let config = &self.components[index].config;
-            config
-                .action
-                .filter(|_| !config.disabled)
-                .map_or(Hit::Panel, Hit::Button)
+            self.available_action(index).map_or(Hit::Panel, Hit::Button)
         })
     }
     pub fn hover(&mut self, point: Option<(u32, u32)>) -> bool {
@@ -720,6 +845,14 @@ impl Hud {
         self.selected_action = Some(action);
     }
 
+    pub(super) fn set_active_action(&mut self, action: Option<Action>) {
+        self.active_action = action;
+    }
+
+    pub(super) fn set_unavailable_action(&mut self, action: Option<Action>) {
+        self.unavailable_action = action;
+    }
+
     pub fn advance_focus(&mut self, backwards: bool) {
         let len = self.components.len();
         if len == 0 {
@@ -744,7 +877,9 @@ impl Hud {
     fn available_action(&self, index: usize) -> Option<Action> {
         self.placed.get(index)?.as_ref()?;
         let config = &self.components[index].config;
-        config.action.filter(|_| !config.disabled)
+        config
+            .action
+            .filter(|action| !config.disabled && Some(*action) != self.unavailable_action)
     }
 
     pub fn draws(
@@ -763,7 +898,8 @@ impl Hud {
                 } else {
                     None
                 };
-                let selected = (action.is_some() && action == self.selected_action)
+                let selected = (action.is_some()
+                    && (action == self.selected_action || action == self.active_action))
                     .then_some(p.state_art[2].as_ref())
                     .flatten();
                 let highlighted = (hot
@@ -937,7 +1073,7 @@ fn raster(
     generated_frame(&c.config.id, frame)
 }
 
-fn generated_frame(id: &str, frame: SpriteFrame) -> Arc<LoadedFrame> {
+pub(super) fn generated_frame(id: &str, frame: SpriteFrame) -> Arc<LoadedFrame> {
     Arc::new(LoadedFrame {
         source: Source {
             virtual_path: format!("ui/{id}"),

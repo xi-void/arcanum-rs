@@ -142,6 +142,38 @@ fn rejects_unsupported_types_and_fields_and_invalid_record_boundaries() {
 }
 
 #[test]
+fn trap_fields_preserve_the_following_static_record() {
+    let mut data = vec![1]; // Present location.
+    for value in [2056u32, 1991, 0, 0, 0, 20, 0] {
+        data.extend(value.to_le_bytes());
+    }
+    data.extend([0, 0]); // Absent 32-bit and 64-bit pad arrays.
+    let trap = instance(TRAP, [14, 0, 0x1f], &data);
+    let mut bytes = sector_header(0xaa0004);
+    bytes.extend(&trap);
+    let wall_start = bytes.len();
+    bytes.extend(wall());
+    bytes.extend(2u32.to_le_bytes());
+    let list = decode(&bytes).unwrap();
+    assert_eq!(list.count, 2);
+    assert_eq!(list.traps[0].stored_tile, Some((2056, 1991)));
+    assert_eq!(list.traps[0].index, 0);
+    assert_eq!(list.walls[0].index, 1);
+    assert_eq!(list.walls[0].span.start, wall_start);
+
+    // A future subtype field must not be interpreted as a known pad or skipped.
+    let mut unknown = sector_header(0xaa0004);
+    unknown.extend(instance(TRAP, [0, 0, 0x20], &[0; 4]));
+    unknown.extend(1u32.to_le_bytes());
+    assert!(
+        decode(&unknown)
+            .unwrap_err()
+            .message
+            .contains("unsupported object fields")
+    );
+}
+
+#[test]
 fn retains_scenery_placements_and_rejects_a_truncated_override() {
     let art = 0x4120_0380_u32;
     let mut data = art.to_le_bytes().to_vec();

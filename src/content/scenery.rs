@@ -423,6 +423,7 @@ pub struct RoomOverview {
     pub outside_floor_walls: usize,
     pub outside_floor_scenery: usize,
     pub object_issue: Option<String>,
+    pub(super) traps: Vec<crate::sector::objects::TrapRecord>,
     pub object_list_failed: bool,
     pub(super) townmap: u32,
     pub(super) roof_words: Vec<(usize, u32)>,
@@ -508,14 +509,16 @@ pub(super) fn load_streamed_sector(
     frames: &mut art::FrameCache,
     region: WorldRegion<'_>,
     playing: bool,
+    audit: bool,
+    terrain: Result<Option<&super::terrain::TerrainMap>, &str>,
 ) -> (Result<RoomOverview, Box<dyn Error>>, LoadStages) {
     let mut timing = LoadStages::default();
-    let mode = if playing {
+    let mode = if playing || audit {
         LoadMode::Playable
     } else {
         LoadMode::Streamed
     };
-    let result = load_overview_timed(vfs, frames, region, mode, &mut timing);
+    let result = load_overview_timed(vfs, frames, region, mode, terrain, &mut timing);
     frames.finish_sector();
     (result, timing)
 }
@@ -547,7 +550,14 @@ fn load_overview(
     region: WorldRegion<'_>,
     mode: LoadMode,
 ) -> Result<RoomOverview, Box<dyn Error>> {
-    load_overview_timed(vfs, frames, region, mode, &mut LoadStages::default())
+    load_overview_timed(
+        vfs,
+        frames,
+        region,
+        mode,
+        Ok(None),
+        &mut LoadStages::default(),
+    )
 }
 
 fn load_overview_timed(
@@ -555,6 +565,7 @@ fn load_overview_timed(
     frames: &mut art::FrameCache,
     region: WorldRegion<'_>,
     mode: LoadMode,
+    terrain: Result<Option<&super::terrain::TerrainMap>, &str>,
     timing: &mut LoadStages,
 ) -> Result<RoomOverview, Box<dyn Error>> {
     use std::time::Instant;
@@ -575,11 +586,41 @@ fn load_overview_timed(
         return Err("invalid world preview viewport".into());
     }
     let start = Instant::now();
-    let base = sector::read_base_sector(vfs, map, coordinates);
+    let base = sector::read_base_sector(vfs, map, coordinates).or_else(|error| {
+        let missing = matches!(
+            error.downcast_ref::<super::Error>(),
+            Some(super::Error::Resource {
+                error: crate::vfs::Error::NotFound(_),
+                ..
+            })
+        );
+        if !missing {
+            return Err(error);
+        }
+        match terrain {
+            Ok(Some(terrain)) => {
+                let path = terrain
+                    .template(coordinates)
+                    .map_err(|reason| format!("{error}; {reason}"))?;
+                super::read_bounded(vfs, &path, crate::sector::MAX_INPUT_BYTES).map_err(|reason| {
+                    format!("{error}; original terrain template {path}: {reason}").into()
+                })
+            }
+            Ok(None) => Err(error),
+            Err(reason) => Err(format!("{error}; terrain lookup unavailable: {reason}").into()),
+        }
+    });
     timing.sector_read = start.elapsed();
     let (source, bytes) = base?;
     let start = Instant::now();
-    let floor = sector::parse_surface(&source, &bytes)?;
+    let mut floor = sector::parse_surface(&source, &bytes)?;
+    let template_lights = if source.virtual_path.starts_with("terrain/") {
+        let count = floor.lights.len();
+        floor.lights.clear();
+        count
+    } else {
+        0
+    };
     let townmap = crate::sector::objects::townmap(&bytes, floor.tile_offset).unwrap_or(0);
     let roof_words = crate::sector::objects::roof_words(&bytes, floor.tile_offset)
         .unwrap_or_default()
@@ -596,7 +637,7 @@ fn load_overview_timed(
         None
     };
     let start = Instant::now();
-    let floor = sector::resolve_surface(
+    let mut floor = sector::resolve_surface(
         vfs,
         frames,
         (source.clone(), floor),
@@ -609,6 +650,11 @@ fn load_overview_timed(
             partial,
         },
     )?;
+    if template_lights > 0 {
+        floor.surface_issues.push(format!(
+            "{template_lights} terrain-template light records require unsupported relocation"
+        ));
+    }
     timing.surfaces = start.elapsed();
     let start = Instant::now();
     let objects = decode(&bytes)
@@ -639,6 +685,7 @@ fn load_overview_timed(
                 outside_floor_walls: 0,
                 outside_floor_scenery: 0,
                 object_issue: Some(error),
+                traps: Vec::new(),
                 object_list_failed: true,
                 townmap,
                 roof_words,
@@ -835,6 +882,7 @@ fn load_overview_timed(
         townmap,
         roof_words,
         collision,
+        traps: objects.traps,
         object_issue: (partial && framing_only != (0, 0)).then(|| {
             format!(
                 "{} portals lack a stored ART ID or location, {} scenery records lack an instance location",

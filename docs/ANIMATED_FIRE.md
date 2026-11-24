@@ -5,13 +5,13 @@ the CPU compositor and the optional Vulkan and OpenGL backends.
 
 ```sh
 game="$HOME/Work/arcanum-ce-test"
-cargo run --offline --locked --release --features gpu -- \
+cargo run --offline --locked --release --features windowed -- \
   art world "$game" --sectors "k'na tha" 12 12 12 12 798 786 1280 720 \
-  --lighting 0 --renderer vulkan --trace
+  --lighting 0 --trace
 ```
 
 Pass `--animation-ms 90` to freeze playback at 90 ms from the serialized
-starting frame. Use `--renderer cpu` or `--renderer gles` at the same tick
+starting frame. Use the same tick
 and viewport for comparison. For Bates Mansion, use
 `--sectors "bates mansion lev 1" 1 1 1 1 91 81 1280 720 --lighting 12`.
 The older `--view` and room previews remain static fixtures.

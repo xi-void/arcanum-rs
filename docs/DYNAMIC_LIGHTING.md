@@ -7,17 +7,16 @@ animated flames remain part of the scene.
 
 ```sh
 game="$HOME/Work/arcanum-ce-test"
-cargo run --offline --locked --release --features gpu -- \
+cargo run --offline --locked --release --features windowed -- \
   art world "$game" --sectors "bates mansion lev 1" 1 1 1 1 101 83 1280 720 \
-  --lighting 12 --renderer vulkan --light-probe 101 82 --light-probe 103 83 --trace
+  --lighting 12 --light-probe 101 82 --light-probe 103 83 --trace
 ```
 
 The two optional probes start enabled. Press **1** or **2** to toggle a
 probe. **J/L** change probe 1's world tile X by one, and **I/K** change
 Y by one. Arrow keys and Home still control only the camera. Keep the
 same placement and add `--animation-ms 90` for a fixed-tick capture.
-Omitting that option gives live flame playback. Switch to
-`--renderer cpu` for the reference compositor.
+Omitting that option gives live flame playback.
 
 ## Original rules and verified source data
 

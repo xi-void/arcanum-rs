@@ -1190,6 +1190,20 @@ fn streams_original_layout_from_two_synthetic_adjacent_sectors() {
         (39, 132),
         &[1, 0],
     );
+    let mut terrain = [0; 32];
+    terrain[..4].copy_from_slice(&1.2f32.to_le_bytes());
+    terrain[8] = 2;
+    terrain[16] = 1;
+    fixture.write(
+        "maps/synthetic/terrain.tdf",
+        &[terrain.as_slice(), &[0, 0, 1, 0]].concat(),
+    );
+    fixture.write("terrain/terrain.mes", b"{0}{grass}");
+    fixture.write(
+        "terrain/grass/0.sec",
+        b"strict authored sector must take precedence",
+    );
+
     for id in 0_u32..=1 {
         let mut bytes = 0_u32.to_le_bytes().to_vec();
         for cell in 0..4096 {
@@ -1215,7 +1229,12 @@ fn streams_original_layout_from_two_synthetic_adjacent_sectors() {
         bytes.extend((if id == 0 { -40_i32 } else { 0 }).to_le_bytes());
         bytes.extend((if id == 0 { 170_i32 } else { 150 }).to_le_bytes());
         bytes.extend(1_u32.to_le_bytes());
-        fixture.write(&format!("maps/synthetic/{id}.sec"), &bytes);
+        let path = if id == 0 {
+            "maps/synthetic/0.sec"
+        } else {
+            "terrain/grass/1.sec"
+        };
+        fixture.write(path, &bytes);
     }
 
     let region = SectorRegion {
@@ -1240,6 +1259,16 @@ fn streams_original_layout_from_two_synthetic_adjacent_sectors() {
     camera.pan((-1260, 630), size);
     world.prepare(&camera, size).unwrap();
     assert_eq!(world.reports().map(|r| r.id).collect::<Vec<_>>(), [0, 1]);
+    assert!(
+        world
+            .reports()
+            .find(|r| r.id == 1)
+            .unwrap()
+            .source
+            .as_deref()
+            .unwrap()
+            .starts_with("terrain/grass/1.sec from ")
+    );
     assert_eq!(world.stats().art.decodes, 4);
     assert!(world.stats().art.hits > 0);
     let seam = render(&world, &camera);

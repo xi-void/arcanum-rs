@@ -10,7 +10,7 @@ const PALETTE_BYTES: usize = 256 * 4;
 const FRAME_BYTES: usize = 28;
 
 /// A selected frame as straight RGBA8 in row-major order, top row first.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpriteFrame {
     pub width: u32,
     pub height: u32,

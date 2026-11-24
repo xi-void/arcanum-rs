@@ -1,31 +1,31 @@
 //! Optional desktop presentation for the sprite diagnostic.
 
-use crate::RenderBackend;
 use arcanum_rs::art::SpriteFrame;
 
-#[cfg(feature = "gpu")]
 mod gpu;
 mod hud;
 mod map_ui;
+use map_ui::Arrival;
 pub(super) use map_ui::MapUi;
 mod menu;
 use arcanum_rs::camera::{Camera, CameraScene};
-use arcanum_rs::compositor::{Modulation, SpriteDraw, blit_modulated};
-use arcanum_rs::content::world::{Destination, DoorStates, InteractiveWorld, WorldStream};
+use arcanum_rs::compositor::{Modulation, SpriteDraw};
+use arcanum_rs::content::travel::Clock;
+use arcanum_rs::content::{
+    art::LoadedFrame,
+    world::{Destination, DoorStates, InteractiveWorld, WorldDraw, WorldStream},
+};
 pub(super) use hud::Hud;
 use menu::{Command as MenuCommand, Menu, Settings};
-use softbuffer::{Context, Surface};
 use std::{
-    num::NonZeroU32,
+    collections::BTreeMap,
     sync::Arc,
     time::{Duration, Instant},
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize, Size};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
-use winit::event_loop::{
-    ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy, OwnedDisplayHandle,
-};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
@@ -125,7 +125,16 @@ pub fn show_layers_at_size(
 }
 
 fn show_layers_with_size(title: String, layers: &[Layer<'_>], size: Size) -> Result<(), String> {
-    show_content(title, ViewContent::Fixed(layers), size)
+    let sprites = layers
+        .iter()
+        .map(|layer| {
+            (
+                hud::generated_frame("diagnostic-sprite", layer.frame.clone()),
+                layer.relative_anchor,
+            )
+        })
+        .collect();
+    show_content(title, ViewContent::Fixed(sprites), size)
 }
 
 pub fn show_camera(
@@ -134,10 +143,17 @@ pub fn show_camera(
     camera: Camera,
     size: (u32, u32),
 ) -> Result<(), String> {
+    let mut assets = BTreeMap::new();
+    for frame in scene.frames() {
+        assets
+            .entry(std::ptr::from_ref(frame))
+            .or_insert_with(|| hud::generated_frame("diagnostic-sprite", frame.clone()));
+    }
     show_content(
         title,
         ViewContent::World {
             scene,
+            assets,
             camera,
             shift: false,
         },
@@ -146,7 +162,14 @@ pub fn show_camera(
 }
 
 pub type TravelLoader<'a> = Box<
-    dyn Fn(&str, Destination, u8, (u32, u32)) -> Result<(String, WorldStream, Camera), String> + 'a,
+    dyn Fn(
+            &str,
+            Destination,
+            u8,
+            (u32, u32),
+            Option<u8>,
+        ) -> Result<(String, WorldStream, Camera), String>
+        + 'a,
 >;
 
 struct Travel<'a> {
@@ -158,9 +181,9 @@ struct Travel<'a> {
 
 pub struct StreamOptions<'a> {
     pub trace: bool,
-    pub renderer: RenderBackend,
     pub animation_ms: Option<u64>,
     pub explore: bool,
+    pub debug: bool,
     pub travel: Option<(String, TravelLoader<'a>)>,
     pub hud: Option<Box<Hud>>,
     pub map_ui: Option<Box<MapUi>>,
@@ -175,17 +198,13 @@ pub fn show_stream(
 ) -> Result<(), String> {
     let StreamOptions {
         trace,
-        renderer,
         animation_ms,
         explore,
+        debug,
         travel,
         hud,
         map_ui,
     } = options;
-    #[cfg(not(feature = "gpu"))]
-    if renderer != RenderBackend::Cpu {
-        return Err("GPU renderer requires the gpu feature".into());
-    }
     let event_loop = make_loop()?;
     let proxy = event_loop.create_proxy();
     let travel = travel.map(|(map, loader)| Travel {
@@ -215,6 +234,7 @@ pub fn show_stream(
             last_zoom: 1,
             waiting: false,
             explore,
+            debug,
             trace,
             animation_ms,
             travel,
@@ -223,12 +243,11 @@ pub fn show_stream(
         },
         PhysicalSize::<u32>::from(size).into(),
         event_loop,
-        renderer,
     )
 }
 
 enum ViewContent<'a> {
-    Fixed(&'a [Layer<'a>]),
+    Fixed(Vec<(Arc<LoadedFrame>, (i16, i16))>),
     Stream {
         world: Box<InteractiveWorld>,
         camera: Camera,
@@ -239,6 +258,7 @@ enum ViewContent<'a> {
         last_zoom: u8,
         waiting: bool,
         explore: bool,
+        debug: bool,
         trace: bool,
         animation_ms: Option<u64>,
         travel: Option<Travel<'a>>,
@@ -247,13 +267,14 @@ enum ViewContent<'a> {
     },
     World {
         scene: &'a CameraScene<'a>,
+        assets: BTreeMap<*const SpriteFrame, Arc<LoadedFrame>>,
         camera: Camera,
         shift: bool,
     },
 }
 
 fn show_content(title: String, content: ViewContent<'_>, size: Size) -> Result<(), String> {
-    run_content(title, content, size, make_loop()?, RenderBackend::Cpu)
+    run_content(title, content, size, make_loop()?)
 }
 
 fn make_loop() -> Result<EventLoop<()>, String> {
@@ -267,18 +288,15 @@ fn run_content(
     content: ViewContent<'_>,
     size: Size,
     event_loop: EventLoop<()>,
-    renderer: RenderBackend,
 ) -> Result<(), String> {
     event_loop.set_control_flow(ControlFlow::Wait);
-    let context = (renderer == RenderBackend::Cpu)
-        .then(|| Context::new(event_loop.owned_display_handle()))
-        .transpose()
-        .map_err(|error| format!("cannot initialize software presentation: {error}"))?;
+    let clock = match &content {
+        ViewContent::Stream { world, .. } => world.game_clock(),
+        _ => None,
+    };
     let mut app = Viewer {
         title,
         size,
-        context,
-        renderer,
         view: None,
         content,
         failure: None,
@@ -290,7 +308,9 @@ fn run_content(
         settings: Settings::default(),
         pause: None,
         paused_for: Duration::ZERO,
+        clock_paused_for: Duration::ZERO,
         map_since: None,
+        clock,
     };
     event_loop
         .run_app(&mut app)
@@ -304,8 +324,6 @@ fn run_content(
 struct Viewer<'a> {
     title: String,
     size: Size,
-    context: Option<Context<OwnedDisplayHandle>>,
-    renderer: RenderBackend,
     view: Option<WindowSurface>,
     content: ViewContent<'a>,
     failure: Option<String>,
@@ -317,7 +335,9 @@ struct Viewer<'a> {
     settings: Settings,
     pause: Option<(Menu, Instant)>,
     paused_for: Duration,
+    clock_paused_for: Duration,
     map_since: Option<Instant>,
+    clock: Option<Clock>,
 }
 
 const CAMERA_TICK: Duration = Duration::from_millis(16);
@@ -404,21 +424,11 @@ impl Navigation {
 }
 
 struct WindowSurface {
-    backend: Presentation,
+    renderer: gpu::WindowRenderer,
+    map_inset: Option<Arc<LoadedFrame>>,
+    developer_status: Option<Arc<LoadedFrame>>,
     window: Arc<Window>,
     occluded: bool,
-}
-
-enum Presentation {
-    Cpu(CpuSurface),
-    #[cfg(feature = "gpu")]
-    Gpu(Box<gpu::WindowRenderer>),
-}
-
-struct CpuSurface {
-    surface: Surface<OwnedDisplayHandle, Arc<Window>>,
-    pixels: Vec<[u8; 3]>,
-    overlay_pixels: Vec<[u8; 3]>,
 }
 
 impl Viewer<'_> {
@@ -433,6 +443,119 @@ impl Viewer<'_> {
             .map_or(self.map_since.unwrap_or(now), |(_, paused)| *paused)
             .saturating_duration_since(self.epoch)
             .saturating_sub(self.paused_for)
+    }
+
+    fn game_elapsed(&self, now: Instant) -> Duration {
+        self.pause
+            .as_ref()
+            .map_or(now, |(_, paused)| *paused)
+            .saturating_duration_since(self.epoch)
+            .saturating_sub(self.clock_paused_for)
+    }
+
+    fn change_location(&mut self, target: Destination, facing: u8) -> Result<(), String> {
+        let hour = self
+            .clock
+            .as_ref()
+            .map(|clock| clock.hour(self.game_elapsed(Instant::now())));
+        let view = self.view.as_mut().ok_or("World window is unavailable")?;
+        let ViewContent::Stream {
+            world,
+            camera,
+            travel: Some(travel),
+            trace,
+            direction,
+            waiting,
+            last_presented,
+            last_viewport,
+            ..
+        } = &mut self.content
+        else {
+            return Err("World transition is unavailable".into());
+        };
+        let size = view.window.inner_size();
+        let (map, next, next_camera) =
+            (travel.loader)(&travel.map, target, facing, (size.width, size.height), hour)?;
+        let wake = travel.wake.clone();
+        let mut next = next
+            .into_interactive(
+                move || {
+                    let _ = wake.send_event(());
+                },
+                *trace,
+            )
+            .map_err(|err| err.to_string())?;
+        travel
+            .doors
+            .insert(travel.map.clone(), world.take_door_states());
+        if let Some(states) = travel.doors.remove(&map) {
+            next.restore_door_states(states);
+        }
+        eprintln!("Entered {map} at {:?}, game hour {hour:?}", target.tile);
+        view.window.set_title(&format!("Arcanum-RS | {map} play"));
+        view.developer_status = None;
+        travel.map = map;
+        **world = next;
+        *camera = next_camera;
+        *last_presented = None;
+        *last_viewport = (0, 0);
+        *waiting = false;
+        *direction = (0, 0);
+        self.navigation = Navigation::default();
+        self.player_deadline = None;
+        self.animation_deadline = None;
+        view.window.request_redraw();
+        Ok(())
+    }
+
+    fn finish_travel(&mut self, event_loop: &ActiveEventLoop, arrival: Arrival) {
+        let (map, tile, cancelled) = match arrival {
+            Arrival::Destination(map, tile) => (map, Some(tile), false),
+            Arrival::Cancelled(map, tile) => (map, tile, true),
+        };
+        let facing = if let ViewContent::Stream { world, .. } = &mut self.content {
+            world.cancel_player_route();
+            world.player_facing().unwrap_or(4)
+        } else {
+            return;
+        };
+        let loaded = tile.map_or(Ok(()), |tile| {
+            self.change_location(
+                Destination {
+                    map: Some(map),
+                    tile,
+                },
+                facing,
+            )
+        });
+        let hour = self
+            .clock
+            .as_ref()
+            .map(|clock| clock.hour(self.game_elapsed(Instant::now())));
+        if let ViewContent::Stream { world, .. } = &mut self.content
+            && let Some(hour) = hour
+        {
+            world.set_game_hour(hour);
+        }
+        if let Err(error) = loaded {
+            if let ViewContent::Stream {
+                map_ui: Some(ui), ..
+            } = &mut self.content
+            {
+                ui.travel_notice(&format!("Cannot arrive: {error}"));
+            }
+            if !cancelled {
+                if let Some(view) = &self.view {
+                    view.window.request_redraw();
+                }
+                self.update_control_flow(event_loop);
+                return;
+            }
+            eprintln!(
+                "Cancellation stopped at the departure location; the current route sector cannot be entered on foot."
+            );
+        }
+        self.close_map(event_loop);
     }
 
     fn pause_game(&mut self, event_loop: &ActiveEventLoop) {
@@ -464,7 +587,9 @@ impl Viewer<'_> {
         match command {
             MenuCommand::Continue => {
                 if let Some((_, paused)) = self.pause.take() {
-                    self.paused_for += paused.elapsed();
+                    let pause = paused.elapsed();
+                    self.paused_for += pause;
+                    self.clock_paused_for += pause;
                 }
                 if matches!(&self.content, ViewContent::Stream { world, .. } if world.player_moving())
                 {
@@ -481,36 +606,23 @@ impl Viewer<'_> {
     }
 
     fn open_map(&mut self, event_loop: &ActiveEventLoop) {
-        let elapsed = self.play_elapsed(Instant::now());
         if let ViewContent::Stream {
             map_ui: Some(map),
             hud,
             shift,
             world,
             trace,
-            last_presented,
+            travel,
             ..
         } = &mut self.content
         {
-            if let (Some(camera), Some((width, height))) =
-                (last_presented.as_ref(), map.lens_size())
-            {
-                let viewport = (width, height);
-                let mut pixels = vec![stream_background(true); (width * height) as usize];
-                let draws = scene_draws(world, camera, viewport, elapsed, self.settings)
-                    .map(|draw| (draw.sprite, draw.modulation));
-                if blit_modulated(&mut pixels, viewport, width as usize, draws).is_ok() {
-                    map.set_lens(&SpriteFrame {
-                        width,
-                        height,
-                        hotspot: (0, 0),
-                        offset: (0, 0),
-                        pixels: pixels.into_iter().map(|[r, g, b]| [r, g, b, 255]).collect(),
-                    });
+            if let Some((tile, town)) = world.player_map_position() {
+                if let Some(travel) = travel {
+                    map.observe(&travel.map, tile, town);
                 }
-            }
-            if *trace && let Some((tile, town)) = world.player_map_position() {
-                eprintln!("Map player tile {tile:?}, town map {town}");
+                if *trace {
+                    eprintln!("Map player tile {tile:?}, town map {town}");
+                }
             }
             map.open(hud.as_ref().map(|hud| hud.scale()));
             *shift = false;
@@ -518,7 +630,8 @@ impl Viewer<'_> {
             self.navigation = Navigation::default();
             self.player_deadline = None;
             self.schedule_animation(event_loop, None);
-            if let Some(view) = &self.view {
+            if let Some(view) = &mut self.view {
+                view.map_inset = None;
                 view.window.request_redraw();
             }
         }
@@ -534,7 +647,8 @@ impl Viewer<'_> {
             map.close();
             self.paused_for += self.map_since.take().expect("open map timestamp").elapsed();
             self.player_deadline = world.player_moving().then(Instant::now);
-            if let Some(view) = &self.view {
+            if let Some(view) = &mut self.view {
+                view.map_inset = None;
                 view.window.request_redraw();
             }
         }
@@ -542,8 +656,13 @@ impl Viewer<'_> {
     }
 
     fn map_event(&mut self, loop_: &ActiveEventLoop, event: &WindowEvent) -> bool {
+        let now = self.epoch.elapsed();
         let elapsed = self.play_elapsed(Instant::now());
         let settings = self.settings;
+        let hours = self
+            .clock
+            .as_ref()
+            .map(|clock| clock.hours(self.game_elapsed(Instant::now())));
         let ViewContent::Stream {
             map_ui: Some(map),
             hud,
@@ -560,19 +679,58 @@ impl Viewer<'_> {
             return false;
         }
         let view = self.view.as_mut().unwrap();
+        let mut arrival = None;
         match event {
             WindowEvent::RedrawRequested => {
                 let size = view.window.inner_size();
                 if size.width > 0 && size.height > 0 {
                     let viewport = (size.width, size.height);
                     let map = map.prepare(viewport, self.cursor);
+                    let camera = last_presented.as_ref().unwrap_or(camera);
+                    if let Some([w, h]) = map.lens_size()
+                        && let Some((rect, _)) = map.bounds(hud::Binding::PlayerLens)
+                    {
+                        if view.map_inset.as_ref().is_none_or(|asset| {
+                            (asset.decoded.frame.width, asset.decoded.frame.height)
+                                != (rect.w, rect.h)
+                        }) {
+                            let asset = hud::generated_frame(
+                                "map-player-inset",
+                                SpriteFrame {
+                                    width: rect.w,
+                                    height: rect.h,
+                                    hotspot: (0, 0),
+                                    offset: (0, 0),
+                                    pixels: Vec::new(),
+                                },
+                            );
+                            let source = (w * 2, h * 2);
+                            let scale = (rect.w as f32 / source.0 as f32)
+                                .min(rect.h as f32 / source.1 as f32);
+                            let scene = scene_draws(world, camera, source, elapsed, settings);
+                            if let Err(error) = view.renderer.render_inset(
+                                &asset,
+                                scale,
+                                stream_background(true),
+                                scene,
+                            ) {
+                                self.fail(loop_, error);
+                                return true;
+                            }
+                            view.map_inset = Some(asset);
+                        }
+                        map.set_lens_asset(Arc::clone(view.map_inset.as_ref().unwrap()));
+                    }
                     let hud = hud.as_deref_mut().map(|hud| {
+                        if let Some(hours) = hours {
+                            hud.set_game_time(hours);
+                        }
                         hud.layout(viewport);
                         &*hud
                     });
                     let scene = scene_draws(
                         world,
-                        last_presented.as_ref().unwrap_or(camera),
+                        camera,
                         logical_size(size, settings.zoom),
                         elapsed,
                         settings,
@@ -602,12 +760,17 @@ impl Viewer<'_> {
                     if state.is_pressed() {
                         map.mouse_down(point);
                     } else {
-                        map.mouse_up(point);
+                        arrival = map.mouse_up(point, now);
                     }
                 } else {
                     map.cancel_drag();
                 }
             }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Right,
+                ..
+            } => arrival = map.remove_waypoint(self.cursor),
             WindowEvent::MouseWheel { delta, .. } => {
                 let delta = match delta {
                     MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
@@ -626,11 +789,19 @@ impl Viewer<'_> {
                 ..
             } if event.state.is_pressed() => match &event.logical_key {
                 Key::Named(NamedKey::Escape) if !event.repeat => {
-                    self.close_map(loop_);
+                    if let Some(arrival) = map.cancel_journey() {
+                        self.finish_travel(loop_, arrival);
+                    } else {
+                        self.close_map(loop_);
+                    }
                     return true;
                 }
                 Key::Character(key) if key.eq_ignore_ascii_case("m") && !event.repeat => {
-                    self.close_map(loop_);
+                    if let Some(arrival) = map.cancel_journey() {
+                        self.finish_travel(loop_, arrival);
+                    } else {
+                        self.close_map(loop_);
+                    }
                     return true;
                 }
                 Key::Character(key) if key.eq_ignore_ascii_case("z") && !event.repeat => {
@@ -643,7 +814,7 @@ impl Viewer<'_> {
                 Key::Named(NamedKey::Home) => map.home(),
                 Key::Named(NamedKey::Tab) => map.focus(*shift),
                 Key::Named(NamedKey::Enter | NamedKey::Space) if !event.repeat => {
-                    map.activate_focus()
+                    arrival = map.activate_focus(now);
                 }
                 Key::Character(key) if key == "[" || key == "]" => {
                     let scale = map.adjust_scale(if key == "[" { -25 } else { 25 });
@@ -664,16 +835,32 @@ impl Viewer<'_> {
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {}
             _ => return true,
         }
-        view.window.request_redraw();
+        if let Some(arrival) = arrival {
+            self.finish_travel(loop_, arrival);
+        } else {
+            view.window.request_redraw();
+            self.update_control_flow(loop_);
+        }
         true
     }
 
     fn update_control_flow(&self, event_loop: &ActiveEventLoop) {
+        let real_now = Instant::now();
+        let clock = (self.clock.is_some() && self.pause.is_none())
+            .then(|| real_now + Clock::until_next_hour(self.game_elapsed(real_now)));
+        let travel = match &self.content {
+            ViewContent::Stream {
+                map_ui: Some(map), ..
+            } if map.is_open() => map.travel_deadline().map(|time| self.epoch + time),
+            _ => None,
+        };
         let next = self
             .animation_deadline
             .into_iter()
             .chain(self.navigation.deadline())
             .chain(self.player_deadline)
+            .chain(clock)
+            .chain(travel)
             .min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
@@ -751,34 +938,12 @@ impl Viewer<'_> {
                 .create_window(attributes)
                 .map_err(|error| format!("cannot create sprite window: {error}"))?,
         );
-        let backend = match self.renderer {
-            RenderBackend::Cpu => {
-                let surface = Surface::new(
-                    self.context.as_ref().expect("CPU context"),
-                    Arc::clone(&window),
-                )
-                .map_err(|error| format!("cannot create sprite surface: {error}"))?;
-                Presentation::Cpu(CpuSurface {
-                    surface,
-                    pixels: Vec::new(),
-                    overlay_pixels: Vec::new(),
-                })
-            }
-            #[cfg(feature = "gpu")]
-            backend => {
-                let trace = matches!(&self.content, ViewContent::Stream { trace: true, .. });
-                Presentation::Gpu(Box::new(gpu::WindowRenderer::new(
-                    Arc::clone(&window),
-                    event_loop.owned_display_handle(),
-                    backend,
-                    trace,
-                )?))
-            }
-            #[cfg(not(feature = "gpu"))]
-            _ => return Err("GPU renderer requires the gpu feature".into()),
-        };
+        let trace = matches!(&self.content, ViewContent::Stream { trace: true, .. });
+        let renderer = gpu::WindowRenderer::new(Arc::clone(&window), trace)?;
         Ok(WindowSurface {
-            backend,
+            renderer,
+            map_inset: None,
+            developer_status: None,
             window,
             occluded: false,
         })
@@ -796,10 +961,41 @@ impl ApplicationHandler for Viewer<'_> {
             return;
         }
         let now = Instant::now();
-        if self.pause.is_some() || self.map_since.is_some() {
+        if self.pause.is_some() {
+            return;
+        }
+        let game_elapsed = self.game_elapsed(now);
+        if self.map_since.is_some() {
+            if let ViewContent::Stream {
+                map_ui: Some(map),
+                world,
+                hud,
+                ..
+            } = &mut self.content
+            {
+                let (steps, arrival) =
+                    map.advance_travel(now.saturating_duration_since(self.epoch));
+                let mut redraw = steps > 0;
+                if let Some(clock) = &mut self.clock {
+                    clock.step_travel(steps);
+                    if !map.travelling() && arrival.is_none() {
+                        redraw |= world.set_game_hour(clock.hour(game_elapsed));
+                    }
+                    if let Some(hud) = hud {
+                        redraw |= hud.set_game_time(clock.hours(game_elapsed));
+                    }
+                }
+                if let Some(arrival) = arrival {
+                    self.finish_travel(event_loop, arrival);
+                } else if redraw && let Some(view) = &self.view {
+                    view.window.request_redraw();
+                }
+            }
+            self.update_control_flow(event_loop);
             return;
         }
         let elapsed = self.play_elapsed(now);
+        let mut transition = None;
         let mut redraw = self
             .animation_deadline
             .is_some_and(|deadline| now >= deadline);
@@ -813,12 +1009,16 @@ impl ApplicationHandler for Viewer<'_> {
                 shift,
                 direction,
                 waiting,
-                trace,
-                last_presented,
-                travel,
+                hud,
                 ..
             } = &mut self.content
             {
+                if let Some(clock) = &self.clock {
+                    redraw |= world.set_game_hour(clock.hour(game_elapsed));
+                    if let Some(hud) = hud {
+                        redraw |= hud.set_game_time(clock.hours(game_elapsed));
+                    }
+                }
                 if world.playing() {
                     if self.player_deadline.is_some_and(|deadline| now >= deadline) {
                         let input = self.navigation.direction();
@@ -835,60 +1035,9 @@ impl ApplicationHandler for Viewer<'_> {
                                 *direction = (after.0 - before.0, after.1 - before.1);
                             }
                         }
-                        if let Some((target, facing)) = world.take_transition() {
+                        transition = world.take_transition();
+                        if transition.is_some() {
                             world.cancel_player_route();
-                            if let Some(travel) = travel {
-                                let size = view.window.inner_size();
-                                let loaded = (travel.loader)(
-                                    &travel.map,
-                                    target,
-                                    facing,
-                                    (size.width, size.height),
-                                )
-                                .and_then(
-                                    |(map, next, next_camera)| {
-                                        let wake = travel.wake.clone();
-                                        let next = next
-                                            .into_interactive(
-                                                move || {
-                                                    let _ = wake.send_event(());
-                                                },
-                                                *trace,
-                                            )
-                                            .map_err(|error| error.to_string())?;
-                                        Ok((map, next, next_camera))
-                                    },
-                                );
-                                match loaded {
-                                    Ok((map, mut next, next_camera)) => {
-                                        eprintln!("Entered {map} at {:?}", target.tile);
-                                        view.window.set_title(&format!("Arcanum-RS | {map} play"));
-                                        travel
-                                            .doors
-                                            .insert(travel.map.clone(), world.take_door_states());
-                                        if let Some(states) = travel.doors.remove(&map) {
-                                            next.restore_door_states(states);
-                                        }
-                                        travel.map = map;
-                                        **world = next;
-                                        *camera = next_camera;
-                                        *last_presented = None;
-                                        *waiting = false;
-                                        *direction = (0, 0);
-                                        self.navigation = Navigation::default();
-                                        self.player_deadline = None;
-                                        view.window.request_redraw();
-                                        self.update_control_flow(event_loop);
-                                        return;
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Cannot travel to {target:?}: {error}");
-                                        view.window.set_title(&format!(
-                                            "Arcanum-RS | Travel unavailable: {error}"
-                                        ));
-                                    }
-                                }
-                            }
                         }
                         if let Some(message) = world.take_notice() {
                             eprintln!("{message}");
@@ -915,6 +1064,15 @@ impl ApplicationHandler for Viewer<'_> {
             }
             if redraw {
                 view.window.request_redraw();
+            }
+        }
+        if let Some((target, facing)) = transition
+            && let Err(error) = self.change_location(target, facing)
+        {
+            eprintln!("Cannot travel to {target:?}: {error}");
+            if let Some(view) = &self.view {
+                view.window
+                    .set_title(&format!("Arcanum-RS | Travel unavailable: {error}"));
             }
         }
         self.update_control_flow(event_loop);
@@ -1033,6 +1191,32 @@ impl ApplicationHandler for Viewer<'_> {
                 self.menu_action(command, event_loop);
                 return;
             }
+        }
+        if playing
+            && let ViewContent::Stream {
+                world, debug: true, ..
+            } = &mut self.content
+            && let WindowEvent::KeyboardInput {
+                event: key,
+                is_synthetic: false,
+                ..
+            } = &event
+            && key.state.is_pressed()
+            && !key.repeat
+            && key.logical_key == Key::Named(NamedKey::F6)
+        {
+            use arcanum_rs::content::world::DeveloperAction;
+            let (label, message) = match world.developer_action(DeveloperAction::ToggleCollision) {
+                Ok(true) => ("COLLISION OFF   F6 TO RESTORE", "Collision disabled".into()),
+                Ok(false) => ("COLLISION ON", "Collision enabled".into()),
+                Err(message) => ("COLLISION OFF   MOVE TO CLEAR GROUND", message),
+            };
+            let view = self.view.as_mut().unwrap();
+            view.developer_status = Some(menu::developer_status(label));
+            eprintln!("Developer F6: {message}");
+            view.window.set_title(&format!("Arcanum-RS | {message}"));
+            view.window.request_redraw();
+            return;
         }
         if playing
             && let WindowEvent::KeyboardInput {
@@ -1379,32 +1563,49 @@ impl Viewer<'_> {
 
             WindowEvent::RedrawRequested if !view.occluded => {
                 let size = view.window.inner_size();
+                let clock_hours = self.clock.as_ref().map(|clock| {
+                    let now = self
+                        .pause
+                        .as_ref()
+                        .map_or_else(Instant::now, |(_, paused)| *paused);
+                    clock.hours(
+                        now.saturating_duration_since(self.epoch)
+                            .saturating_sub(self.clock_paused_for),
+                    )
+                });
                 let mut deadline = None;
                 let result = match &mut self.content {
                     ViewContent::Fixed(layers) => {
                         let center = ((size.width / 2) as i32, (size.height / 2) as i32);
-                        let draws = layers.iter().map(|layer| SpriteDraw {
-                            frame: layer.frame,
-                            anchor: (
-                                center.0 + i32::from(layer.relative_anchor.0),
-                                center.1 + i32::from(layer.relative_anchor.1),
-                            ),
-                        });
-                        view.redraw(size, draws.map(|draw| (draw, Modulation::Unlit)))
-                            .map(|_| ())
+                        view.redraw(
+                            size,
+                            layers.iter().map(|(asset, anchor)| {
+                                unlit(
+                                    asset,
+                                    (
+                                        center.0 + i32::from(anchor.0),
+                                        center.1 + i32::from(anchor.1),
+                                    ),
+                                )
+                            }),
+                        )
                     }
-                    ViewContent::World { scene, camera, .. } => {
+                    ViewContent::World {
+                        scene,
+                        assets,
+                        camera,
+                        ..
+                    } => {
                         let viewport = (size.width, size.height);
                         if size.width != 0 && size.height != 0 {
                             camera.resize(viewport);
                         }
                         view.redraw(
                             size,
-                            scene
-                                .visible(camera, viewport)
-                                .map(|draw| (draw, Modulation::Unlit)),
+                            scene.visible(camera, viewport).map(|draw| {
+                                unlit(&assets[&std::ptr::from_ref(draw.frame)], draw.anchor)
+                            }),
                         )
-                        .map(|_| ())
                     }
                     ViewContent::Stream {
                         world,
@@ -1423,16 +1624,23 @@ impl Viewer<'_> {
                     } => {
                         let sampled = Instant::now();
                         let elapsed = animation_ms.map_or(play_elapsed, Duration::from_millis);
-                        let menu = self.pause.as_ref().map(|(menu, _)| {
-                            menu.frame(
-                                self.settings,
-                                match self.renderer {
-                                    RenderBackend::Cpu => "CPU",
-                                    RenderBackend::Vulkan => "VULKAN",
-                                    RenderBackend::Gles => "OPENGL",
-                                },
-                            )
-                        });
+                        if let (Some(hud), Some(hours)) = (hud.as_mut(), clock_hours) {
+                            hud.set_game_time(hours);
+                        }
+                        let menu = self
+                            .pause
+                            .as_ref()
+                            .map(|(menu, _)| menu.frame(self.settings, "VULKAN"));
+                        if let (Some(map_ui), Some(travel), Some((tile, town))) = (
+                            map_ui.as_mut(),
+                            travel.as_ref(),
+                            world.player_map_position(),
+                        ) {
+                            map_ui.observe(&travel.map, tile, town);
+                            if let Some(hud) = hud {
+                                hud.set_travel_available(map_ui.can_travel());
+                            }
+                        }
                         view.redraw_stream(
                             size,
                             world,
@@ -1459,6 +1667,11 @@ impl Viewer<'_> {
                                     world.player_map_position(),
                                 ) {
                                     map_ui.observe(&travel.map, tile, town);
+                                    if let Some(hud) = hud
+                                        && hud.set_travel_available(map_ui.can_travel())
+                                    {
+                                        view.window.request_redraw();
+                                    }
                                 }
                                 if animation_ms.is_none() && self.pause.is_none() {
                                     deadline = world
@@ -1483,12 +1696,15 @@ impl Viewer<'_> {
     }
 }
 
-#[derive(Default)]
-struct FrameTiming {
-    composition: Duration,
-    packing: Duration,
-    submission: Duration,
-    host: Duration,
+fn unlit(asset: &Arc<LoadedFrame>, anchor: (i32, i32)) -> WorldDraw<'_> {
+    WorldDraw {
+        asset,
+        sprite: SpriteDraw {
+            frame: &asset.decoded.frame,
+            anchor,
+        },
+        modulation: Modulation::Unlit,
+    }
 }
 
 fn scene_draws<'a>(
@@ -1597,76 +1813,50 @@ impl WindowSurface {
                     modulation: Modulation::Unlit,
                 }
             }));
-        #[cfg(feature = "gpu")]
-        if let Presentation::Gpu(renderer) = &mut self.backend {
-            if trace {
-                eprintln!(
-                    "GPU world camera {:?} animation {}ms schedule {:?} order {:?} shading {:?}",
-                    camera.position(),
-                    elapsed.as_millis(),
-                    prepared.scheduling,
-                    prepared.ordering,
-                    prepared.shading,
-                );
-            }
-            renderer.redraw(
-                ((size.width, size.height), zoom),
-                background,
-                draws,
-                hud.into_iter()
-                    .flat_map(|hud| hud.draws(settings.run))
-                    .map(|(asset, sprite)| arcanum_rs::content::world::WorldDraw {
-                        asset,
-                        sprite,
-                        modulation: Modulation::Unlit,
-                    }),
-                &self.window,
-                trace,
-            )?;
-            return Ok(true);
-        }
-        let frame = self.redraw_scaled(
-            size,
-            zoom,
-            background,
-            draws.map(|draw| (draw.sprite, draw.modulation)),
-            hud.into_iter()
-                .flat_map(|hud| hud.draws(settings.run))
-                .map(|(_, sprite)| (sprite, Modulation::Unlit)),
-        )?;
-        if trace
-            || prepared.scheduling
-                + prepared.ordering
-                + prepared.shading
-                + frame.composition
-                + frame.packing
-                + frame.submission
-                > Duration::from_millis(30)
-        {
+        if trace {
             eprintln!(
-                "Frame {:?} {}x{} sync load wait 0ns schedule {:?} order {:?} shading {:?} compose {:?} pack {:?} submit {:?} host {:?} animation {}ms",
+                "GPU world camera {:?} animation {}ms schedule {:?} order {:?} shading {:?}",
                 camera.position(),
-                size.width,
-                size.height,
+                elapsed.as_millis(),
                 prepared.scheduling,
                 prepared.ordering,
                 prepared.shading,
-                frame.composition,
-                frame.packing,
-                frame.submission,
-                frame.host,
-                elapsed.as_millis()
             );
         }
+        self.renderer.redraw(
+            ((size.width, size.height), zoom),
+            background,
+            draws,
+            hud.into_iter()
+                .flat_map(|hud| hud.draws(settings.run))
+                .map(|(asset, sprite)| unlit(asset, sprite.anchor))
+                .chain(
+                    self.developer_status
+                        .iter()
+                        .map(|asset| unlit(asset, (12, 52))),
+                ),
+            &self.window,
+            trace,
+        )?;
         Ok(true)
     }
 
     fn redraw<'a>(
         &mut self,
         size: PhysicalSize<u32>,
-        draws: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
-    ) -> Result<FrameTiming, String> {
-        self.redraw_scaled(size, 1, BACKGROUND, draws, std::iter::empty())
+        draws: impl IntoIterator<Item = WorldDraw<'a>>,
+    ) -> Result<(), String> {
+        if size.width == 0 || size.height == 0 {
+            return Ok(());
+        }
+        self.renderer.redraw(
+            ((size.width, size.height), 1),
+            BACKGROUND,
+            draws,
+            std::iter::empty(),
+            &self.window,
+            false,
+        )
     }
 
     fn redraw_map<'a>(
@@ -1681,152 +1871,14 @@ impl WindowSurface {
             .into_iter()
             .flat_map(|hud| hud.draws(false))
             .chain(map.draws(false));
-        let background = stream_background(true);
-        #[cfg(feature = "gpu")]
-        if let Presentation::Gpu(renderer) = &mut self.backend {
-            return renderer.redraw(
-                ((size.width, size.height), zoom),
-                background,
-                scene,
-                layers.map(|(asset, sprite)| arcanum_rs::content::world::WorldDraw {
-                    asset,
-                    sprite,
-                    modulation: Modulation::Unlit,
-                }),
-                &self.window,
-                false,
-            );
-        }
-        self.redraw_scaled(
-            size,
-            zoom,
-            background,
-            scene.into_iter().map(|draw| (draw.sprite, draw.modulation)),
-            layers.map(|(_, draw)| (draw, Modulation::Unlit)),
+        self.renderer.redraw(
+            ((size.width, size.height), zoom),
+            stream_background(true),
+            scene,
+            layers.map(|(asset, sprite)| unlit(asset, sprite.anchor)),
+            &self.window,
+            false,
         )
-        .map(|_| ())
-    }
-
-    fn redraw_scaled<'a>(
-        &mut self,
-        size: PhysicalSize<u32>,
-        zoom: u8,
-        background: [u8; 3],
-        draws: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
-        overlays: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
-    ) -> Result<FrameTiming, String> {
-        match &mut self.backend {
-            Presentation::Cpu(cpu) => {
-                cpu.redraw(size, zoom, background, draws, overlays, &self.window)
-            }
-            #[cfg(feature = "gpu")]
-            Presentation::Gpu(_) => Err("GPU presentation requires a streamed world".into()),
-        }
-    }
-}
-
-impl CpuSurface {
-    fn redraw<'a>(
-        &mut self,
-        size: PhysicalSize<u32>,
-        zoom: u8,
-        background: [u8; 3],
-        draws: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
-        overlays: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
-        window: &Window,
-    ) -> Result<FrameTiming, String> {
-        let (Some(width), Some(height)) =
-            (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
-        else {
-            return Ok(FrameTiming::default());
-        };
-        let frame_start = Instant::now();
-        let start = frame_start;
-        let count = (width.get() as usize)
-            .checked_mul(height.get() as usize)
-            .filter(|&count| count <= MAX_SURFACE_PIXELS)
-            .ok_or_else(|| {
-                format!(
-                    "sprite surface {} × {} exceeds {MAX_SURFACE_PIXELS} pixels",
-                    width, height
-                )
-            })?;
-        let viewport = logical_size(size, zoom);
-        let pixels = (viewport.0 * viewport.1) as usize;
-        self.pixels
-            .try_reserve(pixels.saturating_sub(self.pixels.len()))
-            .map_err(|error| format!("cannot allocate sprite framebuffer: {error}"))?;
-        self.pixels.resize(pixels, background);
-        self.pixels.fill(background);
-        blit_modulated(&mut self.pixels, viewport, viewport.0 as usize, draws)
-            .map_err(|error| format!("cannot composite sprite: {error}"))?;
-        let (mut pixels, mut pack_zoom) = (&mut self.pixels, zoom);
-        let mut overlays = overlays.into_iter().peekable();
-        if overlays.peek().is_some() {
-            if zoom > 1 {
-                self.overlay_pixels.resize(count, background);
-                for (y, row) in self
-                    .overlay_pixels
-                    .chunks_exact_mut(size.width as usize)
-                    .enumerate()
-                {
-                    for (x, pixel) in row.iter_mut().enumerate() {
-                        *pixel = self.pixels
-                            [y / usize::from(zoom) * viewport.0 as usize + x / usize::from(zoom)];
-                    }
-                }
-                pixels = &mut self.overlay_pixels;
-                pack_zoom = 1;
-            }
-            blit_modulated(
-                pixels,
-                (size.width, size.height),
-                size.width as usize,
-                overlays,
-            )
-            .map_err(|error| format!("cannot composite HUD: {error}"))?;
-        }
-        let composition = start.elapsed();
-        let start = Instant::now();
-        self.surface
-            .resize(width, height)
-            .map_err(|error| format!("cannot resize sprite surface: {error}"))?;
-        let mut buffer = self
-            .surface
-            .buffer_mut()
-            .map_err(|error| format!("cannot access presentation buffer: {error}"))?;
-        if buffer.len() != count {
-            return Err(format!(
-                "presentation buffer has {} pixels, expected {count}",
-                buffer.len()
-            ));
-        }
-        if pack_zoom == 1 {
-            for (output, &[r, g, b]) in buffer.iter_mut().zip(pixels.iter()) {
-                *output = u32::from_be_bytes([0, r, g, b]);
-            }
-        } else {
-            let zoom = usize::from(zoom);
-            for (y, row) in buffer.chunks_exact_mut(size.width as usize).enumerate() {
-                let start = y / zoom * viewport.0 as usize;
-                for (x, output) in row.iter_mut().enumerate() {
-                    let [r, g, b] = self.pixels[start + x / zoom];
-                    *output = u32::from_be_bytes([0, r, g, b]);
-                }
-            }
-        }
-        let packing = start.elapsed();
-        let start = Instant::now();
-        window.pre_present_notify();
-        buffer
-            .present()
-            .map_err(|error| format!("cannot present sprite: {error}"))?;
-        Ok(FrameTiming {
-            composition,
-            packing,
-            submission: start.elapsed(),
-            host: frame_start.elapsed(),
-        })
     }
 }
 

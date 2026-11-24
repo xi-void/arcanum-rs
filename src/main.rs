@@ -41,7 +41,7 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] mes get <game-directory> <resource-path> <entry-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art inspect <game-directory> <resource-path> <frame> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art export <game-directory> <resource-path> <frame> <output.pam> [--mods <mods-directory> <mod-id> ...]
-  arcanum-rs [--ordered] play <game-directory> [--map <map-name-or-id>] [--center X Y] [--ui classic|off|PATH] [--ui-scale PERCENT] [--map-ui PATH] [--map-reveal] [--lighting <hour>] [--renderer cpu|vulkan|gles] (requires --features windowed)
+  arcanum-rs [--ordered] play <game-directory> [--map <map-name-or-id>] [--center X Y] [--ui classic|off|PATH] [--ui-scale PERCENT] [--map-ui PATH] [--map-reveal] [--discover-all] [--debug] [--lighting <hour>] (requires --features windowed)
   arcanum-rs art demo                          (requires --features windowed)
   arcanum-rs [--ordered] art sector-audit <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art sector-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
@@ -51,8 +51,8 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] art world <game-directory> [--view <local-x> <local-y> <side> <center-x> <center-y> <width> <height>] [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art maps list <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art maps info <game-directory> <map-name-or-id> [--mods <mods-directory> <mod-id> ...]
-  arcanum-rs [--ordered] art world <game-directory> --map <map-name-or-id> [--center X Y] [--renderer cpu|vulkan|gles] [--lighting <hour>] [--roofs] [--trace]
-  arcanum-rs [--ordered] art world <game-directory> --sectors <map> <min-x> <min-y> <max-x> <max-y> <world-x> <world-y> <width> <height> [--trace] [--lighting <hour>] [--animation-ms <elapsed>] [--fidget] [--walk] [--light-probe X Y | --nocturnal-probe X Y] [--renderer cpu|vulkan|gles] [--mods …]
+  arcanum-rs [--ordered] art world <game-directory> --map <map-name-or-id> [--center X Y] [--lighting <hour>] [--roofs] [--trace]
+  arcanum-rs [--ordered] art world <game-directory> --sectors <map> <min-x> <min-y> <max-x> <max-y> <world-x> <world-y> <width> <height> [--trace] [--lighting <hour>] [--animation-ms <elapsed>] [--fidget] [--walk] [--light-probe X Y | --nocturnal-probe X Y] [--mods …]
   arcanum-rs [--ordered] art sector-room-wide-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art sector-room-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
   arcanum-rs [--ordered] art sector-room-inspect <game-directory> [--mods <mods-directory> <mod-id> ...]
@@ -1170,6 +1170,8 @@ fn show_world(
 ) -> Result<(), Box<dyn Error>> {
     let mut map_theme = None;
     let mut map_reveal = false;
+    let mut discover_all = false;
+    let mut debug = false;
     let mut world_args = Vec::with_capacity(options.len());
     let mut args = options.iter();
     while let Some(flag) = args.next() {
@@ -1191,6 +1193,8 @@ fn show_world(
                 });
             }
             Some("--map-reveal") if playing => map_reveal = true,
+            Some("--discover-all") if playing => discover_all = true,
+            Some("--debug") if playing => debug = true,
             _ => world_args.push(flag.clone()),
         }
     }
@@ -1213,7 +1217,7 @@ fn show_world(
     } else {
         None
     };
-    if let Some((world, camera, size, trace, map, renderer, animation_ms, explore)) =
+    if let Some((world, camera, size, trace, map, animation_ms, explore)) =
         streaming_world(game, options, policy, playing)?
     {
         let world = if playing { world.with_player()? } else { world };
@@ -1228,7 +1232,7 @@ fn show_world(
             let path = map_theme.unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/classic-map/theme.toml")
             });
-            match viewer::MapUi::load(&path, vfs, ui_scale, map_reveal) {
+            match viewer::MapUi::load(&path, vfs, ui_scale, map_reveal, discover_all) {
                 Ok(map) => Some(Box::new(map)),
                 Err(error) if !custom => {
                     eprintln!("Map interface unavailable: {error}");
@@ -1240,34 +1244,37 @@ fn show_world(
             None
         };
         let travel: Option<viewer::TravelLoader<'_>> = if playing {
-            Some(Box::new(move |current, dst, facing, viewport| {
-                let load = || -> Result<_, Box<dyn Error>> {
-                    let mut vfs = inspection_vfs(game, mount_options, policy)?;
-                    let catalog = content::maps::Catalog::load(&mut vfs)?;
-                    let id = dst.map.map(|id| id.to_string());
-                    let map = catalog.find(id.as_deref().unwrap_or(current))?;
-                    let files = map.files(&mut vfs)?;
-                    let center = files.center(Some(dst.tile))?;
-                    let region = files.region_at(center);
-                    let mut camera = region.camera(center).ok_or("invalid destination bounds")?;
-                    camera.follow((0, 0));
-                    let mut world = content::world::WorldStream::new(
-                        vfs,
-                        map.directory.clone(),
-                        region,
-                        center,
-                    )?;
-                    if let Some(hour) = hour {
-                        world = world.with_lighting(hour)?;
-                    }
-                    world = world.with_player()?;
-                    world.set_arrival_facing(facing);
-                    world.prepare(&camera, viewport)?;
-                    world.validate_arrival(center)?;
-                    Ok((map.directory.clone(), world, camera))
-                };
-                load().map_err(|error| error.to_string())
-            }))
+            Some(Box::new(
+                move |current, dst, facing, viewport, current_hour| {
+                    let load = || -> Result<_, Box<dyn Error>> {
+                        let mut vfs = inspection_vfs(game, mount_options, policy)?;
+                        let catalog = content::maps::Catalog::load(&mut vfs)?;
+                        let id = dst.map.map(|id| id.to_string());
+                        let map = catalog.find(id.as_deref().unwrap_or(current))?;
+                        let files = map.files(&mut vfs)?;
+                        let center = files.center(Some(dst.tile))?;
+                        let region = files.bounds();
+                        let mut camera =
+                            region.camera(center).ok_or("invalid destination bounds")?;
+                        camera.follow((0, 0));
+                        let mut world = content::world::WorldStream::new(
+                            vfs,
+                            map.directory.clone(),
+                            region,
+                            center,
+                        )?;
+                        if let Some(hour) = hour {
+                            world = world.with_lighting(current_hour.unwrap_or(hour))?;
+                        }
+                        world = world.with_player()?;
+                        world.set_arrival_facing(facing);
+                        world.prepare(&camera, viewport)?;
+                        world.validate_arrival(center)?;
+                        Ok((map.directory.clone(), world, camera))
+                    };
+                    load().map_err(|error| error.to_string())
+                },
+            ))
         } else {
             None
         };
@@ -1279,9 +1286,9 @@ fn show_world(
             size,
             viewer::StreamOptions {
                 trace,
-                renderer,
                 animation_ms,
                 explore,
+                debug,
                 travel: travel.map(|loader| (map, loader)),
                 map_ui,
                 hud,
@@ -1377,9 +1384,25 @@ fn inspect_maps(
         }
         writeln!(
             out,
-            "{} winning base-sector resources, bounds {:?}; absent cells inside these bounds remain unloaded",
+            "{} winning authored sector resources, authored bounds {:?}",
             files.sectors.len(),
             files.region
+        )?;
+        if let Some((bounds, source)) = &files.properties {
+            writeln!(
+                out,
+                "Original map bounds {bounds:?} from {} ({source})",
+                source.virtual_path
+            )?;
+        }
+        writeln!(
+            out,
+            "Terrain template lookup: {}",
+            if files.terrain_lookup {
+                "terrain.tdf present"
+            } else {
+                "terrain.tdf missing"
+            }
         )?;
     } else {
         for map in &catalog.maps {
@@ -1390,7 +1413,7 @@ fn inspect_maps(
 }
 
 fn inspect_world(game: &Path, options: &[OsString], policy: Policy) -> Result<(), Box<dyn Error>> {
-    if let Some((mut world, mut camera, size, trace, map, _, _, _)) =
+    if let Some((mut world, mut camera, size, trace, map, _, _)) =
         streaming_world(game, options, policy, false)?
     {
         if trace {
@@ -1412,6 +1435,17 @@ fn inspect_world(game: &Path, options: &[OsString], policy: Policy) -> Result<()
                 report.id,
                 report.source.as_deref().unwrap_or("unavailable")
             )?;
+            if trace {
+                writeln!(
+                    out,
+                    "  On-foot collision: {}",
+                    if report.collision_available {
+                        "prepared"
+                    } else {
+                        "unavailable"
+                    }
+                )?;
+            }
             if report.object_list_failed {
                 writeln!(
                     out,
@@ -1498,21 +1532,12 @@ fn inspect_world(game: &Path, options: &[OsString], policy: Policy) -> Result<()
     report_room_overview(&mut io::stdout().lock(), &overview)
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum RenderBackend {
-    #[default]
-    Cpu,
-    Vulkan,
-    Gles,
-}
-
 type StreamPreview = (
     content::world::WorldStream,
     arcanum_rs::camera::Camera,
     (u32, u32),
     bool,
     String,
-    RenderBackend,
     Option<u64>,
     bool,
 );
@@ -1592,7 +1617,6 @@ fn streaming_world(
     let mut fidget = false;
     let mut walking = false;
     let mut probes = Vec::new();
-    let mut renderer = RenderBackend::Cpu;
     let mut options = rest;
     loop {
         options = match options {
@@ -1645,16 +1669,7 @@ fn streaming_world(
                 ));
                 rest
             }
-            [flag, backend, rest @ ..] if flag == "--renderer" => {
-                renderer = match backend.to_str() {
-                    Some("cpu") => RenderBackend::Cpu,
-                    Some("vulkan") => RenderBackend::Vulkan,
-                    Some("gles") => RenderBackend::Gles,
-                    _ => return Err("expected renderer cpu, vulkan or gles".into()),
-                };
-                rest
-            }
-            [flag] if flag == "--renderer" || flag == "--lighting" || flag == "--animation-ms" => {
+            [flag] if flag == "--lighting" || flag == "--animation-ms" => {
                 return Err(format!("missing value after {}", flag.to_string_lossy()).into());
             }
             _ => break,
@@ -1678,15 +1693,7 @@ fn streaming_world(
         };
         let files = map.files(&mut vfs)?;
         let center = files.center(center_override)?;
-        (
-            map.directory.clone(),
-            if playing {
-                files.region_at(center)
-            } else {
-                files.region
-            },
-            center,
-        )
+        (map.directory.clone(), files.bounds(), center)
     };
     let camera = region
         .camera(reference)
@@ -1715,7 +1722,6 @@ fn streaming_world(
         size,
         trace,
         map,
-        renderer,
         animation_ms,
         explicit.is_none() && !walking,
     )))

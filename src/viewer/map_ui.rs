@@ -3,12 +3,14 @@ use super::hud::{Action, Binding, Hit, Hud, MapView as Mode, Rect};
 use arcanum_rs::{
     art::SpriteFrame,
     content::map_atlas::{Atlas, Bitmap, Point, Sheet, Town, world_pixel},
+    content::travel::{self, Journey, TravelMap},
     vfs::Vfs,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     path::Path,
+    time::Duration,
 };
 
 #[derive(Clone, Copy)]
@@ -50,6 +52,17 @@ impl Transform {
     }
 }
 
+struct Waypoint {
+    tile: Point,
+    area: Option<i32>,
+    steps: Vec<Point>,
+}
+
+pub(super) enum Arrival {
+    Destination(i32, Point),
+    Cancelled(i32, Option<Point>),
+}
+
 pub(crate) struct MapUi {
     hud: Hud,
     atlas: Atlas,
@@ -61,6 +74,12 @@ pub(crate) struct MapUi {
     continent: Option<Bitmap>,
     world_id: i32,
     world_available: bool,
+    travel_map: Result<TravelMap, String>,
+    can_travel: bool,
+    waypoints: Vec<Waypoint>,
+    active_waypoint: Option<usize>,
+    journey: Option<Journey>,
+    travel_message: Option<String>,
     tile: Option<Point>,
     world_tile: Option<Point>,
     location: String,
@@ -91,8 +110,14 @@ impl MapUi {
         mut vfs: Vfs,
         scale: Option<u16>,
         inspect_all: bool,
+        discover_all: bool,
     ) -> Result<Self, Box<dyn Error>> {
-        let atlas = Atlas::load(&mut vfs)?;
+        let mut atlas = Atlas::load(&mut vfs)?;
+        if discover_all {
+            atlas.discovered.extend(atlas.areas.keys().copied());
+        }
+        let travel_map = TravelMap::load(&mut vfs, &atlas.catalog.new_game()?.directory)
+            .map_err(|err| err.to_string());
         let world = atlas.world(&mut vfs, 0)?;
         let hud = Hud::load(path, &mut vfs, scale)?;
         if !hud.has_canvas() {
@@ -106,6 +131,12 @@ impl MapUi {
             continent: None,
             world_id: 0,
             world_available: false,
+            travel_map,
+            can_travel: false,
+            waypoints: Vec::new(),
+            active_waypoint: None,
+            journey: None,
+            travel_message: None,
             town: None,
             town_id: 0,
             explored: BTreeMap::new(),
@@ -189,10 +220,15 @@ impl MapUi {
                 }
             };
         }
-        if (new_area || new_sector)
-            && current.is_some_and(|map| map.id == self.atlas.start_map)
-            && self.town.is_some()
-        {
+        let overworld = current.is_some_and(|map| map.id == self.atlas.start_map);
+        self.can_travel = current.is_some_and(|map| {
+            self.atlas
+                .travel_available_from(self.world_id, map.id, town_id)
+        }) && self
+            .travel_map
+            .as_ref()
+            .is_ok_and(|data| data.can_depart(tile));
+        if (new_area || new_sector) && overworld && self.town.is_some() {
             // The overworld sector origin is in the same coordinates as GameArea.
             self.atlas.discover_near((tile.0 & !63, tile.1 & !63));
         }
@@ -222,6 +258,10 @@ impl MapUi {
             self.hud.set_scale(scale);
         }
         self.open = true;
+        self.waypoints.clear();
+        self.active_waypoint = None;
+        self.atlas.destination = None;
+        self.travel_message = None;
         let mode = if self.town.is_some() || !self.world_available {
             Mode::Local
         } else {
@@ -230,19 +270,18 @@ impl MapUi {
         self.switch(mode);
     }
 
-    pub(super) fn lens_size(&self) -> Option<(u32, u32)> {
-        self.hud.lens_size().map(|[w, h]| (w * 2, h * 2))
-    }
-
-    pub(super) fn set_lens(&mut self, frame: &SpriteFrame) {
-        self.hud.set_lens(frame);
-    }
-
     pub(super) fn toggle_overview(&mut self, detail: bool) {
+        if self.travelling() {
+            return;
+        }
         if detail {
             self.switch(Mode::World);
         } else if self.mode == Mode::Continent {
-            self.action(Action::MapLocal);
+            self.switch(if self.town.is_some() {
+                Mode::Local
+            } else {
+                Mode::World
+            });
         } else {
             self.switch(Mode::Continent);
         }
@@ -250,6 +289,7 @@ impl MapUi {
 
     pub(super) fn close(&mut self) {
         self.open = false;
+        self.journey = None;
         self.cancel_drag();
         self.hud.clear_layout();
     }
@@ -264,7 +304,14 @@ impl MapUi {
     fn player_pixel(&self) -> Option<Point> {
         match self.mode {
             Mode::Local => self.town.as_ref()?.pixel(self.tile?),
-            Mode::World | Mode::Continent => world_pixel(self.world_tile?, self.world.size().0),
+            Mode::World | Mode::Continent => {
+                let tile = self
+                    .journey
+                    .as_ref()
+                    .and_then(|ride| ride.traversed().last().copied())
+                    .or(self.world_tile)?;
+                world_pixel(tile, self.world.size().0)
+            }
         }
     }
 
@@ -362,24 +409,267 @@ impl MapUi {
         self.hud.scale()
     }
 
-    fn action(&mut self, action: Action) {
+    fn action(&mut self, action: Action, now: Duration) -> Option<Arrival> {
+        if self.journey.is_some() && action != Action::MapTravel {
+            return None;
+        }
         match action {
             Action::MapLocal if self.town.is_some() => self.switch(Mode::Local),
             Action::MapLocal | Action::MapWorld => self.switch(Mode::World),
             Action::MapZoomIn => self.zoom(1),
             Action::MapOverview => self.switch(Mode::Continent),
             Action::MapRecenter => self.recenter(),
+            Action::MapTravel => {
+                if self.journey.is_some() {
+                    return self.cancel_journey();
+                }
+                self.start_journey(now);
+            }
             _ => {}
+        }
+        None
+    }
+
+    pub(super) fn can_travel(&self) -> bool {
+        self.can_travel
+    }
+
+    pub(super) fn travelling(&self) -> bool {
+        self.journey.is_some()
+    }
+
+    pub(super) fn travel_deadline(&self) -> Option<Duration> {
+        self.journey.as_ref().map(Journey::deadline)
+    }
+
+    fn arrival_waypoint(&self) -> Option<&Waypoint> {
+        let map = self.travel_map.as_ref().ok()?;
+        self.waypoints
+            .last()
+            .filter(|point| map.has_sector(point.tile))
+    }
+
+    fn start_journey(&mut self, now: Duration) {
+        if !self.can_travel || self.mode != Mode::World {
+            return;
+        }
+        let Some(last) = self.arrival_waypoint() else {
+            return;
+        };
+        let steps: Vec<_> = self
+            .waypoints
+            .iter()
+            .flat_map(|point| point.steps.iter().copied())
+            .collect();
+        eprintln!(
+            "World travel: {} waypoint(s), {} sector steps, arrival {:?}",
+            self.waypoints.len(),
+            steps.len(),
+            last.tile
+        );
+        self.journey = Journey::new(steps, now);
+        self.travel_message = None;
+        self.dirty = true;
+    }
+
+    pub(super) fn advance_travel(&mut self, now: Duration) -> (usize, Option<Arrival>) {
+        let Some(journey) = &mut self.journey else {
+            return (0, None);
+        };
+        let old_count = journey.traversed().len();
+        let steps = journey.advance(now);
+        for &tile in &journey.traversed()[old_count..] {
+            self.atlas.discover_near(tile);
+        }
+        let finished = journey.finished();
+        if steps > 0 {
+            self.recenter();
+        }
+        let arrival = finished.then(|| {
+            self.journey = None;
+            Arrival::Destination(self.atlas.start_map, self.waypoints.last().unwrap().tile)
+        });
+        (steps, arrival)
+    }
+
+    pub(super) fn cancel_journey(&mut self) -> Option<Arrival> {
+        let journey = self.journey.take()?;
+        let stop = journey.traversed().last().copied();
+        self.dirty = true;
+        eprintln!(
+            "World travel cancelled after {} sector steps",
+            journey.traversed().len()
+        );
+        Some(Arrival::Cancelled(self.atlas.start_map, stop))
+    }
+
+    pub(super) fn travel_notice(&mut self, message: &str) {
+        eprintln!("{message}");
+        self.travel_message = Some(message.into());
+    }
+
+    fn append_waypoint(&mut self, tile: Point, area: Option<i32>) -> Result<(), String> {
+        if !self.can_travel {
+            return Err(self
+                .travel_map
+                .as_ref()
+                .err()
+                .cloned()
+                .unwrap_or_else(|| "World travel is unavailable from this location.".into()));
+        }
+        if self.waypoints.len() == 30 {
+            return Err("The route already has 30 waypoints.".into());
+        }
+        let from = self
+            .waypoints
+            .last()
+            .map(|point| point.tile)
+            .or(self.world_tile)
+            .ok_or("Player has no world-map position.")?;
+        let steps = self
+            .travel_map
+            .as_ref()
+            .map_err(String::as_str)?
+            .route(from, tile)?;
+        if steps.is_empty() {
+            return Err("That waypoint is in the current route sector.".into());
+        }
+        if self
+            .waypoints
+            .iter()
+            .map(|point| point.steps.len())
+            .sum::<usize>()
+            + steps.len()
+            > 5000
+        {
+            return Err("The route exceeds 5000 sector steps.".into());
+        }
+        self.waypoints.push(Waypoint { tile, area, steps });
+        self.active_waypoint = None;
+        self.travel_message = None;
+        self.dirty = true;
+        Ok(())
+    }
+
+    fn replace_waypoints(&mut self, old: Vec<Waypoint>, changed: Vec<(Point, Option<i32>)>) {
+        let previous_selection = self.atlas.destination.clone();
+        let result = changed
+            .into_iter()
+            .try_for_each(|(tile, area)| self.append_waypoint(tile, area));
+        if let Err(error) = result {
+            self.waypoints = old;
+            self.atlas.destination = previous_selection;
+            self.travel_notice(&error);
+        } else {
+            self.atlas.destination = None;
+            if let Some(id) = self.waypoints.last().and_then(|point| point.area) {
+                let _ = self.atlas.select(id, &self.vfs);
+            }
+            self.travel_message = None;
+            self.dirty = true;
+        }
+    }
+
+    pub(super) fn remove_waypoint(&mut self, point: Option<Point>) -> Option<Arrival> {
+        if self.travelling() {
+            return self.cancel_journey();
+        }
+        if let Some(index) = point
+            .and_then(|p| self.pick_waypoint(p))
+            .or(self.active_waypoint.take())
+            .or_else(|| self.waypoints.len().checked_sub(1))
+        {
+            let old = std::mem::take(&mut self.waypoints);
+            let changed = old
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != index)
+                .map(|(_, point)| (point.tile, point.area))
+                .collect();
+            self.replace_waypoints(old, changed);
+        }
+        None
+    }
+
+    fn pick_waypoint(&self, point: Point) -> Option<usize> {
+        let transform = self.transform()?;
+        if self.mode != Mode::World || !transform.rect.contains(point) {
+            return None;
+        }
+        let radius = i64::from((6 * transform.ui_scale / 100).max(4));
+        self.waypoints
+            .iter()
+            .enumerate()
+            .filter_map(|(i, waypoint)| {
+                let (x, y) = transform.screen(world_pixel(waypoint.tile, self.world.size().0)?);
+                let d = (i64::from(x) - i64::from(point.0))
+                    .abs()
+                    .max((i64::from(y) - i64::from(point.1)).abs());
+                (d <= radius).then_some((d, i))
+            })
+            .min()
+            .map(|(_, i)| i)
+    }
+
+    fn place_waypoint(&mut self, point: Point) {
+        if self.active_waypoint.is_none()
+            && let Some(i) = self.pick_waypoint(point)
+        {
+            self.active_waypoint = Some(i);
+            self.dirty = true;
+            return;
+        }
+        let area = self.pick(point);
+        let previous_selection = self.atlas.destination.clone();
+        let tile = if let Some(id) = area {
+            match self.atlas.select(id, &self.vfs) {
+                Ok(()) => self.atlas.areas[&id].tile,
+                Err(error) => {
+                    self.travel_notice(&error.to_string());
+                    return;
+                }
+            }
+        } else {
+            let Some(tile) = self
+                .transform()
+                .and_then(|t| t.at(point))
+                .filter(|&p| self.world.index(p).is_some())
+                .and_then(|p| travel::sector_center(p, self.world.size().0))
+            else {
+                return;
+            };
+            tile
+        };
+        if let Some(index) = self.active_waypoint.take() {
+            self.atlas.destination = previous_selection;
+            let old = std::mem::take(&mut self.waypoints);
+            let changed = old
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    if i == index {
+                        (tile, area)
+                    } else {
+                        (p.tile, p.area)
+                    }
+                })
+                .collect();
+            self.replace_waypoints(old, changed);
+        } else if let Err(error) = self.append_waypoint(tile, area) {
+            self.atlas.destination = previous_selection;
+            self.travel_notice(&error);
+        } else if let Some(id) = area {
+            eprintln!("Map destination {:?}", self.atlas.areas[&id]);
+        } else {
+            self.atlas.destination = None;
         }
     }
 
     pub(super) fn focus(&mut self, backwards: bool) {
         self.hud.advance_focus(backwards);
     }
-    pub(super) fn activate_focus(&mut self) {
-        if let Some(action) = self.hud.focused_action() {
-            self.action(action);
-        }
+    pub(super) fn activate_focus(&mut self, now: Duration) -> Option<Arrival> {
+        self.action(self.hud.focused_action()?, now)
     }
 
     pub(super) fn mouse_down(&mut self, point: Point) {
@@ -393,28 +683,29 @@ impl MapUi {
             .map(|_| (point, point));
     }
 
-    pub(super) fn mouse_up(&mut self, point: Point) {
+    pub(super) fn mouse_up(&mut self, point: Point, now: Duration) -> Option<Arrival> {
         let on_canvas = self.drag.take().is_some();
         let action = self.hud.release(point);
         if self.suppress_click {
-            return;
+            return None;
         }
         if let Some(action) = action {
-            self.action(action);
-        } else if on_canvas
-            && !matches!(self.hud.hit(point), Hit::Button(_))
-            && let Some(id) = self.pick(point)
-        {
-            match self.atlas.select(id, &self.vfs) {
-                Ok(()) => {
-                    if let Some(selection) = &self.atlas.destination {
-                        eprintln!("Map destination {selection:?}");
-                    }
-                    self.dirty = true;
-                }
-                Err(error) => eprintln!("Map destination: {error}"),
+            return self.action(action, now);
+        }
+        if on_canvas && !matches!(self.hud.hit(point), Hit::Button(_)) && !self.travelling() {
+            if self.mode == Mode::World {
+                self.place_waypoint(point);
+            } else if self.mode == Mode::Continent
+                && let Some(pixel) = self
+                    .transform()
+                    .and_then(|t| t.at(point))
+                    .filter(|&p| self.world.index(p).is_some())
+            {
+                self.switch(Mode::World);
+                self.center = (f64::from(pixel.0), f64::from(pixel.1));
             }
         }
+        None
     }
 
     pub(super) fn cursor(&mut self, point: Option<Point>) {
@@ -470,7 +761,13 @@ impl MapUi {
             .map(|(_, id)| id)
     }
 
-    pub(super) fn prepare(&mut self, size: Point, cursor: Option<Point>) -> &Hud {
+    pub(super) fn prepare(&mut self, size: Point, cursor: Option<Point>) -> &mut Hud {
+        self.hud.set_unavailable_action(
+            (!self.travelling() && (!self.can_travel || self.arrival_waypoint().is_none()))
+                .then_some(Action::MapTravel),
+        );
+        self.hud
+            .set_active_action(self.travelling().then_some(Action::MapTravel));
         self.hud.layout(size);
         let bounds = self.hud.bounds(Binding::MapCanvas);
         if self.bounds != bounds {
@@ -514,8 +811,16 @@ impl MapUi {
             },
             |area| &area.description,
         );
-        self.hud.set_label(Binding::MapStatus, status);
-        &self.hud
+        let arrival_status = (!self.waypoints.is_empty() && self.arrival_waypoint().is_none())
+            .then_some("No on-foot terrain is available at the final waypoint.");
+        self.hud.set_label(
+            Binding::MapStatus,
+            self.travel_message
+                .as_deref()
+                .or(arrival_status)
+                .unwrap_or(status),
+        );
+        &mut self.hud
     }
 
     fn paint(&mut self, t: Transform) {
@@ -575,6 +880,9 @@ impl MapUi {
                     }
                 }
             }
+            if self.mode != Mode::Local {
+                self.paint_route(&mut canvas, t);
+            }
             if let Some(pixel) = self.player_pixel()
                 && sheet.index(pixel).is_some()
             {
@@ -587,6 +895,45 @@ impl MapUi {
             }
         }
         self.hud.set_canvas(canvas);
+    }
+
+    fn paint_route(&self, canvas: &mut SpriteFrame, t: Transform) {
+        let width = self.world.size().0;
+        let passed = self
+            .journey
+            .as_ref()
+            .map_or(0, |travel| travel.traversed().len());
+        let points = || {
+            let mut cumulative = 0;
+            self.waypoints
+                .iter()
+                .enumerate()
+                .filter_map(move |(index, waypoint)| {
+                    cumulative += waypoint.steps.len();
+                    (cumulative > passed)
+                        .then(|| world_pixel(waypoint.tile, width))
+                        .flatten()
+                        .map(|pixel| (index, pixel))
+                })
+        };
+        if let Some(start) = self.player_pixel() {
+            let mut previous = t.screen(start);
+            for (index, pixel) in points() {
+                let next = t.screen(pixel);
+                if let Some(color) = self.hud.route_color(self.active_waypoint == Some(index)) {
+                    dashed_segment(canvas, t.rect, previous, next, color);
+                }
+                previous = next;
+            }
+        }
+        for (index, pixel) in points() {
+            let binding = if self.active_waypoint == Some(index) {
+                Binding::SelectedMarker
+            } else {
+                Binding::WaypointMarker
+            };
+            draw_marker(canvas, t, pixel, self.hud.marker(binding));
+        }
     }
 
     fn paint_sheet(&mut self, t: Transform, sheet: &Sheet, canvas: &mut SpriteFrame) {
@@ -653,6 +1000,48 @@ impl MapUi {
                     paint_tile(canvas, t, (col * tw, row * th), tile, flags);
                 }
             }
+        }
+    }
+}
+
+fn dashed_segment(
+    canvas: &mut SpriteFrame,
+    rect: Rect,
+    a: (i32, i32),
+    b: (i32, i32),
+    color: [u8; 4],
+) {
+    // TIG starts at the upper (or leftmost) endpoint and uses one pixel of width.
+    let (a, b) = if (a.1, a.0) <= (b.1, b.0) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let (mut x, mut y) = a;
+    let (dx, dy) = ((b.0 - a.0).abs(), b.1 - a.1);
+    let sx = (b.0 - a.0).signum();
+    let (major, minor) = (dx.max(dy), dx.min(dy));
+    let mut error = 2 * minor - major;
+    for i in 0..=major {
+        let (column, row) = (x - rect.x, y - rect.y);
+        if (i == 0 || (i - 1) % 6 < 3)
+            && column >= 0
+            && row >= 0
+            && column < rect.w as i32
+            && row < rect.h as i32
+        {
+            canvas.pixels[row as usize * rect.w as usize + column as usize] = color;
+        }
+        let diagonal = error > 0;
+        error += 2 * minor;
+        if diagonal {
+            error -= 2 * major;
+        }
+        if dx >= dy || diagonal {
+            x += sx;
+        }
+        if dy > dx || diagonal {
+            y += 1;
         }
     }
 }
@@ -802,8 +1191,76 @@ mod tests {
             };
             let player = (548, 1290);
             let (x, y) = transform.screen(player);
-            assert_eq!(transform.at((x as u32, y as u32)), Some(player));
+            let picked = transform.at((x as u32, y as u32)).unwrap();
+            assert_eq!(picked, player);
+            let tile = travel::sector_center(picked, 2000).unwrap();
+            assert_eq!(world_pixel(tile, 2000), Some(player));
             assert_eq!(transform.at((119, y as u32)), None);
+        }
+    }
+
+    #[test]
+    fn route_marks_are_clipped_to_the_scaled_canvas() {
+        let rect = Rect {
+            x: 20,
+            y: 30,
+            w: 10,
+            h: 3,
+        };
+        let mut canvas = SpriteFrame {
+            width: rect.w,
+            height: rect.h,
+            hotspot: (0, 0),
+            offset: (0, 0),
+            pixels: vec![[0; 4]; 30],
+        };
+        let red = [180, 50, 50, 255];
+        dashed_segment(&mut canvas, rect, (14, 31), (36, 31), red);
+        assert!(canvas.pixels[10..20].contains(&red));
+        assert!(
+            canvas.pixels[..10]
+                .iter()
+                .chain(&canvas.pixels[20..])
+                .all(|&p| p == [0; 4])
+        );
+    }
+
+    #[test]
+    fn waypoint_segments_follow_pan_and_zoom_at_fractional_ui_scales() {
+        let rect = Rect {
+            x: 120,
+            y: 70,
+            w: 100,
+            h: 80,
+        };
+        let red = [160, 50, 50, 255];
+        let blue = [50, 50, 110, 255];
+        for (ui_scale, scale, center) in [(100, 1., (50., 50.)), (125, 2.5, (51., 49.))] {
+            let transform = Transform {
+                rect,
+                center,
+                scale,
+                ui_scale,
+            };
+            let mut canvas = SpriteFrame {
+                width: rect.w,
+                height: rect.h,
+                hotspot: (0, 0),
+                offset: (0, 0),
+                pixels: vec![[0; 4]; (rect.w * rect.h) as usize],
+            };
+            let [a, b, c] = [(40, 45), (58, 45), (58, 55)].map(|p| transform.screen(p));
+            dashed_segment(&mut canvas, rect, a, b, red);
+            dashed_segment(&mut canvas, rect, b, c, blue);
+            let pixel = |(x, y): (i32, i32)| {
+                canvas.pixels[((y - rect.y) * rect.w as i32 + x - rect.x) as usize]
+            };
+            assert_eq!(pixel(a), red);
+            assert_eq!(pixel((a.0 + 3, a.1)), red);
+            assert_eq!(pixel((a.0 + 4, a.1)), [0; 4]);
+            assert_eq!(pixel(b), blue);
+            assert_eq!(pixel((b.0, b.1 + 3)), blue);
+            assert_eq!(pixel((b.0 - 1, b.1 + 3)), [0; 4]);
         }
     }
 

@@ -1,5 +1,7 @@
 name = "Classic Atlas"
 scale = 125
+route_color = [160, 50, 50, 255]
+selected_route_color = [50, 50, 110, 255]
 fit_viewport = [800, 600]
 
 [fonts.map]
@@ -44,13 +46,14 @@ action = "map-overview"
 
 [[hud]]
 id = "travel"
-map_views = ["local", "world"]
+map_views = ["world"]
 parent = "frame"
 offset = [698, 312]
 size = [57, 57]
 image = "vfs:art/interface/maptravelbut.art"
-frame = 1
-disabled = true
+pressed_frame = 1
+selected_frame = 1
+action = "map-travel"
 
 [[hud]]
 id = "player-lens"
@@ -168,3 +171,9 @@ font = "map"
 wrap = true
 text_shadow = [0, 0, 0, 255]
 binding = "place-label"
+
+[[hud]]
+id = "waypoint"
+size = [12, 12]
+image = "vfs:art/interface/mm_wayp.art"
+binding = "waypoint-marker"

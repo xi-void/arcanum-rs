@@ -50,7 +50,7 @@ background. The default spawn is the original Zephyr crash site, resolved
 from the game's `START_MAP` metadata. Click the nearby cave entrance to
 enter, then click the exit inside to return. Select Bates Mansion with
 `--map 5011`. For K’na Tha, add `--map "k'na tha" --center 383 928`.
-With `--features gpu`, add `--renderer vulkan` to use Vulkan.
+The windowed build uses Vulkan through wgpu.
 
 The default Classic HUD uses your installed Arcanum interface artwork.
 Use **[** and **]** to adjust HUD scale independently of camera zoom.
@@ -60,7 +60,9 @@ Pass `--ui ui/field-notes` for the example replacement,
 
 Press **M** or click the Classic map icon to open the in-game atlas.
 Use **Z** for the continent overview and **Shift+Z** for the detailed
-world map. Selecting a discovered location records a destination.
+world map. At an eligible overworld position, place waypoints and use
+the atlas travel button. `--discover-all` reveals destinations for alpha
+testing. The default Crash Site spawn is inside the local-map area.
 [Map controls, original data and theme configuration](docs/MAP_UI.md)
 
 The alpha uses original human standing, walking and running sprites.
@@ -287,8 +289,8 @@ cargo run -- art sector-audit "$game"
 ```
 
 The streamed world viewer also supports an experimental hardware backend
-with the optional `gpu` feature. See [GPU renderer](docs/GPU_RENDERER.md)
-for Vulkan, GLES and CPU comparison commands.
+with the `windowed` feature. See [Vulkan rendering](docs/GPU_RENDERER.md)
+for the production rendering path and hardware checks.
 
 The streamed viewer plays original additive fire scenery. Pass
 `--animation-ms 90` with `--sectors` to freeze a reproducible animation tick.

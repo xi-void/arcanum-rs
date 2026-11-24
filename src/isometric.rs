@@ -36,11 +36,22 @@ pub fn floor_draw(frame: &SpriteFrame, x: i32, y: i32) -> Option<SpriteDraw<'_>>
     if (frame.width, frame.height) != FLOOR_SIZE || frame.hotspot != FLOOR_HOTSPOT {
         return None;
     }
+    surface_draw(frame, x, y)
+}
+
+/// CE tile_draw_iso blits a fixed rectangle for tiles and baked facades.
+/// Serialized ART hotspots only affect object-style drawing.
+pub(crate) fn surface_draw(frame: &SpriteFrame, x: i32, y: i32) -> Option<SpriteDraw<'_>> {
+    if (frame.width, frame.height) != FLOOR_SIZE {
+        return None;
+    }
     let (sx, sy) = project_tile(x, y)?;
-    // The 78 × 40 raster starts at center − (39, 20).
     Some(SpriteDraw {
         frame,
-        anchor: (sx, sy.checked_add(FLOOR_HOTSPOT.1 - 20)?),
+        anchor: (
+            sx.checked_sub(39)?.checked_add(frame.hotspot.0)?,
+            sy.checked_sub(20)?.checked_add(frame.hotspot.1)?,
+        ),
     })
 }
 

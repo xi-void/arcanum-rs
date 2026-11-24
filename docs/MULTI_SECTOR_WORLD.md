@@ -41,15 +41,108 @@ both samples. At world Y=928, the seam cells at X=383 and X=384 store
 The two selected sectors contain no baked facades or portals. The Bates
 regression covers the existing facade and portal paths.
 
-The table records the Milestone 39 baseline. Milestone 41 resolves the
-alternate tree palette requests and the prototype ART for positioned
-scenery with no instance ART override. The
-[coverage and location audit](SCENERY_ART_COVERAGE.md) gives the updated
-counts and the coordinates of the original paved brazier court.
-The headless inspection reports unsupported inputs. A sector whose object list cannot be framed
-keeps its validated floor and reports the object-layer error. An absent
-sector or unsupported floor cell leaves the normal cleared background.
-Original black void tiles remain regular original draws.
+The table records the Milestone 39 baseline. Current loading uses map properties
+and original wilderness templates through the same world stream.
+
+## Map initialization and terrain reconstruction
+
+CE's `map_open` sets tile and sector limits using the two 64-bit dimensions
+in `map.prp`. The Rust catalog displays those limits independently of the
+rectangle covered by authored sectors. The archive's `MapList.mes` still
+supplies the gameplay entry. Streaming keeps a 12-sector cache across the
+larger coordinate range.
+
+CE's `sector_load_game` uses an authored `maps/<map>/<id>.sec` first. If that
+resource is absent, `terrain_sector_path` reads the destination cell's word
+from `terrain.tdf` and selects an original stock template. The first and
+second terrain types occupy five bits each. The next four bits choose the
+transition and its orientation, and the last two choose a base variant.
+The type names and travel block bits come from `terrain/terrain.mes`. Rows
+in the stock overworld TDF are length-prefixed zlib streams. A corrupt
+authored winner is reported with its original provenance.
+
+Terrain templates enter the same sector reader as authored data. Floor
+tiles, facades, roof words, collision and supported object records keep their
+original data. Object placement uses the local six bits plus the destination
+sector origin, as CE's `objlist_load` does for a template. Travel uses the same
+terrain decoder and can use a resolved template for an on-foot stop. It still
+honors the original sector block list and verifies collision at arrival.
+
+| Location | Destination sector | Installed source | Recovered surfaces and scenery |
+| --- | --- | --- | --- |
+| Tulla western approach | (441, 487) | `terrain/desert island/67108864.sec` | 4096 surfaces, 351 scenery records |
+| Vendigroth eastern edge | (308, 585) | `terrain/desert island/0.sec` | 4096 surfaces, 364 scenery records |
+| K’na Tha forest seam | (9, 14) | `terrain/forest/67108864.sec` | 4096 surfaces, 477 scenery records |
+
+The Tulla inspection also exposed two generic rendering rules. CE's
+`tile_draw_iso` puts each 78×40 baked facade in the floor cell's fixed blit
+rectangle, independent of the frame hotspot. Its wall filename table maps
+pieces 16–20 to the five-piece window family. Both use the shared importers.
+The traced overworld sectors now retain 209/209 and 192/192 original walls.
+One neighboring authored sector also recovers 200 baked facade cells.
+The western travel fixture `(28320,31168)` is a walkable dirt transition in
+sector `(442,487)`, 135 tiles west in X from Tulla's original `GameArea`
+arrival `(28455,31171)` in sector `(444,487)`. It does not match the supplied
+CE palace views. For example, tile
+`(28324,31179)` in sector `32682017210` stores `0x071c01c0`, which resolves
+to `art/tile/blkbse0a.art`. Its visible texels are opaque black, and the
+winning tile-name entry carries `/b`. The two adjacent dirt-to-black
+transition IDs remain original floor draws. The sector's serialized roof
+list is empty. CE's `tile_is_blocking` reads the tile mask, a facade's
+walkable bit or the tile-name flags. `tile_draw_iso` separately draws the
+authored ART, with roof coverage tested before the blit. That distinction
+accounts for the reproduced black cells without terrain substitution.
+
+At the authored arrival, wall records 131 in `32614908348.sec` and 56 in
+`32682017212.sec` use `0x11e1d811`, piece 7. CE's
+`build_wall_file_name` maps pieces 7 and 8 to `uec` and `lec`. These
+end caps now use the ordinary wall palette, pivot, mirror and depth rules.
+The palace approach contains tile trigger 2341 at X 28450, which checks
+global flag 2395 and other quest state. The tower door farther west is
+scenery record 9 in `32682017211.sec`, prototype 4026 at `(28376,31171)`.
+Its original Use script 2356 points to Tulla Interior (map 5031) at
+`(507,221)`. The alpha still lacks general tile-script execution and
+additional portal and scenery appearances.
+
+The Vendigroth bell-tower entry is scenery record 256, prototype 4047,
+at `(19689,37486)` in `39258685747.sec`. The instance's Use script 2379
+teleports the triggerer to map 5032 at `(2051,2038)`. There is no additional
+access condition in that script. Destination sector `2080374816.sec` used
+to fail at record 91, a trap with prototype 26021. CE's trap schema defines
+three 32-bit fields followed by 32-bit and 64-bit sparse arrays. The loader
+now validates those fields and continues with the following records.
+Trap detection and effects remain unsupported.
+
+
+### Coverage and remaining mechanisms
+
+- **Map and streaming.** Map selection, archive precedence, authored and
+  template sector selection, viewport neighbors, prefetch, ordering and
+  eviction are active. CE's final `terrain_fill` fallback uses original
+  illegal-tile ART and its variant selection. The alpha reports unavailable
+  templates and has no emulation of that final fallback or editor-created TDFs.
+- **Surfaces and visibility.** Floor and supported facade IDs, original roof
+  lists, player-based fading, ambient lighting and the verified darkness and
+  shadow masks are active. Full CE visibility and all ART variants remain
+  partial. Existing Tulla portal rejection reasons appear in the object trace.
+- **Objects and collision.** Supported sector records use original effective
+  prototypes, offsets and tile masks. An unframeable variable-length record
+  reports its byte offset and disables unverified collision for that sector.
+  Template light relocation remains unsupported and is reported separately.
+- **Mobiles and scripts.** CE's `map_load_mobile` reads a GUID-prefixed
+  compiled object stream whose filename is reversed ROT13. The alpha still
+  has a limited set of verified individual mobile imports. The compiled
+  stream, full postprocessing, arbitrary scripts, saved sector diffs and
+  dynamic mobile state remain incomplete. Verified object-use scripts and
+  `map.jmp` transitions use the shared world loader.
+
+Inspect the source, reconstructed records and collision state with the
+existing headless command.
+
+```sh
+cargo run --locked -- art world-inspect "$HOME/Work/arcanum-ce-test" \
+  --map 5000 --center 28320 31168 --roofs --trace
+```
 
 The streamed viewer also supports opt-in [original static lighting](STATIC_LIGHTING.md)
 at a fixed scheme hour, with mask preparation in the same sector worker
