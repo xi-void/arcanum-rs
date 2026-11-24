@@ -182,7 +182,20 @@ fn read_frame_zoom<'a>(
     bg: [u8; 3],
     draws: impl IntoIterator<Item = WorldDraw<'a>>,
 ) -> (Vec<[u8; 3]>, Preparation) {
-    let stats = gpu.prepare_scaled(size, zoom, draws).unwrap();
+    read_frame_with_overlay(gpu, size, zoom, bg, draws, std::iter::empty())
+}
+
+fn read_frame_with_overlay<'a>(
+    gpu: &mut Compositor,
+    size: (u32, u32),
+    zoom: u8,
+    bg: [u8; 3],
+    draws: impl IntoIterator<Item = WorldDraw<'a>>,
+    overlay: impl IntoIterator<Item = WorldDraw<'a>>,
+) -> (Vec<[u8; 3]>, Preparation) {
+    let stats = gpu
+        .prepare_with_overlay(size, zoom, draws, overlay)
+        .unwrap();
     let target = read_target(gpu, size);
     let stride = (size.0 * 4).next_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT);
     let copy = buffer(
@@ -225,6 +238,48 @@ fn read_frame_zoom<'a>(
         })
         .collect();
     (pixels, stats)
+}
+
+#[test]
+#[ignore = "requires a hardware GPU adapter"]
+fn screen_overlay_matches_cpu_at_every_world_zoom() {
+    let backend = test_backend();
+    let context = instance(backend);
+    let adapter = hardware_adapter(&context, backend, None).unwrap();
+    let mut gpu = Compositor::new(&adapter, TextureFormat::Rgba8Unorm, false).unwrap();
+    let world = fixture(3, 3, vec![[80, 100, 120, 255]; 9]);
+    let hud = fixture(2, 1, vec![[40, 80, 160, 255], [0; 4]]);
+    let size = (8u32, 6u32);
+    let bg = [10, 20, 30];
+    for zoom in [1, 2, 3] {
+        let (world, hud) = (
+            draw(&world, (1, 1), Modulation::Unlit),
+            draw(&hud, (3, 2), Modulation::Unlit),
+        );
+        let z = u32::from(zoom);
+        let logical = (size.0.div_ceil(z), size.1.div_ceil(z));
+        let mut base = vec![bg; (logical.0 * logical.1) as usize];
+        blit_modulated(
+            &mut base,
+            logical,
+            logical.0 as usize,
+            [(world.sprite, world.modulation)],
+        )
+        .unwrap();
+        let mut expected = (0..size.1)
+            .flat_map(|y| (0..size.0).map(move |x| (y / z * logical.0 + x / z) as usize))
+            .map(|i| base[i])
+            .collect::<Vec<_>>();
+        blit_modulated(
+            &mut expected,
+            size,
+            size.0 as usize,
+            [(hud.sprite, hud.modulation)],
+        )
+        .unwrap();
+        let (actual, _) = read_frame_with_overlay(&mut gpu, size, zoom, bg, [world], [hud]);
+        assert_eq!(actual, expected, "world zoom {zoom}");
+    }
 }
 
 #[test]

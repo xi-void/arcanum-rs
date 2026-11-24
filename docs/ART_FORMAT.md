@@ -82,7 +82,7 @@ and archive or mod precedence, including a malformed winning override.
 
 ## Bounds and limitations
 
-- Accepted files use flags `0x00` or `0x02` (eight directions), `0x01` or `0x09`
+- Accepted files use flags `0x00` or `0x02` (eight directions), `0x01`, `0x05` or `0x09`
   (one direction), and 8-bit indices. Palette slot zero is required.
   Present alternate slots are stored in ascending slot order. A request
   for a missing palette falls back to slot zero. A single-direction file

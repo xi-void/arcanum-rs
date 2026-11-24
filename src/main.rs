@@ -41,7 +41,7 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] mes get <game-directory> <resource-path> <entry-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art inspect <game-directory> <resource-path> <frame> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art export <game-directory> <resource-path> <frame> <output.pam> [--mods <mods-directory> <mod-id> ...]
-  arcanum-rs [--ordered] play <game-directory> [--map <map-name-or-id>] [--center X Y] [--lighting <hour>] [--renderer cpu|vulkan|gles] (requires --features windowed)
+  arcanum-rs [--ordered] play <game-directory> [--map <map-name-or-id>] [--center X Y] [--ui classic|off|PATH] [--ui-scale PERCENT] [--lighting <hour>] [--renderer cpu|vulkan|gles] (requires --features windowed)
   arcanum-rs art demo                          (requires --features windowed)
   arcanum-rs [--ordered] art sector-audit <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art sector-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
@@ -1088,12 +1088,105 @@ fn show_room(
 }
 
 #[cfg(feature = "windowed")]
+type PlayUiOptions = (Option<std::path::PathBuf>, Option<u16>, Vec<OsString>);
+
+#[cfg(feature = "windowed")]
+fn play_ui_options(options: &[OsString]) -> Result<PlayUiOptions, Box<dyn Error>> {
+    let mut theme = Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/classic/theme.toml"));
+    let mut seen_theme = false;
+    let mut scale = None;
+    let mut kept = Vec::with_capacity(options.len());
+    let mut args = options.iter();
+    while let Some(flag) = args.next() {
+        if flag == "--mods" {
+            kept.push(flag.clone());
+            kept.extend(args.cloned());
+            break;
+        }
+        if flag == "--ui" {
+            if seen_theme {
+                return Err("--ui can be specified once".into());
+            }
+            let value = args
+                .next()
+                .ok_or("expected theme path, classic or off after --ui")?;
+            seen_theme = true;
+            if value == "off" {
+                theme = None;
+            } else if value != "classic" {
+                let path = Path::new(value);
+                theme = Some(if path.is_dir() {
+                    path.join("theme.toml")
+                } else {
+                    path.into()
+                });
+            }
+        } else if flag == "--ui-scale" {
+            if scale.is_some() {
+                return Err("--ui-scale can be specified once".into());
+            }
+            let value = args
+                .next()
+                .and_then(|v| v.to_str())
+                .and_then(|v| v.parse::<u16>().ok())
+                .filter(|x| (50..=300).contains(x))
+                .ok_or("--ui-scale expects a percent from 50 to 300")?;
+            scale = Some(value);
+        } else {
+            kept.push(flag.clone());
+        }
+    }
+    Ok((theme, scale, kept))
+}
+
+#[cfg(all(feature = "windowed", test))]
+#[test]
+fn play_hud_selection_preserves_world_and_mod_options() {
+    let options = [
+        "--ui",
+        "off",
+        "--ui-scale",
+        "200",
+        "--map",
+        "Crash Site Cave",
+        "--mods",
+        "mods",
+        "test",
+    ]
+    .map(OsString::from);
+    let (theme, scale, world) = play_ui_options(&options).unwrap();
+    assert!(theme.is_none());
+    assert_eq!(scale, Some(200));
+    assert_eq!(world, options[4..]);
+    assert!(play_ui_options(&["--ui-scale", "301"].map(OsString::from)).is_err());
+}
+
+#[cfg(feature = "windowed")]
 fn show_world(
     game: &Path,
     options: &[OsString],
     policy: Policy,
     playing: bool,
 ) -> Result<(), Box<dyn Error>> {
+    let (theme, ui_scale, stripped) = if playing {
+        play_ui_options(options)?
+    } else {
+        (None, None, options.to_vec())
+    };
+    let options = stripped.as_slice();
+    let hud = if let Some(theme) = theme {
+        let mods = options
+            .iter()
+            .position(|arg| arg == "--mods")
+            .map_or(&[][..], |index| &options[index..]);
+        let mut vfs = inspection_vfs(game, mods, policy)?;
+        Some(Box::new(
+            viewer::Hud::load(&theme, &mut vfs, ui_scale)
+                .map_err(|error| format!("UI theme {}: {error}", theme.display()))?,
+        ))
+    } else {
+        None
+    };
     if let Some((world, camera, size, trace, map, renderer, animation_ms, explore)) =
         streaming_world(game, options, policy, playing)?
     {
@@ -1147,6 +1240,7 @@ fn show_world(
                 animation_ms,
                 explore,
                 travel: travel.map(|loader| (map, loader)),
+                hud,
             },
         )
         .map_err(Into::into);

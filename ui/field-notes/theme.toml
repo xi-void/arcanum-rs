@@ -1,0 +1,61 @@
+name = "Field Notes"
+scale = 150
+
+[fonts.controls]
+source = "bitmap"
+size = 10
+bold = true
+color = [218, 251, 238, 255]
+line_gap = 2
+
+[[hud]]
+id = "toolbar"
+anchor = "top-left"
+offset = [12, 12]
+size = [136, 97]
+fill = [12, 33, 35, 245]
+capture = true
+
+[[hud]]
+id = "title"
+parent = "toolbar"
+offset = [10, 9]
+size = [116, 12]
+text = "EXPLORATION"
+font = "controls"
+
+[[hud]]
+id = "pause"
+parent = "toolbar"
+offset = [10, 27]
+size = [116, 17]
+fill = [25, 67, 65, 255]
+hover_fill = [52, 108, 95, 255]
+text = "PAUSE"
+font = "controls"
+align = "center"
+action = "pause"
+
+[[hud]]
+id = "gait"
+parent = "toolbar"
+offset = [10, 49]
+size = [116, 17]
+fill = [25, 67, 65, 255]
+hover_fill = [52, 108, 95, 255]
+text = "RUN TOGGLE"
+font = "controls"
+align = "center"
+action = "toggle-run"
+
+[[hud]]
+id = "zoom"
+parent = "toolbar"
+offset = [10, 71]
+size = [116, 17]
+fill = [25, 67, 65, 255]
+hover_fill = [52, 108, 95, 255]
+text = "RESET ZOOM"
+font = "controls"
+align = "center"
+action = "reset-zoom"
