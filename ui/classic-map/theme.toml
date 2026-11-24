@@ -1,0 +1,170 @@
+name = "Classic Atlas"
+scale = 125
+fit_viewport = [800, 600]
+
+[fonts.map]
+source = "vfs:art/interface/newtimes16font.art"
+size = 21
+color = [250, 250, 250, 255]
+
+[[hud]]
+id = "frame"
+anchor = "center"
+offset = [0, -59]
+size = [800, 400]
+image = "vfs:art/interface/mapmain.art"
+capture = true
+
+[[hud]]
+id = "canvas"
+parent = "frame"
+offset = [150, 11]
+size = [501, 365]
+binding = "map-canvas"
+
+[[hud]]
+id = "zoom"
+parent = "frame"
+offset = [20, 165]
+size = [111, 56]
+image = "vfs:art/interface/mapzoombut.art"
+pressed_frame = 1
+selected_frame = 1
+action = "map-local"
+
+[[hud]]
+id = "overview"
+parent = "frame"
+offset = [19, 267]
+size = [106, 56]
+image = "vfs:art/interface/mapwholebut.art"
+pressed_frame = 1
+selected_frame = 1
+action = "map-overview"
+
+[[hud]]
+id = "travel"
+map_views = ["local", "world"]
+parent = "frame"
+offset = [698, 312]
+size = [57, 57]
+image = "vfs:art/interface/maptravelbut.art"
+frame = 1
+disabled = true
+
+[[hud]]
+id = "player-lens"
+parent = "frame"
+offset = [25, 24]
+size = [89, 89]
+binding = "player-lens"
+
+[[hud]]
+id = "player-lens-cover"
+parent = "frame"
+offset = [25, 24]
+size = [89, 89]
+image = "vfs:art/interface/pcwincvr.art"
+
+[[hud]]
+id = "navigate"
+parent = "frame"
+offset = [375, 347]
+size = [45, 45]
+image = "vfs:art/interface/navbutton.art"
+pressed_frame = 1
+action = "map-recenter"
+map_views = ["local", "world"]
+
+[[hud]]
+id = "navigate-overview"
+parent = "frame"
+offset = [375, 347]
+size = [45, 45]
+image = "vfs:art/interface/navbutton.art"
+disabled = true
+map_views = ["continent"]
+
+[[hud]]
+id = "navigate-cover"
+parent = "frame"
+offset = [294, 341]
+size = [207, 35]
+image = "vfs:art/interface/nav_cvr.art"
+map_views = ["continent"]
+
+[[hud]]
+id = "west"
+parent = "frame"
+offset = [707, 159]
+size = [60, 18]
+font = "map"
+align = "left"
+fill = [0, 0, 0, 255]
+binding = "map-west"
+
+[[hud]]
+id = "south"
+parent = "frame"
+offset = [707, 191]
+size = [60, 18]
+font = "map"
+align = "left"
+fill = [0, 0, 0, 255]
+binding = "map-south"
+
+[[hud]]
+id = "status"
+anchor = "bottom"
+offset = [3, -15]
+size = [383, 82]
+font = "map"
+wrap = true
+binding = "map-status"
+
+[[hud]]
+id = "place-dot"
+size = [9, 9]
+image = "vfs:art/interface/mm_loc.art"
+binding = "place-marker"
+
+[[hud]]
+id = "destination-dot"
+size = [9, 9]
+image = "vfs:art/interface/mm_wayp.art"
+frame = 1
+binding = "selected-marker"
+
+[[hud]]
+id = "player-dot"
+size = [11, 11]
+image = "vfs:art/interface/mm_cross.art"
+binding = "player-marker"
+
+[[hud]]
+id = "overview-player"
+size = [3, 3]
+fill = [0, 255, 0, 255]
+binding = "continent-player-marker"
+
+[[hud]]
+id = "overview-place"
+size = [2, 2]
+fill = [255, 0, 0, 255]
+binding = "continent-place-marker"
+
+[[hud]]
+id = "overview-selected"
+size = [5, 5]
+fill = [255, 255, 0, 255]
+binding = "continent-selected-marker"
+
+
+[[hud]]
+id = "area-name"
+offset = [12, -10]
+size = [200, 50]
+font = "map"
+wrap = true
+text_shadow = [0, 0, 0, 255]
+binding = "place-label"

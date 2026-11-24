@@ -6,6 +6,8 @@ use arcanum_rs::art::SpriteFrame;
 #[cfg(feature = "gpu")]
 mod gpu;
 mod hud;
+mod map_ui;
+pub(super) use map_ui::MapUi;
 mod menu;
 use arcanum_rs::camera::{Camera, CameraScene};
 use arcanum_rs::compositor::{Modulation, SpriteDraw, blit_modulated};
@@ -161,6 +163,7 @@ pub struct StreamOptions<'a> {
     pub explore: bool,
     pub travel: Option<(String, TravelLoader<'a>)>,
     pub hud: Option<Box<Hud>>,
+    pub map_ui: Option<Box<MapUi>>,
 }
 
 pub fn show_stream(
@@ -177,6 +180,7 @@ pub fn show_stream(
         explore,
         travel,
         hud,
+        map_ui,
     } = options;
     #[cfg(not(feature = "gpu"))]
     if renderer != RenderBackend::Cpu {
@@ -215,6 +219,7 @@ pub fn show_stream(
             animation_ms,
             travel,
             hud,
+            map_ui,
         },
         PhysicalSize::<u32>::from(size).into(),
         event_loop,
@@ -238,6 +243,7 @@ enum ViewContent<'a> {
         animation_ms: Option<u64>,
         travel: Option<Travel<'a>>,
         hud: Option<Box<Hud>>,
+        map_ui: Option<Box<MapUi>>,
     },
     World {
         scene: &'a CameraScene<'a>,
@@ -284,6 +290,7 @@ fn run_content(
         settings: Settings::default(),
         pause: None,
         paused_for: Duration::ZERO,
+        map_since: None,
     };
     event_loop
         .run_app(&mut app)
@@ -310,6 +317,7 @@ struct Viewer<'a> {
     settings: Settings,
     pause: Option<(Menu, Instant)>,
     paused_for: Duration,
+    map_since: Option<Instant>,
 }
 
 const CAMERA_TICK: Duration = Duration::from_millis(16);
@@ -422,7 +430,7 @@ impl Viewer<'_> {
     fn play_elapsed(&self, now: Instant) -> Duration {
         self.pause
             .as_ref()
-            .map_or(now, |(_, paused)| *paused)
+            .map_or(self.map_since.unwrap_or(now), |(_, paused)| *paused)
             .saturating_duration_since(self.epoch)
             .saturating_sub(self.paused_for)
     }
@@ -444,6 +452,8 @@ impl Viewer<'_> {
             hud::Action::Pause => self.pause_game(event_loop),
             hud::Action::ToggleRun => self.settings.run = !self.settings.run,
             hud::Action::ResetZoom => self.settings.zoom = 1,
+            hud::Action::OpenMap => self.open_map(event_loop),
+            _ => {}
         }
         if let Some(view) = &self.view {
             view.window.request_redraw();
@@ -468,6 +478,194 @@ impl Viewer<'_> {
             view.window.request_redraw();
         }
         self.update_control_flow(event_loop);
+    }
+
+    fn open_map(&mut self, event_loop: &ActiveEventLoop) {
+        let elapsed = self.play_elapsed(Instant::now());
+        if let ViewContent::Stream {
+            map_ui: Some(map),
+            hud,
+            shift,
+            world,
+            trace,
+            last_presented,
+            ..
+        } = &mut self.content
+        {
+            if let (Some(camera), Some((width, height))) =
+                (last_presented.as_ref(), map.lens_size())
+            {
+                let viewport = (width, height);
+                let mut pixels = vec![stream_background(true); (width * height) as usize];
+                let draws = scene_draws(world, camera, viewport, elapsed, self.settings)
+                    .map(|draw| (draw.sprite, draw.modulation));
+                if blit_modulated(&mut pixels, viewport, width as usize, draws).is_ok() {
+                    map.set_lens(&SpriteFrame {
+                        width,
+                        height,
+                        hotspot: (0, 0),
+                        offset: (0, 0),
+                        pixels: pixels.into_iter().map(|[r, g, b]| [r, g, b, 255]).collect(),
+                    });
+                }
+            }
+            if *trace && let Some((tile, town)) = world.player_map_position() {
+                eprintln!("Map player tile {tile:?}, town map {town}");
+            }
+            map.open(hud.as_ref().map(|hud| hud.scale()));
+            *shift = false;
+            self.map_since = Some(Instant::now());
+            self.navigation = Navigation::default();
+            self.player_deadline = None;
+            self.schedule_animation(event_loop, None);
+            if let Some(view) = &self.view {
+                view.window.request_redraw();
+            }
+        }
+    }
+
+    fn close_map(&mut self, event_loop: &ActiveEventLoop) {
+        if let ViewContent::Stream {
+            map_ui: Some(map),
+            world,
+            ..
+        } = &mut self.content
+        {
+            map.close();
+            self.paused_for += self.map_since.take().expect("open map timestamp").elapsed();
+            self.player_deadline = world.player_moving().then(Instant::now);
+            if let Some(view) = &self.view {
+                view.window.request_redraw();
+            }
+        }
+        self.update_control_flow(event_loop);
+    }
+
+    fn map_event(&mut self, loop_: &ActiveEventLoop, event: &WindowEvent) -> bool {
+        let elapsed = self.play_elapsed(Instant::now());
+        let settings = self.settings;
+        let ViewContent::Stream {
+            map_ui: Some(map),
+            hud,
+            shift,
+            world,
+            camera,
+            last_presented,
+            ..
+        } = &mut self.content
+        else {
+            return false;
+        };
+        if !map.is_open() {
+            return false;
+        }
+        let view = self.view.as_mut().unwrap();
+        match event {
+            WindowEvent::RedrawRequested => {
+                let size = view.window.inner_size();
+                if size.width > 0 && size.height > 0 {
+                    let viewport = (size.width, size.height);
+                    let map = map.prepare(viewport, self.cursor);
+                    let hud = hud.as_deref_mut().map(|hud| {
+                        hud.layout(viewport);
+                        &*hud
+                    });
+                    let scene = scene_draws(
+                        world,
+                        last_presented.as_ref().unwrap_or(camera),
+                        logical_size(size, settings.zoom),
+                        elapsed,
+                        settings,
+                    );
+                    if let Err(error) = view.redraw_map(size, settings.zoom, scene, map, hud) {
+                        self.fail(loop_, error);
+                    }
+                }
+                return true;
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = (position.x >= 0. && position.y >= 0.)
+                    .then_some((position.x as u32, position.y as u32));
+                map.cursor(self.cursor);
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.cursor = None;
+                map.cursor(None);
+                map.cancel_drag();
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if let Some(point) = self.cursor {
+                    if state.is_pressed() {
+                        map.mouse_down(point);
+                    } else {
+                        map.mouse_up(point);
+                    }
+                } else {
+                    map.cancel_drag();
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let delta = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
+                    MouseScrollDelta::PixelDelta(p) => p.y,
+                };
+                map.zoom(i32::from(delta > 0.) - i32::from(delta < 0.));
+            }
+            WindowEvent::ModifiersChanged(modifiers) => *shift = modifiers.state().shift_key(),
+            WindowEvent::Focused(false) => {
+                map.cancel_drag();
+                *shift = false;
+            }
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic: false,
+                ..
+            } if event.state.is_pressed() => match &event.logical_key {
+                Key::Named(NamedKey::Escape) if !event.repeat => {
+                    self.close_map(loop_);
+                    return true;
+                }
+                Key::Character(key) if key.eq_ignore_ascii_case("m") && !event.repeat => {
+                    self.close_map(loop_);
+                    return true;
+                }
+                Key::Character(key) if key.eq_ignore_ascii_case("z") && !event.repeat => {
+                    map.toggle_overview(*shift);
+                }
+                Key::Named(NamedKey::ArrowLeft) => map.pan_keys(-32, 0),
+                Key::Named(NamedKey::ArrowRight) => map.pan_keys(32, 0),
+                Key::Named(NamedKey::ArrowUp) => map.pan_keys(0, -32),
+                Key::Named(NamedKey::ArrowDown) => map.pan_keys(0, 32),
+                Key::Named(NamedKey::Home) => map.home(),
+                Key::Named(NamedKey::Tab) => map.focus(*shift),
+                Key::Named(NamedKey::Enter | NamedKey::Space) if !event.repeat => {
+                    map.activate_focus()
+                }
+                Key::Character(key) if key == "[" || key == "]" => {
+                    let scale = map.adjust_scale(if key == "[" { -25 } else { 25 });
+                    if let Some(hud) = hud {
+                        hud.set_scale(scale);
+                    }
+                }
+                _ => return true,
+            },
+            WindowEvent::KeyboardInput { .. } | WindowEvent::MouseInput { .. } => return true,
+            WindowEvent::CloseRequested | WindowEvent::Destroyed => return false,
+            WindowEvent::Occluded(occluded) => {
+                view.occluded = *occluded;
+                if *occluded {
+                    return true;
+                }
+            }
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {}
+            _ => return true,
+        }
+        view.window.request_redraw();
+        true
     }
 
     fn update_control_flow(&self, event_loop: &ActiveEventLoop) {
@@ -598,7 +796,7 @@ impl ApplicationHandler for Viewer<'_> {
             return;
         }
         let now = Instant::now();
-        if self.pause.is_some() {
+        if self.pause.is_some() || self.map_since.is_some() {
             return;
         }
         let elapsed = self.play_elapsed(now);
@@ -725,6 +923,7 @@ impl ApplicationHandler for Viewer<'_> {
     fn user_event(&mut self, _: &ActiveEventLoop, _: ()) {
         if let ViewContent::Stream { world, .. } = &mut self.content
             && world.receive()
+            && self.map_since.is_none()
             && let Some(view) = &self.view
         {
             view.window.request_redraw();
@@ -758,6 +957,9 @@ impl ApplicationHandler for Viewer<'_> {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         if self.view.as_ref().is_none_or(|view| view.window.id() != id) {
+            return;
+        }
+        if self.map_event(event_loop, &event) {
             return;
         }
         let playing = matches!(&self.content, ViewContent::Stream { world, .. } if world.playing());
@@ -831,6 +1033,19 @@ impl ApplicationHandler for Viewer<'_> {
                 self.menu_action(command, event_loop);
                 return;
             }
+        }
+        if playing
+            && let WindowEvent::KeyboardInput {
+                event: key,
+                is_synthetic: false,
+                ..
+            } = &event
+            && key.state.is_pressed()
+            && !key.repeat
+            && matches!(&key.logical_key, Key::Character(ch) if ch.eq_ignore_ascii_case("m"))
+        {
+            self.open_map(event_loop);
+            return;
         }
         if let ViewContent::Stream {
             hud: Some(hud),
@@ -1202,6 +1417,8 @@ impl Viewer<'_> {
                         trace,
                         animation_ms,
                         hud,
+                        map_ui,
+                        travel,
                         ..
                     } => {
                         let sampled = Instant::now();
@@ -1236,6 +1453,13 @@ impl Viewer<'_> {
                                 *last_presented = Some(camera.clone());
                                 *last_viewport = (size.width, size.height);
                                 *last_zoom = self.settings.zoom;
+                                if let (Some(map_ui), Some(travel), Some((tile, town))) = (
+                                    map_ui.as_mut(),
+                                    travel.as_ref(),
+                                    world.player_map_position(),
+                                ) {
+                                    map_ui.observe(&travel.map, tile, town);
+                                }
                                 if animation_ms.is_none() && self.pause.is_none() {
                                     deadline = world
                                         .animation_delay(
@@ -1265,6 +1489,33 @@ struct FrameTiming {
     packing: Duration,
     submission: Duration,
     host: Duration,
+}
+
+fn scene_draws<'a>(
+    world: &'a InteractiveWorld,
+    camera: &Camera,
+    viewport: (u32, u32),
+    elapsed: Duration,
+    settings: Settings,
+) -> impl Iterator<Item = arcanum_rs::content::world::WorldDraw<'a>> {
+    world
+        .visible_assets_at(camera, viewport, elapsed)
+        .filter_map(move |mut draw| {
+            match draw.modulation {
+                Modulation::Shadow(_) if !settings.shadows => return None,
+                Modulation::Shadow(_) | Modulation::Additive | Modulation::AdditiveTint(_) => {}
+                Modulation::Fade { corners, .. } if !settings.lighting => {
+                    draw.modulation = Modulation::Fade {
+                        corners,
+                        color: [255; 3],
+                        columns: &[],
+                    };
+                }
+                _ if !settings.lighting => draw.modulation = Modulation::Unlit,
+                _ => {}
+            }
+            Some(draw)
+        })
 }
 
 fn logical_size(size: PhysicalSize<u32>, zoom: u8) -> (u32, u32) {
@@ -1338,28 +1589,13 @@ impl WindowSurface {
                 start.elapsed()
             );
         }
-        let draws = world
-            .visible_assets_at(camera, viewport, elapsed)
-            .filter_map(|mut draw| {
-                match draw.modulation {
-                    Modulation::Shadow(_) if !settings.shadows => return None,
-                    Modulation::Shadow(_) | Modulation::Additive | Modulation::AdditiveTint(_) => {}
-                    Modulation::Fade { corners, .. } if !settings.lighting => {
-                        draw.modulation = Modulation::Fade {
-                            corners,
-                            color: [255; 3],
-                            columns: &[],
-                        };
-                    }
-                    _ if !settings.lighting => draw.modulation = Modulation::Unlit,
-                    _ => {}
+        let draws =
+            scene_draws(world, camera, viewport, elapsed, settings).chain(menu.map(|asset| {
+                arcanum_rs::content::world::WorldDraw {
+                    asset,
+                    sprite: menu::layer(asset, viewport),
+                    modulation: Modulation::Unlit,
                 }
-                Some(draw)
-            })
-            .chain(menu.map(|asset| arcanum_rs::content::world::WorldDraw {
-                asset,
-                sprite: menu::layer(asset, viewport),
-                modulation: Modulation::Unlit,
             }));
         #[cfg(feature = "gpu")]
         if let Presentation::Gpu(renderer) = &mut self.backend {
@@ -1394,7 +1630,9 @@ impl WindowSurface {
             zoom,
             background,
             draws.map(|draw| (draw.sprite, draw.modulation)),
-            hud.map(|hud| (hud, settings.run)),
+            hud.into_iter()
+                .flat_map(|hud| hud.draws(settings.run))
+                .map(|(_, sprite)| (sprite, Modulation::Unlit)),
         )?;
         if trace
             || prepared.scheduling
@@ -1428,7 +1666,45 @@ impl WindowSurface {
         size: PhysicalSize<u32>,
         draws: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
     ) -> Result<FrameTiming, String> {
-        self.redraw_scaled(size, 1, BACKGROUND, draws, None)
+        self.redraw_scaled(size, 1, BACKGROUND, draws, std::iter::empty())
+    }
+
+    fn redraw_map<'a>(
+        &mut self,
+        size: PhysicalSize<u32>,
+        zoom: u8,
+        scene: impl IntoIterator<Item = arcanum_rs::content::world::WorldDraw<'a>>,
+        map: &'a Hud,
+        hud: Option<&'a Hud>,
+    ) -> Result<(), String> {
+        let layers = hud
+            .into_iter()
+            .flat_map(|hud| hud.draws(false))
+            .chain(map.draws(false));
+        let background = stream_background(true);
+        #[cfg(feature = "gpu")]
+        if let Presentation::Gpu(renderer) = &mut self.backend {
+            return renderer.redraw(
+                ((size.width, size.height), zoom),
+                background,
+                scene,
+                layers.map(|(asset, sprite)| arcanum_rs::content::world::WorldDraw {
+                    asset,
+                    sprite,
+                    modulation: Modulation::Unlit,
+                }),
+                &self.window,
+                false,
+            );
+        }
+        self.redraw_scaled(
+            size,
+            zoom,
+            background,
+            scene.into_iter().map(|draw| (draw.sprite, draw.modulation)),
+            layers.map(|(_, draw)| (draw, Modulation::Unlit)),
+        )
+        .map(|_| ())
     }
 
     fn redraw_scaled<'a>(
@@ -1437,10 +1713,12 @@ impl WindowSurface {
         zoom: u8,
         background: [u8; 3],
         draws: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
-        hud: Option<(&Hud, bool)>,
+        overlays: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
     ) -> Result<FrameTiming, String> {
         match &mut self.backend {
-            Presentation::Cpu(cpu) => cpu.redraw(size, zoom, background, draws, hud, &self.window),
+            Presentation::Cpu(cpu) => {
+                cpu.redraw(size, zoom, background, draws, overlays, &self.window)
+            }
             #[cfg(feature = "gpu")]
             Presentation::Gpu(_) => Err("GPU presentation requires a streamed world".into()),
         }
@@ -1454,7 +1732,7 @@ impl CpuSurface {
         zoom: u8,
         background: [u8; 3],
         draws: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
-        hud: Option<(&Hud, bool)>,
+        overlays: impl IntoIterator<Item = (SpriteDraw<'a>, Modulation<'a>)>,
         window: &Window,
     ) -> Result<FrameTiming, String> {
         let (Some(width), Some(height)) =
@@ -1483,7 +1761,8 @@ impl CpuSurface {
         blit_modulated(&mut self.pixels, viewport, viewport.0 as usize, draws)
             .map_err(|error| format!("cannot composite sprite: {error}"))?;
         let (mut pixels, mut pack_zoom) = (&mut self.pixels, zoom);
-        if let Some((hud, running)) = hud {
+        let mut overlays = overlays.into_iter().peekable();
+        if overlays.peek().is_some() {
             if zoom > 1 {
                 self.overlay_pixels.resize(count, background);
                 for (y, row) in self
@@ -1503,8 +1782,7 @@ impl CpuSurface {
                 pixels,
                 (size.width, size.height),
                 size.width as usize,
-                hud.draws(running)
-                    .map(|(_, sprite)| (sprite, Modulation::Unlit)),
+                overlays,
             )
             .map_err(|error| format!("cannot composite HUD: {error}"))?;
         }

@@ -37,7 +37,8 @@ parent = "top"
 offset = [78, 2]
 size = [34, 34]
 image = "vfs:art/interface/tmap_but.art"
-disabled = true
+hover_frame = 2
+action = "open-map"
 
 [[hud]]
 id = "inventory"
@@ -62,6 +63,55 @@ offset = [605, 9]
 size = [23, 23]
 image = "vfs:art/interface/lilgrnbut.art"
 disabled = true
+
+[[hud]]
+id = "maintained-spell-slot-1"
+parent = "top"
+offset = [281, 3]
+size = [32, 32]
+image = "vfs:art/interface/splslt1.art"
+
+[[hud]]
+id = "maintained-spell-slot-2"
+parent = "top"
+offset = [331, 3]
+size = [32, 32]
+image = "vfs:art/interface/splslt2.art"
+
+[[hud]]
+id = "maintained-spell-slot-3"
+parent = "top"
+offset = [381, 3]
+size = [32, 32]
+image = "vfs:art/interface/splslt3.art"
+
+[[hud]]
+id = "maintained-spell-slot-4"
+parent = "top"
+offset = [431, 3]
+size = [32, 32]
+image = "vfs:art/interface/splslt4.art"
+
+[[hud]]
+id = "maintained-spell-slot-5"
+parent = "top"
+offset = [481, 3]
+size = [32, 32]
+image = "vfs:art/interface/splslt5.art"
+
+[[hud]]
+id = "clock-face"
+parent = "top"
+offset = [648, 5]
+size = [128, 30]
+fill = [0, 0, 0, 255]
+
+[[hud]]
+id = "clock-daylight"
+parent = "clock-face"
+size = [128, 29]
+image = "vfs:art/interface/clk_timestrip.art"
+source_rect = [35, 0, 128, 29]
 
 [[hud]]
 id = "slot-1"

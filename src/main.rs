@@ -41,7 +41,7 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] mes get <game-directory> <resource-path> <entry-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art inspect <game-directory> <resource-path> <frame> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art export <game-directory> <resource-path> <frame> <output.pam> [--mods <mods-directory> <mod-id> ...]
-  arcanum-rs [--ordered] play <game-directory> [--map <map-name-or-id>] [--center X Y] [--ui classic|off|PATH] [--ui-scale PERCENT] [--lighting <hour>] [--renderer cpu|vulkan|gles] (requires --features windowed)
+  arcanum-rs [--ordered] play <game-directory> [--map <map-name-or-id>] [--center X Y] [--ui classic|off|PATH] [--ui-scale PERCENT] [--map-ui PATH] [--map-reveal] [--lighting <hour>] [--renderer cpu|vulkan|gles] (requires --features windowed)
   arcanum-rs art demo                          (requires --features windowed)
   arcanum-rs [--ordered] art sector-audit <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art sector-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
@@ -1168,10 +1168,36 @@ fn show_world(
     policy: Policy,
     playing: bool,
 ) -> Result<(), Box<dyn Error>> {
+    let mut map_theme = None;
+    let mut map_reveal = false;
+    let mut world_args = Vec::with_capacity(options.len());
+    let mut args = options.iter();
+    while let Some(flag) = args.next() {
+        if flag == "--mods" {
+            world_args.push(flag.clone());
+            world_args.extend(args.cloned());
+            break;
+        }
+        match flag.to_str() {
+            Some("--map-ui") if playing && map_theme.is_none() => {
+                let path = Path::new(
+                    args.next()
+                        .ok_or("--map-ui expects a package or manifest")?,
+                );
+                map_theme = Some(if path.is_dir() {
+                    path.join("theme.toml")
+                } else {
+                    path.into()
+                });
+            }
+            Some("--map-reveal") if playing => map_reveal = true,
+            _ => world_args.push(flag.clone()),
+        }
+    }
     let (theme, ui_scale, stripped) = if playing {
-        play_ui_options(options)?
+        play_ui_options(&world_args)?
     } else {
-        (None, None, options.to_vec())
+        (None, None, world_args)
     };
     let options = stripped.as_slice();
     let hud = if let Some(theme) = theme {
@@ -1196,6 +1222,23 @@ fn show_world(
             .iter()
             .position(|arg| arg == "--mods")
             .map_or(&[][..], |index| &options[index..]);
+        let map_ui = if playing {
+            let vfs = inspection_vfs(game, mount_options, policy)?;
+            let custom = map_theme.is_some();
+            let path = map_theme.unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/classic-map/theme.toml")
+            });
+            match viewer::MapUi::load(&path, vfs, ui_scale, map_reveal) {
+                Ok(map) => Some(Box::new(map)),
+                Err(error) if !custom => {
+                    eprintln!("Map interface unavailable: {error}");
+                    None
+                }
+                Err(error) => return Err(format!("Map UI {}: {error}", path.display()).into()),
+            }
+        } else {
+            None
+        };
         let travel: Option<viewer::TravelLoader<'_>> = if playing {
             Some(Box::new(move |current, dst, facing, viewport| {
                 let load = || -> Result<_, Box<dyn Error>> {
@@ -1240,6 +1283,7 @@ fn show_world(
                 animation_ms,
                 explore,
                 travel: travel.map(|loader| (map, loader)),
+                map_ui,
                 hud,
             },
         )

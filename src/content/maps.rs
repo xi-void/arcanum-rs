@@ -15,6 +15,8 @@ pub struct Map {
     pub directory: String,
     pub map_list_center: (u32, u32),
     start_map: bool,
+    pub area: Option<i32>,
+    pub worldmap: Option<i32>,
 }
 
 pub struct MapFiles {
@@ -46,17 +48,28 @@ impl Catalog {
                 .ok_or_else(malformed)?
                 .parse()
                 .map_err(|_| malformed())?;
+            let mut start_map = false;
+            let mut area = None;
+            let mut worldmap = None;
+            for field in fields {
+                if let Some((key, value)) = field.split_once(':') {
+                    let value = value.trim();
+                    match key.trim().to_ascii_lowercase().as_str() {
+                        "type" => start_map = value.eq_ignore_ascii_case("START_MAP"),
+                        "area" => area = Some(value.parse().map_err(|_| malformed())?),
+                        "worldmap" => worldmap = Some(value.parse().map_err(|_| malformed())?),
+                        _ => {}
+                    }
+                }
+            }
             maps.push(Map {
                 id,
                 name: name.into(),
                 directory,
                 map_list_center: (x, y),
-                start_map: fields.any(|field| {
-                    field.split_once(':').is_some_and(|(key, value)| {
-                        key.trim().eq_ignore_ascii_case("type")
-                            && value.trim().eq_ignore_ascii_case("START_MAP")
-                    })
-                }),
+                start_map,
+                area,
+                worldmap,
             });
         }
         Ok(Self {

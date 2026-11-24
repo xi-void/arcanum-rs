@@ -6,6 +6,7 @@ pub mod effects;
 pub mod items;
 mod jumps;
 mod lighting;
+pub mod map_atlas;
 pub mod maps;
 mod mobile;
 mod player;
