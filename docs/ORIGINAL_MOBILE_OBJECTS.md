@@ -175,6 +175,10 @@ unprepared. The full scan increased prepared NPC rasters from 887 to
 The scan took 26.9 seconds end to end with 132.6 MiB peak RSS. See the
 [compatibility history](WORLD_COMPATIBILITY_BASELINES.json) for counts.
 
-## Mutable instances
+## Follow-up
 
-[Session objects and inventory](RUNTIME_INVENTORY.md) describes gameplay changes to these instances, current ownership, and projection after streaming.
+Milestone 62 should add runtime object state keyed by persistent identity,
+then transactional ownership changes with consistent parent, slot and
+inventory links. Sector unloading should keep pending state changes without
+pinning raster assets. Use the contained armour and placed chest fixtures
+to verify transfer and reload before wiring up inventory UI or equipment.

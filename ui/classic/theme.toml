@@ -39,8 +39,6 @@ offset = [78, 2]
 size = [34, 34]
 image = "vfs:art/interface/tmap_but.art"
 hover_frame = 2
-pressed_frame = 1
-selected_image = "vfs:art/interface/tmap_on.art"
 action = "open-map"
 
 [[hud]]
@@ -51,8 +49,6 @@ offset = [78, 2]
 size = [34, 34]
 image = "vfs:art/interface/wmap_but.art"
 hover_frame = 2
-pressed_frame = 1
-selected_image = "vfs:art/interface/wmap_on.art"
 action = "open-map"
 
 [[hud]]
@@ -61,10 +57,7 @@ parent = "top"
 offset = [115, 2]
 size = [34, 34]
 image = "vfs:art/interface/invn_but.art"
-hover_frame = 2
-pressed_frame = 1
-selected_image = "vfs:art/interface/invn_on.art"
-action = "open-inventory"
+disabled = true
 
 [[hud]]
 id = "fate"

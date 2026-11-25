@@ -15,9 +15,7 @@ pub enum Request {
     SetTime(u8),
     DiscoverAll,
     ReloadUi,
-    Scale(u16, Option<String>),
-    CameraFollow(bool),
-    CameraCenter,
+    Scale(u16),
     ShowCollision,
     ShowSectors,
     Fps,
@@ -30,12 +28,6 @@ pub enum Request {
     Operation(u64),
     Events(Option<String>),
     Trace(bool),
-    Inventory,
-    Owner(String),
-    OpenInventory(Option<String>),
-    CloseInventory,
-    ApproachObject(String),
-    Transfer(String, String, Option<String>),
     Quit,
 }
 
@@ -202,56 +194,6 @@ fn object_filter(args: &[String]) -> Option<ObjectFilter> {
 }
 
 const COMMANDS: &[Command] = &[
-    command!(
-        "approachobject",
-        "approachobject ORIGINAL_ID",
-        "Start normal approach and use of a resident item or container. Observe navigation and inventory for the outcome.",
-        |a| match a {
-            [id] => Some(Request::ApproachObject(id.clone())),
-            _ => None,
-        }
-    ),
-    query!(
-        "inventory",
-        "inventory",
-        "Inspect current player and open container contents.",
-        |a| a.is_empty().then_some(Request::Inventory)
-    ),
-    query!(
-        "owner",
-        "owner ORIGINAL_ID",
-        "Inspect current and original placement, including unloaded modified items.",
-        |a| match a {
-            [id] => Some(Request::Owner(id.clone())),
-            _ => None,
-        }
-    ),
-    command!(
-        "openinventory",
-        "openinventory [ORIGINAL_ID]",
-        "Open player inventory or a nearby accessible container.",
-        |a| (a.len() <= 1).then(|| Request::OpenInventory(a.first().cloned()))
-    ),
-    simple!(
-        "closeinventory",
-        "Close the inventory window.",
-        CloseInventory
-    ),
-    command!(
-        "transfer",
-        "transfer take|put|drop ORIGINAL_ID [CONTAINER_ID]",
-        "Transfer one whole object using gameplay access checks.",
-        |a| {
-            let [op, id, rest @ ..] = a else { return None };
-            let valid_id = |s: &str| crate::sector::objects::OriginalId::parse(s).is_some();
-            (matches!(
-                (op.as_str(), rest),
-                ("take" | "drop", []) | ("take" | "put", [_])
-            ) && valid_id(id)
-                && rest.iter().all(|s| valid_id(s)))
-            .then(|| Request::Transfer(op.clone(), id.clone(), rest.first().cloned()))
-        }
-    ),
     query!(
         "maps",
         "maps [filter]",
@@ -320,41 +262,12 @@ const COMMANDS: &[Command] = &[
     ),
     command!(
         "setuiscale",
-        "setuiscale <50..300> [GROUP]",
-        "Temporarily set HUD, inventory, map, console, or menu scale. Omit group to set all.",
+        "setuiscale <50..300>",
+        "Set UI scale in percent.",
         |a| {
-            let [scale, rest @ ..] = a else { return None };
+            let [scale] = a else { return None };
             let scale = scale.parse::<u16>().ok()?;
-            let group = match rest {
-                [] => None,
-                [group]
-                    if matches!(
-                        group.as_str(),
-                        "hud" | "map" | "inventory" | "console" | "menu"
-                    ) =>
-                {
-                    Some(group.clone())
-                }
-                _ => return None,
-            };
-            (50..=300)
-                .contains(&scale)
-                .then_some(Request::Scale(scale, group))
-        }
-    ),
-    simple!(
-        "centercamera",
-        "Center the camera on the player.",
-        CameraCenter
-    ),
-    command!(
-        "camerafollow",
-        "camerafollow on|off",
-        "Temporarily change player tracking.",
-        |a| match a {
-            [mode] if mode == "on" => Some(Request::CameraFollow(true)),
-            [mode] if mode == "off" => Some(Request::CameraFollow(false)),
-            _ => None,
+            (50..=300).contains(&scale).then_some(Request::Scale(scale))
         }
     ),
     simple!(
@@ -510,10 +423,9 @@ impl Command {
                     "near" | "id" | "original" | "category" | "prototype" => ("literal", name),
                     "JSON" => ("string", "version-1 snapshot JSON object"),
                     "0..23" | "50..300" => ("integer", name),
-                    "on|off" | "take|put|drop" => ("enum", name),
+                    "on|off" => ("enum", name),
                     "ID" | "SECTOR:RECORD" => ("string", "sector:record"),
-                    "GROUP" => ("enum", "hud|map|inventory|console|menu"),
-                    "ORIGINAL_ID" | "CONTAINER_ID" => ("string", "2: followed by 32 hexadecimal digits in serialized GUID-byte order"),
+                    "ORIGINAL_ID" => ("string", "2: followed by 32 hexadecimal digits in serialized GUID-byte order"),
                     "CATEGORY" if self.name == "objects" => {
                         ("string", "mobile or a canonical category such as npc, container, armor, or wall")
                     }
@@ -533,21 +445,6 @@ impl Command {
                 "world",
                 "renderer",
             ],
-            "inventory" | "openinventory" | "closeinventory" => {
-                &["open", "container", "container_name", "player", "contents"]
-            }
-            "transfer" => &["id", "from", "to"],
-            "approachobject" => &["id", "route_steps", "interaction_pending"],
-            "owner" => &[
-                "id",
-                "source",
-                "original",
-                "current",
-                "quantity",
-                "icon",
-                "slot",
-                "footprint",
-            ],
             "sectors" => &["bounds", "cached", "required", "speculative", "stats"],
             "objects" | "inspect" => &["map", "objects", "issues", "truncated"],
             "maps" => &["maps", "areas"],
@@ -559,8 +456,7 @@ impl Command {
             "coc" | "teleport" | "restore" => &["map", "tile", "view_ready"],
             "tcl" => &["collision_bypass"],
             "settime" => &["hour"],
-            "setuiscale" => &["scale_percent", "group", "persistent"],
-            "centercamera" | "camerafollow" => &["projected", "follow", "persistent"],
+            "setuiscale" => &["scale_percent"],
             "discoverall" => &["discovered", "travel_eligible"],
             "unlock" => &["id", "unlocked", "changed"],
             "trace" | "fps" | "showsectors" | "showcollision" => &["enabled"],
@@ -702,24 +598,6 @@ mod tests {
         assert_eq!(runtime.0, Some(Request::Position));
     }
 
-    #[test]
-    fn inventory_registry_rejects_incomplete_transfers_before_execution() {
-        let mut runtime = Recording::default();
-        let id = "2:00000000000000000000000000000001";
-        for command in [
-            format!("transfer put {id}"),
-            format!("transfer drop {id} {id}"),
-            "transfer take invalid".into(),
-        ] {
-            assert!(dispatch(&command, &mut runtime).is_err());
-            assert_eq!(runtime.0, None);
-        }
-        dispatch(&format!("transfer take {id}"), &mut runtime).unwrap();
-        assert_eq!(
-            runtime.0,
-            Some(Request::Transfer("take".into(), id.into(), None))
-        );
-    }
     #[test]
     fn object_registry_checks_combined_filters() {
         let mut runtime = Recording::default();

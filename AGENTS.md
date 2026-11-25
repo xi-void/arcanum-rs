@@ -14,6 +14,8 @@
 - Prioritize functional improvements over lengthy reports and repetitive demonstrations.
 - Avoid unnecessary token consumption.
 
+Do not report user-facing behavior as verified unless the complete production input, state transition and rendering path has been exercised. Testing an action handler directly through RPC or unit tests does not establish that the corresponding mouse or keyboard interaction works. Clearly distinguish automated verification, native interaction testing and unverified behavior.
+
 ## Project philosophy
 
 - Arcanum-RS is an independent native Rust replacement engine, not a recreation of individual Arcanum locations.
@@ -45,22 +47,6 @@ Once the principal gameplay systems are implemented and interconnected, undertak
 
 The objective is a coherent, extensible reconstruction of Arcanum, followed by systematic convergence toward original gameplay, content and Classic interface fidelity. Full fidelity is the destination, not a requirement to finish every dependent system or cosmetic detail in each milestone.
 
-## Reverse Engineering
-
-REA with Ghidra is available through MCP.
-
-Use it selectively when original Arcanum behavior cannot be established reliably through existing documentation, Arcanum-CE, asset inspection, or gameplay verification.
-
-- Prefer persistent Ghidra analysis.
-- Investigate specific functions rather than entire subsystems indiscriminately.
-- Record relevant addresses, references, observations and uncertainties.
-- Cross-reference findings against Arcanum-CE where appropriate.
-- Implement independent Rust equivalents.
-- Verify reconstructed behavior through regression tests.
-- Avoid unnecessarily large decompilation dumps.
-- Never modify the original executable.
-
-Persistent Ghidra analysis of the original executable at `~/Games/arcanum/Arcanum.exe` has been initialized through REA. Reuse the existing checkpoint in `~/Work/rea-checkpoints`. Preserve verified function names, comments and type annotations across research sessions. Close REA binary sessions normally to persist analysis changes. Treat decompiler output as evidence requiring interpretation, not authoritative original source code.
 
 ## Generic world reconstruction
 

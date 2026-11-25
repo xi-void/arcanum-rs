@@ -66,7 +66,7 @@ pub(super) enum Arrival {
 pub(crate) struct MapUi {
     hud: Hud,
     atlas: Atlas,
-    vfs: std::rc::Rc<std::cell::RefCell<Vfs>>,
+    vfs: Vfs,
     town: Option<Town>,
     town_id: u32,
     explored: BTreeMap<u32, BTreeSet<u32>>,
@@ -107,12 +107,11 @@ const MAX_VISIBLE_CHUNKS: u32 = 4096;
 impl MapUi {
     pub(crate) fn load(
         path: &Path,
-        shared: std::rc::Rc<std::cell::RefCell<Vfs>>,
+        mut vfs: Vfs,
         scale: Option<u16>,
         inspect_all: bool,
         discover_all: bool,
     ) -> Result<Self, Box<dyn Error>> {
-        let mut vfs = shared.borrow_mut();
         let mut atlas = Atlas::load(&mut vfs)?;
         if discover_all {
             atlas.discover_all();
@@ -124,11 +123,10 @@ impl MapUi {
         if !hud.has_canvas() {
             return Err("map theme needs a visible map-canvas binding".into());
         }
-        drop(vfs);
         Ok(Self {
             hud,
             atlas,
-            vfs: shared,
+            vfs,
             world,
             continent: None,
             world_id: 0,
@@ -181,8 +179,7 @@ impl MapUi {
     }
 
     pub(super) fn prepare_theme(&mut self, path: &Path, scale: u16) -> Result<Hud, String> {
-        let hud =
-            Hud::load(path, &mut self.vfs.borrow_mut(), Some(scale)).map_err(|e| e.to_string())?;
+        let hud = Hud::load(path, &mut self.vfs, Some(scale)).map_err(|e| e.to_string())?;
         if !hud.has_canvas() {
             return Err("map theme needs a visible map-canvas binding".into());
         }
@@ -193,10 +190,6 @@ impl MapUi {
         hud.set_map_view(self.mode);
         self.hud = hud;
         self.invalidate_sheet();
-    }
-
-    pub(super) fn scale(&self) -> u16 {
-        self.hud.scale()
     }
 
     pub(super) fn set_scale(&mut self, scale: u16) {
@@ -236,7 +229,7 @@ impl MapUi {
             if world_id != self.world_id {
                 self.world_id = world_id;
                 self.continent = None;
-                match self.atlas.world(&mut self.vfs.borrow_mut(), world_id) {
+                match self.atlas.world(&mut self.vfs, world_id) {
                     Ok(world) => {
                         self.world = world;
                         self.world_error = None;
@@ -251,7 +244,7 @@ impl MapUi {
         }
         if new_area && town_id != self.town_id {
             self.town_id = town_id;
-            self.town = match self.atlas.local(&mut self.vfs.borrow_mut(), town_id) {
+            self.town = match self.atlas.local(&mut self.vfs, town_id) {
                 Ok(town) => {
                     self.town_error = None;
                     town
@@ -296,7 +289,10 @@ impl MapUi {
         self.open
     }
 
-    pub(super) fn open(&mut self) {
+    pub(super) fn open(&mut self, scale: Option<u16>) {
+        if let Some(scale) = scale {
+            self.hud.set_scale(scale);
+        }
         self.open = true;
         self.waypoints.clear();
         self.active_waypoint = None;
@@ -360,10 +356,7 @@ impl MapUi {
             self.invalidate_sheet();
         }
         if mode == Mode::Continent && self.continent.is_none() && self.world_available {
-            match self
-                .atlas
-                .overview(&mut self.vfs.borrow_mut(), self.world_id)
-            {
+            match self.atlas.overview(&mut self.vfs, self.world_id) {
                 Ok(overview) => self.continent = Some(overview),
                 Err(error) => eprintln!("Continent overview: {error}"),
             }
@@ -606,7 +599,7 @@ impl MapUi {
         } else {
             self.atlas.destination = None;
             if let Some(id) = self.waypoints.last().and_then(|point| point.area) {
-                let _ = self.atlas.select(id, &self.vfs.borrow());
+                let _ = self.atlas.select(id, &self.vfs);
             }
             self.travel_message = None;
             self.dirty = true;
@@ -665,8 +658,7 @@ impl MapUi {
         let area = self.pick(point);
         let previous_selection = self.atlas.destination.clone();
         let tile = if let Some(id) = area {
-            let selection = self.atlas.select(id, &self.vfs.borrow());
-            match selection {
+            match self.atlas.select(id, &self.vfs) {
                 Ok(()) => self.atlas.areas[&id].tile,
                 Err(error) => {
                     self.travel_notice(&error.to_string());
@@ -1020,7 +1012,7 @@ impl MapUi {
                     }
                 }
                 let tile = self.bitmaps.entry(index).or_insert_with(|| {
-                    match sheet.load(&mut self.vfs.borrow_mut(), index) {
+                    match sheet.load(&mut self.vfs, index) {
                         Ok(bitmap) if bitmap.size == sheet.chunk => {
                             self.bitmap_bytes += bitmap.pixels.len() * 4;
                             Some(bitmap)

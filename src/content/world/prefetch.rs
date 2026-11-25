@@ -233,7 +233,6 @@ struct ViewPlan {
     position: (i32, i32),
     viewport: (u32, u32),
     direction: (i32, i32),
-    player_sector: Option<u64>,
 }
 
 /// Runtime actions exposed only through developer-enabled input.
@@ -278,12 +277,10 @@ impl InteractiveWorld {
         let WorldStream {
             region,
             mut loader,
-            mut cache,
+            cache,
         } = world;
         let reference = loader.reference;
         let map = loader.map.clone();
-        cache.inventory.map = map.clone();
-        cache.inventory.reference = reference;
         let mobile_index = loader.mobile_index.clone();
         let resources = loader.stats();
         let worker = Worker::start(
@@ -408,7 +405,6 @@ impl InteractiveWorld {
             position,
             viewport,
             direction,
-            player_sector: self.committed_player_tile().map(tile_sector_id),
         };
         if self.ready_plan == Some(plan) {
             return Ok(ViewPreparation {
@@ -417,18 +413,7 @@ impl InteractiveWorld {
                 ..ViewPreparation::default()
             });
         }
-        let mut needed = self.region.needed(self.reference, position, viewport)?;
-        if let Some(id) = plan.player_sector
-            && !needed.as_slice().contains(&id)
-        {
-            if needed.len == MAX_SECTORS {
-                return Err(
-                    "The camera and player together exceed the sector cache capacity".into(),
-                );
-            }
-            needed.ids[needed.len] = id;
-            needed.len += 1;
-        }
+        let needed = self.region.needed(self.reference, position, viewport)?;
         let next = needed.as_slice();
         for id in next.iter().filter(|id| !self.required.contains(id)) {
             if let Some((_, touched)) = self.cache.entries.get(id) {
@@ -570,30 +555,6 @@ impl InteractiveWorld {
         self.cache.set_game_hour(hour)
     }
 
-    pub fn player_portrait_frame(&self) -> Option<&crate::art::SpriteFrame> {
-        Some(
-            &self
-                .cache
-                .player
-                .as_ref()?
-                .sample(Duration::ZERO)
-                .asset
-                .decoded
-                .frame,
-        )
-    }
-
-    pub fn committed_player_tile(&self) -> Option<(u32, u32)> {
-        self.cache.player.as_ref().map(Player::tile)
-    }
-
-    pub fn player_anchor(&self, elapsed: Duration) -> Option<(i32, i32)> {
-        self.cache
-            .player
-            .as_ref()
-            .map(|player| player.sample(elapsed).anchor)
-    }
-
     pub fn follow_player(&self, elapsed: Duration, camera: &mut Camera) {
         if let Some(player) = &self.cache.player {
             camera.follow(player.sample(elapsed).anchor);
@@ -648,8 +609,13 @@ impl InteractiveWorld {
         if !self.cache.collision_disabled
             && let Some(key) = self.cache.pick(point, self.reference, elapsed)
         {
-            if let Err(e) = self.approach_target(key, run) {
-                self.notice = Some(e)
+            let steps = self.cache.approach(key, run);
+            self.pending_use = steps.map(|_| key);
+            if steps.is_none() {
+                self.notice = Some("cannot reach the object".into());
+            }
+            if self.trace {
+                eprintln!("Use target {key:?}: {steps:?} steps");
             }
             return;
         }
@@ -659,35 +625,6 @@ impl InteractiveWorld {
         }
     }
 
-    fn approach_target(&mut self, key: WorldOrder, run: bool) -> Result<usize, String> {
-        self.cancel_player_route();
-        let steps = self
-            .cache
-            .approach(key, run)
-            .ok_or("Cannot reach the object")?;
-        self.pending_use = Some(key);
-        Ok(steps)
-    }
-    pub fn approach_inventory_object(&mut self, identity: &str) -> Result<usize, String> {
-        if self.inventory_is_open() {
-            return Err("Close the inventory before approaching a target".into());
-        }
-        let id = crate::sector::objects::OriginalId::parse(identity)
-            .ok_or("Invalid original identity")?;
-        let key = self
-            .cache
-            .ordered
-            .iter()
-            .rev()
-            .find_map(|r| {
-                let target = self.cache.target(r.key)?;
-                (matches!(target.action,interaction::Action::Inventory(i) if i==id)
-                    && !r.click_through)
-                    .then_some(r.key)
-            })
-            .ok_or("Object has no active interaction target")?;
-        self.approach_target(key, false)
-    }
     pub fn update_hover(
         &mut self,
         cursor: Option<(u32, u32)>,
@@ -793,7 +730,13 @@ impl InteractiveWorld {
         }
     }
 
-    pub fn move_player(&mut self, input: (i32, i32), run: bool, now: Duration) -> bool {
+    pub fn move_player(
+        &mut self,
+        input: (i32, i32),
+        run: bool,
+        now: Duration,
+        camera: &mut Camera,
+    ) -> bool {
         if !self.player_started {
             return false;
         }
@@ -814,13 +757,15 @@ impl InteractiveWorld {
             return false;
         };
         let pose = self.cache.player.as_ref().unwrap().sample(now);
-        let changed = before.is_some_and(|(previous, asset, tile, _)| {
-            previous != anchor || asset != Arc::as_ptr(pose.asset) || tile != pose.tile
-        });
+        let previous_camera = camera.position();
+        camera.follow(anchor);
+        let changed = previous_camera != anchor
+            || before.is_some_and(|(previous, asset, tile, _)| {
+                previous != anchor || asset != Arc::as_ptr(pose.asset) || tile != pose.tile
+            });
         let player = self.cache.player.as_ref().unwrap();
         let facing_now = player.facing();
         let moving = player.moving();
-        let stepping = player.stepping();
         if let Some((_, _, tile, facing)) = before
             && tile != player.tile()
         {
@@ -868,18 +813,7 @@ impl InteractiveWorld {
             }
             return true;
         }
-        // Sampling twice at the same instant only detects discrete state changes.
-        // An active step also changes between ticks, even with a stationary camera.
-        changed || stepping
-    }
-
-    pub fn debug_player_pose(&self, elapsed: Duration) -> Option<serde_json::Value> {
-        let player = self.cache.player.as_ref()?;
-        let pose = player.sample(elapsed);
-        Some(serde_json::json!({
-            "anchor":pose.anchor, "tile":pose.tile, "stepping":player.stepping(),
-            "art":pose.asset.source.virtual_path
-        }))
+        changed
     }
 
     /// Start at the current epoch and report whether the viewport needs redraw.
@@ -968,7 +902,7 @@ mod tests {
         let wall = (28446, 31171);
         let inside = (28445, 31171);
         let viewport = (1280, 720);
-        let camera = region.camera(outside).unwrap();
+        let mut camera = region.camera(outside).unwrap();
         let mut stream = WorldStream::new(vfs, map.directory.clone(), region, outside)
             .unwrap()
             .with_player()
@@ -982,38 +916,25 @@ mod tests {
             world.debug_collision(wall).unwrap().edges[2],
             "original wall edge"
         );
-        world.move_player((1, -1), false, Duration::ZERO);
-        world.move_player((0, 0), false, Duration::from_secs(1));
+        world.move_player((1, -1), false, Duration::ZERO, &mut camera);
+        world.move_player((0, 0), false, Duration::from_secs(1), &mut camera);
         assert_eq!(player(&world), outside);
         assert!(
             world
                 .developer_action(DeveloperAction::ToggleCollision)
                 .unwrap()
         );
-        let start = Duration::from_secs(2);
-        assert!(world.move_player((1, -1), false, start));
-        let origin = world.player_anchor(start);
-        let within_step = start + Duration::from_millis(40);
-        assert!(world.move_player((1, -1), false, within_step));
-        assert_ne!(world.player_anchor(within_step), origin);
-        assert_eq!(player(&world), outside, "the tile is still uncommitted");
-        assert_eq!(
-            camera.position(),
-            (0, 0),
-            "interpolation needs no camera movement"
-        );
-        world.move_player((1, -1), false, Duration::from_secs(3));
-        world.move_player((0, 0), false, Duration::from_secs(4));
+        world.move_player((1, -1), false, Duration::from_secs(2), &mut camera);
+        world.move_player((1, -1), false, Duration::from_secs(3), &mut camera);
+        world.move_player((0, 0), false, Duration::from_secs(4), &mut camera);
         assert_eq!(player(&world), inside);
         assert!(world.pending_use.is_none());
 
         // Screen pick of the original outside tile, now across the wall.
-        let mut camera = camera;
-        world.follow_player(Duration::from_secs(4), &mut camera);
         world.set_player_destination((560, 400), viewport, &camera, false, Duration::from_secs(4));
         assert!(world.player_moving() && world.pending_use.is_none());
         for t in 5..9 {
-            world.move_player((0, 0), false, Duration::from_secs(t));
+            world.move_player((0, 0), false, Duration::from_secs(t), &mut camera);
         }
         assert_eq!(player(&world), outside);
         assert!(
@@ -1021,8 +942,8 @@ mod tests {
                 .developer_action(DeveloperAction::ToggleCollision)
                 .unwrap()
         );
-        world.move_player((1, -1), false, Duration::from_secs(9));
-        world.move_player((0, 0), false, Duration::from_secs(10));
+        world.move_player((1, -1), false, Duration::from_secs(9), &mut camera);
+        world.move_player((0, 0), false, Duration::from_secs(10), &mut camera);
         assert_eq!(player(&world), outside);
     }
 
@@ -1037,7 +958,7 @@ mod tests {
             first: sector,
             last: sector,
         };
-        let camera = region.camera(from).unwrap();
+        let mut camera = region.camera(from).unwrap();
         let size = (1280, 720);
         let mut world = WorldStream::new(
             Vfs::from_game(game, crate::vfs::Policy::Ce).unwrap(),
@@ -1088,15 +1009,20 @@ mod tests {
             assert!(world.update_hover(None, viewport, &camera, now));
         }
         world.route_to(to, false);
-        world.move_player((0, 0), false, Duration::ZERO);
+        world.move_player((0, 0), false, Duration::ZERO, &mut camera);
         let deadline = world
             .wait_for_door
             .expect("opened, waiting for the last frame");
         let early = deadline - Duration::from_millis(1);
-        world.move_player((0, 0), false, early);
+        world.move_player((0, 0), false, early, &mut camera);
         assert_eq!(camera.position(), (0, 0));
-        world.move_player((0, 0), false, deadline);
-        world.move_player((0, 0), false, deadline + Duration::from_secs(1));
+        world.move_player((0, 0), false, deadline, &mut camera);
+        world.move_player(
+            (0, 0),
+            false,
+            deadline + Duration::from_secs(1),
+            &mut camera,
+        );
         assert_eq!(world.cache.player.as_ref().unwrap().tile(), to);
         assert!(!world.player_moving());
     }

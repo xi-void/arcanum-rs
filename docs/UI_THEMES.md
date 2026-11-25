@@ -147,43 +147,7 @@ The atlas is an independent package. See [Map UI](MAP_UI.md) for its
 data bindings, map-specific actions and the `--map-ui` option.
 
 Image-backed actions can use zero-based `hover_frame`, `pressed_frame`
-and `selected_frame` from their existing `image`. A state may instead name
-`hover_image`, `pressed_image` or `selected_image` and use frame zero or the
-matching frame field. Frame artwork takes precedence over a configured
-hover fill. The HUD inventory and map buttons use the three-state ART
-convention implemented in TIG's `tig_button_refresh_rect`. Their separate
-active ART files come from CE's primary-button table in `src/ui/intgame.c`.
-The viewer selects that artwork while the corresponding panel is open. The Classic top panel uses
+and `selected_frame` from their existing `image`. Frame artwork takes
+precedence over a configured hover fill. The Classic top panel uses
 the original empty spell-slot artwork and a fixed daytime crop of
 `Clk_timestrip.ART`. Clock simulation remains deferred.
-
-
-Application preferences select interface packages and set their independent
-starting scales. Inventory packages contain `inventory.toml` and
-`container.toml`. An optional `player-preview` component displays the current
-playable sprite as a read-only preview. The grid, tooltip and transaction
-bindings work with any package. See [Application settings](APPLICATION_CONFIG.md)
-and [Inventory controls](RUNTIME_INVENTORY.md).
-
-Inventory grid and preview bindings accept the same `image`, `frame`, and
-`source_rect` fields as static panels. The image supplies the background.
-The renderer restores it before painting items or the live player preview,
-so transfers, scrolling, and hover updates expose the original background.
-Omit `image` to use `fill` and the optional `grid_line` color. Grid dimensions
-still declare ten columns and whole rows. Asset crops affect appearance only,
-so changing the package leaves item footprints and transactions intact.
-
-The bundled package uses the installed player-grid region of `Inventor.ART`
-and the container-grid region of `Loot.ART`, based on CE's
-`redraw_inven` coordinates and the VFS-resolved panel dimensions.
-
-The inventory may also declare a `player-lens` component. It receives a small
-Vulkan view centered on the player, independent of the main camera. Put
-authored frame or mask ART in a subsequent component at the same position.
-Equipment silhouettes can be static ART components with no equipment action.
-
-For the loot panel, `inventory-scroll-track` and `inventory-scroll-thumb`
-bind the track and thumb to the existing container row offset. Optional
-`inventory-scroll-up` and `inventory-scroll-down` actions step one row.
-Item picking, pointer movement on the track, and thumb placement use the
-scaled component bounds.
