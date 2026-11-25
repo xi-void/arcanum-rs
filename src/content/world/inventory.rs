@@ -233,7 +233,7 @@ impl Records<'_> {
                 std::cmp::Reverse((h, w))
             });
             for item in originals {
-                if &item.original != &Place::Owned(owner.clone()) {
+                if item.original != Place::Owned(owner.clone()) {
                     return Err(format!(
                         "Inconsistent original container member {}",
                         item.id.key()

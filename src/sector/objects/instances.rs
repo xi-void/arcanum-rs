@@ -82,7 +82,7 @@ impl OriginalId {
             return None;
         }
         let mut payload = [0; 16];
-        for (byte, pair) in payload.iter_mut().zip(hash.chunks_exact(2)) {
+        for (byte, pair) in payload.iter_mut().zip(hash.as_chunks::<2>().0) {
             *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
         }
         Some(Self { kind: 2, payload })
