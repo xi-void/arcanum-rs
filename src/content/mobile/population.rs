@@ -24,6 +24,7 @@ pub(crate) fn paths(vfs: &Vfs, map: &str) -> Vec<String> {
 #[derive(Clone)]
 struct Locator {
     path: String,
+    category: u32,
     tile: Option<(u32, u32)>,
     parent: Option<OriginalId>,
     held: bool,
@@ -99,6 +100,7 @@ impl Index {
             Entry::Vacant(entry) => {
                 entry.insert(Locator {
                     path,
+                    category: object.category,
                     tile: object.tile().filter(|tile| *tile != (0, 0)),
                     parent: parent(object),
                     held: stored_flags(object).is_some_and(|flags| flags & INVENTORY != 0),
@@ -150,6 +152,24 @@ impl Index {
 
     pub fn contains(&self, id: OriginalId) -> bool {
         self.objects.contains_key(&id)
+    }
+
+    pub fn path(&self, id: OriginalId) -> Option<&str> {
+        self.objects.get(&id).map(|entry| entry.path.as_str())
+    }
+
+    pub fn category(&self, id: OriginalId) -> Option<u32> {
+        self.objects.get(&id).map(|entry| entry.category)
+    }
+
+    pub fn members(&self, owner: OriginalId) -> BTreeSet<OriginalId> {
+        let mut members: BTreeSet<_> = self.objects[&owner].inventory.iter().copied().collect();
+        members.extend(
+            self.objects
+                .iter()
+                .filter_map(|(&id, entry)| (entry.parent == Some(owner)).then_some(id)),
+        );
+        members
     }
 
     pub fn owner(&self, id: OriginalId) -> Option<OriginalId> {
@@ -264,6 +284,7 @@ impl Prototypes {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct Effective {
     pub current_art: Property<u32>,
     pub flags: Property<u32>,

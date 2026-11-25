@@ -1,5 +1,7 @@
 # Arcanum-RS — Codex Instructions
 
+This document defines permanent architectural requirements and future compatibility targets. Implement only the functionality requested by the current milestone. The absence of a planned subsystem does not authorize expanding the task to implement it.
+
 ## Development workflow
 
 - Focus on implementation, debugging, testing and benchmarks.
@@ -78,6 +80,10 @@ The objective is a coherent, extensible reconstruction of Arcanum, followed by s
 - Fix root causes rather than individual visual symptoms.
 - Reuse established systems instead of introducing parallel implementations.
 - Keep gameplay, world loading, rendering, input and presentation responsibilities appropriately separated.
+- Implement gameplay foundations independently of their user interfaces. Presentation must consume authoritative gameplay state rather than own it.
+- Do not modify unrelated, previously working subsystems unless a demonstrated integration requirement makes it necessary.
+- If a correction introduces new regressions, investigate the underlying architectural cause rather than accumulating compensating workarounds.
+- Preserve previously verified behavior when introducing new functionality.
 - Gameplay and diagnostic viewers should share the same underlying world reconstruction and rendering systems.
 - Keep original object data immutable. Preserve stable object identities and authoritative mutable runtime state independently of loaded sectors. All gameplay and developer interfaces must use the same validated object transactions.
 - Preserve meaningful regression tests and performance baselines.
@@ -139,7 +145,7 @@ The objective is a coherent, extensible reconstruction of Arcanum, followed by s
 - On Linux, use the standard XDG configuration directory (`$XDG_CONFIG_HOME/arcanum-rs/`, falling back to `~/.config/arcanum-rs/`). Use a predictable configuration discovery and precedence policy.
 - Once configured, running the built `arcanum-rs` executable without arguments must launch the playable game. Do not require the `play` subcommand, repeated data-path arguments, map coordinates, debug flags or a Cargo invocation for routine playtesting.
 - Preserve explicit subcommands and command-line overrides for automation, compatibility scanning, debugging and specialized launches. Command-line overrides take precedence over configured values for the current invocation and must not silently overwrite persistent preferences.
-- Support configuration of the game data path, applicable resource overrides, window and display settings, camera preferences, UI packages and per-interface scales, input settings and developer options.
+- Support configuration of the game data path, applicable resource overrides, window and display settings, camera preferences, UI packages and coordinated UI scale settings, input settings and developer options.
 - Resolve configuration and engine resource paths predictably, independently of the working directory. Do not embed developer-specific absolute paths or assume the source repository is the launch directory.
 - Provide safe defaults, a documented example configuration and actionable first-run guidance if required game data is missing or invalid. Do not guess the user's game-data directory.
 - Persist user-adjustable interface scales and settings changed through supported in-game settings. Write configuration safely, preserving unrelated settings and reporting failures rather than silently discarding user preferences.
@@ -157,10 +163,16 @@ Classic original-interface fidelity is the default presentation target for Arcan
 - Preserve original HUD, inventory, equipment, container, trading, character, journal, dialogue, local and world map, document, spell and crafting interfaces as their associated gameplay systems are implemented.
 - Support independently replaceable HUDs and interface screens. Alternative HUDs and interface packages must be able to coexist with Classic screens without duplicating gameplay logic.
 - Use original ART resources, panel geometry, fonts, colors, gauges, item icons and decorative motifs where applicable. Consult original resources, CE implementation and existing screenshots rather than inventing substitutes for established Classic elements.
+- Architectural completeness before exhaustive fidelity does not justify replacing established original interface structures with invented layouts.
+- When implementing a Classic interface, investigate the installed resources, reference layout definitions and interaction mechanisms before designing its components.
+- Distinguish missing gameplay functionality from incorrect presentation. Unsupported controls may remain inactive, but their absence must not require redesigning the surrounding interface.
+- Implement the resource interpretation and composition mechanisms independently of proprietary assets. Original resources must be loaded from the user’s installation at runtime, not embedded in the engine or redistributed with it.
 - Preserve original spatial inventory geometry, multi-cell item sizes, equipment arrangement and container presentation. Retain the shared runtime ownership and transfer mechanisms; presentation changes must not introduce a second inventory system.
 - Preserve useful implemented interaction improvements, including drag-and-drop, quick transfers and hover details. Additional or divergent interaction conventions should be configurable or provided through alternative packages where appropriate.
-- Preserve independent world-camera zoom and UI scaling. Use `[` and `]` to scale the active gameplay interface; when no interface panel is open, scale the HUD.
-- Maintain independently configurable, persistent scale settings for each interface group. Use shared scaling, layout and hit-testing infrastructure rather than separate implementations for individual screens.
+- Preserve independent world-camera zoom and UI scaling.
+- Treat the top HUD, bottom HUD and active gameplay panel as a coordinated layout group. Pressing `[` or `]` must change their shared scale together, regardless of whether a panel is open. Newly opened panels must use the current shared scale. Independent theme packages do not imply independent scaling of these regions.
+- Persist the requested shared UI scale. Calculate layout, scaling, clipping and hit testing through shared infrastructure. Interface regions must never overlap unintentionally.
+- Constrain the effective scale to the available viewport without overwriting the requested scale. Scaling must not trigger unnecessary asset decoding, texture uploads or resource reconstruction.
 - Ensure rendering, text, item placement, pointer interaction, drag-and-drop and hit testing remain aligned at different scales and resolutions.
 - Keep fonts, artwork, colors, layouts, component positions and presentation settings externally configurable. Support external replacement resources without recompilation.
 - Keep gameplay state, calculations and transactions independent of UI presentation. Reuse the same underlying systems across all themes and developer interfaces.
@@ -178,7 +190,8 @@ Classic original-interface fidelity is the default presentation target for Arcan
 - Preserve world zoom independently of interface scaling, and maintain correct world-coordinate picking at different zoom levels and camera positions.
 - Center the camera appropriately on map arrival. Investigate original camera behavior when the player moves outside the visible area rather than assuming a tracking rule.
 - Keep manual camera movement independent of character movement. Do not issue movement commands merely because the camera pans.
-- Prevent accidental edge scrolling or world interactions while the pointer is interacting with UI panels. Preserve correct input routing and modal behavior.
+- Preserve screen-edge camera scrolling over passive HUD regions. Suppress camera scrolling during active UI interactions such as item dragging or where modal behavior explicitly requires it.
+- Prevent unintended world interactions through UI elements without disabling unrelated camera controls. Preserve correct input routing and modal behavior.
 - Keep camera position, zoom, follow mode and relevant readiness state inspectable through the existing machine-readable interface.
 
 ## Gameplay-driven development
@@ -221,7 +234,7 @@ Classic original-interface fidelity is the default presentation target for Arcan
 - Do not repeatedly reuse the same demonstration scene as the sole evidence of generic engine correctness.
 - Use varied original locations to verify shared systems.
 - Treat location-specific tests as regression fixtures for generic engine functionality.
-- Test direct executable startup with persistent configuration, actual documented launch commands and supported argument combinations. Verify UI scaling and input alignment through representative gameplay interactions.
+- When implementing or changing startup or configuration, test direct executable startup with persistent configuration where available, actual documented launch commands and supported argument combinations. When implementing or changing UI behavior, verify scaling and input alignment through representative gameplay interactions.
 - Verify user-facing features through the playable executable rather than relying exclusively on internal tests.
 - Prefer targeted regression tests during implementation and appropriate broader validation before milestone completion.
 - Use Vulkan exclusively for production rendering validation.

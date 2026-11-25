@@ -607,7 +607,19 @@ fn load_critter(
     })
 }
 
-fn load_prop(
+pub(super) fn item_art_entry(art: u32) -> i32 {
+    let kind = (art & 15) as i32;
+    let subtype = ((art >> 6) & 15) as i32;
+    let coverage = ((art >> 14) & 7) as i32;
+    let adjust = if kind == 2 && coverage != 0 {
+        20 * (5 * coverage + 10)
+    } else {
+        0
+    };
+    ((art >> 17) & 0x7ff) as i32 + 20 * (subtype + 50 * kind) + adjust
+}
+
+pub(super) fn load_prop(
     vfs: &mut Vfs,
     cache: &mut FrameCache,
     names: &mut BTreeMap<&'static str, super::LoadedMes>,
@@ -633,23 +645,13 @@ fn load_prop(
         return Err("unsupported mobile prop scale, blending or water state".into());
     }
     let (dir, table, entry, frame, rotation) = match (category, art >> 28) {
-        (5..=14, 6) if (art >> 12) & 3 == 0 => {
-            let kind = (art & 15) as i32;
-            let subtype = ((art >> 6) & 15) as i32;
-            let coverage = ((art >> 14) & 7) as i32;
-            let adjust = if kind == 2 && coverage != 0 {
-                20 * (5 * coverage + 10)
-            } else {
-                0
-            };
-            (
-                "item",
-                "art/item/item_ground.mes",
-                ((art >> 17) & 0x7ff) as i32 + 20 * (subtype + 50 * kind) + adjust,
-                0,
-                0,
-            )
-        }
+        (5..=14, 6) if (art >> 12) & 3 == 0 => (
+            "item",
+            "art/item/item_ground.mes",
+            item_art_entry(art),
+            0,
+            0,
+        ),
         (2, 7) => (
             "container",
             "art/container/container.mes",

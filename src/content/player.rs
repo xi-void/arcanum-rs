@@ -53,13 +53,6 @@ pub(super) struct Sample<'a> {
     pub asset: &'a Arc<LoadedFrame>,
 }
 
-fn facing(input: (i32, i32)) -> Option<u8> {
-    DIRECTIONS
-        .iter()
-        .position(|&(x, y)| ((y - x).signum(), (x + y).signum()) == input)
-        .map(|index| index as u8)
-}
-
 fn tile_period(
     direction: u8,
     offsets: impl Iterator<Item = (i32, i32)>,
@@ -248,16 +241,7 @@ impl Player {
         self.route.clear();
     }
 
-    pub(super) fn update(
-        &mut self,
-        input: (i32, i32),
-        run: bool,
-        now: Duration,
-        next: impl FnOnce(Tile, u8) -> Option<Tile>,
-    ) {
-        if input != (0, 0) {
-            self.cancel_route();
-        }
+    pub(super) fn update(&mut self, now: Duration, next: impl FnOnce(Tile, u8) -> Option<Tile>) {
         let mut start = now;
         let mut continuing = false;
         if let Some(step) = self.step {
@@ -271,12 +255,8 @@ impl Player {
             // Absorb ordinary timer jitter without jumping through obstacles after a stall.
             start = end.max(now.saturating_sub(Duration::from_millis(16)));
         }
-        let intent = facing(input).map(|direction| (direction, run)).or_else(|| {
-            self.route
-                .pop_front()
-                .map(|direction| (direction, self.route_runs))
-        });
-        if let Some((direction, running)) = intent {
+        if let Some(direction) = self.route.pop_front() {
+            let running = self.route_runs;
             if !continuing || direction != self.facing || running != self.running {
                 self.phase_start = start;
             }
@@ -337,25 +317,6 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn input_maps_to_all_original_critter_rotations() {
-        assert_eq!(
-            [
-                (0, -1),
-                (1, -1),
-                (1, 0),
-                (1, 1),
-                (0, 1),
-                (-1, 1),
-                (-1, 0),
-                (-1, -1)
-            ]
-            .map(facing),
-            std::array::from_fn(|index| Some(index as u8))
-        );
-        assert_eq!(facing((0, 0)), None);
-    }
 
     #[test]
     fn authored_stride_defines_tile_duration_and_rejects_zero_or_reverse_motion() {

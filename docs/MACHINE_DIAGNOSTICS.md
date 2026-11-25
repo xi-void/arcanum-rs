@@ -72,6 +72,16 @@ quit` closes the session cleanly.
 
 ## State and capture
 
+- `inventory [OWNER]` reports the grid and items for `player` or a container
+  GUID on the active map. `itemowner ORIGINAL_ID` reports an item's authored
+  and current placement, cell footprint and resource provenance. Modified
+  items remain inspectable across sector eviction and map transitions.
+- `pickup ORIGINAL_ID [SLOT]`, `drop ORIGINAL_ID` and
+  `transfer ORIGINAL_ID FROM TO [SLOT]` apply session transactions. `FROM` and
+  `TO` take `player` or a container GUID. Successful results include the item
+  ID, source, destination, footprint and resulting slot. Inventory inspection
+  failures return `inventory_unavailable`. Rejected moves return
+  `inventory_rejected` with the reason in `error.message`.
 - `pos` combines player, camera, travel, renderer, streaming and UI state.
   `camera.view_ready` reports whether the current location has presented
   its view. `coc` and `teleport` validate and prepare the destination in

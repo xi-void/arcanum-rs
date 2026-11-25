@@ -165,9 +165,8 @@ impl Menu {
         }
         if self.page == Page::Controls {
             for (row, text) in [
-                "WASD OR ARROWS  MOVE",
                 "CLICK  MOVE OR USE",
-                "SHIFT  CHANGE GAIT",
+                "SHIFT + CLICK  CHANGE GAIT",
                 "WHEEL  ZOOM    0  RESET",
                 "ESC  PAUSE OR BACK",
             ]

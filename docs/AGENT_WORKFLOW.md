@@ -65,7 +65,7 @@ rpc resource art/wall/txxbseu1.art 0
   `winner`, override `candidates`, and available `decode` information.
 
 ```sh
-# Toggle keyboard and mouse collision bypass. Check the returned state.
+# Toggle collision bypass for mouse routes and developer arrivals.
 rpc tcl | jq '.result.collision_bypass'
 rpc pos | jq '.result.player | {tile, collision, collision_bypass, navigation}'
 
@@ -88,6 +88,40 @@ category such as `npc`, `container`, or `armor`. Use `rpc objects original
 2:GUIDHEX` when a persistent GUID is known. Inspect effective property
 origins, placement, and ownership together. See the
 [mobile object reference](ORIGINAL_MOBILE_OBJECTS.md) for installed-data fixtures.
+
+## Runtime inventory
+
+On the base installation, load Bates Mansion Level 1 near the original chest.
+Wait for `rpc pos` to report `camera.view_ready` after each `coc`.
+
+```sh
+rpc coc 5011 80 102
+chest=2:98fd05e54e0ed4118f1d00e02920220c
+item=2:5db66ad2fe3ad4118f1d00e02920220c
+rpc inventory "$chest"
+rpc itemowner "$item"
+rpc transfer "$item" "$chest" player 9  # Expected inventory_rejected for the multi-cell item
+rpc itemowner "$item"                    # Still in the chest at its previous slot
+rpc transfer "$item" "$chest" player 0
+rpc inventory
+rpc coc 5078 2087 2018
+rpc itemowner "$item"                    # Same GUID and player slot on the new map
+rpc coc 5011 80 102
+rpc drop "$item"
+rpc itemowner "$item"                    # World placement at the player's tile
+rpc pickup "$item" 0
+rpc transfer "$item" player "$chest" 0
+rpc inventory "$chest"
+```
+
+`inventory` defaults to the player. `itemowner` includes original and current
+placement, the instance and prototype sources, and the ART used to determine
+the footprint. Grid slots are zero-based in row-major order. Pickups and
+transfers without an explicit slot use the first fit. The source and
+destination containers must be nearby and accessible for a transfer. A failed
+transaction preserves prior ownership and placement. Inventory transactions
+operate on whole original objects. Stack merging, generated loot, item decay,
+and scripted inventory interactions are outside the supported subset.
 
 ## Asynchronous operations
 
@@ -124,9 +158,10 @@ zoom, UI scale, render toggles, diagnostic overlays, and the selected record
 when available. Camera coordinates, viewport dimensions, and cached-sector
 references are recorded for context. The camera follows the player after
 restore and the window keeps its current size. Snapshots cover reproduction
-context. Door changes and other runtime object state, pending interactions,
+context. Door changes, inventory and ground-item state, pending interactions,
 travel progress, cache ordering, and exact animation phase are outside the
-restore scope.
+restore scope. A restore within the running session preserves current inventory
+changes through the normal map loader.
 
 ## Vulkan screenshot capture
 
