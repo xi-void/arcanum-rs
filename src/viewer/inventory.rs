@@ -22,6 +22,12 @@ impl Icon {
             && (self.slot / 10..self.slot / 10 + self.shape[1]).contains(&y)
     }
 }
+struct Lens {
+    asset: Arc<LoadedFrame>,
+    center: (i32, i32),
+    next: Option<Duration>,
+}
+
 struct Drag {
     id: String,
     side: usize,
@@ -41,6 +47,8 @@ pub(super) struct InventoryUi {
     selected: Option<String>,
     drag: Option<Drag>,
     notice: String,
+    lens: Option<Lens>,
+    scrolling: bool,
 }
 
 impl InventoryUi {
@@ -58,6 +66,8 @@ impl InventoryUi {
             selected: None,
             drag: None,
             notice: String::new(),
+            lens: None,
+            scrolling: false,
         }
     }
     fn close(&mut self) {
@@ -70,6 +80,8 @@ impl InventoryUi {
         self.drag = None;
         self.scroll = [0; 2];
         self.notice.clear();
+        self.lens = None;
+        self.scrolling = false;
     }
     fn icon(world: &mut InteractiveWorld, item: &InventoryItem, side: usize) -> Option<Icon> {
         let image = world.inventory_icon(
@@ -124,6 +136,32 @@ impl InventoryUi {
                     .map_err(|e| e.to_string())?,
                 );
                 self.container = container;
+                if let Some(sprite) = world.player_portrait_frame() {
+                    self.panel.as_mut().unwrap().paint_surface(
+                        Binding::PlayerPreview,
+                        |panel, _, _| {
+                            let ratio = (panel.width as f64 / sprite.width as f64)
+                                .min(panel.height as f64 / sprite.height as f64)
+                                .min(2.0);
+                            let width = (f64::from(sprite.width) * ratio).floor().max(1.) as u32;
+                            let height = (f64::from(sprite.height) * ratio).floor().max(1.) as u32;
+                            let mut portrait = hud::sprite([width, height], [0; 4]);
+                            if hud::scale_into(sprite, &mut portrait, None).is_ok() {
+                                let x = (panel.width - width) / 2;
+                                let y = (panel.height - height) / 2;
+                                for row in 0..height {
+                                    for col in 0..width {
+                                        let px = portrait.pixels[(row * width + col) as usize];
+                                        if px[3] != 0 {
+                                            panel.pixels
+                                                [((row + y) * panel.width + x + col) as usize] = px;
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                    );
+                }
             }
             self.panel.as_mut().unwrap().set_label(
                 Binding::ContainerName,
@@ -141,6 +179,9 @@ impl InventoryUi {
                     self.icons.push(icon);
                 }
             }
+            for side in 0..SIDES.len() {
+                self.scroll[side] = self.scroll[side].min(self.last_row(side));
+            }
             self.drag = None;
             self.hovered = None;
             self.revision = Some(world.inventory_revision());
@@ -150,18 +191,21 @@ impl InventoryUi {
         let panel = self.panel.as_mut().unwrap();
         panel.set_scale(self.scale);
         panel.layout(size);
-        self.tooltip();
+        self.update_thumb();
+        if self.hit_item() != self.hovered {
+            self.refresh();
+        } else {
+            self.tooltip();
+        }
         Ok(())
     }
     fn cell(&self, p: Point) -> Option<(usize, usize)> {
         let panel = self.panel.as_ref()?;
         SIDES.iter().enumerate().find_map(|(side, &binding)| {
-            let (r, _) = panel.bounds(binding)?;
-            if !r.contains(p) {
-                return None;
-            }
-            let x = (p.0 as i32 - r.x) as usize * 10 / r.w as usize;
-            let y = (p.1 as i32 - r.y) as usize * 10 / r.w as usize + self.scroll[side];
+            let (x, y) = panel.local_point(binding, p)?;
+            let cell = panel.native_size(binding)?.0 / 10;
+            let x = (x / cell) as usize;
+            let y = (y / cell) as usize + self.scroll[side];
             Some((side, y * 10 + x))
         })
     }
@@ -173,6 +217,13 @@ impl InventoryUi {
     }
     fn tooltip(&mut self) {
         if let Some(panel) = self.panel.as_mut() {
+            let invalid_drop = self.drag.as_ref().is_some_and(|drag| drag.side == 0)
+                && self.cursor.is_some_and(|point| {
+                    panel
+                        .bounds(Binding::InventoryDrop)
+                        .is_some_and(|(rect, _)| rect.contains(point))
+                });
+            panel.set_active_action(invalid_drop.then_some(Action::InventoryDrop));
             let tip = if self.drag.is_some() {
                 ""
             } else if !self.notice.is_empty() {
@@ -191,19 +242,19 @@ impl InventoryUi {
             return;
         };
         for (side, binding) in SIDES.into_iter().enumerate() {
-            panel.paint_surface(binding, |frame, fill, line, active| {
+            panel.paint_surface(binding, |frame, grid_line, active| {
                 let cell = frame.width as usize / 10;
                 if cell == 0 {
                     return;
                 }
-                for (idx, p) in frame.pixels.iter_mut().enumerate() {
-                    let x = idx % frame.width as usize;
-                    let y = idx / frame.width as usize;
-                    *p = if x.is_multiple_of(cell) || y.is_multiple_of(cell) {
-                        line
-                    } else {
-                        fill
-                    };
+                if let Some(line) = grid_line {
+                    for (idx, pixel) in frame.pixels.iter_mut().enumerate() {
+                        let x = idx % frame.width as usize;
+                        let y = idx / frame.width as usize;
+                        if x.is_multiple_of(cell) || y.is_multiple_of(cell) {
+                            *pixel = line;
+                        }
+                    }
                 }
                 for (index, i) in self
                     .icons
@@ -250,11 +301,12 @@ impl InventoryUi {
         }
         self.tooltip();
     }
-    fn scroll(&mut self, side: usize, delta: isize) {
-        let Some((r, _)) = self.panel.as_ref().and_then(|p| p.bounds(SIDES[side])) else {
-            return;
+    fn last_row(&self, side: usize) -> usize {
+        let Some((width, height)) = self.panel.as_ref().and_then(|p| p.native_size(SIDES[side]))
+        else {
+            return 0;
         };
-        let rows = (r.h * 10 / r.w).max(1) as usize;
+        let rows = (height / (width / 10)) as usize;
         let end = self
             .icons
             .iter()
@@ -262,11 +314,111 @@ impl InventoryUi {
             .map(|i| i.slot / 10 + i.shape[1])
             .max()
             .unwrap_or(0);
-        self.scroll[side] = self.scroll[side]
-            .saturating_add_signed(delta)
-            .min(end.saturating_sub(rows));
-        self.refresh();
+        end.saturating_sub(rows)
     }
+
+    fn update_thumb(&mut self) {
+        let last = self.last_row(0);
+        if let Some(panel) = &mut self.panel {
+            panel.set_inventory_scroll(self.scroll[0], last);
+        }
+    }
+
+    fn scroll(&mut self, side: usize, delta: isize) {
+        self.set_scroll(side, self.scroll[side].saturating_add_signed(delta));
+    }
+
+    fn set_scroll(&mut self, side: usize, row: usize) {
+        let row = row.min(self.last_row(side));
+        if row != self.scroll[side] {
+            self.scroll[side] = row;
+            self.update_thumb();
+            self.refresh();
+        }
+    }
+
+    fn scroll_to_pointer(&mut self, point: Point) {
+        let Some(panel) = &self.panel else {
+            return;
+        };
+        let Some((track, _)) = panel.bounds(Binding::InventoryScrollTrack) else {
+            return;
+        };
+        let thumb_height = panel
+            .bounds(Binding::InventoryScrollThumb)
+            .map_or(1, |(r, _)| r.h);
+        let span = track.h.saturating_sub(thumb_height).max(1) as usize;
+        let offset = (i64::from(point.1) - i64::from(track.y) - i64::from(thumb_height / 2))
+            .clamp(0, span as i64) as usize;
+        self.set_scroll(0, (offset * self.last_row(0) + span / 2) / span);
+    }
+
+    pub(super) fn lens_delay(&self, elapsed: Duration) -> Option<Duration> {
+        Some(self.lens.as_ref()?.next?.saturating_sub(elapsed))
+    }
+
+    pub(super) fn render_lens(
+        &mut self,
+        renderer: &mut gpu::WindowRenderer,
+        world: &InteractiveWorld,
+        camera: &Camera,
+        elapsed: Duration,
+        settings: Settings,
+    ) -> Result<(), String> {
+        let Some(panel) = &mut self.panel else {
+            return Ok(());
+        };
+        let Some((rect, _)) = panel.bounds(Binding::PlayerLens) else {
+            return Ok(());
+        };
+        let Some([width, height]) = panel.lens_size() else {
+            return Ok(());
+        };
+        let Some(center) = world.player_anchor(elapsed) else {
+            return Ok(());
+        };
+        if let Some(lens) = &self.lens
+            && lens.center == center
+            && lens.asset.decoded.frame.width == rect.w
+            && lens.asset.decoded.frame.height == rect.h
+            && lens.next.is_none_or(|next| elapsed < next)
+        {
+            panel.set_lens_asset(Arc::clone(&lens.asset));
+            return Ok(());
+        }
+
+        let mut lens_camera = camera.clone();
+        lens_camera.follow(center);
+        let source = (width * 2, height * 2);
+        let scale = (rect.w as f32 / source.0 as f32).min(rect.h as f32 / source.1 as f32);
+        let asset = hud::generated_frame(
+            "inventory-player-inset",
+            SpriteFrame {
+                width: rect.w,
+                height: rect.h,
+                hotspot: (0, 0),
+                offset: (0, 0),
+                pixels: Vec::new(),
+            },
+        );
+        renderer.render_inset(
+            &asset,
+            scale,
+            stream_background(true),
+            scene_draws(world, &lens_camera, source, elapsed, settings),
+        )?;
+        let next = world
+            .animation_delay(&lens_camera, source, elapsed)
+            .map(|delay| elapsed + delay);
+        panel.set_lens_asset(Arc::clone(&asset));
+        self.lens = Some(Lens {
+            asset,
+            center,
+            next,
+        });
+        Ok(())
+    }
+
     fn start_drag(&mut self) {
         let Some(index) = self.hit_item() else { return };
         let item = &self.icons[index];
@@ -313,6 +465,8 @@ impl InventoryUi {
             match self.panel.as_mut().and_then(|p| p.release(point)) {
                 Some(Action::InventoryClose) => world.close_inventory(),
                 Some(Action::InventoryDrop) => self.drop_selected(world),
+                Some(Action::InventoryScrollUp) => self.scroll(0, -1),
+                Some(Action::InventoryScrollDown) => self.scroll(0, 1),
                 _ => {}
             }
             return;
@@ -408,6 +562,7 @@ impl Viewer<'_> {
                 if event.state.is_pressed() && !event.repeat =>
             {
                 match event.logical_key.as_ref() {
+                    Key::Named(NamedKey::Escape) if ui.scrolling => ui.scrolling = false,
                     Key::Named(NamedKey::Escape) if ui.drag.take().is_some() => ui.refresh(),
                     Key::Named(NamedKey::Escape) | Key::Character("i" | "I") => {
                         world.close_inventory()
@@ -417,10 +572,16 @@ impl Viewer<'_> {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                let point = Some((position.x as u32, position.y as u32));
+                let pixel = (position.x as u32, position.y as u32);
+                let point = Some(pixel);
                 self.cursor = point;
                 ui.cursor = point;
                 ui.notice.clear();
+                if ui.scrolling {
+                    ui.scroll_to_pointer(pixel);
+                    window.request_redraw();
+                    return true;
+                }
                 let changed = ui.panel.as_mut().is_some_and(|p| p.hover(point));
                 if ui.hovered != ui.hit_item() {
                     ui.refresh();
@@ -436,12 +597,21 @@ impl Viewer<'_> {
                 ui.notice.clear();
                 match (*button, state.is_pressed()) {
                     (MouseButton::Left, true) => {
-                        if ui.hit_item().is_some() {
+                        if ui
+                            .panel
+                            .as_ref()
+                            .and_then(|panel| panel.bounds(Binding::InventoryScrollTrack))
+                            .is_some_and(|(track, _)| track.contains(p))
+                        {
+                            ui.scrolling = true;
+                            ui.scroll_to_pointer(p);
+                        } else if ui.hit_item().is_some() {
                             ui.start_drag();
                         } else if let Some(panel) = ui.panel.as_mut() {
                             panel.press(p);
                         }
                     }
+                    (MouseButton::Left, false) if ui.scrolling => ui.scrolling = false,
                     (MouseButton::Left, false) => ui.release(world, p),
                     (MouseButton::Right, false) if ui.container.is_some() => {
                         if let Some(i) = ui.hit_item() {
@@ -467,6 +637,7 @@ impl Viewer<'_> {
                 self.cursor = None;
                 ui.cursor = None;
                 ui.drag = None;
+                ui.scrolling = false;
                 ui.refresh();
             }
             WindowEvent::RedrawRequested

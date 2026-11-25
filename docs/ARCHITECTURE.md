@@ -199,7 +199,9 @@ aptitude formula, script interpreter, slot rules or serialized state.
   complete sector per completion. The event thread protects required
   sectors in the bounded 12-entry cache and retains the last complete view
   while a required sector is pending. A ready plan is keyed by camera
-  position, viewport and direction. Completions invalidate that plan.
+  position, viewport, direction and the player sector. Independent camera
+  panning retains the player sector for collision and state queries.
+  Completions invalidate the plan.
 - Scene rasters and animation banks retain decoded frames through `Arc`.
   Eviction from either the sector or decoded-frame cache cannot invalidate a
   still-referenced raster. Prepared draw commands borrow those rasters.
@@ -360,3 +362,12 @@ Design independent Rust systems around explicit ownership, native
 content models, and extensibility.
 
 Compatibility is an external contract. Architecture is our choice.
+
+
+## Application preferences
+
+[Application settings](APPLICATION_CONFIG.md) supply launch values before the
+viewer starts. The viewer applies per-interface scale and camera settings to
+shared layout and world preparation. The selected interface receives scale
+input, and settings writes update the affected TOML key. Inventory actions
+still use [session object transactions](RUNTIME_INVENTORY.md).

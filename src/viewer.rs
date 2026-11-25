@@ -2,6 +2,8 @@
 
 use arcanum_rs::art::SpriteFrame;
 
+mod application;
+use application::outside_camera;
 mod console;
 mod development;
 pub(super) use development::Developer;
@@ -194,6 +196,7 @@ pub struct StreamOptions<'a> {
     pub travel: Option<(String, TravelLoader<'a>)>,
     pub hud: Option<Box<Hud>>,
     pub map_ui: Option<Box<MapUi>>,
+    pub application: Option<crate::application::Application>,
     pub inventory_theme: Option<(std::path::PathBuf, u16)>,
 }
 
@@ -214,7 +217,12 @@ pub fn show_stream(
         hud,
         map_ui,
         inventory_theme,
+        application,
     } = options;
+    let size = application
+        .as_ref()
+        .and_then(|a| a.prefs.display.width.zip(a.prefs.display.height))
+        .unwrap_or(size);
     let event_loop = make_loop()?;
     let proxy = event_loop.create_proxy();
     let travel = travel.map(|(map, loader)| Travel {
@@ -255,6 +263,7 @@ pub fn show_stream(
         PhysicalSize::<u32>::from(size).into(),
         event_loop,
         developer,
+        application,
     )
 }
 
@@ -287,7 +296,7 @@ enum ViewContent<'a> {
 }
 
 fn show_content(title: String, content: ViewContent<'_>, size: Size) -> Result<(), String> {
-    run_content(title, content, size, make_loop()?, None)
+    run_content(title, content, size, make_loop()?, None, None)
 }
 
 fn make_loop() -> Result<EventLoop<()>, String> {
@@ -302,6 +311,7 @@ fn run_content(
     size: Size,
     event_loop: EventLoop<()>,
     mut developer: Option<Developer>,
+    application: Option<crate::application::Application>,
 ) -> Result<(), String> {
     if let Some(dev) = &mut developer {
         dev.start_automation(event_loop.create_proxy())?;
@@ -311,6 +321,18 @@ fn run_content(
         ViewContent::Stream { world, .. } => world.game_clock(),
         _ => None,
     };
+    let mut settings = Settings::default();
+    let mut camera_preferences = crate::application::Camera::default();
+    if let Some(app) = &application {
+        let d = app.prefs.display;
+        camera_preferences = app.prefs.camera.clone();
+        settings = Settings {
+            zoom: camera_preferences.zoom,
+            lighting: d.lighting,
+            shadows: d.shadows,
+            run: d.run,
+        };
+    }
     let mut app = Viewer {
         title,
         size,
@@ -322,7 +344,16 @@ fn run_content(
         navigation: Navigation::default(),
         player_deadline: None,
         cursor: None,
-        settings: Settings::default(),
+        settings,
+        camera_preferences,
+        camera_navigation: Navigation::default(),
+        edge_direction: (0, 0),
+        focused: false,
+        menu_scale: application
+            .as_ref()
+            .and_then(|a| a.prefs.ui.menu_scale)
+            .unwrap_or(150),
+        application,
         pause: None,
         paused_for: Duration::ZERO,
         clock_paused_for: Duration::ZERO,
@@ -352,12 +383,18 @@ struct Viewer<'a> {
     player_deadline: Option<Instant>,
     cursor: Option<(u32, u32)>,
     settings: Settings,
+    camera_preferences: crate::application::Camera,
+    camera_navigation: Navigation,
+    edge_direction: (i32, i32),
+    focused: bool,
+    menu_scale: u16,
     pause: Option<(Menu, Instant)>,
     paused_for: Duration,
     clock_paused_for: Duration,
     map_since: Option<Instant>,
     clock: Option<Clock>,
     developer: Option<Developer>,
+    application: Option<crate::application::Application>,
     modifiers: winit::keyboard::ModifiersState,
 }
 
@@ -418,8 +455,16 @@ impl Navigation {
             self.remainder = (0., 0.);
             return (0, 0);
         }
-        let (x, y) = self.direction();
-        let speed = if fast { 1000. } else { 300. };
+        self.advance_delta(now, self.direction(), if fast { 1000. } else { 300. }, last)
+    }
+
+    fn advance_delta(
+        &mut self,
+        now: Instant,
+        (x, y): (i32, i32),
+        speed: f64,
+        last: Instant,
+    ) -> (i32, i32) {
         let distance = speed
             * now
                 .saturating_duration_since(last)
@@ -544,6 +589,8 @@ impl Viewer<'_> {
         *waiting = false;
         *direction = (0, 0);
         self.navigation = Navigation::default();
+        self.camera_navigation = Navigation::default();
+        self.edge_direction = (0, 0);
         self.player_deadline = None;
         self.animation_deadline = None;
         view.window.request_redraw();
@@ -661,7 +708,6 @@ impl Viewer<'_> {
     fn open_map(&mut self, event_loop: &ActiveEventLoop) {
         if let ViewContent::Stream {
             map_ui: Some(map),
-            hud,
             shift,
             world,
             trace,
@@ -677,7 +723,7 @@ impl Viewer<'_> {
                     eprintln!("Map player tile {tile:?}, town map {town}");
                 }
             }
-            map.open(hud.as_ref().map(|hud| hud.scale()));
+            map.open();
             *shift = false;
             self.map_since = Some(Instant::now());
             self.navigation = Navigation::default();
@@ -779,6 +825,7 @@ impl Viewer<'_> {
                             hud.set_game_time(hours);
                         }
                         hud.layout(viewport);
+                        hud.set_active_action(Some(hud::Action::OpenMap));
                         &*hud
                     });
                     let scene = scene_draws(
@@ -869,12 +916,6 @@ impl Viewer<'_> {
                 Key::Named(NamedKey::Enter | NamedKey::Space) if !event.repeat => {
                     arrival = map.activate_focus(now);
                 }
-                Key::Character(key) if key == "[" || key == "]" => {
-                    let scale = map.adjust_scale(if key == "[" { -25 } else { 25 });
-                    if let Some(hud) = hud {
-                        hud.set_scale(scale);
-                    }
-                }
                 _ => return true,
             },
             WindowEvent::KeyboardInput { .. } | WindowEvent::MouseInput { .. } => return true,
@@ -911,6 +952,7 @@ impl Viewer<'_> {
             .animation_deadline
             .into_iter()
             .chain(self.navigation.deadline())
+            .chain(self.camera_deadline())
             .chain(self.player_deadline)
             .chain(clock)
             .chain(travel)
@@ -985,7 +1027,13 @@ impl Viewer<'_> {
     fn open(&self, event_loop: &ActiveEventLoop) -> Result<WindowSurface, String> {
         let attributes = Window::default_attributes()
             .with_title(&self.title)
-            .with_inner_size(self.size);
+            .with_inner_size(self.size)
+            .with_fullscreen(
+                self.application
+                    .as_ref()
+                    .filter(|a| a.prefs.display.fullscreen)
+                    .map(|_| winit::window::Fullscreen::Borderless(None)),
+            );
         let window = Arc::new(
             event_loop
                 .create_window(attributes)
@@ -1056,11 +1104,16 @@ impl ApplicationHandler for Viewer<'_> {
             return;
         }
         let elapsed = self.play_elapsed(now);
+        let camera_changed = self.advance_play_camera(now);
         let mut transition = None;
         let mut redraw = self
             .animation_deadline
-            .is_some_and(|deadline| now >= deadline);
-        if redraw {
+            .is_some_and(|deadline| now >= deadline)
+            || camera_changed;
+        if self
+            .animation_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
             self.animation_deadline = None;
         }
         if let Some(view) = &self.view {
@@ -1085,14 +1138,21 @@ impl ApplicationHandler for Viewer<'_> {
                         let input = self.navigation.direction();
                         if !*waiting && !view.occluded {
                             let before = camera.position();
-                            redraw |= world.move_player(
-                                input,
-                                *shift ^ self.settings.run,
-                                elapsed,
-                                camera,
-                            );
+                            let tile_before = world.committed_player_tile();
+                            redraw |= world.move_player(input, *shift ^ self.settings.run, elapsed);
+                            let viewport =
+                                logical_size(view.window.inner_size(), self.settings.zoom);
+                            if self.camera_preferences.follow
+                                || (tile_before != world.committed_player_tile()
+                                    && world.player_anchor(elapsed).is_some_and(|anchor| {
+                                        outside_camera(before, anchor, viewport)
+                                    }))
+                            {
+                                world.follow_player(elapsed, camera);
+                            }
                             let after = camera.position();
                             if before != after {
+                                redraw = true;
                                 *direction = (after.0 - before.0, after.1 - before.1);
                             }
                         }
@@ -1193,6 +1253,9 @@ impl ApplicationHandler for Viewer<'_> {
         if self.view.as_ref().is_none_or(|view| view.window.id() != id) {
             return;
         }
+        if self.application_input(event_loop, &event) {
+            return;
+        }
         if self.developer_event(event_loop, &event)
             || self.inventory_event(&event)
             || self.map_event(event_loop, &event)
@@ -1227,6 +1290,7 @@ impl ApplicationHandler for Viewer<'_> {
                 _ => {}
             }
             if let Some((menu, _)) = &mut self.pause {
+                let prior = self.settings;
                 let command = match &event {
                     WindowEvent::KeyboardInput { event, .. } => {
                         if !event.state.is_pressed() || event.repeat {
@@ -1252,10 +1316,10 @@ impl ApplicationHandler for Viewer<'_> {
                     } => {
                         let Some(cursor) = self.cursor else { return };
                         let size = self.view.as_ref().unwrap().window.inner_size();
-                        let scale = u32::from(self.settings.zoom);
                         menu.click(
-                            (cursor.0 / scale, cursor.1 / scale),
-                            logical_size(size, self.settings.zoom),
+                            cursor,
+                            (size.width, size.height),
+                            self.menu_scale,
                             &mut self.settings,
                         )
                     }
@@ -1267,6 +1331,7 @@ impl ApplicationHandler for Viewer<'_> {
                         return;
                     }
                 };
+                self.persist_menu_changes(prior);
                 self.menu_action(command, event_loop);
                 return;
             }
@@ -1340,37 +1405,44 @@ impl ApplicationHandler for Viewer<'_> {
                     self.hud_action(action, event_loop);
                     return;
                 }
-                let step = match &key.logical_key {
-                    Key::Character(ch) if ch == "[" => -25,
-                    Key::Character(ch) if ch == "]" => 25,
-                    _ => 0,
-                };
-                if step != 0 {
-                    hud.adjust_scale(step);
-                    hud.hover(self.cursor);
-                    view.window.request_redraw();
-                    return;
-                }
             }
             if hud.hover(self.cursor) {
                 view.window.request_redraw();
             }
             let hit = self.cursor.map_or(hud::Hit::World, |point| hud.hit(point));
-            if hit != hud::Hit::World {
-                match event {
-                    WindowEvent::MouseInput {
-                        state: ElementState::Pressed,
-                        button: MouseButton::Left,
-                        ..
-                    } => {
-                        if let hud::Hit::Button(action) = hit {
-                            self.hud_action(action, event_loop);
-                        }
-                        return;
+            match event {
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                } if hit != hud::Hit::World => {
+                    if let Some(point) = self.cursor
+                        && hud.press(point)
+                    {
+                        view.window.request_redraw();
                     }
-                    WindowEvent::MouseWheel { .. } => return,
-                    _ => {}
+                    return;
                 }
+                WindowEvent::MouseInput {
+                    state: ElementState::Released,
+                    button: MouseButton::Left,
+                    ..
+                } if hud.is_pressed() => {
+                    let action = self.cursor.and_then(|point| hud.release(point));
+                    hud.cancel_press();
+                    view.window.request_redraw();
+                    if let Some(action) = action {
+                        self.hud_action(action, event_loop);
+                    }
+                    return;
+                }
+                WindowEvent::MouseWheel { .. } if hit != hud::Hit::World => return,
+                WindowEvent::Focused(false) => {
+                    hud.cancel_press();
+                    hud.hover(None);
+                    view.window.request_redraw();
+                }
+                _ => {}
             }
         }
         self.render_event(event_loop, id, event, elapsed);
@@ -1446,10 +1518,14 @@ impl Viewer<'_> {
                     MouseScrollDelta::LineDelta(_, y) => f64::from(y),
                     MouseScrollDelta::PixelDelta(position) => position.y,
                 };
+                let previous = self.settings.zoom;
                 self.settings.zoom = (i32::from(self.settings.zoom) + (y > 0.) as i32
                     - (y < 0.) as i32)
                     .clamp(1, 3) as u8;
                 view.window.request_redraw();
+                if previous != self.settings.zoom {
+                    self.persist("camera", "zoom", i64::from(self.settings.zoom));
+                }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
@@ -1590,9 +1666,12 @@ impl Viewer<'_> {
                     }
                 }
                 if matches!(&self.content, ViewContent::Stream { world, .. } if world.playing()) {
-                    if matches!(&event.logical_key, Key::Character(key) if key == "0") {
+                    if matches!(&event.logical_key, Key::Character(key) if key == "0")
+                        && self.settings.zoom != 1
+                    {
                         self.settings.zoom = 1;
                         view.window.request_redraw();
+                        self.persist("camera", "zoom", 1_i64);
                     }
                     return;
                 }
@@ -1707,10 +1786,14 @@ impl Viewer<'_> {
                         if let (Some(hud), Some(hours)) = (hud.as_mut(), clock_hours) {
                             hud.set_game_time(hours);
                         }
-                        let menu = self
-                            .pause
-                            .as_ref()
-                            .map(|(menu, _)| menu.frame(self.settings, "VULKAN"));
+                        let menu = self.pause.as_ref().map(|(menu, _)| {
+                            menu.frame(
+                                self.settings,
+                                "VULKAN",
+                                self.menu_scale,
+                                (size.width, size.height),
+                            )
+                        });
                         if let (Some(map_ui), Some(travel), Some((tile, town))) = (
                             map_ui.as_mut(),
                             travel.as_ref(),
@@ -1721,15 +1804,12 @@ impl Viewer<'_> {
                                 hud.set_travel_available(map_ui.can_travel());
                             }
                         }
-                        if let Some(ui) = inventory {
-                            if let Some(h) = hud {
-                                ui.scale = h.scale();
-                            }
-                            if let Err(e) = ui.prepare(world, (size.width, size.height)) {
-                                eprintln!("Inventory UI: {e}");
-                                view.window.set_title(&e);
-                                world.close_inventory();
-                            }
+                        if let Some(ui) = inventory
+                            && let Err(e) = ui.prepare(world, (size.width, size.height))
+                        {
+                            eprintln!("Inventory UI: {e}");
+                            view.window.set_title(&e);
+                            world.close_inventory();
                         }
                         view.redraw_stream(
                             size,
@@ -1744,7 +1824,7 @@ impl Viewer<'_> {
                                 cursor: self.cursor,
                                 hud: hud.as_deref_mut(),
                                 developer: self.developer.as_mut(),
-                                inventory: inventory.as_deref().filter(|ui| ui.panel.is_some()),
+                                inventory: inventory.as_deref_mut().filter(|ui| ui.panel.is_some()),
                             },
                         )
                         .map(|ready| {
@@ -1772,6 +1852,13 @@ impl Viewer<'_> {
                                             logical_size(size, self.settings.zoom),
                                             elapsed,
                                         )
+                                        .into_iter()
+                                        .chain(
+                                            inventory
+                                                .as_deref()
+                                                .and_then(|ui| ui.lens_delay(elapsed)),
+                                        )
+                                        .min()
                                         .map(|delay| sampled + delay);
                                 }
                             }
@@ -1837,7 +1924,7 @@ struct FrameOptions<'a> {
     menu: Option<&'a Arc<arcanum_rs::content::art::LoadedFrame>>,
     hud: Option<&'a mut Hud>,
     developer: Option<&'a mut Developer>,
-    inventory: Option<&'a inventory::InventoryUi>,
+    inventory: Option<&'a mut inventory::InventoryUi>,
     cursor: Option<(u32, u32)>,
 }
 
@@ -1857,7 +1944,7 @@ impl WindowSurface {
             menu,
             hud,
             mut developer,
-            inventory,
+            mut inventory,
             cursor,
         } = options;
         let zoom = settings.zoom;
@@ -1866,7 +1953,6 @@ impl WindowSurface {
         if size.width == 0 || size.height == 0 {
             return Ok(false);
         }
-        world.follow_player(elapsed, camera);
         camera.resize(viewport);
         let prepared = world.prepare(camera, viewport, direction)?;
         if !prepared.ready {
@@ -1875,7 +1961,15 @@ impl WindowSurface {
             return Ok(false);
         }
         world.start_player()?;
+        if let Some(ui) = inventory.as_deref_mut() {
+            ui.render_lens(&mut self.renderer, world, camera, elapsed, settings)?;
+        }
         let hud = hud.filter(|_| menu.is_none()).map(|hud| {
+            hud.set_active_action(
+                world
+                    .inventory_is_open()
+                    .then_some(hud::Action::OpenInventory),
+            );
             hud.layout((size.width, size.height));
             &*hud
         });
@@ -1901,9 +1995,8 @@ impl WindowSurface {
                 start.elapsed()
             );
         }
-        let scale = hud.map(|hud| hud.scale());
         let (console, status) = developer.as_deref_mut().map_or((None, None), |dev| {
-            let scale = scale.unwrap_or(dev.ui_scale());
+            let scale = dev.ui_scale();
             (
                 dev.console_frame((size.width, size.height), scale),
                 dev.status_frame(
@@ -1916,18 +2009,12 @@ impl WindowSurface {
                 ),
             )
         });
-        let developer = developer.as_deref();
-        let draws = scene_draws(world, camera, viewport, elapsed, settings)
-            .chain(
-                developer
-                    .into_iter()
-                    .flat_map(|dev| dev.world_marks(world, camera, viewport)),
-            )
-            .chain(menu.map(|asset| WorldDraw {
-                asset,
-                sprite: menu::layer(asset, viewport),
-                modulation: Modulation::Unlit,
-            }));
+        let overlays = developer.as_deref();
+        let draws = scene_draws(world, camera, viewport, elapsed, settings).chain(
+            overlays
+                .into_iter()
+                .flat_map(|dev| dev.world_marks(world, camera, viewport)),
+        );
         if trace {
             eprintln!(
                 "GPU world camera {:?} animation {}ms schedule {:?} order {:?} shading {:?}",
@@ -1945,13 +2032,16 @@ impl WindowSurface {
             draws,
             hud.into_iter()
                 .flat_map(|hud| hud.draws(settings.run))
-                .chain(inventory.into_iter().flat_map(|ui| ui.draws()))
+                .chain(inventory.as_deref().into_iter().flat_map(|ui| ui.draws()))
                 .map(|(asset, sprite)| unlit(asset, sprite.anchor))
                 .chain(
                     self.developer_status
                         .iter()
                         .map(|asset| unlit(asset, (12, 52))),
                 )
+                .chain(menu.map(|asset| {
+                    unlit(asset, menu::layer(asset, (size.width, size.height)).anchor)
+                }))
                 .chain(status.iter().map(|asset| unlit(asset, (12, 85))))
                 .chain(console.iter().map(|(asset, anchor)| unlit(asset, *anchor))),
             &self.window,
@@ -1960,6 +2050,12 @@ impl WindowSurface {
         self.last_frame_time = frame_start.elapsed();
         let now = Instant::now();
         self.last_frame_interval = self.frame_presented_at.replace(now).map(|prev| now - prev);
+        if let Some(dev) = developer
+            && dev.tracing()
+            && world.player_moving()
+        {
+            dev.record_player_frame(world, camera.position(), elapsed, self.last_frame_interval);
+        }
         self.submitted_frames += 1;
         Ok(true)
     }

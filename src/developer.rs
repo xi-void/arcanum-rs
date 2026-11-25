@@ -15,7 +15,9 @@ pub enum Request {
     SetTime(u8),
     DiscoverAll,
     ReloadUi,
-    Scale(u16),
+    Scale(u16, Option<String>),
+    CameraFollow(bool),
+    CameraCenter,
     ShowCollision,
     ShowSectors,
     Fps,
@@ -318,12 +320,41 @@ const COMMANDS: &[Command] = &[
     ),
     command!(
         "setuiscale",
-        "setuiscale <50..300>",
-        "Set UI scale in percent.",
+        "setuiscale <50..300> [GROUP]",
+        "Temporarily set HUD, inventory, map, console, or menu scale. Omit group to set all.",
         |a| {
-            let [scale] = a else { return None };
+            let [scale, rest @ ..] = a else { return None };
             let scale = scale.parse::<u16>().ok()?;
-            (50..=300).contains(&scale).then_some(Request::Scale(scale))
+            let group = match rest {
+                [] => None,
+                [group]
+                    if matches!(
+                        group.as_str(),
+                        "hud" | "map" | "inventory" | "console" | "menu"
+                    ) =>
+                {
+                    Some(group.clone())
+                }
+                _ => return None,
+            };
+            (50..=300)
+                .contains(&scale)
+                .then_some(Request::Scale(scale, group))
+        }
+    ),
+    simple!(
+        "centercamera",
+        "Center the camera on the player.",
+        CameraCenter
+    ),
+    command!(
+        "camerafollow",
+        "camerafollow on|off",
+        "Temporarily change player tracking.",
+        |a| match a {
+            [mode] if mode == "on" => Some(Request::CameraFollow(true)),
+            [mode] if mode == "off" => Some(Request::CameraFollow(false)),
+            _ => None,
         }
     ),
     simple!(
@@ -481,6 +512,7 @@ impl Command {
                     "0..23" | "50..300" => ("integer", name),
                     "on|off" | "take|put|drop" => ("enum", name),
                     "ID" | "SECTOR:RECORD" => ("string", "sector:record"),
+                    "GROUP" => ("enum", "hud|map|inventory|console|menu"),
                     "ORIGINAL_ID" | "CONTAINER_ID" => ("string", "2: followed by 32 hexadecimal digits in serialized GUID-byte order"),
                     "CATEGORY" if self.name == "objects" => {
                         ("string", "mobile or a canonical category such as npc, container, armor, or wall")
@@ -527,7 +559,8 @@ impl Command {
             "coc" | "teleport" | "restore" => &["map", "tile", "view_ready"],
             "tcl" => &["collision_bypass"],
             "settime" => &["hour"],
-            "setuiscale" => &["scale_percent"],
+            "setuiscale" => &["scale_percent", "group", "persistent"],
+            "centercamera" | "camerafollow" => &["projected", "follow", "persistent"],
             "discoverall" => &["discovered", "travel_eligible"],
             "unlock" => &["id", "unlocked", "changed"],
             "trace" | "fps" | "showsectors" | "showcollision" => &["enabled"],

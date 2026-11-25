@@ -73,6 +73,13 @@ quit` closes the session cleanly.
 ## State and capture
 
 - `pos` combines player, camera, travel, renderer, streaming and UI state.
+  `application` includes the configuration and active RPC socket paths.
+  `ui.active` and `ui.scales` describe the current interface and independently
+  selected scales.
+- `centercamera` and `camerafollow on|off` operate on the active camera.
+  `setuiscale PERCENT [GROUP]` supports `hud`, `inventory`, `map`, `console`
+  and `menu`. Omitting the group changes all running groups. RPC settings
+  affect only the current process. See [Application settings](APPLICATION_CONFIG.md).
   `camera.view_ready` reports whether the current location has presented
   its view. `coc` and `teleport` validate and prepare the destination in
   the shared loader before replacing the active world. The window redraw
@@ -201,3 +208,8 @@ authored-sector raster preparation by object category and ART origin.
 `inventory` reports `open`, the active container GUID and name, its `contents` (null when closed), and the player's inventory. Each item carries its GUID, prototype, description ID, original and current physical placement, source, original inventory slot, current slot, footprint, quantity and icon resource where available. Slots are row-major, ten per row. `owner GUID` works even outside the source map for changed items. `objects original GUID` reports their current world placement and preparation state.
 
 `approachobject GUID` schedules the ordinary approach and use action. Poll inventory or owner for the resulting change. `openinventory [CONTAINER_GUID]` enforces ordinary reach and access checks. `closeinventory` dismisses the interface. `transfer take GUID [CONTAINER_GUID]`, `transfer put GUID CONTAINER_GUID` and `transfer drop GUID` use the same transaction as mouse input. Successful transfers report the item identity and both placements. Access or placement failures return `transfer_rejected` and retain the original state. Read-only queries do not schedule presentation. See [Session objects and inventory](RUNTIME_INVENTORY.md) for scope and storage lifetime.
+
+
+With developer tracing enabled, `rpc events player_frame` reports submitted
+movement frames, sampled player anchors, the camera position and host-side
+submission intervals. The bounded history follows the existing tracing rules.

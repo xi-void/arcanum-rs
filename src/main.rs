@@ -1,3 +1,5 @@
+#[cfg(feature = "windowed")]
+mod application;
 use arcanum_rs::content;
 use arcanum_rs::content::effects::{
     EffectDefinition, EffectId, EffectOperation, LegacyEffectId, load_effect,
@@ -77,7 +79,9 @@ const USAGE: &str = "Usage:
   arcanum-rs simulate same-channel-demo
   arcanum-rs rpc SOCKET [--id N] COMMAND [ARGS...]
   arcanum-rs world-scan GAME [--map MAP] [--sector ID] [--limit N] [--category CATEGORY] [--group CODE] [--summary | --examples N]
-  play options: --debug --rpc SOCKET [--diagnostics DIRECTORY]";
+  play options: --debug --rpc SOCKET [--diagnostics DIRECTORY]
+  Display/camera: --window-size WIDTH HEIGHT --fullscreen|--windowed --zoom 1..3
+                  --follow|--no-follow --edge-scroll|--no-edge-scroll --pan-speed 40..2400";
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -160,8 +164,10 @@ fn main() -> ExitCode {
         }
         #[cfg(feature = "windowed")]
         (Some("play"), [_, game, options @ ..]) => {
-            show_world(Path::new(game), options, policy, true)
+            launch_play(Some(Path::new(game)), options, policy)
         }
+        #[cfg(feature = "windowed")]
+        (None, []) | (Some("play"), [_]) => launch_play(None, &[], policy),
         #[cfg(feature = "windowed")]
         (Some("art"), [_, action, game, options @ ..]) if action == "world" => {
             show_world(Path::new(game), options, policy, false)
@@ -1188,7 +1194,7 @@ type PlayUiOptions = (Option<std::path::PathBuf>, Option<u16>, Vec<OsString>);
 
 #[cfg(feature = "windowed")]
 fn play_ui_options(options: &[OsString]) -> Result<PlayUiOptions, Box<dyn Error>> {
-    let mut theme = Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/classic/theme.toml"));
+    let mut theme = Some(application::ui_resource("classic/theme.toml"));
     let mut seen_theme = false;
     let mut scale = None;
     let mut kept = Vec::with_capacity(options.len());
@@ -1258,12 +1264,39 @@ fn play_hud_selection_preserves_world_and_mod_options() {
 }
 
 #[cfg(feature = "windowed")]
+fn launch_play(
+    game: Option<&Path>,
+    options: &[OsString],
+    policy: Policy,
+) -> Result<(), Box<dyn Error>> {
+    let mut application = application::Application::load()?;
+    let game = game
+        .map(Path::to_owned)
+        .map_or_else(|| application.game_data(), Ok)?;
+    let options = application.launch_overrides(options)?;
+    let flags = application.flags(&options)?;
+    show_world_with_application(&game, &flags, policy, true, Some(application))
+}
+
+#[cfg(feature = "windowed")]
 fn show_world(
     game: &Path,
     options: &[OsString],
     policy: Policy,
     playing: bool,
 ) -> Result<(), Box<dyn Error>> {
+    show_world_with_application(game, options, policy, playing, None)
+}
+
+#[cfg(feature = "windowed")]
+fn show_world_with_application(
+    game: &Path,
+    options: &[OsString],
+    policy: Policy,
+    playing: bool,
+    application: Option<application::Application>,
+) -> Result<(), Box<dyn Error>> {
+    let ui = application.as_ref().map(|app| &app.prefs.ui);
     let mut inventory_theme = None;
     let mut map_theme = None;
     let mut map_reveal = false;
@@ -1336,8 +1369,12 @@ fn show_world(
             .map_or(&[][..], |index| &options[index..]);
         let mut vfs = inspection_vfs(game, mods, policy)?;
         Some(Box::new(
-            viewer::Hud::load(theme, &mut vfs, ui_scale)
-                .map_err(|error| format!("UI theme {}: {error}", theme.display()))?,
+            viewer::Hud::load(
+                theme,
+                &mut vfs,
+                ui_scale.or_else(|| ui.and_then(|ui| ui.hud_scale)),
+            )
+            .map_err(|error| format!("UI theme {}: {error}", theme.display()))?,
         ))
     } else {
         None
@@ -1357,20 +1394,19 @@ fn show_world(
             .position(|arg| arg == "--mods")
             .map_or(&[][..], |index| &options[index..]);
         let custom = map_theme.is_some();
-        let path = map_theme.unwrap_or_else(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/classic-map/theme.toml")
-        });
+        let path = map_theme.unwrap_or_else(|| application::ui_resource("classic-map/theme.toml"));
         let developer = if debug {
-            let console_theme = console_theme.unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/developer-console.toml")
-            });
+            let console_theme =
+                console_theme.unwrap_or_else(|| application::ui_resource("developer-console.toml"));
             Some(
                 viewer::Developer::load(
                     inspection_vfs(game, mount_options, policy)?,
                     console_theme,
                     theme,
                     path.clone(),
-                    ui_scale.unwrap_or(100),
+                    ui.and_then(|ui| ui.console_scale)
+                        .or(ui_scale)
+                        .unwrap_or(100),
                 )?
                 .with_automation(rpc, diagnostics)?,
             )
@@ -1384,7 +1420,13 @@ fn show_world(
                 policy,
             )?));
             let world = world.with_inventory(vfs.clone());
-            let map = match viewer::MapUi::load(&path, vfs, ui_scale, map_reveal, discover_all) {
+            let map = match viewer::MapUi::load(
+                &path,
+                vfs,
+                ui_scale.or_else(|| ui.and_then(|ui| ui.map_scale)),
+                map_reveal,
+                discover_all,
+            ) {
                 Ok(map) => Some(Box::new(map)),
                 Err(error) if !custom => {
                     eprintln!("Map interface unavailable: {error}");
@@ -1451,13 +1493,14 @@ fn show_world(
                 map_ui,
                 inventory_theme: playing.then(|| {
                     (
-                        inventory_theme.unwrap_or_else(|| {
-                            Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/inventory")
-                        }),
-                        ui_scale.unwrap_or(125),
+                        inventory_theme.unwrap_or_else(|| application::ui_resource("inventory")),
+                        ui_scale
+                            .or_else(|| ui.and_then(|ui| ui.inventory_scale))
+                            .unwrap_or(125),
                     )
                 }),
                 hud,
+                application,
             },
         )
         .map_err(Into::into);

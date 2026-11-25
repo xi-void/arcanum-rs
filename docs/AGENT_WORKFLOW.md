@@ -34,6 +34,12 @@ rpc pos
 When finished, run `rpc quit`. The engine removes the socket on clean exit.
 After it exits, remove the empty directory with `rmdir "$(dirname "$sock")"`.
 
+For repeated launches, enable `developer.enabled` and `developer.rpc` in the
+[application configuration](APPLICATION_CONFIG.md) and start the executable
+without arguments. Use the socket printed at startup. Check `.result.application`,
+`.result.ui.scales` and `.result.camera` in `rpc pos`. `rpc setuiscale 150 inventory`,
+`rpc camerafollow off` and `rpc centercamera` are session-only.
+
 ## Runtime debugging
 
 ```sh

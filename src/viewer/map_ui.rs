@@ -195,6 +195,10 @@ impl MapUi {
         self.invalidate_sheet();
     }
 
+    pub(super) fn scale(&self) -> u16 {
+        self.hud.scale()
+    }
+
     pub(super) fn set_scale(&mut self, scale: u16) {
         self.hud.set_scale(scale);
         self.dirty = true;
@@ -292,10 +296,7 @@ impl MapUi {
         self.open
     }
 
-    pub(super) fn open(&mut self, scale: Option<u16>) {
-        if let Some(scale) = scale {
-            self.hud.set_scale(scale);
-        }
+    pub(super) fn open(&mut self) {
         self.open = true;
         self.waypoints.clear();
         self.active_waypoint = None;

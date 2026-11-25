@@ -106,12 +106,15 @@ impl Menu {
         &mut self,
         point: (u32, u32),
         size: (u32, u32),
+        percent: u16,
         settings: &mut Settings,
     ) -> Command {
-        let scale = menu_scale(settings.zoom);
-        let (x, y) = origin(size, scale);
-        let in_x = (i64::from(point.0) - i64::from(x)).div_euclid(i64::from(scale));
-        let in_y = (i64::from(point.1) - i64::from(y)).div_euclid(i64::from(scale))
+        let (width, height) = dimensions(size, percent);
+        let (x, y) = origin(size, (width, height));
+        let in_x =
+            ((i64::from(point.0) - i64::from(x)) * i64::from(WIDTH)).div_euclid(i64::from(width));
+        let in_y = ((i64::from(point.1) - i64::from(y)) * i64::from(HEIGHT))
+            .div_euclid(i64::from(height))
             - i64::from(self.row_start());
         if !(6..WIDTH as i64 - 6).contains(&in_x) || in_y < 0 {
             return Command::Stay;
@@ -128,7 +131,13 @@ impl Menu {
         if self.page == Page::Controls { 105 } else { 30 }
     }
 
-    pub(super) fn frame(&self, settings: Settings, backend: &str) -> Arc<LoadedFrame> {
+    pub(super) fn frame(
+        &self,
+        settings: Settings,
+        backend: &str,
+        percent: u16,
+        viewport: (u32, u32),
+    ) -> Arc<LoadedFrame> {
         let mut frame = SpriteFrame {
             width: WIDTH,
             height: HEIGHT,
@@ -190,16 +199,17 @@ impl Menu {
             }
             print(&mut frame, 12, y + 4, label);
         }
-        if menu_scale(settings.zoom) == 2 {
-            let mut pixels = Vec::with_capacity(frame.pixels.len() * 4);
-            for y in 0..2 * HEIGHT {
-                for x in 0..2 * WIDTH {
-                    pixels.push(frame.pixels[((y / 2) * WIDTH + x / 2) as usize]);
-                }
-            }
-            frame.width *= 2;
-            frame.height *= 2;
-            frame.pixels = pixels;
+        let (width, height) = dimensions(viewport, percent);
+        if (width, height) != (WIDTH, HEIGHT) {
+            frame.pixels = (0..height)
+                .flat_map(|y| {
+                    (0..width)
+                        .map(move |x| (y * HEIGHT / height * WIDTH + x * WIDTH / width) as usize)
+                })
+                .map(|index| frame.pixels[index])
+                .collect();
+            frame.width = width;
+            frame.height = height;
         }
         let source = Source {
             virtual_path: "play/menu".into(),
@@ -231,21 +241,25 @@ const WIDTH: u32 = 190;
 const HEIGHT: u32 = 138;
 const ROW: u32 = 14;
 
-fn menu_scale(zoom: u8) -> u32 {
-    if zoom == 1 { 2 } else { 1 }
+fn dimensions(viewport: (u32, u32), percent: u16) -> (u32, u32) {
+    let scale = u32::from(percent)
+        .min(viewport.0.saturating_mul(100) / WIDTH)
+        .min(viewport.1.saturating_mul(100) / HEIGHT);
+    ((WIDTH * scale / 100).max(1), (HEIGHT * scale / 100).max(1))
 }
-
-fn origin(size: (u32, u32), scale: u32) -> (i32, i32) {
+fn origin(size: (u32, u32), frame: (u32, u32)) -> (i32, i32) {
     (
-        (size.0 as i32 - (WIDTH * scale) as i32) / 2,
-        (size.1 as i32 - (HEIGHT * scale) as i32) / 2,
+        (size.0 as i32 - frame.0 as i32) / 2,
+        (size.1 as i32 - frame.1 as i32) / 2,
     )
 }
-
 pub(super) fn layer(asset: &LoadedFrame, size: (u32, u32)) -> SpriteDraw<'_> {
     SpriteDraw {
         frame: &asset.decoded.frame,
-        anchor: origin(size, asset.decoded.frame.width / WIDTH),
+        anchor: origin(
+            size,
+            (asset.decoded.frame.width, asset.decoded.frame.height),
+        ),
     }
 }
 
@@ -345,9 +359,9 @@ mod tests {
         assert!(menu.activate(&mut settings) == Command::Stay);
         assert_eq!(menu.page, Page::Options);
         let size = (640, 360);
-        let (x, y) = origin(size, 2);
+        let (x, y) = origin(size, (WIDTH * 2, HEIGHT * 2));
         let click = (x as u32 + 24, y as u32 + 2 * (30 + ROW));
-        assert!(menu.click(click, size, &mut settings) == Command::Stay);
+        assert!(menu.click(click, size, 200, &mut settings) == Command::Stay);
         assert!(!settings.lighting && settings.shadows);
         assert!(menu.back() == Command::Stay);
         assert!(menu.back() == Command::Continue);

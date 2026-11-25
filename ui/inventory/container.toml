@@ -1,110 +1,157 @@
-name = "Container and inventory"
+name = "Arcanum-RS Container"
 scale = 125
-fit_viewport = [570, 356]
+fit_viewport = [820, 460]
 
 [fonts.heading]
 source = "vfs:art/interface/newtimes16font.art"
-size = 18
-color = [242, 237, 222, 255]
+size = 21
+color = [242, 228, 194, 255]
 
 [fonts.control]
 source = "vfs:art/interface/newtimes16font.art"
-size = 16
-color = [211, 221, 215, 255]
-
-[fonts.hint]
-source = "vfs:art/interface/newtimes16font.art"
-size = 16
-color = [177, 195, 186, 255]
+size = 17
+color = [232, 218, 187, 255]
 
 [[hud]]
 id = "panel"
-offset = [0, -14]
-size = [550, 302]
+size = [800, 400]
 anchor = "center"
-fill = [24, 32, 32, 250]
+fill = [32, 25, 22, 254]
 capture = true
 
 [[hud]]
-id = "accent"
+id = "panel-band"
 parent = "panel"
-size = [550, 2]
-fill = [176, 152, 97, 255]
+offset = [14, 34]
+size = [426, 11]
+image = "vfs:art/interface/loot.art"
+source_rect = [8, 115, 320, 11]
 
 [[hud]]
-id = "container-grid-title"
+id = "container-title"
 parent = "panel"
-offset = [12, 10]
-size = [170, 26]
+offset = [17, 9]
+size = [320, 31]
 binding = "container-name"
 font = "heading"
 
 [[hud]]
 id = "container-grid"
 parent = "panel"
-offset = [12, 42]
-size = [250, 200]
+offset = [17, 67]
+size = [320, 256]
 binding = "container-grid"
-fill = [33, 44, 44, 255]
-hover_fill = [78, 89, 71, 255]
-grid_line = [44, 57, 55, 255]
+image = "vfs:art/interface/loot.art"
+source_rect = [8, 136, 320, 256]
+fill = [17, 17, 18, 255]
+grid_line = [54, 48, 43, 255]
+hover_fill = [89, 65, 39, 255]
 
 [[hud]]
-id = "player-grid-title"
+id = "inventory-title"
 parent = "panel"
-offset = [282, 10]
-size = [170, 26]
+offset = [352, 15]
+size = [92, 25]
 text = "Inventory"
 font = "heading"
 
 [[hud]]
 id = "player-grid"
 parent = "panel"
-offset = [282, 42]
-size = [250, 200]
+offset = [455, 8]
+size = [320, 384]
 binding = "player-grid"
-fill = [33, 44, 44, 255]
-hover_fill = [78, 89, 71, 255]
-grid_line = [44, 57, 55, 255]
+image = "vfs:art/interface/inventor.art"
+source_rect = [10, 8, 320, 384]
+fill = [17, 17, 18, 255]
+grid_line = [54, 48, 43, 255]
+hover_fill = [89, 65, 39, 255]
 
 [[hud]]
-id = "close"
+id = "use-unavailable"
 parent = "panel"
-offset = [514, 9]
-size = [25, 24]
-text = "X"
-font = "control"
-align = "center"
-action = "inventory-close"
-hover_fill = [73, 77, 66, 255]
+offset = [360, 267]
+size = [80, 43]
+image = "vfs:art/interface/use_box_ill.art"
+disabled = true
 
 [[hud]]
 id = "drop"
 parent = "panel"
-offset = [456, 253]
-size = [82, 26]
-text = "Drop item"
-font = "control"
-align = "center"
+offset = [360, 320]
+size = [80, 43]
+image = "vfs:art/interface/drop_off.art"
+hover_image = "vfs:art/interface/drop_on.art"
+selected_image = "vfs:art/interface/drop_ill.art"
 action = "inventory-drop"
 binding = "inventory-drop"
-fill = [55, 65, 59, 255]
-hover_fill = [81, 87, 67, 255]
 
 [[hud]]
-id = "hint"
+id = "close"
 parent = "panel"
-offset = [12, 249]
-size = [435, 43]
-text = "Drag between inventories or right-click to transfer."
-font = "hint"
-wrap = true
+offset = [406, 49]
+size = [26, 25]
+text = "X"
+font = "control"
+align = "center"
+action = "inventory-close"
+hover_fill = [103, 72, 43, 255]
+
+[[hud]]
+id = "world-inset"
+parent = "panel"
+offset = [359, 105]
+size = [89, 89]
+binding = "player-lens"
+
+[[hud]]
+id = "world-inset-mask"
+parent = "panel"
+offset = [359, 105]
+size = [89, 89]
+image = "vfs:art/interface/lns_loot.art"
+
+[[hud]]
+id = "loot-scroll-up"
+parent = "panel"
+offset = [345, 67]
+size = [11, 15]
+image = "vfs:art/interface/scrllup.art"
+action = "inventory-scroll-up"
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "loot-scroll-track"
+parent = "panel"
+offset = [345, 82]
+size = [11, 227]
+image = "vfs:art/interface/loot.art"
+binding = "inventory-scroll-track"
+source_rect = [330, 151, 11, 227]
+
+[[hud]]
+id = "loot-scroll-thumb"
+parent = "panel"
+offset = [345, 82]
+size = [11, 5]
+image = "vfs:art/interface/scrllslidet.art"
+binding = "inventory-scroll-thumb"
+
+[[hud]]
+id = "loot-scroll-down"
+parent = "panel"
+offset = [345, 309]
+size = [11, 14]
+image = "vfs:art/interface/scrlldwn.art"
+action = "inventory-scroll-down"
+pressed_frame = 1
+hover_frame = 2
 
 [[hud]]
 id = "tooltip"
-size = [202, 39]
+size = [202, 42]
 binding = "inventory-detail"
 font = "control"
 wrap = true
-fill = [12, 19, 20, 252]
-
+fill = [15, 13, 13, 252]
