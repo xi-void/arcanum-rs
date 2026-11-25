@@ -187,10 +187,6 @@ impl Player {
         self.tile
     }
 
-    pub(super) fn stepping(&self) -> bool {
-        self.step.is_some()
-    }
-
     pub(super) fn moving(&self) -> bool {
         self.step.is_some() || !self.route.is_empty()
     }

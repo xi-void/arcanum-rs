@@ -33,9 +33,7 @@ mod debug;
 mod scan;
 pub use scan::{ScanOptions, compatibility_scan};
 mod interaction;
-mod inventory;
 pub use debug::{DebugCollision, DebugObject};
-pub use inventory::{InventoryItem, InventoryView};
 mod prefetch;
 pub use super::jumps::Destination;
 pub use interaction::DoorStates;
@@ -727,17 +725,6 @@ impl CachedSector {
             if let Some(walk) = walk {
                 self.walk = Some((raster.key, walk));
             }
-            let entry = &self.mobiles[index];
-            if entry.category == 2 || (5..=14).contains(&entry.category) {
-                raster.click_through = entry.click_through;
-                self.interactions.insert(
-                    raster.key,
-                    interaction::Target {
-                        tile: caster.tile,
-                        action: interaction::Action::Inventory(entry.id),
-                    },
-                );
-            }
             self.mobiles[index].raster = Some(record);
             self.draws.push(raster);
             if mobile.casts_shadow {
@@ -808,7 +795,6 @@ impl PreparedShade {
 
 #[derive(Default)]
 struct SectorCache {
-    inventory: inventory::Session,
     entries: BTreeMap<u64, (CachedSector, Option<u64>)>,
     active: Vec<u64>,
     ordered: Vec<Raster>,
@@ -927,7 +913,6 @@ impl SectorCache {
             *touched = Some(self.step);
             self.ordered.extend(sector.draws.iter().cloned());
         }
-        self.project_inventory();
         self.ordered.sort_unstable_by_key(|draw| draw.key);
         self.walk_subject = required.iter().find_map(|id| {
             let (key, walk) = self.entries[id].0.walk.as_ref()?;
@@ -937,7 +922,13 @@ impl SectorCache {
                 .ok()?;
             Some((index, Arc::clone(walk)))
         });
-        self.reindex_animations();
+        self.animated.clear();
+        self.animated.extend(
+            self.ordered
+                .iter()
+                .enumerate()
+                .filter_map(|(index, raster)| raster.animation.is_some().then_some(index)),
+        );
         self.refresh_roofs();
         if self.ambient.is_none() {
             return Duration::ZERO;
@@ -951,16 +942,6 @@ impl SectorCache {
         self.refresh_shades(None);
         self.refresh_shadows();
         start.elapsed()
-    }
-
-    fn reindex_animations(&mut self) {
-        self.animated.clear();
-        self.animated.extend(
-            self.ordered
-                .iter()
-                .enumerate()
-                .filter_map(|(index, raster)| raster.animation.is_some().then_some(index)),
-        );
     }
 
     fn set_game_hour(&mut self, hour: u8) -> bool {

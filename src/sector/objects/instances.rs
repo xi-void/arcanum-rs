@@ -56,18 +56,6 @@ pub(crate) struct OriginalId {
 }
 
 impl OriginalId {
-    pub(crate) fn parse(text: &str) -> Option<Self> {
-        let hex = text.strip_prefix("2:")?;
-        if hex.len() != 32 || !hex.is_ascii() {
-            return None;
-        }
-        let mut payload = [0; 16];
-        for (i, byte) in payload.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()?;
-        }
-        Some(Self { kind: 2, payload })
-    }
-
     pub(crate) fn from_wire(bytes: [u8; 24]) -> Self {
         let kind = u16::from_le_bytes([bytes[0], bytes[1]]);
         let payload = if kind == 0 {
@@ -278,10 +266,6 @@ pub(crate) struct PrototypeDefaults {
     pub appearance: AppearanceFields,
     pub current_art: Option<u32>,
     pub description: Option<u32>,
-    pub subtype_flags: Option<u32>,
-    pub inventory_art: Option<u32>,
-    pub quantity: Option<u32>,
-    pub transfer_script: bool,
     pub dexterity: Option<i32>,
 }
 
@@ -314,12 +298,8 @@ pub(crate) fn prototype_defaults(
     // critter stat prefix consumed by placement and stationary rendering.
     let mut fields = Fields::default();
     let mut description = None;
-    let mut transfer_script = false;
     for index in 0..COMMON.len() {
         let value = read_value(&mut reader, index, category)?;
-        if index == 31 {
-            transfer_script = has_inventory_script(value);
-        }
         if index == 22 {
             description = value.scalar();
         }
@@ -335,44 +315,10 @@ pub(crate) fn prototype_defaults(
     } else {
         None
     };
-    let mut subtype_flags = None;
-    let mut inventory_art = None;
-    let mut quantity = None;
-    if category == 2 || (5..=14).contains(&category) {
-        subtype_flags = read_value(&mut reader, 64, category)?.scalar();
-        if category != 2 {
-            for index in 65..=70 {
-                let field = read_value(&mut reader, index, category)?;
-                if index == 70 {
-                    inventory_art = field.scalar();
-                }
-            }
-            if matches!(category, 6 | 8) {
-                for index in 71..64 + ITEMS.len() {
-                    read_value(&mut reader, index, category)?;
-                }
-                read_value(&mut reader, 96, category)?;
-                quantity = read_value(&mut reader, 97, category)?.scalar();
-            }
-        }
-    }
     Ok(PrototypeDefaults {
-        subtype_flags,
-        inventory_art,
-        quantity,
-        transfer_script,
         appearance: fields.appearance,
         current_art: fields.art_id,
         description,
         dexterity,
-    })
-}
-
-pub(crate) fn has_inventory_script(value: FieldValue<'_>) -> bool {
-    // CE ScriptAttachmentPoint: get, drop, insert, remove and transfer.
-    [4, 5, 21, 28, 32].into_iter().any(|slot| {
-        value
-            .array_entry(slot)
-            .is_some_and(|entry| entry[8..12] != [0; 4])
     })
 }

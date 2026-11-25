@@ -34,12 +34,6 @@ rpc pos
 When finished, run `rpc quit`. The engine removes the socket on clean exit.
 After it exits, remove the empty directory with `rmdir "$(dirname "$sock")"`.
 
-For repeated launches, enable `developer.enabled` and `developer.rpc` in the
-[application configuration](APPLICATION_CONFIG.md) and start the executable
-without arguments. Use the socket printed at startup. Check `.result.application`,
-`.result.ui.scales` and `.result.camera` in `rpc pos`. `rpc setuiscale 150 inventory`,
-`rpc camerafollow off` and `rpc centercamera` are session-only.
-
 ## Runtime debugging
 
 ```sh
@@ -231,31 +225,3 @@ for count definitions, scope, and interpretation.
 7. Reproduce the same scenario through automation.
 8. Capture visual evidence only when relevant.
 9. Report remaining limitations.
-
-## Reproduce a session inventory transfer
-
-Use an original accessible chest on the servants' side of Bates Mansion. These are fixture identifiers. With the RPC helper above:
-
-```sh
-rpc coc 5011 80 103
-# Wait until pos.result.camera.view_ready, then approach the chest.
-chest=2:98fd05e54e0ed4118f1d00e02920220c
-rpc approachobject "$chest"
-# Wait for inventory.result.open and confirm inventory.result.container.
-item=$(rpc inventory | jq -er '.result.contents[0].id')
-rpc transfer take "$item" "$chest"
-rpc owner "$item"
-rpc closeinventory
-rpc transfer drop "$item"
-rpc objects original "$item"
-rpc approachobject "$item"
-# Wait for player membership before leaving.
-rpc coc 5031
-rpc owner "$item"
-rpc coc 5011 80 102
-rpc openinventory "$chest"
-rpc transfer put "$item" "$chest"
-rpc inventory
-```
-
-Location changes and diagnostic snapshot restoration retain current inventory during the same session. See [Session objects and inventory](RUNTIME_INVENTORY.md) for controls and the data model.

@@ -87,43 +87,19 @@ impl Developer {
     }
 
     pub(super) fn start_automation(&mut self, proxy: EventLoopProxy<()>) -> Result<(), String> {
-        if let Some(socket) = &self.socket {
+        if let Some(socket) = self.socket.take() {
             self.server = Some(
-                Server::bind(socket, move || {
+                Server::bind(&socket, move || {
                     let _ = proxy.send_event(());
                 })
                 .map_err(|err| format!("Developer socket {}: {err}", socket.display()))?,
             );
-            eprintln!("Developer RPC socket: {}", socket.display());
         }
         Ok(())
     }
 
     pub(super) fn capture_enabled(&self) -> bool {
         self.captures.is_some()
-    }
-
-    pub(super) fn tracing(&self) -> bool {
-        self.events.enabled
-    }
-
-    pub(super) fn record_player_frame(
-        &mut self,
-        world: &InteractiveWorld,
-        camera: (i32, i32),
-        elapsed: Duration,
-        interval: Option<Duration>,
-    ) {
-        self.event(
-            "player_frame",
-            None,
-            json!({
-                "elapsed_ms":elapsed.as_secs_f64()*1000.0,
-                "interval_ms":interval.map(|d|d.as_secs_f64()*1000.0),
-                "pose":world.debug_player_pose(elapsed),
-                "camera":camera
-            }),
-        );
     }
 
     pub(super) fn event(&mut self, category: &str, id: Option<u64>, data: Value) {
@@ -186,13 +162,6 @@ impl Developer {
         ))
     }
 
-    pub(super) fn console_open(&self) -> bool {
-        self.console.open
-    }
-    pub(super) fn adjust_console_scale(&mut self, step: i16) -> u16 {
-        self.scale = self.scale.saturating_add_signed(step).clamp(50, 300);
-        self.scale
-    }
     pub(super) fn ui_scale(&self) -> u16 {
         self.scale
     }
@@ -375,7 +344,7 @@ impl Viewer<'_> {
             return false;
         };
         let size = view.window.inner_size();
-        let scale = dev.scale;
+        let scale = hud.as_ref().map_or(dev.scale, |hud| hud.scale());
         match event {
             WindowEvent::ModifiersChanged(value) => {
                 self.modifiers = value.state();
@@ -560,9 +529,7 @@ impl developer::Runtime for Viewer<'_> {
     fn execute(&mut self, request: Request) -> Result<Output, Failure> {
         let mutating = !matches!(
             &request,
-            Request::Inventory
-                | Request::Owner(_)
-                | Request::Maps(_)
+            Request::Maps(_)
                 | Request::Position
                 | Request::Sectors
                 | Request::Objects(_)
@@ -584,7 +551,6 @@ impl developer::Runtime for Viewer<'_> {
 
 impl Viewer<'_> {
     fn execute_developer(&mut self, request: Request) -> Result<Output, Failure> {
-        let active_interface = self.active_interface();
         let now = Instant::now();
         let elapsed = self.play_elapsed(now);
         let game = self.game_elapsed(now);
@@ -597,7 +563,6 @@ impl Viewer<'_> {
             travel: Some(travel),
             hud,
             map_ui,
-            inventory,
             camera,
             last_presented,
             waiting,
@@ -624,34 +589,6 @@ impl Viewer<'_> {
         let map_state =
             json!({"id":map.id,"name":map.name,"directory":map.directory,"area_id":map.area});
         let result = match request {
-            Request::ApproachObject(id) => {
-                let steps = world.approach_inventory_object(&id)?;
-                self.navigation = Navigation::default();
-                self.player_deadline = Some(Instant::now());
-                json!({"id":id,"route_steps":steps,"interaction_pending":true})
-            }
-            Request::Inventory => json!(world.inventory_view()),
-            Request::Owner(id) => world.inventory_owner(&id)?,
-            Request::OpenInventory(id) => {
-                if self.map_since.is_some() || self.pause.is_some() {
-                    return Err("Close the active menu first".into());
-                }
-                world.inventory_open(id.as_deref())?;
-                self.navigation = Navigation::default();
-                json!(world.inventory_view())
-            }
-            Request::CloseInventory => {
-                world.close_inventory();
-                json!(world.inventory_view())
-            }
-            Request::Transfer(op, id, owner) => {
-                let result = world
-                    .inventory_transfer(&id, &op, owner.as_deref())
-                    .map_err(|e| Failure::new("transfer_rejected", e))?;
-                dev.event("item_transfer", None, result.clone());
-                result
-            }
-
             Request::Maps(filter) => {
                 let query = filter.unwrap_or_default().to_lowercase();
                 let maps:Vec<_> = dev.atlas.catalog.maps.iter()
@@ -723,21 +660,12 @@ impl Viewer<'_> {
                     "world":{"hour":current_hour,"world_tile":mapped,"area":area,
                         "atlas_pixel":mapped.and_then(|tile|world_pixel(tile,map_ui.as_ref()?.world_width())),
                         "travel":map_ui.as_ref().map(|map|map.diagnostic())},
-                    "application":{"configuration":self.application.as_ref().map(|app|&app.source),
-                        "display":self.application.as_ref().map(|app|app.prefs.display),"developer":true,"rpc_socket":dev.socket,
-                        "lighting":self.settings.lighting,"shadows":self.settings.shadows,"run":self.settings.run},
                     "camera":{"projected":camera.position(),"viewport":viewport,"zoom":self.settings.zoom,
-                        "follow":self.camera_preferences.follow,"edge_scroll":self.camera_preferences.edge_scroll,
-                        "speed":self.camera_preferences.speed,"recenter_key":self.camera_preferences.recenter,
-                        "follow_toggle_key":self.camera_preferences.follow_toggle,
                         "view_ready":last_presented.is_some() && !*waiting},
                     "streaming":world.stats(),
-                    "ui":{"active":active_interface,"inventory_theme":inventory.as_ref().map(|ui|&ui.path),
-                        "scales":{"hud":hud.as_ref().map(|h|h.scale()),"inventory":inventory.as_ref().map(|ui|ui.scale),
-                            "map":map_ui.as_ref().map(|map|map.scale()),"console":dev.scale,"menu":self.menu_scale},
-                        "hud_theme":dev.hud_theme,"map_theme":dev.map_theme,"console_theme":dev.console_theme,
+                    "ui":{"hud_theme":dev.hud_theme,"map_theme":dev.map_theme,"console_theme":dev.console_theme,
                         "hud":hud.as_ref().map(|hud|hud.diagnostics()),"scale_percent":scale,"console_open":dev.console.open,
-                        "inventory_open":world.inventory_is_open(),"paused":self.pause.is_some(),"reload_generation":dev.reloads,"reload_status":dev.reload_status,
+                        "paused":self.pause.is_some(),"reload_generation":dev.reloads,"reload_status":dev.reload_status,
                         "selected":dev.selected.map(InteractiveWorld::debug_selection_id)},
                     "renderer":{"stats":self.view.as_ref().and_then(|view|view.renderer.stats.as_ref()),
                         "frames_presented":self.view.as_ref().map(|view|view.submitted_frames),
@@ -847,7 +775,7 @@ impl Viewer<'_> {
                 self.settings.lighting = snapshot.lighting;
                 self.settings.shadows = snapshot.shadows;
                 self.settings.run = snapshot.run;
-                self.execute_developer(Request::Scale(snapshot.scale_percent, Some("hud".into())))?;
+                self.execute_developer(Request::Scale(snapshot.scale_percent))?;
                 self.execute_developer(Request::SetTime(snapshot.hour))?;
                 if let Some(dev) = &mut self.developer {
                     [dev.collision, dev.sectors, dev.fps] = snapshot.overlays;
@@ -956,7 +884,7 @@ impl Viewer<'_> {
                     let next_hud = load_hud(dev.hud_theme.as_deref(), &mut dev.vfs, scale)?;
                     let next_map = map_ui
                         .as_mut()
-                        .map(|map| map.prepare_theme(&dev.map_theme, map.scale()))
+                        .map(|map| map.prepare_theme(&dev.map_theme, scale))
                         .transpose()?;
                     let next_console = Console::load(&dev.console_theme, &mut dev.vfs)
                         .map_err(|err| err.to_string())?;
@@ -972,6 +900,7 @@ impl Viewer<'_> {
                     ui.replace_theme(theme);
                 }
                 dev.console.replace_theme(next_console);
+                dev.scale = scale;
                 dev.status = None;
                 dev.reloads += 1;
                 let outcome = json!({"status":"completed","generation":dev.reloads});
@@ -979,39 +908,15 @@ impl Viewer<'_> {
                 dev.event("ui_reload", None, outcome.clone());
                 outcome
             }
-            Request::Scale(scale, group) => {
-                let applies = |name| group.as_deref().is_none_or(|g| g == name);
-                if applies("console") {
-                    dev.scale = scale;
-                }
-                if applies("inventory")
-                    && let Some(ui) = inventory
-                {
-                    ui.scale = scale;
-                }
-                if applies("hud")
-                    && let Some(hud) = hud
-                {
+            Request::Scale(scale) => {
+                dev.scale = scale;
+                if let Some(hud) = hud {
                     hud.set_scale(scale);
                 }
-                if applies("map")
-                    && let Some(map) = map_ui
-                {
+                if let Some(map) = map_ui {
                     map.set_scale(scale);
                 }
-                if applies("menu") {
-                    self.menu_scale = scale;
-                }
-                json!({"scale_percent":scale,"group":group,"persistent":false})
-            }
-            Request::CameraCenter | Request::CameraFollow(_) => {
-                if let Request::CameraFollow(on) = request {
-                    self.camera_preferences.follow = on;
-                }
-                if !matches!(request, Request::CameraFollow(false)) {
-                    world.follow_player(elapsed, camera);
-                }
-                json!({"projected":camera.position(),"follow":self.camera_preferences.follow,"persistent":false})
+                json!({"scale_percent":scale})
             }
             Request::ShowCollision => {
                 dev.collision = !dev.collision;
