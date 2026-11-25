@@ -58,6 +58,11 @@ Pass `--ui ui/field-notes` for the example replacement,
 `--ui /path/to/package` for your own, or `--ui off` to play without a HUD.
 [Theme format and controls](docs/UI_THEMES.md)
 
+Press **I** for inventory. Click a reachable chest to open it alongside your
+backpack. Drag items between grids or right-click for quick transfer. To try
+an original wood chest, launch with `--map 5011 --center 80 103`.
+[Inventory controls, restrictions and theme configuration](docs/RUNTIME_INVENTORY.md)
+
 Press **M** or click the Classic map icon to open the in-game atlas.
 Use **Z** for the continent overview and **Shift+Z** for the detailed
 world map. At an eligible overworld position, place waypoints and use

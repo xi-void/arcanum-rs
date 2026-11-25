@@ -19,6 +19,9 @@ pub(super) enum Action {
     Pause,
     ToggleRun,
     ResetZoom,
+    OpenInventory,
+    InventoryDrop,
+    InventoryClose,
     OpenMap,
     MapLocal,
     MapWorld,
@@ -88,6 +91,11 @@ struct Font {
 #[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(super) enum Binding {
+    ContainerName,
+    ContainerGrid,
+    PlayerGrid,
+    InventoryDetail,
+    InventoryDrop,
     MapCanvas,
     PlayerLens,
     MapTitle,
@@ -109,7 +117,13 @@ impl Binding {
     fn is_label(self) -> bool {
         matches!(
             self,
-            Self::MapTitle | Self::MapWest | Self::MapSouth | Self::MapStatus | Self::PlaceLabel
+            Self::InventoryDetail
+                | Self::ContainerName
+                | Self::MapTitle
+                | Self::MapWest
+                | Self::MapSouth
+                | Self::MapStatus
+                | Self::PlaceLabel
         )
     }
 
@@ -156,6 +170,7 @@ struct Element {
     #[serde(default)]
     frame: usize,
     fill: Option<Color>,
+    grid_line: Option<Color>,
     hover_fill: Option<Color>,
     hover_frame: Option<usize>,
     pressed_frame: Option<usize>,
@@ -302,6 +317,7 @@ pub(crate) struct Hud {
     size: (u32, u32),
     scale: u16,
     fit_viewport: Option<[u32; 2]>,
+    tooltip_anchor: (i32, i32),
     hover: Option<usize>,
     pressed: Option<usize>,
     route_color: Option<Color>,
@@ -497,6 +513,7 @@ impl Hud {
             size: (0, 0),
             scale,
             fit_viewport: theme.fit_viewport,
+            tooltip_anchor: (0, 0),
             hover: None,
             pressed: None,
             route_color: theme.route_color,
@@ -725,7 +742,7 @@ impl Hud {
         {
             label.value = value.into();
             self.components[index].text = Some(label.text(value));
-            if let Some(place) = self.placed[index].as_mut() {
+            if let Some(place) = self.placed.get_mut(index).and_then(Option::as_mut) {
                 place.art = raster(
                     &self.components[index],
                     &self.components[index].base,
@@ -735,6 +752,45 @@ impl Hud {
                     None,
                 );
             }
+        }
+    }
+
+    pub(super) fn paint_surface(
+        &mut self,
+        binding: Binding,
+        paint: impl FnOnce(&mut SpriteFrame, Color, Color, Color),
+    ) {
+        let Some(i) = self.bound(binding) else {
+            return;
+        };
+        let c = &mut self.components[i];
+        let fill = c.config.fill.unwrap_or([0; 4]);
+        paint(
+            &mut c.base,
+            fill,
+            c.config.grid_line.unwrap_or(fill),
+            c.config.hover_fill.unwrap_or(fill),
+        );
+        if let Some(p) = self.placed.get_mut(i).and_then(Option::as_mut) {
+            p.art = raster(c, &c.base, p.full, p.rect, p.scale, None);
+        }
+    }
+    pub(super) fn tooltip(&mut self, point: (u32, u32), text: &str) {
+        let binding = Binding::InventoryDetail;
+        self.set_label(binding, text);
+        if let Some(i) = self.bound(binding)
+            && let Some(p) = self.placed[i].as_ref()
+        {
+            self.tooltip_anchor.0 = point
+                .0
+                .saturating_add(14)
+                .min(self.size.0.saturating_sub(p.rect.w))
+                as i32;
+            self.tooltip_anchor.1 = point
+                .1
+                .saturating_add(15)
+                .min(self.size.1.saturating_sub(p.rect.h))
+                as i32;
         }
     }
 
@@ -912,6 +968,14 @@ impl Hud {
             .enumerate()
             .filter_map(move |(index, placement)| {
                 let p = placement.as_ref()?;
+                if self.components[index].config.binding == Some(Binding::InventoryDetail)
+                    && self.components[index]
+                        .label
+                        .as_ref()
+                        .is_none_or(|l| l.value.is_empty())
+                {
+                    return None;
+                }
                 let action = self.components[index].config.action;
                 let hot = self.hover == Some(index);
                 let state = if hot && self.pressed == Some(index) {
@@ -933,7 +997,13 @@ impl Hud {
                     asset,
                     SpriteDraw {
                         frame: &asset.decoded.frame,
-                        anchor: (p.rect.x, p.rect.y),
+                        anchor: if self.components[index].config.binding
+                            == Some(Binding::InventoryDetail)
+                        {
+                            self.tooltip_anchor
+                        } else {
+                            (p.rect.x, p.rect.y)
+                        },
                     },
                 ))
             })
@@ -968,6 +1038,13 @@ fn parse(source: &str) -> Result<Theme, Box<dyn Error>> {
             || e.text.as_ref().is_some_and(|s| s.len() > 256)
         {
             return Err(format!("invalid size, offset or text in component {}", e.id).into());
+        }
+        if matches!(
+            e.binding,
+            Some(Binding::PlayerGrid | Binding::ContainerGrid)
+        ) && (e.size[0] < 10 || e.size[0] % 10 != 0 || !e.size[1].is_multiple_of(e.size[0] / 10))
+        {
+            return Err(format!("{} requires ten equal columns and whole rows", e.id).into());
         }
         let variants = [e.hover_frame, e.pressed_frame, e.selected_frame]
             .into_iter()
@@ -1027,7 +1104,7 @@ fn layout_rect(e: &Element, parent: Rect, s: u32) -> Rect {
         h,
     }
 }
-fn sprite([width, height]: [u32; 2], color: Color) -> SpriteFrame {
+pub(super) fn sprite([width, height]: [u32; 2], color: Color) -> SpriteFrame {
     SpriteFrame {
         width,
         height,
@@ -1036,7 +1113,7 @@ fn sprite([width, height]: [u32; 2], color: Color) -> SpriteFrame {
         pixels: vec![color; (width * height) as usize],
     }
 }
-fn scale_into(
+pub(super) fn scale_into(
     src: &SpriteFrame,
     dst: &mut SpriteFrame,
     crop: Option<[u32; 4]>,
@@ -1519,6 +1596,36 @@ mod tests {
         assert_eq!(replacement.hit((640, 65)), Hit::Button(Action::Pause));
     }
 
+    #[test]
+    fn tooltip_retext_after_moving_or_resizing_preserves_source_bounds() {
+        let pkg = Package::new();
+        let mut hud = pkg
+            .theme(
+                r#"
+name="tips"
+[fonts.body]
+source="bitmap"
+size=12
+color=[255,255,255,255]
+[[hud]]
+id="tip"
+binding="inventory-detail"
+font="body"
+size=[120,40]
+"#,
+            )
+            .unwrap();
+        for scale in [100, 125, 200] {
+            hud.set_scale(scale);
+            hud.layout((380, 220));
+            hud.tooltip((360, 210), "First");
+            hud.tooltip((13, 9), "Second");
+            let (_, draw) = hud.draws(false).next().unwrap();
+            assert_eq!(draw.anchor, (27, 24));
+            hud.tooltip((20, 10), "");
+            assert_eq!(hud.draws(false).count(), 0);
+        }
+    }
     #[test]
     fn theme_reports_bad_references_and_clips_children_and_input() {
         let package = Package::new();

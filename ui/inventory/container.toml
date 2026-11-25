@@ -1,0 +1,110 @@
+name = "Container and inventory"
+scale = 125
+fit_viewport = [570, 356]
+
+[fonts.heading]
+source = "vfs:art/interface/newtimes16font.art"
+size = 18
+color = [242, 237, 222, 255]
+
+[fonts.control]
+source = "vfs:art/interface/newtimes16font.art"
+size = 16
+color = [211, 221, 215, 255]
+
+[fonts.hint]
+source = "vfs:art/interface/newtimes16font.art"
+size = 16
+color = [177, 195, 186, 255]
+
+[[hud]]
+id = "panel"
+offset = [0, -14]
+size = [550, 302]
+anchor = "center"
+fill = [24, 32, 32, 250]
+capture = true
+
+[[hud]]
+id = "accent"
+parent = "panel"
+size = [550, 2]
+fill = [176, 152, 97, 255]
+
+[[hud]]
+id = "container-grid-title"
+parent = "panel"
+offset = [12, 10]
+size = [170, 26]
+binding = "container-name"
+font = "heading"
+
+[[hud]]
+id = "container-grid"
+parent = "panel"
+offset = [12, 42]
+size = [250, 200]
+binding = "container-grid"
+fill = [33, 44, 44, 255]
+hover_fill = [78, 89, 71, 255]
+grid_line = [44, 57, 55, 255]
+
+[[hud]]
+id = "player-grid-title"
+parent = "panel"
+offset = [282, 10]
+size = [170, 26]
+text = "Inventory"
+font = "heading"
+
+[[hud]]
+id = "player-grid"
+parent = "panel"
+offset = [282, 42]
+size = [250, 200]
+binding = "player-grid"
+fill = [33, 44, 44, 255]
+hover_fill = [78, 89, 71, 255]
+grid_line = [44, 57, 55, 255]
+
+[[hud]]
+id = "close"
+parent = "panel"
+offset = [514, 9]
+size = [25, 24]
+text = "X"
+font = "control"
+align = "center"
+action = "inventory-close"
+hover_fill = [73, 77, 66, 255]
+
+[[hud]]
+id = "drop"
+parent = "panel"
+offset = [456, 253]
+size = [82, 26]
+text = "Drop item"
+font = "control"
+align = "center"
+action = "inventory-drop"
+binding = "inventory-drop"
+fill = [55, 65, 59, 255]
+hover_fill = [81, 87, 67, 255]
+
+[[hud]]
+id = "hint"
+parent = "panel"
+offset = [12, 249]
+size = [435, 43]
+text = "Drag between inventories or right-click to transfer."
+font = "hint"
+wrap = true
+
+[[hud]]
+id = "tooltip"
+size = [202, 39]
+binding = "inventory-detail"
+font = "control"
+wrap = true
+fill = [12, 19, 20, 252]
+

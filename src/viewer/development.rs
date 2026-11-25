@@ -529,7 +529,9 @@ impl developer::Runtime for Viewer<'_> {
     fn execute(&mut self, request: Request) -> Result<Output, Failure> {
         let mutating = !matches!(
             &request,
-            Request::Maps(_)
+            Request::Inventory
+                | Request::Owner(_)
+                | Request::Maps(_)
                 | Request::Position
                 | Request::Sectors
                 | Request::Objects(_)
@@ -563,6 +565,7 @@ impl Viewer<'_> {
             travel: Some(travel),
             hud,
             map_ui,
+            inventory,
             camera,
             last_presented,
             waiting,
@@ -589,6 +592,34 @@ impl Viewer<'_> {
         let map_state =
             json!({"id":map.id,"name":map.name,"directory":map.directory,"area_id":map.area});
         let result = match request {
+            Request::ApproachObject(id) => {
+                let steps = world.approach_inventory_object(&id)?;
+                self.navigation = Navigation::default();
+                self.player_deadline = Some(Instant::now());
+                json!({"id":id,"route_steps":steps,"interaction_pending":true})
+            }
+            Request::Inventory => json!(world.inventory_view()),
+            Request::Owner(id) => world.inventory_owner(&id)?,
+            Request::OpenInventory(id) => {
+                if self.map_since.is_some() || self.pause.is_some() {
+                    return Err("Close the active menu first".into());
+                }
+                world.inventory_open(id.as_deref())?;
+                self.navigation = Navigation::default();
+                json!(world.inventory_view())
+            }
+            Request::CloseInventory => {
+                world.close_inventory();
+                json!(world.inventory_view())
+            }
+            Request::Transfer(op, id, owner) => {
+                let result = world
+                    .inventory_transfer(&id, &op, owner.as_deref())
+                    .map_err(|e| Failure::new("transfer_rejected", e))?;
+                dev.event("item_transfer", None, result.clone());
+                result
+            }
+
             Request::Maps(filter) => {
                 let query = filter.unwrap_or_default().to_lowercase();
                 let maps:Vec<_> = dev.atlas.catalog.maps.iter()
@@ -665,7 +696,7 @@ impl Viewer<'_> {
                     "streaming":world.stats(),
                     "ui":{"hud_theme":dev.hud_theme,"map_theme":dev.map_theme,"console_theme":dev.console_theme,
                         "hud":hud.as_ref().map(|hud|hud.diagnostics()),"scale_percent":scale,"console_open":dev.console.open,
-                        "paused":self.pause.is_some(),"reload_generation":dev.reloads,"reload_status":dev.reload_status,
+                        "inventory_open":world.inventory_is_open(),"paused":self.pause.is_some(),"reload_generation":dev.reloads,"reload_status":dev.reload_status,
                         "selected":dev.selected.map(InteractiveWorld::debug_selection_id)},
                     "renderer":{"stats":self.view.as_ref().and_then(|view|view.renderer.stats.as_ref()),
                         "frames_presented":self.view.as_ref().map(|view|view.submitted_frames),
@@ -910,6 +941,9 @@ impl Viewer<'_> {
             }
             Request::Scale(scale) => {
                 dev.scale = scale;
+                if let Some(ui) = inventory {
+                    ui.scale = scale;
+                }
                 if let Some(hud) = hud {
                     hud.set_scale(scale);
                 }

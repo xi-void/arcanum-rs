@@ -24,7 +24,7 @@
 - Never commit original copyrighted game assets.
 - Prefer functional gameplay over isolated technical demonstrations.
 - Treat incomplete functionality as an explicit limitation rather than concealing it through workarounds.
-- Preserve original gameplay semantics while allowing optional modern enhancements.
+- Preserve original gameplay semantics and Classic interface fidelity as the default baseline. Modern engine capabilities and optional quality-of-life enhancements must not require reproducing obsolete technical limitations.
 - Moddability, configurability, performance and maintainability are fundamental architectural requirements.
 - Do not reproduce limitations of the original executable unless required for genuine content or gameplay compatibility.
 
@@ -43,7 +43,24 @@ During foundational engine development, prioritize implementing missing mechanic
 
 Once the principal gameplay systems are implemented and interconnected, undertake dedicated comprehensive compatibility sweeps using the expanded machine-readable diagnostic infrastructure.
 
-The objective is a coherent, extensible reconstruction of Arcanum, followed by systematic convergence toward original behavior.
+The objective is a coherent, extensible reconstruction of Arcanum, followed by systematic convergence toward original gameplay, content and Classic interface fidelity. Full fidelity is the destination, not a requirement to finish every dependent system or cosmetic detail in each milestone.
+
+## Reverse Engineering
+
+REA with Ghidra is available through MCP.
+
+Use it selectively when original Arcanum behavior cannot be established reliably through existing documentation, Arcanum-CE, asset inspection, or gameplay verification.
+
+- Prefer persistent Ghidra analysis.
+- Investigate specific functions rather than entire subsystems indiscriminately.
+- Record relevant addresses, references, observations and uncertainties.
+- Cross-reference findings against Arcanum-CE where appropriate.
+- Implement independent Rust equivalents.
+- Verify reconstructed behavior through regression tests.
+- Avoid unnecessarily large decompilation dumps.
+- Never modify the original executable.
+
+Persistent Ghidra analysis of the original executable at `~/Games/arcanum/Arcanum.exe` has been initialized through REA. Reuse the existing checkpoint in `~/Work/rea-checkpoints`. Preserve verified function names, comments and type annotations across research sessions. Close REA binary sessions normally to persist analysis changes. Treat decompiler output as evidence requiring interpretation, not authoritative original source code.
 
 ## Generic world reconstruction
 
@@ -76,6 +93,7 @@ The objective is a coherent, extensible reconstruction of Arcanum, followed by s
 - Reuse established systems instead of introducing parallel implementations.
 - Keep gameplay, world loading, rendering, input and presentation responsibilities appropriately separated.
 - Gameplay and diagnostic viewers should share the same underlying world reconstruction and rendering systems.
+- Keep original object data immutable. Preserve stable object identities and authoritative mutable runtime state independently of loaded sectors. All gameplay and developer interfaces must use the same validated object transactions.
 - Preserve meaningful regression tests and performance baselines.
 - Remove obsolete implementations once their replacements are verified.
 - Avoid maintaining redundant systems solely for historical compatibility with earlier development milestones.
@@ -129,29 +147,53 @@ The objective is a coherent, extensible reconstruction of Arcanum, followed by s
 - Do not introduce heavyweight dependencies or premature scripting abstractions without a concrete implementation requirement.
 - Document public extension points, configuration formats and supported resource overrides.
 
+## Application startup and persistent configuration
+
+- Provide a unified, documented TOML configuration using the existing configuration infrastructure wherever practical.
+- On Linux, use the standard XDG configuration directory (`$XDG_CONFIG_HOME/arcanum-rs/`, falling back to `~/.config/arcanum-rs/`). Use a predictable configuration discovery and precedence policy.
+- Once configured, running the built `arcanum-rs` executable without arguments must launch the playable game. Do not require the `play` subcommand, repeated data-path arguments, map coordinates, debug flags or a Cargo invocation for routine playtesting.
+- Preserve explicit subcommands and command-line overrides for automation, compatibility scanning, debugging and specialized launches. Command-line overrides take precedence over configured values for the current invocation and must not silently overwrite persistent preferences.
+- Support configuration of the game data path, applicable resource overrides, window and display settings, camera preferences, UI packages and per-interface scales, input settings and developer options.
+- Resolve configuration and engine resource paths predictably, independently of the working directory. Do not embed developer-specific absolute paths or assume the source repository is the launch directory.
+- Provide safe defaults, a documented example configuration and actionable first-run guidance if required game data is missing or invalid. Do not guess the user's game-data directory.
+- Persist user-adjustable interface scales and settings changed through supported in-game settings. Write configuration safely, preserving unrelated settings and reporting failures rather than silently discarding user preferences.
+- Keep normal gameplay and development settings distinguishable. Developer mode, discovery overrides and RPC must be disabled in fresh default configurations; explicitly enabled testing configurations may retain them between launches.
+- When RPC is enabled through configuration, support secure local socket initialization and cleanup without requiring a manually constructed socket directory on every launch. Preserve explicit socket-path overrides for automation.
+- Keep developer-only map and coordinate overrides separate from normal new-game initialization. The original Crash Site remains the default starting location.
+- Do not introduce a mandatory launcher or a second settings system. Future launchers and configuration tools must use the same configuration model.
+- Document a minimal build-and-launch workflow and verify direct execution of the built binary as well as existing supported CLI workflows.
+
 ## User interface architecture
 
-- Keep gameplay state independent of UI presentation.
-- Implement Classic UI through the same public component and configuration system available to third-party UI packages.
-- Classic must not receive privileged layout or presentation logic unavailable to external themes.
-- Preserve original interface fidelity in Classic.
-- Do not add unrequested controls, labels, overlays or decorative elements.
-- Keep diagnostic information separate from normal gameplay UI.
-- Support independently replaceable HUDs and interface screens.
-- Allow alternative HUDs to coexist with Classic inventory, character, dialogue and map screens.
-- Inactive interfaces must not be instantiated as hidden or transparent duplicate overlays.
-- Disabling a UI component must remove its rendering and input handling.
-- Preserve independent UI scaling and world-camera zoom.
-- Keep fonts, artwork, colors, layouts and component positioning externally configurable.
-- Support external font resources and reusable typography configuration.
-- Prefer scalable text rendering and readable layouts over fixed-resolution assumptions.
-- Ensure rendering, layout and input handling remain consistent at different resolutions and scale factors.
-- Treat 1920×1080 as a primary manual testing resolution while preserving support for smaller displays and other aspect ratios.
-- Keep UI behavior shared across Classic and alternative themes rather than duplicating gameplay logic.
+Classic original-interface fidelity is the default presentation target for Arcanum-RS. Follow the original artwork, layout, typography, visual proportions and interaction conventions, while removing original engine limitations and supporting configurable quality-of-life improvements.
+
+- Implement Classic through the same shared, externally configurable UI component and package architecture available to third-party themes. Do not give Classic privileged hardcoded presentation logic.
+- Preserve original HUD, inventory, equipment, container, trading, character, journal, dialogue, local and world map, document, spell and crafting interfaces as their associated gameplay systems are implemented.
+- Support independently replaceable HUDs and interface screens. Alternative HUDs and interface packages must be able to coexist with Classic screens without duplicating gameplay logic.
+- Use original ART resources, panel geometry, fonts, colors, gauges, item icons and decorative motifs where applicable. Consult original resources, CE implementation and existing screenshots rather than inventing substitutes for established Classic elements.
+- Preserve original spatial inventory geometry, multi-cell item sizes, equipment arrangement and container presentation. Retain the shared runtime ownership and transfer mechanisms; presentation changes must not introduce a second inventory system.
+- Preserve useful implemented interaction improvements, including drag-and-drop, quick transfers and hover details. Additional or divergent interaction conventions should be configurable or provided through alternative packages where appropriate.
+- Preserve independent world-camera zoom and UI scaling. Use `[` and `]` to scale the active gameplay interface; when no interface panel is open, scale the HUD.
+- Maintain independently configurable, persistent scale settings for each interface group. Use shared scaling, layout and hit-testing infrastructure rather than separate implementations for individual screens.
+- Ensure rendering, text, item placement, pointer interaction, drag-and-drop and hit testing remain aligned at different scales and resolutions.
+- Keep fonts, artwork, colors, layouts, component positions and presentation settings externally configurable. Support external replacement resources without recompilation.
+- Keep gameplay state, calculations and transactions independent of UI presentation. Reuse the same underlying systems across all themes and developer interfaces.
+- Do not add invented Classic controls, decorative elements or debug substitutes simply to fill gaps in unimplemented functionality. Document unavailable gameplay capabilities without pretending they work.
+- Inactive interfaces must not be instantiated as hidden duplicate overlays or receive input. Keep developer overlays separate from normal gameplay.
 - Use the shared Vulkan rendering infrastructure for UI composition.
-- Preserve original artwork through the installed game VFS rather than redistributing proprietary assets.
-- Do not require engine recompilation to replace ordinary UI layouts or visual resources.
-- Do not let minor cosmetic discrepancies unnecessarily delay functional milestones.
+- Treat the original 800×600 presentation as a reference for Classic proportions and 1920×1080 as a primary modern manual-testing resolution. Support other resolutions and aspect ratios without reproducing original fixed-resolution limitations.
+- Full Classic fidelity is the long-term target. Implement usable interfaces alongside their actual gameplay mechanics; do not block progress on exhaustive cosmetic comparisons or implement nonfunctional screens solely to demonstrate their appearance.
+
+## Camera and exploration controls
+
+- Default to independent isometric camera movement rather than continuous automatic player tracking.
+- Support original-style screen-edge scrolling, configurable manual camera panning and a dedicated configurable recenter-on-player control.
+- Provide optional, toggleable player-follow behavior and persist the user's camera preferences.
+- Preserve world zoom independently of interface scaling, and maintain correct world-coordinate picking at different zoom levels and camera positions.
+- Center the camera appropriately on map arrival. Investigate original camera behavior when the player moves outside the visible area rather than assuming a tracking rule.
+- Keep manual camera movement independent of character movement. Do not issue movement commands merely because the camera pans.
+- Prevent accidental edge scrolling or world interactions while the pointer is interacting with UI panels. Preserve correct input routing and modal behavior.
+- Keep camera position, zoom, follow mode and relevant readiness state inspectable through the existing machine-readable interface.
 
 ## Gameplay-driven development
 
@@ -180,20 +222,20 @@ The objective is a coherent, extensible reconstruction of Arcanum, followed by s
 - Extend the existing shared command registry rather than introducing another command parser.
 - Developer commands must not require permanent changes to original content or gameplay rules.
 - Prefer diagnostics that help identify root causes during actual gameplay.
-- Do not introduce developer overlays into the default Classic interface.
+- Keep developer overlays disabled during ordinary gameplay and separate from Classic and alternative interface packages.
 - Keep developer tools lightweight and accessible from the playable engine wherever practical.
 
 ## Testing and reference material
 
 - Prefer reproducible automated tests and focused native gameplay verification.
-- Use existing Arcanum-CE reference screenshots in `~/Pictures/Screenshots/`, particularly filenames containing `arcanum-ce`.
+- Use existing Arcanum-CE reference screenshots in `~/Pictures/Screenshots/`, particularly filenames containing `arcanum-ce`. The UI references captured on 2026-11-25 are useful for original inventory, equipment, character, journal, document and HUD presentation.
 - Consult reference source code and existing screenshots before launching the reference executable.
 - Avoid repeatedly launching and closing Arcanum-CE when sufficient evidence has already been collected.
 - Do not spend excessive time pursuing pixel-perfect cosmetic comparisons.
 - Do not repeatedly reuse the same demonstration scene as the sole evidence of generic engine correctness.
 - Use varied original locations to verify shared systems.
 - Treat location-specific tests as regression fixtures for generic engine functionality.
-- Test actual documented launch commands and supported argument combinations.
+- Test direct executable startup with persistent configuration, actual documented launch commands and supported argument combinations. Verify UI scaling and input alignment through representative gameplay interactions.
 - Verify user-facing features through the playable executable rather than relying exclusively on internal tests.
 - Prefer targeted regression tests during implementation and appropriate broader validation before milestone completion.
 - Use Vulkan exclusively for production rendering validation.
@@ -229,7 +271,7 @@ The objective is a coherent, extensible reconstruction of Arcanum, followed by s
 - Explain the root cause of corrected defects and identify the reusable engine mechanism involved.
 - Include original source-data or reference-code evidence for significant compatibility corrections.
 - Provide screenshots for relevant visual rendering changes.
-- Provide exact launch commands and controls for manual gameplay testing.
+- Provide the shortest supported launch command and relevant controls for manual gameplay testing. Include specialized CLI or RPC reproduction commands only when useful.
 - Verify that documented launch commands work before reporting completion.
 - Explicitly identify unsupported behavior and unresolved defects.
 - Distinguish implemented functionality from proposed future work.
