@@ -33,8 +33,11 @@ game assets are not included.
 
 ## First playable alpha
 
+Build the executable and set `game_data` in your [application configuration](docs/APPLICATION_CONFIG.md).
+
 ```sh
-cargo run --locked --release --features windowed -- play "$HOME/Work/arcanum-ce-test"
+cargo build --locked --release --features windowed
+./target/release/arcanum-rs
 ```
 
 Hold **W/A/S/D** or the **arrow keys** to walk. Combine two keys to walk
@@ -45,15 +48,15 @@ next tile center. Left-click an original door or staircase to approach
 and use it. **Mouse wheel** zooms from 1× to 3×. Press **0** to reset.
 **Escape** pauses the game. Use the mouse or **Up/Down** and **Enter**
 to choose Resume, Options, or Quit. Escape backs out of menus.
-The camera follows the character, and original sectors load in the
-background. The default spawn is the original Zephyr crash site, resolved
+Pan with **Alt + arrows** or screen edges, press **Home** to recenter,
+and toggle player tracking with **F7**. Original sectors load in the background. The default spawn is the original Zephyr crash site, resolved
 from the game's `START_MAP` metadata. Click the nearby cave entrance to
 enter, then click the exit inside to return. Select Bates Mansion with
 `--map 5011`. For K’na Tha, add `--map "k'na tha" --center 383 928`.
 The windowed build uses Vulkan through wgpu.
 
 The default Classic HUD uses your installed Arcanum interface artwork.
-Use **[** and **]** to adjust HUD scale independently of camera zoom.
+Use **[** and **]** to adjust the active interface scale independently of camera zoom.
 Pass `--ui ui/field-notes` for the example replacement,
 `--ui /path/to/package` for your own, or `--ui off` to play without a HUD.
 [Theme format and controls](docs/UI_THEMES.md)

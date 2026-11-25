@@ -12,7 +12,7 @@ cap-std = "4.0.3"
 flate2 = "1.1.11"
 semver = { version = "1.0.28", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
-toml = { version = "1.2.2", default-features = false, features = ["parse", "serde", "std"] }
+toml = { version = "1.2.2", default-features = false, features = ["parse", "display", "serde", "std"] }
 
 winit = { version = "0.30.13", optional = true, default-features = false, features = ["rwh_06", "wayland", "wayland-dlopen", "x11"] }
 wgpu = { version = "26.0.1", optional = true, default-features = false, features = ["std", "vulkan", "wgsl"] }

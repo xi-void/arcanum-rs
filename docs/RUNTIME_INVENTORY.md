@@ -16,10 +16,11 @@ Open a reachable container by clicking its world sprite. Use **I** for your back
 |---|---|
 | Drag an icon to an empty space | Transfer it or reposition it within its grid |
 | Right-click an icon with a container open | Transfer it into the first available space on the opposite side |
-| Click a carried item, then **Drop item** or **D** | Place it on the player's passable tile |
-| Drag a carried item onto **Drop item** | Same drop transaction |
+| Click a carried item, then **Drop** (the down-arrow target) or **D** | Place it on the player's passable tile |
+| Drag a carried item onto **Drop** (the down-arrow target) | Same drop transaction |
 | Click an item on the ground | Approach and pick up the same object |
 | Wheel over either grid | Scroll that inventory |
+| Loot scrollbar arrows or track | Scroll the container by row |
 | **Esc** | Cancel a drag, otherwise close the window |
 
 The independently themed window works with an alternate HUD or with the HUD disabled. Supply `--inventory-ui DIRECTORY` to load another package. The two manifests are `inventory.toml` and `container.toml`. See [the default package](../ui/inventory/container.toml) and [the public theme format](UI_THEMES.md). A `player-grid` or `container-grid` element defines its rectangle, fill, grid line and hover colors. Its width spans ten equal cells, its height a whole number of cells. Placement, picking, tooltip text, fonts and artwork use the shared UI scale. The grid uses original inventory ART independently of ground ART.

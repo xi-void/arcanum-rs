@@ -22,6 +22,8 @@ pub(super) enum Action {
     OpenInventory,
     InventoryDrop,
     InventoryClose,
+    InventoryScrollUp,
+    InventoryScrollDown,
     OpenMap,
     MapLocal,
     MapWorld,
@@ -91,11 +93,14 @@ struct Font {
 #[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(super) enum Binding {
+    PlayerPreview,
     ContainerName,
     ContainerGrid,
     PlayerGrid,
     InventoryDetail,
     InventoryDrop,
+    InventoryScrollTrack,
+    InventoryScrollThumb,
     MapCanvas,
     PlayerLens,
     MapTitle,
@@ -175,6 +180,9 @@ struct Element {
     hover_frame: Option<usize>,
     pressed_frame: Option<usize>,
     selected_frame: Option<usize>,
+    hover_image: Option<String>,
+    pressed_image: Option<String>,
+    selected_image: Option<String>,
     text: Option<String>,
     font: Option<String>,
     text_shadow: Option<Color>,
@@ -189,6 +197,16 @@ struct Element {
     disabled: bool,
     #[serde(default)]
     hidden: bool,
+}
+
+impl Element {
+    fn art_states(&self) -> [(Option<&str>, Option<usize>); 3] {
+        [
+            (self.hover_image.as_deref(), self.hover_frame),
+            (self.pressed_image.as_deref(), self.pressed_frame),
+            (self.selected_image.as_deref(), self.selected_frame),
+        ]
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -224,6 +242,7 @@ struct Component {
     config: Element,
     parent: Option<usize>,
     base: SpriteFrame,
+    surface_background: Option<Vec<Color>>,
     state_frames: [Option<SpriteFrame>; 3],
     text: Option<Text>,
     label: Option<Label>,
@@ -318,6 +337,7 @@ pub(crate) struct Hud {
     scale: u16,
     fit_viewport: Option<[u32; 2]>,
     tooltip_anchor: (i32, i32),
+    scroll_thumb_anchor: Option<(i32, i32)>,
     hover: Option<usize>,
     pressed: Option<usize>,
     route_color: Option<Color>,
@@ -402,7 +422,7 @@ impl Hud {
                     art.paint(&mut base, 0, config.fill.unwrap_or([0; 4]));
                     clock = Some(art);
                 } else if let Some(asset) = &config.image {
-                    let mut load = |frame| -> Result<SpriteFrame, Box<dyn Error>> {
+                    let mut load = |asset: &str, frame| -> Result<SpriteFrame, Box<dyn Error>> {
                         let art = resource(game, &mut files, asset, frame)
                             .map_err(|error| format!("{}: {error}", config.id))?;
                         let mut raster = sprite(config.size, config.fill.unwrap_or([0; 4]));
@@ -410,13 +430,11 @@ impl Hud {
                             .map_err(|error| format!("{}: {error}", config.id))?;
                         Ok(raster)
                     };
-                    base = load(config.frame)?;
-                    for (out, frame) in state_frames.iter_mut().zip([
-                        config.hover_frame,
-                        config.pressed_frame,
-                        config.selected_frame,
-                    ]) {
-                        *out = frame.map(&mut load).transpose()?;
+                    base = load(asset, config.frame)?;
+                    for (out, (image, frame)) in state_frames.iter_mut().zip(config.art_states()) {
+                        if image.is_some() || frame.is_some() {
+                            *out = Some(load(image.unwrap_or(asset), frame.unwrap_or(0))?);
+                        }
                     }
                 }
                 let dynamic = config.binding.is_some_and(Binding::is_label);
@@ -492,10 +510,17 @@ impl Hud {
                     });
                 }
             }
+            let surface_background = (config.image.is_some()
+                && matches!(
+                    config.binding,
+                    Some(Binding::PlayerGrid | Binding::ContainerGrid | Binding::PlayerPreview)
+                ))
+            .then(|| base.pixels.clone());
             components.push(Component {
                 config,
                 parent,
                 base,
+                surface_background,
                 state_frames,
                 text: prepared_text,
                 label,
@@ -514,6 +539,7 @@ impl Hud {
             scale,
             fit_viewport: theme.fit_viewport,
             tooltip_anchor: (0, 0),
+            scroll_thumb_anchor: None,
             hover: None,
             pressed: None,
             route_color: theme.route_color,
@@ -615,7 +641,11 @@ impl Hud {
         let images: std::collections::BTreeSet<_> = self
             .components
             .iter()
-            .filter_map(|component| component.config.image.as_deref())
+            .flat_map(|component| {
+                std::iter::once(component.config.image.as_deref())
+                    .chain(component.config.art_states().map(|(image, _)| image))
+                    .flatten()
+            })
             .collect();
         serde_json::json!({"scale_percent":self.scale,"fonts":self.font_profiles,"image_references":images,
             "focused":control(self.focus),"hovered":control(self.hover),"pressed":control(self.pressed)})
@@ -664,6 +694,17 @@ impl Hud {
         }
     }
 
+    pub(super) fn set_inventory_scroll(&mut self, row: usize, last: usize) {
+        self.scroll_thumb_anchor = self
+            .bounds(Binding::InventoryScrollTrack)
+            .zip(self.bounds(Binding::InventoryScrollThumb))
+            .map(|((track, _), (thumb, _))| {
+                let span = track.h.saturating_sub(thumb.h) as usize;
+                let offset = row.min(last) * span / last.max(1);
+                (thumb.x, track.y + offset as i32)
+            });
+    }
+
     pub(super) fn has_canvas(&self) -> bool {
         self.bound(Binding::MapCanvas)
             .is_some_and(|index| !self.components[index].config.hidden)
@@ -683,6 +724,24 @@ impl Hud {
     pub(super) fn bounds(&self, binding: Binding) -> Option<(Rect, u32)> {
         let place = self.placed.get(self.bound(binding)?)?.as_ref()?;
         Some((place.rect, place.scale))
+    }
+
+    pub(super) fn local_point(&self, binding: Binding, point: (u32, u32)) -> Option<(u32, u32)> {
+        let index = self.bound(binding)?;
+        let p = self.placed.get(index)?.as_ref()?;
+        if !p.rect.contains(point) {
+            return None;
+        }
+        let base = &self.components[index].base;
+        Some((
+            (point.0 as i32 - p.full.x) as u32 * base.width / p.full.w,
+            (point.1 as i32 - p.full.y) as u32 * base.height / p.full.h,
+        ))
+    }
+
+    pub(super) fn native_size(&self, binding: Binding) -> Option<(u32, u32)> {
+        let base = &self.components[self.bound(binding)?].base;
+        Some((base.width, base.height))
     }
 
     pub(super) fn route_color(&self, selected: bool) -> Option<[u8; 4]> {
@@ -758,19 +817,21 @@ impl Hud {
     pub(super) fn paint_surface(
         &mut self,
         binding: Binding,
-        paint: impl FnOnce(&mut SpriteFrame, Color, Color, Color),
+        paint: impl FnOnce(&mut SpriteFrame, Option<Color>, Color),
     ) {
         let Some(i) = self.bound(binding) else {
             return;
         };
         let c = &mut self.components[i];
         let fill = c.config.fill.unwrap_or([0; 4]);
-        paint(
-            &mut c.base,
-            fill,
-            c.config.grid_line.unwrap_or(fill),
-            c.config.hover_fill.unwrap_or(fill),
-        );
+        let grid_line = if let Some(background) = &c.surface_background {
+            c.base.pixels.copy_from_slice(background);
+            None
+        } else {
+            c.base.pixels.fill(fill);
+            c.config.grid_line
+        };
+        paint(&mut c.base, grid_line, c.config.hover_fill.unwrap_or(fill));
         if let Some(p) = self.placed.get_mut(i).and_then(Option::as_mut) {
             p.art = raster(c, &c.base, p.full, p.rect, p.scale, None);
         }
@@ -918,6 +979,10 @@ impl Hud {
         self.pressed = None;
     }
 
+    pub(super) fn is_pressed(&self) -> bool {
+        self.pressed.is_some()
+    }
+
     pub(super) fn set_selected_action(&mut self, action: Action) {
         self.selected_action = Some(action);
     }
@@ -1001,6 +1066,10 @@ impl Hud {
                             == Some(Binding::InventoryDetail)
                         {
                             self.tooltip_anchor
+                        } else if self.components[index].config.binding
+                            == Some(Binding::InventoryScrollThumb)
+                        {
+                            self.scroll_thumb_anchor.unwrap_or((p.rect.x, p.rect.y))
                         } else {
                             (p.rect.x, p.rect.y)
                         },
@@ -1032,9 +1101,9 @@ fn parse(source: &str) -> Result<Theme, Box<dyn Error>> {
             || e.offset.iter().any(|v| v.unsigned_abs() > 4096)
             || (e.image.is_none()
                 && (e.source_rect.is_some()
-                    || [e.hover_frame, e.pressed_frame, e.selected_frame]
+                    || e.art_states()
                         .into_iter()
-                        .any(|frame| frame.is_some())))
+                        .any(|(image, frame)| image.is_some() || frame.is_some())))
             || e.text.as_ref().is_some_and(|s| s.len() > 256)
         {
             return Err(format!("invalid size, offset or text in component {}", e.id).into());
@@ -1046,9 +1115,10 @@ fn parse(source: &str) -> Result<Theme, Box<dyn Error>> {
         {
             return Err(format!("{} requires ten equal columns and whole rows", e.id).into());
         }
-        let variants = [e.hover_frame, e.pressed_frame, e.selected_frame]
+        let variants = e
+            .art_states()
             .into_iter()
-            .flatten()
+            .filter(|(image, frame)| image.is_some() || frame.is_some())
             .count() as u32;
         pixels += e.size[0] * e.size[1] * (1 + variants);
     }
@@ -1510,6 +1580,95 @@ mod tests {
             hud.advance_focus(false);
             assert_eq!(hud.focused_action(), Some(Action::OpenMap));
         }
+    }
+
+    #[test]
+    #[ignore = "requires installed Arcanum data"]
+    fn authored_inventory_surfaces_restore_art_after_repaint() {
+        let root = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+        let mut game = Vfs::from_game(root, Policy::Ce).unwrap();
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/inventory");
+        for (manifest, binding, path, (x, y), size) in [
+            (
+                "container.toml",
+                Binding::ContainerGrid,
+                "loot",
+                (8, 136),
+                (320, 256),
+            ),
+            (
+                "inventory.toml",
+                Binding::PlayerGrid,
+                "inventor",
+                (10, 8),
+                (320, 384),
+            ),
+        ] {
+            let mut hud = Hud::load(&dir.join(manifest), &mut game, Some(150)).unwrap();
+            let original = load_frame(&mut game, &format!("art/interface/{path}.art"), 0).unwrap();
+            let original = &original.decoded.frame;
+            let mut expected = Vec::new();
+            for row in 0..size.1 {
+                for col in 0..size.0 {
+                    expected.push(original.pixels[((y + row) * original.width + x + col) as usize]);
+                }
+            }
+            hud.paint_surface(binding, |frame, grid, _| {
+                assert!(grid.is_none());
+                assert_eq!(frame.pixels, expected);
+                frame.pixels[0] = [255, 0, 0, 255];
+            });
+            hud.layout((1920, 1080));
+            let (bounds, _) = hud.bounds(binding).unwrap();
+            assert_eq!(
+                hud.local_point(binding, (bounds.x as u32, bounds.y as u32)),
+                Some((0, 0))
+            );
+            hud.paint_surface(binding, |frame, _, _| assert_eq!(frame.pixels, expected));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires installed Arcanum data"]
+    fn inventory_hud_uses_distinct_authored_hover_press_and_active_art() {
+        let root = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+        let mut game = Vfs::from_game(root, Policy::Ce).unwrap();
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/classic/theme.toml");
+        let mut hud = Hud::load(&path, &mut game, Some(125)).unwrap();
+        hud.layout((1920, 1080));
+        let index = hud
+            .components
+            .iter()
+            .position(|c| c.config.id == "inventory")
+            .unwrap();
+        let bounds = hud.placed[index].as_ref().unwrap().rect;
+        let point = (bounds.x as u32 + 4, bounds.y as u32 + 4);
+        let current = |hud: &Hud| {
+            hud.draws(false)
+                .find(|(art, _)| art.source.virtual_path == "ui/inventory")
+                .unwrap()
+                .1
+                .frame
+                .pixels
+                .clone()
+        };
+        let idle = current(&hud);
+        assert!(hud.hover(Some(point)));
+        let hover = current(&hud);
+        assert_ne!(hover, idle);
+        assert!(hud.press(point));
+        let pressed = current(&hud);
+        assert_ne!(pressed, hover);
+        assert_ne!(pressed, idle);
+        assert_eq!(hud.release((0, 500)), None);
+        assert!(hud.press(point));
+        assert_eq!(hud.release(point), Some(Action::OpenInventory));
+        hud.hover(None);
+        hud.set_active_action(Some(Action::OpenInventory));
+        let active = current(&hud);
+        assert_ne!(active, idle);
+        hud.set_active_action(None);
+        assert_eq!(current(&hud), idle);
     }
 
     #[test]
