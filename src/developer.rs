@@ -1,5 +1,6 @@
 //! Typed developer commands shared by interactive and non-visual callers.
 
+use crate::content::character::EquipmentSlot;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -31,6 +32,9 @@ pub enum Request {
     Events(Option<String>),
     Trace(bool),
     Inventory,
+    Character,
+    Equip(String, EquipmentSlot),
+    Unequip(EquipmentSlot, Option<usize>),
     Owner(String),
     OpenInventory(Option<String>),
     CloseInventory,
@@ -218,8 +222,37 @@ const COMMANDS: &[Command] = &[
         |a| a.is_empty().then_some(Request::Inventory)
     ),
     query!(
+        "character",
+        "character",
+        "Inspect attributes, equipment effects, carry weight and movement speed.",
+        |a| a.is_empty().then_some(Request::Character)
+    ),
+    command!(
+        "equip",
+        "equip ITEM_ID SLOT",
+        "Wear a player inventory item. Slots: helmet, ring1, ring2, medallion, weapon, shield, armor, gauntlet, boots.",
+        |a| match a {
+            [id, slot] if crate::sector::objects::OriginalId::parse(id).is_some() =>
+                Some(Request::Equip(id.clone(), EquipmentSlot::parse(slot)?)),
+            _ => None,
+        }
+    ),
+    command!(
+        "unequip",
+        "unequip SLOT [INVENTORY_CELL]",
+        "Remove equipped gear into the player inventory. Optionally specify a zero-based grid cell.",
+        |a| match a {
+            [slot] => Some(Request::Unequip(EquipmentSlot::parse(slot)?, None)),
+            [slot, cell] => {
+                let cell: usize = cell.parse().ok()?;
+                (cell < 120).then_some(Request::Unequip(EquipmentSlot::parse(slot)?, Some(cell)))
+            }
+            _ => None,
+        }
+    ),
+    query!(
         "owner",
-        "owner ORIGINAL_ID",
+        "owner ITEM_ID",
         "Inspect current and original placement, including unloaded modified items.",
         |a| match a {
             [id] => Some(Request::Owner(id.clone())),
@@ -239,7 +272,7 @@ const COMMANDS: &[Command] = &[
     ),
     command!(
         "transfer",
-        "transfer take|put|drop ORIGINAL_ID [CONTAINER_ID]",
+        "transfer take|put|drop ITEM_ID [CONTAINER_ID]",
         "Transfer one whole object using gameplay access checks.",
         |a| {
             let [op, id, rest @ ..] = a else { return None };
@@ -295,7 +328,7 @@ const COMMANDS: &[Command] = &[
     ),
     simple!(
         "unlock",
-        "Unlock the selected ordinary door for this session.",
+        "Unlock the selected ordinary door or container for this session.",
         Unlock
     ),
     command!(
@@ -506,6 +539,8 @@ impl Command {
                 let name = word.trim_matches(['<', '>', '[', ']']);
                 let (kind, constraint) = match name {
                     "X" | "Y" | "FRAME" | "PROTOTYPE" | "TOKEN" => ("integer", "unsigned"),
+                    "SLOT" => ("enum", "helmet|ring1|ring2|medallion|weapon|shield|armor|gauntlet|boots"),
+                    "INVENTORY_CELL" => ("integer", "0..119"),
                     "RADIUS" => ("integer", "0..8"),
                     "near" | "id" | "original" | "category" | "prototype" => ("literal", name),
                     "JSON" => ("string", "version-1 snapshot JSON object"),
@@ -513,6 +548,7 @@ impl Command {
                     "on|off" | "take|put|drop" => ("enum", name),
                     "ID" | "SECTOR:RECORD" => ("string", "sector:record"),
                     "GROUP" => ("enum", "hud|map|inventory|console|menu"),
+                    "ITEM_ID" => ("string", "original 2:GUID or session runtime:N identifier"),
                     "ORIGINAL_ID" | "CONTAINER_ID" => ("string", "2: followed by 32 hexadecimal digits in serialized GUID-byte order"),
                     "CATEGORY" if self.name == "objects" => {
                         ("string", "mobile or a canonical category such as npc, container, armor, or wall")
@@ -533,9 +569,43 @@ impl Command {
                 "world",
                 "renderer",
             ],
-            "inventory" | "openinventory" | "closeinventory" => {
-                &["open", "container", "container_name", "player", "contents"]
-            }
+            "inventory" | "openinventory" | "closeinventory" => &[
+                "open",
+                "container",
+                "container_name",
+                "player",
+                "contents",
+                "equipment",
+                "statistics",
+            ],
+            "character" => &[
+                "base",
+                "attributes",
+                "race",
+                "gender",
+                "race_effect",
+                "weight",
+                "carry_capacity",
+                "encumbrance",
+                "speed",
+                "damage_bonus",
+                "ac_adjustment",
+                "reaction_modifier",
+                "heal_rate",
+                "poison_recovery",
+                "max_followers",
+                "armor_class",
+                "resistance",
+                "unresolved",
+            ],
+            "equip" | "unequip" => &[
+                "slot",
+                "equipped",
+                "unequipped",
+                "inventory_slot",
+                "statistics",
+                "appearance",
+            ],
             "transfer" => &["id", "from", "to"],
             "approachobject" => &["id", "route_steps", "interaction_pending"],
             "owner" => &[

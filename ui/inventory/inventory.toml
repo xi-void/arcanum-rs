@@ -93,6 +93,7 @@ image = "vfs:art/interface/lns_papr.art"
 
 [[hud]]
 id = "cvr-helmet"
+binding = "equipment-helmet"
 parent = "panel"
 offset = [149, 160]
 size = [44, 44]
@@ -100,6 +101,7 @@ image = "vfs:art/interface/cvr_helmet.art"
 
 [[hud]]
 id = "cvr-gauntlet"
+binding = "equipment-gauntlet"
 parent = "panel"
 offset = [233, 160]
 size = [44, 44]
@@ -107,6 +109,7 @@ image = "vfs:art/interface/cvr_gauntlet.art"
 
 [[hud]]
 id = "cvr-weapon"
+binding = "equipment-weapon"
 parent = "panel"
 offset = [145, 215]
 size = [43, 62]
@@ -114,6 +117,7 @@ image = "vfs:art/interface/cvr_weapon.art"
 
 [[hud]]
 id = "cvr-armor"
+binding = "equipment-armor"
 parent = "panel"
 offset = [190, 212]
 size = [48, 60]
@@ -121,6 +125,7 @@ image = "vfs:art/interface/cvr_armor.art"
 
 [[hud]]
 id = "cvr-shield"
+binding = "equipment-shield"
 parent = "panel"
 offset = [242, 214]
 size = [42, 57]
@@ -128,6 +133,7 @@ image = "vfs:art/interface/cvr_shield.art"
 
 [[hud]]
 id = "cvr-ring1"
+binding = "equipment-ring1"
 parent = "panel"
 offset = [149, 284]
 size = [25, 25]
@@ -135,6 +141,7 @@ image = "vfs:art/interface/cvr_ring1.art"
 
 [[hud]]
 id = "cvr-medalion"
+binding = "equipment-medallion"
 parent = "panel"
 offset = [180, 284]
 size = [41, 31]
@@ -142,6 +149,7 @@ image = "vfs:art/interface/cvr_medalion.art"
 
 [[hud]]
 id = "cvr-ring2"
+binding = "equipment-ring2"
 parent = "panel"
 offset = [226, 284]
 size = [25, 25]
@@ -149,6 +157,7 @@ image = "vfs:art/interface/cvr_ring2.art"
 
 [[hud]]
 id = "cvr-boot"
+binding = "equipment-boots"
 parent = "panel"
 offset = [254, 280]
 size = [34, 34]
@@ -161,3 +170,11 @@ binding = "inventory-detail"
 font = "control"
 wrap = true
 fill = [15, 13, 13, 252]
+
+[[hud]]
+id = "character-summary"
+parent = "panel"
+offset = [18, 54]
+size = [150, 80]
+binding = "character-summary"
+font = "control"

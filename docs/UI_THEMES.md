@@ -180,7 +180,13 @@ and the container-grid region of `Loot.ART`, based on CE's
 The inventory may also declare a `player-lens` component. It receives a small
 Vulkan view centered on the player, independent of the main camera. Put
 authored frame or mask ART in a subsequent component at the same position.
-Equipment silhouettes can be static ART components with no equipment action.
+Equipment regions bind as `equipment-helmet`, `equipment-ring1`, `equipment-ring2`,
+`equipment-medallion`, `equipment-weapon`, `equipment-shield`, `equipment-armor`,
+`equipment-gauntlet`, and `equipment-boots`. Each component supplies the empty
+slot artwork and scaled drag target. The worn item uses its original
+paper-doll ART when present, or its inventory icon. An optional
+`character-summary` text component uses the theme font to display current
+weight, capacity, encumbrance, speed and AC. Packages can omit these bindings.
 
 For the loot panel, `inventory-scroll-track` and `inventory-scroll-thumb`
 bind the track and thumb to the existing container row offset. Optional

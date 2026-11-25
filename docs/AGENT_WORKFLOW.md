@@ -259,3 +259,23 @@ rpc inventory
 ```
 
 Location changes and diagnostic snapshot restoration retain current inventory during the same session. See [Session objects and inventory](RUNTIME_INVENTORY.md) for controls and the data model.
+
+
+## Check character statistics and equipment
+
+After taking an original item, use the same equipment transaction as the inventory UI. The starting suit and gold have session-local `runtime:N` IDs.
+
+```sh
+rpc character
+rpc equip "$item" armor
+rpc inventory | jq '.result | {equipment, statistics}'
+rpc owner "$item"
+rpc unequip armor
+```
+
+Use `rpc help equip` for the slot names. `rpc unequip armor 12` requests a
+specific zero-based player grid cell. Check `.error.code` for
+`equipment_rejected` and use `owner` to verify that failed transactions preserve
+the object's placement. `pos.result.player.appearance` lists the active standing, walking and running ART paths. `character.result.unresolved` lists dependencies that
+prevent complete statistics. Map changes and snapshot restores keep current
+equipped gear for the session.

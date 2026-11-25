@@ -23,7 +23,7 @@ fullscreen = false
 zoom = 1
 follow = false
 edge_scroll = true
-speed = 300
+speed = 1200
 
 [ui]
 hud_scale = 125
@@ -44,10 +44,10 @@ Defaults are applied first, followed by `$XDG_CONFIG_HOME/arcanum-rs/config.toml
 | `display.width`, `display.height`, `display.fullscreen` | Optional paired physical extents from 200 to 4096, and borderless fullscreen |
 | `display.lighting`, `display.shadows`, `display.run` | Booleans controlling lighting, shadows and the default gait |
 | `camera.zoom`, `camera.follow`, `camera.edge_scroll` | Zoom 1–3 and booleans for tracking and edge scrolling |
-| `camera.speed` | 40–2400 projected pixels per second |
+| `camera.speed` | 40–2400 horizontal projected pixels per second, default 1200. Vertical speed is half the horizontal speed. |
 | `camera.recenter`, `camera.follow_toggle` | Distinct bindings chosen from Home and F7–F12 |
 | `ui.hud`, `ui.inventory`, `ui.map`, `ui.console` | Independent packages. HUD also accepts `classic` or `off`. Inventory expects a directory and console takes a manifest |
-| `ui.hud_scale`, `ui.inventory_scale`, `ui.map_scale`, `ui.console_scale`, `ui.menu_scale` | Independent percentages from 50 to 300 |
+| `ui.hud_scale`, `ui.inventory_scale`, `ui.map_scale`, `ui.console_scale`, `ui.menu_scale` | Percentages from 50 to 300. HUD and inventory share one gameplay scale. Map, console and menu scale independently. |
 | `developer.enabled`, `developer.rpc`, `developer.diagnostics` | Enable development controls, automatic local RPC and optional existing capture directory |
 | `developer.map`, `developer.center` | Explicit development-only map ID or name and optional `[x, y]` |
 | `developer.map_reveal`, `developer.discover_all` | Existing map discovery overrides |
@@ -56,10 +56,10 @@ Examples of per-launch overrides include `--ui off`, `--ui-scale 150`, `--map 50
 
 ## Controls and persistence
 
-- **Alt + arrows** pan independently of the player. Move the pointer into the eight-pixel edge band to scroll from exposed gameplay areas.
+- **Alt + arrows** pan independently of the player. Move the pointer into the eight-pixel edge band to scroll, including over the gameplay HUD.
 - **Home** recenters on the player. **F7** toggles tracking. Map arrival centers on the player. While tracking is off, entering a new tile beyond the viewport's recenter limits brings the moving player back into view. This generalizes the movement recenter rule in CE's `anim.c` to the active viewport. The edge band comes from `handle_mouse_scroll` in CE's `main.c`.
-- **[** and **]** scale the active inventory, map, console or pause menu. In gameplay they scale the HUD. **Wheel** over the world changes gameplay zoom, with **0** to reset it.
-- In-game changes to tracking, UI scale, zoom, or the existing lighting, shadows and gait options save the changed key. The file is replaced atomically and retains unrelated values. Comments may be reformatted or lost on write. CLI and RPC overrides alone do not persist.
+- **[** and **]** scale both HUD panels and inventory together during gameplay, including when inventory is open. The viewport limits the shared scale so the inventory fits between the top and bottom HUD. The map, console and pause menu keep separate scales. **Wheel** over the world changes gameplay zoom, with **0** to reset it.
+- In-game changes to tracking, UI scale, zoom, or the existing lighting, shadows and gait options save the changed settings. The file is replaced atomically and retains unrelated values. Comments may be reformatted or lost on write. CLI and RPC overrides alone do not persist.
 
 ## Developer RPC
 

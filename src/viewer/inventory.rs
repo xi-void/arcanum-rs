@@ -1,15 +1,33 @@
 //! Inventory input and presentation. Only the world commits ownership changes.
 use super::*;
-use arcanum_rs::content::world::{InventoryItem, InventoryView};
+use arcanum_rs::content::{
+    character::EquipmentSlot,
+    world::{InventoryItem, InventoryView},
+};
 use hud::{Action, Binding};
 use std::path::PathBuf;
 
 const SIDES: [Binding; 2] = [Binding::ContainerGrid, Binding::PlayerGrid];
 type Point = (u32, u32);
 
+fn equipment_binding(slot: EquipmentSlot) -> Binding {
+    match slot {
+        EquipmentSlot::Helmet => Binding::EquipmentHelmet,
+        EquipmentSlot::Ring1 => Binding::EquipmentRing1,
+        EquipmentSlot::Ring2 => Binding::EquipmentRing2,
+        EquipmentSlot::Medallion => Binding::EquipmentMedallion,
+        EquipmentSlot::Weapon => Binding::EquipmentWeapon,
+        EquipmentSlot::Shield => Binding::EquipmentShield,
+        EquipmentSlot::Armor => Binding::EquipmentArmor,
+        EquipmentSlot::Gauntlet => Binding::EquipmentGauntlet,
+        EquipmentSlot::Boots => Binding::EquipmentBoots,
+    }
+}
+
 struct Icon {
     id: String,
     side: usize,
+    worn: Option<EquipmentSlot>,
     slot: usize,
     shape: [usize; 2],
     image: Arc<LoadedFrame>,
@@ -24,6 +42,7 @@ impl Icon {
 }
 struct Lens {
     asset: Arc<LoadedFrame>,
+    body_art: u32,
     center: (i32, i32),
     next: Option<Duration>,
 }
@@ -31,12 +50,14 @@ struct Lens {
 struct Drag {
     id: String,
     side: usize,
+    worn: Option<EquipmentSlot>,
     offset: [usize; 2],
     image: Arc<LoadedFrame>,
 }
 pub(super) struct InventoryUi {
     pub path: PathBuf,
     pub scale: u16,
+    pub extent: [u32; 2],
     pub panel: Option<Hud>,
     revision: Option<u64>,
     container: Option<String>,
@@ -53,9 +74,14 @@ pub(super) struct InventoryUi {
 
 impl InventoryUi {
     pub fn new(path: PathBuf, scale: u16) -> Self {
+        let extent = ["inventory.toml", "container.toml"]
+            .into_iter()
+            .filter_map(|name| Hud::theme_extent(&path.join(name)).ok())
+            .fold([0; 2], |[w, h], [x, y]| [w.max(x), h.max(y)]);
         Self {
             path,
             scale,
+            extent,
             panel: None,
             revision: None,
             container: None,
@@ -70,7 +96,7 @@ impl InventoryUi {
             scrolling: false,
         }
     }
-    fn close(&mut self) {
+    pub(super) fn close(&mut self) {
         self.panel = None;
         self.revision = None;
         self.container = None;
@@ -83,27 +109,53 @@ impl InventoryUi {
         self.lens = None;
         self.scrolling = false;
     }
-    fn icon(world: &mut InteractiveWorld, item: &InventoryItem, side: usize) -> Option<Icon> {
-        let image = world.inventory_icon(
-            item.icon.as_deref()?,
-            ((item.inventory_art? >> 4) & 3) as u8,
-        )?;
+    fn icon(
+        world: &mut InteractiveWorld,
+        item: &InventoryItem,
+        side: usize,
+        worn: Option<EquipmentSlot>,
+    ) -> Option<Icon> {
+        let paper_doll = worn.and_then(|_| {
+            let art = item.paper_doll_art?;
+            world.inventory_icon(item.paper_doll_icon.as_deref()?, ((art >> 4) & 3) as u8)
+        });
+        let image = match paper_doll {
+            Some(image) => image,
+            None => world.inventory_icon(
+                item.icon.as_deref()?,
+                ((item.inventory_art? >> 4) & 3) as u8,
+            )?,
+        };
         let name = item.name.as_deref().unwrap_or("Unnamed item");
         let kind = item.category.unwrap_or("item");
         let mut tip = format!(" {name}\n {kind}");
         if let Some(q) = item.quantity {
             tip.push_str(&format!("   ×{q}"));
         }
+        if let Some(weight) = item.weight {
+            tip.push_str(&format!("   {weight} stone"));
+        }
         Some(Icon {
             id: item.id.clone(),
             side,
-            slot: item.slot?,
-            shape: item.footprint?,
+            worn,
+            slot: if worn.is_some() { 0 } else { item.slot? },
+            shape: if worn.is_some() {
+                [1, 1]
+            } else {
+                item.footprint?
+            },
             image,
             tip,
         })
     }
-    pub fn prepare(&mut self, world: &mut InteractiveWorld, size: Point) -> Result<(), String> {
+    pub fn prepare(
+        &mut self,
+        world: &mut InteractiveWorld,
+        size: Point,
+        area: hud::Rect,
+        scale: u32,
+    ) -> Result<(), String> {
         if !world.inventory_is_open() {
             if self.panel.is_some() {
                 self.close();
@@ -116,6 +168,8 @@ impl InventoryUi {
                 player,
                 contents,
                 container_name,
+                equipment,
+                statistics,
                 ..
             } = world.inventory_view();
             if self.panel.is_none() || self.container != container {
@@ -136,44 +190,70 @@ impl InventoryUi {
                     .map_err(|e| e.to_string())?,
                 );
                 self.container = container;
-                if let Some(sprite) = world.player_portrait_frame() {
-                    self.panel.as_mut().unwrap().paint_surface(
-                        Binding::PlayerPreview,
-                        |panel, _, _| {
-                            let ratio = (panel.width as f64 / sprite.width as f64)
-                                .min(panel.height as f64 / sprite.height as f64)
-                                .min(2.0);
-                            let width = (f64::from(sprite.width) * ratio).floor().max(1.) as u32;
-                            let height = (f64::from(sprite.height) * ratio).floor().max(1.) as u32;
-                            let mut portrait = hud::sprite([width, height], [0; 4]);
-                            if hud::scale_into(sprite, &mut portrait, None).is_ok() {
-                                let x = (panel.width - width) / 2;
-                                let y = (panel.height - height) / 2;
-                                for row in 0..height {
-                                    for col in 0..width {
-                                        let px = portrait.pixels[(row * width + col) as usize];
-                                        if px[3] != 0 {
-                                            panel.pixels
-                                                [((row + y) * panel.width + x + col) as usize] = px;
-                                        }
+            }
+            if let Some(sprite) = world.player_portrait_frame() {
+                self.panel.as_mut().unwrap().paint_surface(
+                    Binding::PlayerPreview,
+                    |panel, _, _| {
+                        let ratio = (panel.width as f64 / sprite.width as f64)
+                            .min(panel.height as f64 / sprite.height as f64)
+                            .min(2.0);
+                        let width = (f64::from(sprite.width) * ratio).floor().max(1.) as u32;
+                        let height = (f64::from(sprite.height) * ratio).floor().max(1.) as u32;
+                        let mut portrait = hud::sprite([width, height], [0; 4]);
+                        if hud::scale_into(sprite, &mut portrait, None).is_ok() {
+                            let x = (panel.width - width) / 2;
+                            let y = (panel.height - height) / 2;
+                            for row in 0..height {
+                                for col in 0..width {
+                                    let px = portrait.pixels[(row * width + col) as usize];
+                                    if px[3] != 0 {
+                                        panel.pixels
+                                            [((row + y) * panel.width + x + col) as usize] = px;
                                     }
                                 }
                             }
-                        },
-                    );
-                }
+                        }
+                    },
+                );
             }
             self.panel.as_mut().unwrap().set_label(
                 Binding::ContainerName,
                 container_name.as_deref().unwrap_or("Container"),
             );
+            let encumbrance = statistics
+                .encumbrance
+                .map_or("Unavailable", |value| value.name());
+            let speed = statistics
+                .speed
+                .map_or("?".into(), |speed| speed.to_string());
+            let weight = statistics
+                .weight
+                .map_or("?".into(), |weight| weight.to_string());
+            self.panel.as_mut().unwrap().set_label(
+                Binding::CharacterSummary,
+                &format!("Weight: {weight} / {} stone\nEncumbrance: {encumbrance}\nSpeed: {speed}   AC: {}",
+                    statistics.carry_capacity, statistics.armor_class),
+            );
             self.icons.clear();
+            for gear in &equipment {
+                if self
+                    .panel
+                    .as_ref()
+                    .unwrap()
+                    .native_size(equipment_binding(gear.slot))
+                    .is_some()
+                    && let Some(icon) = Self::icon(world, &gear.item, 1, Some(gear.slot))
+                {
+                    self.icons.push(icon);
+                }
+            }
             for (side, items) in [contents.as_deref().unwrap_or_default(), &player]
                 .into_iter()
                 .enumerate()
             {
                 for item in items {
-                    let icon = Self::icon(world, item, side).ok_or_else(|| {
+                    let icon = Self::icon(world, item, side, None).ok_or_else(|| {
                         format!("Unresolved inventory grid or artwork for {}", item.id)
                     })?;
                     self.icons.push(icon);
@@ -185,12 +265,11 @@ impl InventoryUi {
             self.drag = None;
             self.hovered = None;
             self.revision = Some(world.inventory_revision());
-            self.panel.as_mut().unwrap().layout(size);
+            self.panel.as_mut().unwrap().layout_in(size, area, scale);
             self.refresh();
         }
         let panel = self.panel.as_mut().unwrap();
-        panel.set_scale(self.scale);
-        panel.layout(size);
+        panel.layout_in(size, area, scale);
         self.update_thumb();
         if self.hit_item() != self.hovered {
             self.refresh();
@@ -209,11 +288,24 @@ impl InventoryUi {
             Some((side, y * 10 + x))
         })
     }
+    fn equipment_at(&self, point: Point) -> Option<EquipmentSlot> {
+        let panel = self.panel.as_ref()?;
+        EquipmentSlot::ALL.into_iter().find(|&slot| {
+            panel
+                .bounds(equipment_binding(slot))
+                .is_some_and(|(rect, _)| rect.contains(point))
+        })
+    }
+
     fn hit_item(&self) -> Option<usize> {
-        let (side, slot) = self.cell(self.cursor?)?;
+        let point = self.cursor?;
+        if let Some(slot) = self.equipment_at(point) {
+            return self.icons.iter().position(|i| i.worn == Some(slot));
+        }
+        let (side, slot) = self.cell(point)?;
         self.icons
             .iter()
-            .position(|i| i.side == side && i.contains(slot))
+            .position(|i| i.worn.is_none() && i.side == side && i.contains(slot))
     }
     fn tooltip(&mut self) {
         if let Some(panel) = self.panel.as_mut() {
@@ -260,7 +352,7 @@ impl InventoryUi {
                     .icons
                     .iter()
                     .enumerate()
-                    .filter(|(_, i)| i.side == side)
+                    .filter(|(_, i)| i.worn.is_none() && i.side == side)
                 {
                     if self.drag.as_ref().is_some_and(|d| d.id == i.id) {
                         continue;
@@ -299,6 +391,31 @@ impl InventoryUi {
                 }
             });
         }
+        for slot in EquipmentSlot::ALL {
+            let equipped = self
+                .icons
+                .iter()
+                .find(|i| i.worn == Some(slot) && self.drag.as_ref().is_none_or(|d| d.id != i.id));
+            panel.paint_surface(equipment_binding(slot), |frame, _, _| {
+                let Some(icon) = equipped else { return };
+                frame.pixels.fill([0; 4]);
+                let src = &icon.image.decoded.frame;
+                let ratio = (f64::from(frame.width) / f64::from(src.width))
+                    .min(f64::from(frame.height) / f64::from(src.height))
+                    .min(1.);
+                let w = (f64::from(src.width) * ratio).floor().max(1.) as u32;
+                let h = (f64::from(src.height) * ratio).floor().max(1.) as u32;
+                let mut image = hud::sprite([w, h], [0; 4]);
+                hud::scale_into(src, &mut image, None).expect("valid equipment frame");
+                let (x, y) = ((frame.width - w) / 2, (frame.height - h) / 2);
+                for row in 0..h {
+                    let dest = ((row + y) * frame.width + x) as usize;
+                    let source = (row * w) as usize;
+                    frame.pixels[dest..dest + w as usize]
+                        .copy_from_slice(&image.pixels[source..source + w as usize]);
+                }
+            });
+        }
         self.tooltip();
     }
     fn last_row(&self, side: usize) -> usize {
@@ -310,7 +427,7 @@ impl InventoryUi {
         let end = self
             .icons
             .iter()
-            .filter(|i| i.side == side)
+            .filter(|i| i.worn.is_none() && i.side == side)
             .map(|i| i.slot / 10 + i.shape[1])
             .max()
             .unwrap_or(0);
@@ -374,11 +491,13 @@ impl InventoryUi {
         let Some([width, height]) = panel.lens_size() else {
             return Ok(());
         };
-        let Some(center) = world.player_anchor(elapsed) else {
+        let Some((center, body_art)) = world.player_anchor(elapsed).zip(world.player_art_id())
+        else {
             return Ok(());
         };
         if let Some(lens) = &self.lens
             && lens.center == center
+            && lens.body_art == body_art
             && lens.asset.decoded.frame.width == rect.w
             && lens.asset.decoded.frame.height == rect.h
             && lens.next.is_none_or(|next| elapsed < next)
@@ -413,6 +532,7 @@ impl InventoryUi {
         panel.set_lens_asset(Arc::clone(&asset));
         self.lens = Some(Lens {
             asset,
+            body_art,
             center,
             next,
         });
@@ -422,18 +542,23 @@ impl InventoryUi {
     fn start_drag(&mut self) {
         let Some(index) = self.hit_item() else { return };
         let item = &self.icons[index];
-        let (_, cell) = self.cell(self.cursor.unwrap()).unwrap();
-        let (r, _) = self
-            .panel
-            .as_ref()
-            .unwrap()
-            .bounds(SIDES[item.side])
-            .unwrap();
+        let panel = self.panel.as_ref().unwrap();
+        let (scale, offset) = if let Some(slot) = item.worn {
+            let (_, scale) = panel.bounds(equipment_binding(slot)).unwrap();
+            (scale, [0, 0])
+        } else {
+            let (_, cell) = self.cell(self.cursor.unwrap()).unwrap();
+            let (rect, _) = panel.bounds(SIDES[item.side]).unwrap();
+            (
+                rect.w * 100 / 320,
+                [cell % 10 - item.slot % 10, cell / 10 - item.slot / 10],
+            )
+        };
         let src = &item.image.decoded.frame;
         let mut frame = hud::sprite(
             [
-                (src.width * r.w / 320).max(1),
-                (src.height * r.w / 320).max(1),
+                (src.width * scale / 100).max(1),
+                (src.height * scale / 100).max(1),
             ],
             [0; 4],
         );
@@ -441,7 +566,8 @@ impl InventoryUi {
         self.drag = Some(Drag {
             id: item.id.clone(),
             side: item.side,
-            offset: [cell % 10 - item.slot % 10, cell / 10 - item.slot / 10],
+            worn: item.worn,
+            offset,
             image: hud::generated_frame("held-item", frame),
         });
         self.selected = Some(item.id.clone());
@@ -471,7 +597,21 @@ impl InventoryUi {
             }
             return;
         };
-        if let Some((side, slot)) = self.cell(point) {
+        if let Some(worn) = drag.worn {
+            if let Some((1, cell)) = self.cell(point) {
+                self.notice = world
+                    .unequip_inventory_item(worn, Some(cell))
+                    .err()
+                    .unwrap_or_default();
+            }
+        } else if let Some(slot) = self.equipment_at(point) {
+            if drag.side == 1 {
+                self.notice = world
+                    .equip_inventory_item(&drag.id, slot)
+                    .err()
+                    .unwrap_or_default();
+            }
+        } else if let Some((side, slot)) = self.cell(point) {
             let x = (slot % 10).checked_sub(drag.offset[0]);
             let y = (slot / 10).checked_sub(drag.offset[1]);
             if let (Some(x), Some(y)) = (x, y) {
@@ -529,34 +669,40 @@ impl InventoryUi {
 }
 
 impl Viewer<'_> {
-    pub(super) fn inventory_event(&mut self, event: &WindowEvent) -> bool {
+    pub(super) fn inventory_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        event: &WindowEvent,
+    ) -> bool {
         if self.pause.is_some() || self.map_since.is_some() {
             return false;
         }
         let ViewContent::Stream {
             world,
             inventory: Some(ui),
+            hud,
             ..
         } = &mut self.content
         else {
             return false;
         };
-        let window = &self.view.as_ref().unwrap().window;
+        if let WindowEvent::KeyboardInput {
+            event,
+            is_synthetic: false,
+            ..
+        } = event
+            && event.state.is_pressed()
+            && !event.repeat
+            && matches!(event.logical_key.as_ref(), Key::Character("i" | "I"))
+        {
+            self.hud_action(Action::OpenInventory, event_loop);
+            return true;
+        }
         if !world.inventory_is_open() {
-            if let WindowEvent::KeyboardInput { event, .. } = event
-                && event.state.is_pressed()
-                && !event.repeat
-                && matches!(event.logical_key.as_ref(), Key::Character("i" | "I"))
-            {
-                if world.inventory_open(None).is_ok() {
-                    self.navigation = Navigation::default();
-                    self.player_deadline = world.player_moving().then_some(Instant::now());
-                }
-                window.request_redraw();
-                return true;
-            }
             return false;
         }
+        let window = &self.view.as_ref().unwrap().window;
+        let allow_hud_toggle = !ui.scrolling && ui.drag.is_none();
         match event {
             WindowEvent::KeyboardInput { event, .. }
                 if event.state.is_pressed() && !event.repeat =>
@@ -564,15 +710,20 @@ impl Viewer<'_> {
                 match event.logical_key.as_ref() {
                     Key::Named(NamedKey::Escape) if ui.scrolling => ui.scrolling = false,
                     Key::Named(NamedKey::Escape) if ui.drag.take().is_some() => ui.refresh(),
-                    Key::Named(NamedKey::Escape) | Key::Character("i" | "I") => {
-                        world.close_inventory()
-                    }
+                    Key::Named(NamedKey::Escape) => world.close_inventory(),
                     Key::Character("d" | "D") => ui.drop_selected(world),
                     _ => return true,
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let pixel = (position.x as u32, position.y as u32);
+                let hud_changed = hud.as_mut().is_some_and(|hud| {
+                    hud.hover(
+                        (allow_hud_toggle
+                            && hud.hit(pixel) == hud::Hit::Button(Action::OpenInventory))
+                        .then_some(pixel),
+                    )
+                });
                 let point = Some(pixel);
                 self.cursor = point;
                 ui.cursor = point;
@@ -585,7 +736,7 @@ impl Viewer<'_> {
                 let changed = ui.panel.as_mut().is_some_and(|p| p.hover(point));
                 if ui.hovered != ui.hit_item() {
                     ui.refresh();
-                } else if ui.hovered.is_none() && ui.drag.is_none() && !changed {
+                } else if ui.hovered.is_none() && ui.drag.is_none() && !changed && !hud_changed {
                     return true;
                 } else {
                     ui.tooltip();
@@ -593,6 +744,27 @@ impl Viewer<'_> {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let Some(p) = self.cursor else { return true };
+                if *button == MouseButton::Left
+                    && let Some(hud) = hud.as_mut()
+                {
+                    if state.is_pressed()
+                        && allow_hud_toggle
+                        && hud.hit(p) == hud::Hit::Button(Action::OpenInventory)
+                    {
+                        hud.press(p);
+                        window.request_redraw();
+                        return true;
+                    }
+                    if !state.is_pressed() && hud.is_pressed() {
+                        let action = allow_hud_toggle.then(|| hud.release(p)).flatten();
+                        hud.cancel_press();
+                        window.request_redraw();
+                        if action == Some(Action::OpenInventory) {
+                            self.hud_action(Action::OpenInventory, event_loop);
+                        }
+                        return true;
+                    }
+                }
                 ui.cursor = Some(p);
                 ui.notice.clear();
                 match (*button, state.is_pressed()) {
@@ -612,13 +784,28 @@ impl Viewer<'_> {
                         }
                     }
                     (MouseButton::Left, false) if ui.scrolling => ui.scrolling = false,
+                    (MouseButton::Left, false)
+                        if ui.drag.is_some()
+                            && hud.as_ref().is_some_and(|hud| {
+                                hud.hit(p) == hud::Hit::Button(Action::OpenInventory)
+                            }) =>
+                    {
+                        ui.drag = None;
+                        ui.refresh();
+                    }
                     (MouseButton::Left, false) => ui.release(world, p),
-                    (MouseButton::Right, false) if ui.container.is_some() => {
+                    (MouseButton::Right, false) => {
                         if let Some(i) = ui.hit_item() {
-                            let id = ui.icons[i].id.clone();
-                            let op = if ui.icons[i].side == 1 { "put" } else { "take" };
-                            let owner = ui.container.clone();
-                            ui.commit(world, &id, op, owner.as_deref(), None);
+                            if let Some(slot) = ui.icons[i].worn {
+                                ui.notice = world
+                                    .unequip_inventory_item(slot, None)
+                                    .err()
+                                    .unwrap_or_default();
+                            } else if let Some(owner) = ui.container.clone() {
+                                let id = ui.icons[i].id.clone();
+                                let op = if ui.icons[i].side == 1 { "put" } else { "take" };
+                                ui.commit(world, &id, op, Some(&owner), None);
+                            }
                         }
                     }
                     _ => return true,
@@ -634,6 +821,10 @@ impl Viewer<'_> {
                 }
             }
             WindowEvent::CursorLeft { .. } | WindowEvent::Focused(false) => {
+                if let Some(hud) = hud {
+                    hud.cancel_press();
+                    hud.hover(None);
+                }
                 self.cursor = None;
                 ui.cursor = None;
                 ui.drag = None;

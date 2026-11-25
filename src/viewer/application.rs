@@ -37,10 +37,18 @@ fn edge_direction((x, y): (u32, u32), (width, height): (u32, u32), band: u32) ->
 
 impl Viewer<'_> {
     pub(super) fn persist(&self, section: &str, key: &str, value: impl Into<toml::Value>) {
+        self.persist_values(section, [(key, value.into())]);
+    }
+
+    fn persist_values<'a>(
+        &self,
+        section: &str,
+        values: impl IntoIterator<Item = (&'a str, toml::Value)>,
+    ) {
         if let Some(app) = &self.application
-            && let Err(e) = app.persist(section, key, value)
+            && let Err(e) = app.persist_values(section, values)
         {
-            let message = format!("Could not save {section}.{key}: {e}");
+            let message = format!("Could not save {section} settings: {e}");
             eprintln!("{message}");
             if let Some(view) = &self.view {
                 view.window.set_title(&message);
@@ -103,7 +111,15 @@ impl Viewer<'_> {
         } else {
             motion
         };
-        let delta = nav.advance_delta(now, motion, f64::from(self.camera_preferences.speed), last);
+        let speed = f64::from(self.camera_preferences.speed);
+        // CE scroll.c uses 20 × 10 projected pixels per tick at Normal,
+        // plus 4 × 2 on diagonals. The reference installation runs at 60 Hz.
+        let diagonal = if motion.0 != 0 && motion.1 != 0 {
+            1.2
+        } else {
+            1.
+        };
+        let delta = nav.advance_delta(now, motion, (speed * diagonal, speed * diagonal / 2.), last);
         if delta == (0, 0) {
             return false;
         }
@@ -174,14 +190,38 @@ impl Viewer<'_> {
                 Some(self.menu_scale)
             }
             "map" => map_ui.as_mut().map(|m| m.adjust_scale(step)),
-            "inventory" => inventory.as_mut().map(|ui| {
-                ui.scale = scale_step(ui.scale, step);
-                ui.scale
-            }),
-            _ => hud.as_mut().map(|hud| {
-                hud.adjust_scale(step);
-                hud.scale()
-            }),
+            _ => {
+                if let Some(current) = hud
+                    .as_ref()
+                    .map(|hud| hud.scale())
+                    .or_else(|| inventory.as_ref().map(|ui| ui.scale))
+                {
+                    let viewport = self.view.as_ref().unwrap().window.inner_size();
+                    let (_, fit) = hud::gameplay_layout(
+                        (viewport.width, viewport.height),
+                        hud.as_deref(),
+                        inventory.as_ref().map(|ui| ui.extent),
+                        300,
+                    );
+                    let maximum = (fit as u16).max(50);
+                    let scale = scale_step(current.min(maximum), step).min(maximum);
+                    if scale == current {
+                        return true;
+                    }
+                    if let Some(hud) = hud {
+                        hud.set_scale(scale);
+                    }
+                    if let Some(ui) = inventory {
+                        ui.scale = scale;
+                    }
+                    self.persist_values(
+                        "ui",
+                        ["hud_scale", "inventory_scale"].map(|key| (key, i64::from(scale).into())),
+                    );
+                    self.view.as_ref().unwrap().window.request_redraw();
+                }
+                return true;
+            }
         };
         if let Some(scale) = scale {
             self.persist("ui", &format!("{group}_scale"), i64::from(scale));
@@ -217,14 +257,11 @@ impl Viewer<'_> {
                     let view = self.view.as_ref().unwrap();
                     let size = view.window.inner_size();
                     let point = (position.x as u32, position.y as u32);
-                    let over_hud = matches!(&self.content,ViewContent::Stream{hud:Some(hud),..} if hud.hit(point)!=hud::Hit::World);
-                    if !over_hud {
-                        next = edge_direction(
-                            point,
-                            (size.width, size.height),
-                            (8. * view.window.scale_factor()).round() as u32,
-                        );
-                    }
+                    next = edge_direction(
+                        point,
+                        (size.width, size.height),
+                        (8. * view.window.scale_factor()).round() as u32,
+                    );
                 }
                 if next != self.edge_direction {
                     self.edge_direction = next;

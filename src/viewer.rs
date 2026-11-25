@@ -240,6 +240,12 @@ pub fn show_stream(
         )
         .map_err(|error| format!("cannot start sector preparation worker: {error}"))?;
     world.follow_player(Duration::ZERO, &mut camera);
+    let inventory = inventory_theme.map(|(path, scale)| {
+        Box::new(inventory::InventoryUi::new(
+            path,
+            hud.as_ref().map_or(scale, |hud| hud.scale()),
+        ))
+    });
     run_content(
         title,
         ViewContent::Stream {
@@ -258,7 +264,7 @@ pub fn show_stream(
             travel,
             hud,
             map_ui,
-            inventory: inventory_theme.map(|(p, s)| Box::new(inventory::InventoryUi::new(p, s))),
+            inventory,
         },
         PhysicalSize::<u32>::from(size).into(),
         event_loop,
@@ -455,36 +461,37 @@ impl Navigation {
             self.remainder = (0., 0.);
             return (0, 0);
         }
-        self.advance_delta(now, self.direction(), if fast { 1000. } else { 300. }, last)
+        let direction = self.direction();
+        let speed = if fast { 1000. } else { 300. }
+            / if direction.0 != 0 && direction.1 != 0 {
+                std::f64::consts::SQRT_2
+            } else {
+                1.
+            };
+        self.advance_delta(now, direction, (speed, speed), last)
     }
 
     fn advance_delta(
         &mut self,
         now: Instant,
         (x, y): (i32, i32),
-        speed: f64,
+        speed: (f64, f64),
         last: Instant,
     ) -> (i32, i32) {
-        let distance = speed
-            * now
-                .saturating_duration_since(last)
-                .min(Duration::from_millis(100))
-                .as_secs_f64()
-            / if x != 0 && y != 0 {
-                std::f64::consts::SQRT_2
-            } else {
-                1.
-            };
+        let elapsed = now
+            .saturating_duration_since(last)
+            .min(Duration::from_millis(100))
+            .as_secs_f64();
         // These quanta preserve exact integer steps in both inverse isometric axes.
-        let axis = |sign, quantum: f64, remainder: &mut f64| {
-            let value = *remainder + f64::from(sign) * distance;
+        let axis = |sign, speed: f64, quantum: f64, remainder: &mut f64| {
+            let value = *remainder + f64::from(sign) * speed * elapsed;
             let step = (value / quantum).trunc() * quantum;
             *remainder = value - step;
             step as i32
         };
         (
-            axis(x, 4., &mut self.remainder.0),
-            axis(y, 2., &mut self.remainder.1),
+            axis(x, speed.0, 4., &mut self.remainder.0),
+            axis(y, speed.1, 2., &mut self.remainder.1),
         )
     }
 }
@@ -669,10 +676,27 @@ impl Viewer<'_> {
             hud::Action::ToggleRun => self.settings.run = !self.settings.run,
             hud::Action::ResetZoom => self.settings.zoom = 1,
             hud::Action::OpenInventory => {
-                if let ViewContent::Stream { world, .. } = &mut self.content {
-                    let _ = world.inventory_open(None);
+                if let ViewContent::Stream {
+                    world,
+                    inventory,
+                    hud,
+                    ..
+                } = &mut self.content
+                {
+                    if let Some(hud) = hud {
+                        hud.cancel_press();
+                    }
+                    if world.inventory_is_open() {
+                        if let Some(ui) = inventory {
+                            ui.close();
+                        }
+                        world.close_inventory();
+                    } else {
+                        let _ = world.inventory_open(None);
+                    }
                     self.navigation = Navigation::default();
                     self.player_deadline = world.player_moving().then_some(Instant::now());
+                    self.update_control_flow(event_loop);
                 }
             }
             hud::Action::OpenMap => self.open_map(event_loop),
@@ -1257,7 +1281,7 @@ impl ApplicationHandler for Viewer<'_> {
             return;
         }
         if self.developer_event(event_loop, &event)
-            || self.inventory_event(&event)
+            || self.inventory_event(event_loop, &event)
             || self.map_event(event_loop, &event)
         {
             return;
@@ -1378,12 +1402,20 @@ impl ApplicationHandler for Viewer<'_> {
         if let ViewContent::Stream {
             hud: Some(hud),
             shift,
+            inventory,
             ..
         } = &mut self.content
         {
             let view = self.view.as_ref().unwrap();
             let size = view.window.inner_size();
-            hud.layout((size.width, size.height));
+            let size = (size.width, size.height);
+            let (_, scale) = hud::gameplay_layout(
+                size,
+                Some(hud),
+                inventory.as_ref().map(|ui| ui.extent),
+                hud.scale(),
+            );
+            hud.layout_in(size, hud::Rect::viewport(size), scale);
             if let WindowEvent::KeyboardInput {
                 event: key,
                 is_synthetic: false,
@@ -1804,8 +1836,28 @@ impl Viewer<'_> {
                                 hud.set_travel_available(map_ui.can_travel());
                             }
                         }
+                        let resolution = (size.width, size.height);
+                        let requested = hud
+                            .as_ref()
+                            .map(|hud| hud.scale())
+                            .or_else(|| inventory.as_ref().map(|inventory| inventory.scale))
+                            .unwrap_or(100);
+                        let (inventory_area, shared_scale) = hud::gameplay_layout(
+                            resolution,
+                            hud.as_deref(),
+                            inventory.as_ref().map(|ui| ui.extent),
+                            requested,
+                        );
+                        if let Some(hud) = hud {
+                            hud.layout_in(
+                                resolution,
+                                hud::Rect::viewport(resolution),
+                                shared_scale,
+                            );
+                        }
                         if let Some(ui) = inventory
-                            && let Err(e) = ui.prepare(world, (size.width, size.height))
+                            && let Err(e) =
+                                ui.prepare(world, resolution, inventory_area, shared_scale)
                         {
                             eprintln!("Inventory UI: {e}");
                             view.window.set_title(&e);
@@ -1970,7 +2022,6 @@ impl WindowSurface {
                     .inventory_is_open()
                     .then_some(hud::Action::OpenInventory),
             );
-            hud.layout((size.width, size.height));
             &*hud
         });
         let cursor =

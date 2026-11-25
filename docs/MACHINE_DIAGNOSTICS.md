@@ -209,6 +209,9 @@ authored-sector raster preparation by object category and ART origin.
 
 `approachobject GUID` schedules the ordinary approach and use action. Poll inventory or owner for the resulting change. `openinventory [CONTAINER_GUID]` enforces ordinary reach and access checks. `closeinventory` dismisses the interface. `transfer take GUID [CONTAINER_GUID]`, `transfer put GUID CONTAINER_GUID` and `transfer drop GUID` use the same transaction as mouse input. Successful transfers report the item identity and both placements. Access or placement failures return `transfer_rejected` and retain the original state. Read-only queries do not schedule presentation. See [Session objects and inventory](RUNTIME_INVENTORY.md) for scope and storage lifetime.
 
+`character` returns base statistics, effective primary attributes, carry weight and capacity, encumbrance, speed, AC and resistances. `inventory.result.equipment` lists worn slot and original item together. `equip GUID SLOT` and `unequip SLOT [CELL]` share the UI's validated transactions. They return the equipped and displaced identities, the destination cell if applicable and updated statistics and player ART paths. Invalid transactions return `equipment_rejected`. Weight and speed can be null where calculation requires unsupported data. `owner.result.current.kind` can be `equipped` with the corresponding slot. Session-created objects use `runtime:N` item IDs and retain the winning prototype as their source. `pos.result.player.appearance` lists the current standing, walking and running ART paths. See [equipment rules](RUNTIME_INVENTORY.md#equipment-and-character-statistics) for stat ordering and the supported modifier subset.
+
+
 
 With developer tracing enabled, `rpc events player_frame` reports submitted
 movement frames, sampled player anchors, the camera position and host-side

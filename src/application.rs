@@ -61,7 +61,7 @@ impl Default for Camera {
             zoom: 1,
             follow: false,
             edge_scroll: true,
-            speed: 300,
+            speed: 1200,
             recenter: "Home".into(),
             follow_toggle: "F7".into(),
         }
@@ -333,11 +333,10 @@ impl Application {
         Ok(flags)
     }
 
-    pub fn persist<T: Into<toml::Value>>(
+    pub fn persist_values<'a>(
         &self,
         section: &str,
-        key: &str,
-        value: T,
+        values: impl IntoIterator<Item = (&'a str, toml::Value)>,
     ) -> Result<(), Box<dyn Error>> {
         let mut table: toml::Table = match fs::read_to_string(&self.source) {
             Ok(text) => {
@@ -352,7 +351,7 @@ impl Application {
             .or_insert_with(|| toml::Value::Table(toml::Table::new()))
             .as_table_mut()
             .ok_or("Configuration section must be a table")?
-            .insert(key.into(), value.into());
+            .extend(values.into_iter().map(|(key, value)| (key.into(), value)));
         let text = toml::to_string_pretty(&table)?;
         Self::parse(&text)?;
         let parent = self.source.parent().unwrap();
@@ -447,16 +446,27 @@ mod tests {
             ["--debug", "--ui", "off", "--map", "5031"].map(OsString::from)
         );
         assert_eq!(fs::read_to_string(&source).unwrap(), input);
-        app.persist("ui", "inventory_scale", 175_i64).unwrap();
+        app.persist_values(
+            "ui",
+            [
+                ("hud_scale", 175_i64.into()),
+                ("inventory_scale", 175_i64.into()),
+            ],
+        )
+        .unwrap();
         let saved = fs::read_to_string(&source).unwrap();
         let prefs = Application::parse(&saved).unwrap();
         assert_eq!(prefs.ui.map_scale, Some(200));
         assert_eq!(prefs.ui.inventory_scale, Some(175));
+        assert_eq!(prefs.ui.hud_scale, Some(175));
         assert_eq!(
             toml::from_str::<toml::Table>(&saved).unwrap()["extension"]["key"].as_str(),
             Some("retained")
         );
-        assert!(app.persist("camera", "zoom", 4_i64).is_err());
+        assert!(
+            app.persist_values("camera", [("zoom", 4_i64.into())])
+                .is_err()
+        );
         assert_eq!(fs::read_to_string(&source).unwrap(), saved);
         fs::remove_dir_all(dir).unwrap();
     }

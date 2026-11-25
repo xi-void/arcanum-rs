@@ -61,13 +61,31 @@ impl InteractiveWorld {
         })
     }
 
-    pub fn debug_door_at(&self, tile: Tile) -> Option<DebugObject> {
+    pub fn debug_lockable_at(&self, tile: Tile) -> Option<DebugObject> {
         let sector = tile_sector_id(tile);
         let (cached, _) = self.cache.entries.get(&sector)?;
-        let [key] = cached.doors_at.get(&tile)?.as_slice() else {
-            return None;
-        };
-        Some(DebugObject { sector, key: *key })
+        if let Some(doors) = cached.doors_at.get(&tile) {
+            let [key] = doors.as_slice() else { return None };
+            return Some(DebugObject { sector, key: *key });
+        }
+        let mut containers = cached.interactions.iter().filter_map(|(&key, target)| {
+            if let interaction::Action::Inventory(id) = target.action
+                && target.tile == tile
+                && cached
+                    .mobiles
+                    .iter()
+                    .any(|entry| entry.id == id && entry.category == 2)
+            {
+                Some(key)
+            } else {
+                None
+            }
+        });
+        let key = containers.next()?;
+        containers
+            .next()
+            .is_none()
+            .then_some(DebugObject { sector, key })
     }
 
     pub fn debug_selection_id(object: DebugObject) -> (u64, usize) {
@@ -187,7 +205,10 @@ impl InteractiveWorld {
                 interaction::Action::Door(door) => {
                     self.cache.door_states.diagnostic(door, self.cache.hour)
                 }
-                interaction::Action::Inventory(id) => json!({"kind":"inventory","id":id.key()}),
+                interaction::Action::Inventory(id) => self
+                    .cache
+                    .container_lock_status(*id)
+                    .unwrap_or_else(|| json!({"kind":"inventory","id":id.key()})),
                 interaction::Action::Travel(dst) => json!({"kind":"transition","destination":dst}),
                 interaction::Action::Unsupported(reason) => {
                     json!({"kind":"unsupported","reason":reason})
@@ -353,9 +374,10 @@ impl InteractiveWorld {
             .entries
             .get(&object.sector)
             .and_then(|(sector, _)| sector.interactions.get(&object.key))
-            .ok_or("Selected object has no supported door action")?;
+            .ok_or("Selected object has no supported lock action")?;
         match &target.action {
             interaction::Action::Door(door) => self.cache.door_states.unlock(door),
+            interaction::Action::Inventory(id) => self.cache.unlock_container(*id),
             _ => Err("Selected object has a scripted or unsupported action".into()),
         }
     }

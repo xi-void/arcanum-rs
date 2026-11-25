@@ -1826,6 +1826,7 @@ impl SectorCache {
         let entries = &self.entries;
         let states = &self.door_states;
         let player = self.player.as_mut()?;
+        player.set_movement_speed(self.inventory.movement_speed);
         player.update(input, run, now, |tile, facing| {
             if self.collision_disabled {
                 Self::unrestricted_step(entries, tile, facing)
@@ -3109,7 +3110,7 @@ mod tests {
         let still = world.cache.player.as_ref().unwrap().sample(Duration::ZERO);
         assert_eq!(
             still.asset.source.virtual_path,
-            "art/critter/hmm/hmmv1xaa.art"
+            "art/critter/hmm/hmmuwxaa.art"
         );
         assert_eq!(still.anchor, (0, 0));
         world.cache.update_player((-1, 1), false, Duration::ZERO);
@@ -3126,7 +3127,7 @@ mod tests {
             .sample(Duration::from_millis(60));
         assert_eq!(
             stepping.asset.source.virtual_path,
-            "art/critter/hmm/hmmv1xab.art"
+            "art/critter/hmm/hmmuwxab.art"
         );
         let destination = world
             .cache
@@ -3150,7 +3151,7 @@ mod tests {
             .sample(Duration::from_millis(3050));
         assert_eq!(
             running.asset.source.virtual_path,
-            "art/critter/hmm/hmmv1xag.art"
+            "art/critter/hmm/hmmuwxag.art"
         );
         assert_ne!(running.anchor, destination);
         world
@@ -3164,7 +3165,7 @@ mod tests {
             .sample(Duration::from_millis(5050));
         assert_eq!(
             resumed.asset.source.virtual_path,
-            "art/critter/hmm/hmmv1xab.art"
+            "art/critter/hmm/hmmuwxab.art"
         );
     }
 

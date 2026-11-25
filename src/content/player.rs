@@ -12,11 +12,13 @@ pub(super) mod path;
 
 type Tile = (u32, u32);
 
-// Original male human, v1 clothing, unarmed, standing. No persistent object is spawned.
-const PLAYER_ART: u32 = 0x2810_2000;
+pub(super) struct Appearance {
+    pub(super) art: u32,
+    directions: [Direction; 8],
+}
 
 pub(super) struct Player {
-    directions: [Direction; 8],
+    pub(super) appearance: Arc<Appearance>,
     reference: Tile,
     tile: Tile,
     facing: u8,
@@ -25,6 +27,10 @@ pub(super) struct Player {
     route: VecDeque<u8>,
     route_runs: bool,
     running: bool,
+    movement_speed: Option<i32>,
+    phase_period: Duration,
+    phase_frames: usize,
+    phase_offset: Duration,
 }
 
 struct Direction {
@@ -141,13 +147,13 @@ impl Direction {
     }
 }
 
-impl Player {
+impl Appearance {
     pub(super) fn load(
         vfs: &mut Vfs,
         frames: &mut FrameCache,
-        start: Tile,
+        art: u32,
     ) -> Result<Self, Box<dyn Error>> {
-        let stand = Pose::decode(PLAYER_ART, None)?;
+        let stand = Pose::decode(art, None)?;
         let standing = (0..8)
             .map(|dir| stand.clone().in_direction(dir).load(vfs, frames, 0))
             .collect::<Result<Vec<_>, _>>()?;
@@ -156,6 +162,7 @@ impl Player {
         let mut standing = standing.into_iter();
         let mut strides = walk.into_iter().zip(run);
         Ok(Self {
+            art,
             directions: std::array::from_fn(|_| {
                 let (walk, run) = strides.next().expect("eight movement directions");
                 Direction {
@@ -164,6 +171,20 @@ impl Player {
                     run,
                 }
             }),
+        })
+    }
+}
+
+impl Player {
+    pub(super) fn load(
+        vfs: &mut Vfs,
+        frames: &mut FrameCache,
+        start: Tile,
+    ) -> Result<Self, Box<dyn Error>> {
+        let art = super::character::Character::default().body_art(None)?;
+        let appearance = Arc::new(Appearance::load(vfs, frames, art)?);
+        Ok(Self {
+            appearance,
             reference: start,
             tile: start,
             facing: 4,
@@ -172,7 +193,34 @@ impl Player {
             route: VecDeque::new(),
             route_runs: false,
             running: false,
+            movement_speed: None,
+            phase_period: Duration::ZERO,
+            phase_frames: 0,
+            phase_offset: Duration::ZERO,
         })
+    }
+
+    pub(super) fn standing_frame(&self) -> &LoadedFrame {
+        &self.appearance.directions[usize::from(self.facing)].stand
+    }
+
+    pub(super) fn appearance_report(&self) -> serde_json::Value {
+        let dir = &self.appearance.directions[usize::from(self.facing)];
+        serde_json::json!({
+            "art": self.appearance.art,
+            "standing": dir.stand.source.virtual_path,
+            "walking": dir.walk.frames.first().map(|asset| &asset.source.virtual_path),
+            "running": dir.run.frames.first().map(|asset| &asset.source.virtual_path),
+        })
+    }
+
+    fn cycle_phase(&self, now: Duration) -> f64 {
+        let cycle = self.phase_period.as_nanos() * self.phase_frames as u128;
+        if cycle == 0 {
+            return 0.;
+        }
+        let elapsed = now.saturating_sub(self.phase_start) + self.phase_offset;
+        (elapsed.as_nanos() % cycle) as f64 / cycle as f64
     }
 
     pub(super) fn facing(&self) -> u8 {
@@ -252,6 +300,10 @@ impl Player {
         self.route.clear();
     }
 
+    pub(super) fn set_movement_speed(&mut self, speed: Option<i32>) {
+        self.movement_speed = speed;
+    }
+
     pub(super) fn update(
         &mut self,
         input: (i32, i32),
@@ -281,8 +333,36 @@ impl Player {
                 .map(|direction| (direction, self.route_runs))
         });
         if let Some((direction, running)) = intent {
-            if !continuing || direction != self.facing || running != self.running {
+            let gait = self.appearance.directions[usize::from(direction)].gait(running);
+            let period = self.movement_speed.map_or(gait.frame_period, |speed| {
+                let (normal, low, high) = if running { (20, 8, 30) } else { (17, 6, 30) };
+                // CE adds four to all three cadence parameters for small bodies.
+                let bonus = if matches!((self.appearance.art >> 24) & 7, 1 | 2) {
+                    4
+                } else {
+                    0
+                };
+                let (normal, low, high) = (normal + bonus, low + bonus, high + bonus);
+                // CE sub_437990: speed 8 uses the authored fps.
+                let fps = match speed {
+                    ..=7 => low + speed * (normal - low) / 8,
+                    8 => return gait.frame_period,
+                    9..=29 => normal + speed * (high - normal) / 30,
+                    _ => high,
+                };
+                Duration::from_millis((1000 / fps).clamp(30, 800) as u64)
+            });
+            let same_gait = continuing && direction == self.facing && running == self.running;
+            if !same_gait || self.phase_period != period || self.phase_frames != gait.frames.len() {
+                let phase = if same_gait {
+                    self.cycle_phase(start)
+                } else {
+                    0.
+                };
                 self.phase_start = start;
+                self.phase_period = period;
+                self.phase_frames = gait.frames.len();
+                self.phase_offset = period.mul_f64(phase * gait.frames.len() as f64);
             }
             self.facing = direction;
             self.running = running;
@@ -290,9 +370,9 @@ impl Player {
                 self.step = Some(Step {
                     to,
                     start,
-                    duration: self.directions[usize::from(direction)]
-                        .gait(running)
-                        .tile_period,
+                    duration: gait
+                        .tile_period
+                        .mul_f64(period.as_secs_f64() / gait.frame_period.as_secs_f64()),
                 });
             } else {
                 self.cancel_route();
@@ -301,7 +381,7 @@ impl Player {
     }
 
     pub(super) fn sample(&self, now: Duration) -> Sample<'_> {
-        let direction = &self.directions[usize::from(self.facing)];
+        let direction = &self.appearance.directions[usize::from(self.facing)];
         let center =
             |tile| project_world_tile(tile, self.reference).expect("bounded player projection");
         let origin = center(self.tile);
@@ -327,10 +407,9 @@ impl Player {
         );
         let c = center(tile);
         let gait = direction.gait(self.running);
-        let phase =
-            now.saturating_sub(self.phase_start).as_millis() / gait.frame_period.as_millis();
+        let phase = (self.cycle_phase(now) * gait.frames.len() as f64).floor() as usize;
         Sample {
-            asset: &gait.frames[(phase % gait.frames.len() as u128) as usize],
+            asset: &gait.frames[phase.min(gait.frames.len() - 1)],
             tile,
             offset: (anchor.0 - c.0, anchor.1 - c.1),
             anchor,

@@ -571,16 +571,15 @@ impl InteractiveWorld {
     }
 
     pub fn player_portrait_frame(&self) -> Option<&crate::art::SpriteFrame> {
-        Some(
-            &self
-                .cache
-                .player
-                .as_ref()?
-                .sample(Duration::ZERO)
-                .asset
-                .decoded
-                .frame,
-        )
+        Some(&self.cache.player.as_ref()?.standing_frame().decoded.frame)
+    }
+
+    pub fn player_art_id(&self) -> Option<u32> {
+        Some(self.cache.player.as_ref()?.appearance.art)
+    }
+
+    pub fn player_appearance(&self) -> Option<serde_json::Value> {
+        self.cache.player.as_ref().map(Player::appearance_report)
     }
 
     pub fn committed_player_tile(&self) -> Option<(u32, u32)> {

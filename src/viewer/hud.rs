@@ -98,6 +98,16 @@ pub(super) enum Binding {
     ContainerGrid,
     PlayerGrid,
     InventoryDetail,
+    CharacterSummary,
+    EquipmentHelmet,
+    EquipmentRing1,
+    EquipmentRing2,
+    EquipmentMedallion,
+    EquipmentWeapon,
+    EquipmentShield,
+    EquipmentArmor,
+    EquipmentGauntlet,
+    EquipmentBoots,
     InventoryDrop,
     InventoryScrollTrack,
     InventoryScrollThumb,
@@ -123,12 +133,28 @@ impl Binding {
         matches!(
             self,
             Self::InventoryDetail
+                | Self::CharacterSummary
                 | Self::ContainerName
                 | Self::MapTitle
                 | Self::MapWest
                 | Self::MapSouth
                 | Self::MapStatus
                 | Self::PlaceLabel
+        )
+    }
+
+    fn is_equipment(self) -> bool {
+        matches!(
+            self,
+            Self::EquipmentHelmet
+                | Self::EquipmentRing1
+                | Self::EquipmentRing2
+                | Self::EquipmentMedallion
+                | Self::EquipmentWeapon
+                | Self::EquipmentShield
+                | Self::EquipmentArmor
+                | Self::EquipmentGauntlet
+                | Self::EquipmentBoots
         )
     }
 
@@ -218,6 +244,10 @@ pub(super) struct Rect {
 }
 
 impl Rect {
+    pub(super) fn viewport((w, h): (u32, u32)) -> Self {
+        Self { x: 0, y: 0, w, h }
+    }
+
     pub(super) fn contains(self, (x, y): (u32, u32)) -> bool {
         let (x, y) = (
             i64::from(x) - i64::from(self.x),
@@ -238,6 +268,43 @@ impl Rect {
     }
 }
 
+pub(super) fn gameplay_layout(
+    size: (u32, u32),
+    hud: Option<&Hud>,
+    inventory: Option<[u32; 2]>,
+    requested: u16,
+) -> (Rect, u32) {
+    let [hud_width, top, bottom] = hud.map_or([0; 3], Hud::chrome);
+    let [inv_width, inv_height] = inventory.unwrap_or_default();
+    let scale = u32::from(requested)
+        .min(size.0.saturating_mul(100) / hud_width.max(inv_width).max(1))
+        .min(
+            size.1.saturating_mul(100)
+                / top.saturating_add(bottom).saturating_add(inv_height).max(1),
+        )
+        .max(1);
+    let top = top.saturating_mul(scale) / 100;
+    let bottom = bottom.saturating_mul(scale) / 100;
+    let remaining = size.1.saturating_sub(top.saturating_add(bottom));
+    (
+        Rect {
+            x: 0,
+            y: top as i32,
+            w: size.0,
+            h: remaining,
+        },
+        scale,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RasterKey {
+    size: (u32, u32),
+    crop: Rect,
+    scale: u32,
+    variant: usize,
+}
+
 struct Component {
     config: Element,
     parent: Option<usize>,
@@ -247,6 +314,61 @@ struct Component {
     text: Option<Text>,
     label: Option<Label>,
     clock: Option<ClockArt>,
+    rasters: Vec<(RasterKey, Arc<LoadedFrame>)>,
+}
+
+impl Component {
+    fn scaled_art(
+        &mut self,
+        full: Rect,
+        clip: Rect,
+        scale: u32,
+        variant: usize,
+    ) -> Arc<LoadedFrame> {
+        let key = RasterKey {
+            size: (full.w, full.h),
+            crop: Rect {
+                x: clip.x - full.x,
+                y: clip.y - full.y,
+                ..clip
+            },
+            scale,
+            variant,
+        };
+        if let Some(index) = self.rasters.iter().position(|(stored, _)| *stored == key) {
+            let entry = self.rasters.remove(index);
+            let art = Arc::clone(&entry.1);
+            self.rasters.push(entry);
+            return art;
+        }
+        let (src, hover) = if variant == 0 {
+            (&self.base, None)
+        } else {
+            self.state_frames[variant - 1]
+                .as_ref()
+                .map_or((&self.base, self.config.hover_fill), |src| (src, None))
+        };
+        let art = raster(self, src, full, clip, scale, hover);
+        // Keep frequently revisited scales alive so the GPU texture identity is
+        // stable. Bound memory per component and let larger custom rasters pass through.
+        const PIXELS: usize = 4_000_000;
+        let pixels = |art: &LoadedFrame| art.decoded.frame.pixels.len();
+        if pixels(&art) <= PIXELS {
+            while self.rasters.len() >= 12
+                || self
+                    .rasters
+                    .iter()
+                    .map(|(_, art)| pixels(art))
+                    .sum::<usize>()
+                    + pixels(&art)
+                    > PIXELS
+            {
+                self.rasters.remove(0);
+            }
+            self.rasters.push((key, Arc::clone(&art)));
+        }
+        art
+    }
 }
 
 struct ClockArt {
@@ -334,6 +456,7 @@ pub(crate) struct Hud {
     font_profiles: BTreeMap<String, serde_json::Value>,
     placed: Vec<Option<Placement>>,
     size: (u32, u32),
+    layout_key: Option<(Rect, u32)>,
     scale: u16,
     fit_viewport: Option<[u32; 2]>,
     tooltip_anchor: (i32, i32),
@@ -514,7 +637,8 @@ impl Hud {
                 && matches!(
                     config.binding,
                     Some(Binding::PlayerGrid | Binding::ContainerGrid | Binding::PlayerPreview)
-                ))
+                )
+                || config.binding.is_some_and(Binding::is_equipment))
             .then(|| base.pixels.clone());
             components.push(Component {
                 config,
@@ -525,6 +649,7 @@ impl Hud {
                 text: prepared_text,
                 label,
                 clock,
+                rasters: Vec::new(),
             });
         }
         if let Some(author) = &theme.author {
@@ -536,6 +661,7 @@ impl Hud {
             font_profiles,
             placed: Vec::new(),
             size: (0, 0),
+            layout_key: None,
             scale,
             fit_viewport: theme.fit_viewport,
             tooltip_anchor: (0, 0),
@@ -553,18 +679,43 @@ impl Hud {
         })
     }
 
+    pub(super) fn theme_extent(path: &Path) -> Result<[u32; 2], Box<dyn Error>> {
+        let mut source = String::new();
+        File::open(path)?
+            .take(128 * 1024 + 1)
+            .read_to_string(&mut source)?;
+        let theme = parse(&source)?;
+        Ok(theme
+            .hud
+            .iter()
+            .filter(|element| element.parent.is_none() && !element.hidden)
+            .fold([0, 0], |[width, height], element| {
+                [width.max(element.size[0]), height.max(element.size[1])]
+            }))
+    }
+
+    fn chrome(&self) -> [u32; 3] {
+        self.components
+            .iter()
+            .filter(|c| c.parent.is_none() && !c.config.hidden)
+            .fold([0, 0, 0], |[width, mut top, mut bottom], c| {
+                let [w, h] = c.config.size;
+                match c.config.anchor {
+                    Anchor::Top | Anchor::TopLeft | Anchor::TopRight => {
+                        top = top.max(h.saturating_add_signed(c.config.offset[1]));
+                    }
+                    Anchor::Bottom | Anchor::BottomLeft | Anchor::BottomRight => {
+                        bottom = bottom
+                            .max(h.saturating_add_signed(c.config.offset[1].saturating_neg()));
+                    }
+                    _ => {}
+                }
+                [width.max(w), top, bottom]
+            })
+    }
+
     pub fn layout(&mut self, size: (u32, u32)) {
-        if size == self.size {
-            return;
-        }
-        self.size = size;
-        self.placed.clear();
-        let viewport = Rect {
-            x: 0,
-            y: 0,
-            w: size.0,
-            h: size.1,
-        };
+        let viewport = Rect::viewport(size);
         let widest = self
             .components
             .iter()
@@ -581,8 +732,18 @@ impl Hud {
             .min(size.0.saturating_mul(100) / widest)
             .min(fit)
             .max(1);
+        self.layout_in(size, viewport, scale);
+    }
+
+    pub(super) fn layout_in(&mut self, size: (u32, u32), viewport: Rect, scale: u32) {
+        if self.layout_key == Some((viewport, scale)) && self.size == size {
+            return;
+        }
+        self.size = size;
+        self.layout_key = Some((viewport, scale));
+        self.placed.clear();
         let mut bounds = Vec::with_capacity(self.components.len());
-        for component in &self.components {
+        for component in &mut self.components {
             let parent = component
                 .parent
                 .map_or(Some((viewport, viewport)), |id| bounds[id]);
@@ -604,20 +765,13 @@ impl Hud {
             });
             bounds.push(placement);
             self.placed.push(placement.map(|(rect, clip)| {
-                let art = raster(component, &component.base, rect, clip, scale, None);
+                let art = component.scaled_art(rect, clip, scale, 0);
                 let state_art = std::array::from_fn(|i| {
-                    if component.config.disabled || component.config.action.is_none() {
-                        return None;
-                    }
-                    if let Some(frame) = &component.state_frames[i] {
-                        return Some(raster(component, frame, rect, clip, scale, None));
-                    }
-                    if i == 0 {
-                        return component.config.hover_fill.map(|color| {
-                            raster(component, &component.base, rect, clip, scale, Some(color))
-                        });
-                    }
-                    None
+                    (!component.config.disabled
+                        && component.config.action.is_some()
+                        && (component.state_frames[i].is_some()
+                            || (i == 0 && component.config.hover_fill.is_some())))
+                    .then(|| component.scaled_art(rect, clip, scale, i + 1))
                 });
                 Placement {
                     full: rect,
@@ -656,10 +810,7 @@ impl Hud {
     }
 
     pub(super) fn set_scale(&mut self, scale: u16) {
-        if self.scale != scale {
-            self.scale = scale.clamp(50, 300);
-            self.clear_layout();
-        }
+        self.scale = scale.clamp(50, 300);
     }
 
     pub(super) fn set_travel_available(&mut self, available: bool) -> bool {
@@ -712,7 +863,7 @@ impl Hud {
 
     pub(super) fn clear_layout(&mut self) {
         self.placed.clear();
-        self.size = (0, 0);
+        self.layout_key = None;
     }
 
     fn bound(&self, binding: Binding) -> Option<usize> {
@@ -781,15 +932,9 @@ impl Hud {
             hours,
             component.config.fill.unwrap_or([0; 4]),
         );
+        component.rasters.clear();
         if let Some(Some(place)) = self.placed.get_mut(index) {
-            place.art = raster(
-                component,
-                &component.base,
-                place.full,
-                place.rect,
-                place.scale,
-                None,
-            );
+            place.art = component.scaled_art(place.full, place.rect, place.scale, 0);
         }
         true
     }
@@ -800,16 +945,12 @@ impl Hud {
             && label.value != value
         {
             label.value = value.into();
-            self.components[index].text = Some(label.text(value));
+            let text = label.text(value);
+            let component = &mut self.components[index];
+            component.text = Some(text);
+            component.rasters.clear();
             if let Some(place) = self.placed.get_mut(index).and_then(Option::as_mut) {
-                place.art = raster(
-                    &self.components[index],
-                    &self.components[index].base,
-                    place.full,
-                    place.rect,
-                    place.scale,
-                    None,
-                );
+                place.art = component.scaled_art(place.full, place.rect, place.scale, 0);
             }
         }
     }
@@ -832,8 +973,9 @@ impl Hud {
             c.config.grid_line
         };
         paint(&mut c.base, grid_line, c.config.hover_fill.unwrap_or(fill));
+        c.rasters.clear();
         if let Some(p) = self.placed.get_mut(i).and_then(Option::as_mut) {
-            p.art = raster(c, &c.base, p.full, p.rect, p.scale, None);
+            p.art = c.scaled_art(p.full, p.rect, p.scale, 0);
         }
     }
     pub(super) fn tooltip(&mut self, point: (u32, u32), text: &str) {
@@ -842,16 +984,13 @@ impl Hud {
         if let Some(i) = self.bound(binding)
             && let Some(p) = self.placed[i].as_ref()
         {
-            self.tooltip_anchor.0 = point
-                .0
-                .saturating_add(14)
-                .min(self.size.0.saturating_sub(p.rect.w))
-                as i32;
-            self.tooltip_anchor.1 = point
-                .1
-                .saturating_add(15)
-                .min(self.size.1.saturating_sub(p.rect.h))
-                as i32;
+            let area = self
+                .layout_key
+                .map_or(Rect::viewport(self.size), |(area, _)| area);
+            self.tooltip_anchor.0 = (point.0 as i32 + 14)
+                .clamp(area.x, area.x + area.w.saturating_sub(p.rect.w) as i32);
+            self.tooltip_anchor.1 = (point.1 as i32 + 15)
+                .clamp(area.y, area.y + area.h.saturating_sub(p.rect.h) as i32);
         }
     }
 
@@ -1217,22 +1356,49 @@ fn raster(
     scale: u32,
     hover: Option<Color>,
 ) -> Arc<LoadedFrame> {
-    let mut frame = sprite([clip.w, clip.h], [0; 4]);
-    for y in 0..clip.h {
-        for x in 0..clip.w {
-            let sx = ((clip.x - full.x) as u32 + x) * src.width / full.w;
-            let sy = ((clip.y - full.y) as u32 + y) * src.height / full.h;
-            let mut color = src.pixels[(sy * src.width + sx) as usize];
-            if let Some(highlight) = hover
-                && (color == c.config.fill.unwrap_or([0; 4])
-                    || sx == 0
-                    || sy == 0
-                    || sx + 1 == src.width
-                    || sy + 1 == src.height)
-            {
-                color = highlight;
+    let uniform = hover.is_none() && src.pixels.iter().all(|px| *px == src.pixels[0]);
+    let mut frame = sprite(
+        [clip.w, clip.h],
+        if uniform { src.pixels[0] } else { [0; 4] },
+    );
+    if !uniform {
+        let x0 = (clip.x - full.x) as u32;
+        let y0 = (clip.y - full.y) as u32;
+        let indices: Vec<_> = (x0..x0 + clip.w)
+            .map(|x| (x * src.width / full.w) as usize)
+            .collect();
+        let width = clip.w as usize;
+        let mut last_y = None;
+        for y in 0..clip.h {
+            let sy = (y0 + y) * src.height / full.h;
+            let offset = y as usize * width;
+            if last_y == Some(sy) {
+                frame.pixels.copy_within(offset - width..offset, offset);
+                continue;
             }
-            frame.pixels[(y * clip.w + x) as usize] = color;
+            last_y = Some(sy);
+            let source = &src.pixels[(sy * src.width) as usize..][..src.width as usize];
+            let target = &mut frame.pixels[offset..offset + width];
+            if let Some(highlight) = hover {
+                let fill = c.config.fill.unwrap_or([0; 4]);
+                for (pixel, &sx) in target.iter_mut().zip(&indices) {
+                    let color = source[sx];
+                    *pixel = if color == fill
+                        || sx == 0
+                        || sy == 0
+                        || sx + 1 == src.width as usize
+                        || sy + 1 == src.height
+                    {
+                        highlight
+                    } else {
+                        color
+                    };
+                }
+            } else {
+                for (pixel, &sx) in target.iter_mut().zip(&indices) {
+                    *pixel = source[sx];
+                }
+            }
         }
     }
     if let Some(text) = &c.text {
@@ -1474,6 +1640,42 @@ mod tests {
     }
 
     const EXAMPLE: &str = include_str!("../../ui/field-notes/theme.toml");
+
+    #[test]
+    fn gameplay_layout_fits_three_regions_and_reuses_raster_identity() {
+        let package = Package::new();
+        let mut hud = package
+            .theme(
+                r#"
+name = "Test chrome"
+[[hud]]
+id = "top"
+anchor = "top"
+size = [800, 41]
+fill = [1, 1, 1, 255]
+[[hud]]
+id = "bottom"
+anchor = "bottom"
+size = [800, 159]
+fill = [2, 2, 2, 255]
+"#,
+            )
+            .unwrap();
+        for (size, cap) in [((936, 500), 83), ((1920, 1080), 180)] {
+            let (region, scale) = gameplay_layout(size, Some(&hud), Some([800, 400]), 300);
+            assert_eq!(scale, cap);
+            assert!(region.h >= 400 * scale / 100);
+            hud.layout_in(size, Rect::viewport(size), scale);
+            let top = hud.placed[0].as_ref().unwrap();
+            let bottom = hud.placed[1].as_ref().unwrap();
+            assert_eq!(top.rect.y + top.rect.h as i32, region.y);
+            assert_eq!(region.y + region.h as i32, bottom.rect.y);
+            let original = Arc::clone(&top.art);
+            hud.layout_in(size, Rect::viewport(size), scale - 25);
+            hud.layout_in(size, Rect::viewport(size), scale);
+            assert!(Arc::ptr_eq(&original, &hud.placed[0].as_ref().unwrap().art));
+        }
+    }
 
     #[test]
     fn component_can_use_original_art_subrect_without_stretching_other_pixels() {

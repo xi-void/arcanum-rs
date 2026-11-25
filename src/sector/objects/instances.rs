@@ -56,7 +56,31 @@ pub(crate) struct OriginalId {
 }
 
 impl OriginalId {
+    // Disjoint from every CE wire identity. Session-created objects are never
+    // serialized into original resources.
+    const RUNTIME_KIND: u16 = u16::MAX;
+
+    pub(crate) fn runtime(serial: u64) -> Self {
+        let mut payload = [0; 16];
+        payload[..8].copy_from_slice(&serial.to_le_bytes());
+        Self {
+            kind: Self::RUNTIME_KIND,
+            payload,
+        }
+    }
+
+    pub(crate) fn is_runtime(self) -> bool {
+        self.kind == Self::RUNTIME_KIND
+    }
+
     pub(crate) fn parse(text: &str) -> Option<Self> {
+        if let Some(serial) = text.strip_prefix("runtime:") {
+            return serial
+                .parse::<u64>()
+                .ok()
+                .filter(|&n| n > 0)
+                .map(Self::runtime);
+        }
         let hex = text.strip_prefix("2:")?;
         if hex.len() != 32 || !hex.is_ascii() {
             return None;
@@ -79,6 +103,10 @@ impl OriginalId {
     }
 
     pub(crate) fn key(self) -> String {
+        if self.is_runtime() {
+            let serial = u64::from_le_bytes(self.payload[..8].try_into().unwrap());
+            return format!("runtime:{serial}");
+        }
         let mut key = format!("{}:", self.kind);
         use std::fmt::Write as _;
         for byte in self.payload {
@@ -273,6 +301,65 @@ pub(crate) fn decode_instance(input: &[u8]) -> Result<Instance<'_>, Error> {
     })
 }
 
+pub(crate) fn int_array<const N: usize>(value: FieldValue<'_>) -> [Option<i32>; N] {
+    std::array::from_fn(|index| {
+        let entry: [u8; 4] = value.array_entry(index)?.try_into().ok()?;
+        Some(i32::from_le_bytes(entry))
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub(crate) struct ItemStats {
+    pub weight: Option<i32>,
+    pub magic_weight: Option<i32>,
+    pub complexity: Option<i32>,
+    pub use_art: Option<u32>,
+    pub equipment_flags: Option<u32>,
+    pub paper_doll_art: Option<u32>,
+    pub armor_class: Option<i32>,
+    pub magic_armor_class: Option<i32>,
+    pub resistance: Option<[Option<i32>; 5]>,
+    pub magic_resistance: Option<[Option<i32>; 5]>,
+    pub weapon_hit_bonus: Option<i32>,
+    pub weapon_speed: Option<i32>,
+    pub weapon_min_strength: Option<i32>,
+    pub wield_script: bool,
+    pub spells: [Option<u32>; 5],
+}
+
+impl ItemStats {
+    fn read(&mut self, category: u32, field: usize, value: FieldValue<'_>) {
+        let scalar = value.scalar();
+        let signed = scalar.map(|v| v as i32);
+        match (category, field) {
+            (_, 31) => self.wield_script = has_scripts(value, &[24, 25]),
+            (_, 66) => self.weight = signed,
+            (_, 67) => self.magic_weight = signed,
+            (_, 72) => self.use_art = scalar,
+            (_, 73) => self.complexity = signed,
+            (_, 77..=81) => self.spells[field - 77] = scalar,
+            (5 | 7 | 14, 96) => self.equipment_flags = scalar,
+            (5 | 7, 97) => self.paper_doll_art = scalar,
+            (5, 98) => self.weapon_hit_bonus = signed,
+            (5, 103) => self.weapon_speed = signed,
+            (5, 107) => self.weapon_min_strength = signed,
+            (7, 98) => self.armor_class = signed,
+            (7, 99) => self.magic_armor_class = signed,
+            (7, 100) => self.resistance = Some(int_array(value)),
+            (7, 101) => self.magic_resistance = Some(int_array(value)),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn resolve(instance: &Instance<'_>, defaults: Option<&Self>) -> Self {
+        let mut result = defaults.cloned().unwrap_or_default();
+        for &(index, value) in &instance.fields {
+            result.read(instance.category, index, value);
+        }
+        result
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PrototypeDefaults {
     pub appearance: AppearanceFields,
@@ -282,7 +369,11 @@ pub(crate) struct PrototypeDefaults {
     pub inventory_art: Option<u32>,
     pub quantity: Option<u32>,
     pub transfer_script: bool,
-    pub dexterity: Option<i32>,
+    pub character: Option<Box<[Option<i32>; 28]>>,
+    pub original_character_art: Option<u32>,
+    pub armor_class: Option<i32>,
+    pub resistance: Option<[Option<i32>; 5]>,
+    pub item: Option<Box<ItemStats>>,
 }
 
 pub(crate) fn prototype_defaults(
@@ -314,24 +405,33 @@ pub(crate) fn prototype_defaults(
     // critter stat prefix consumed by placement and stationary rendering.
     let mut fields = Fields::default();
     let mut description = None;
+    let mut original_character_art = None;
+    let mut armor_class = None;
+    let mut resistance = None;
     let mut transfer_script = false;
+    let mut item = (5..=14).contains(&category).then(ItemStats::default);
     for index in 0..COMMON.len() {
         let value = read_value(&mut reader, index, category)?;
+        if let Some(item) = &mut item {
+            item.read(category, index, value);
+        }
         if index == 31 {
             transfer_script = has_inventory_script(value);
         }
-        if index == 22 {
-            description = value.scalar();
+        match index {
+            22 => description = value.scalar(),
+            23 if matches!(category, 15 | NPC) => original_character_art = value.scalar(),
+            25 if matches!(category, 15 | NPC) => armor_class = value.scalar().map(|v| v as i32),
+            30 if matches!(category, 15 | NPC) => resistance = Some(int_array(value)),
+            _ => {}
         }
         fields.project(index, category, value);
     }
-    let dexterity = if matches!(category, 15 | NPC) {
+    let character = if matches!(category, 15 | NPC) {
         for index in 64..66 {
             fields.read(&mut reader, index, category)?;
         }
-        read_value(&mut reader, 66, category)?
-            .array_entry(1)
-            .map(|bytes| i32::from_le_bytes(bytes.try_into().expect("32-bit statistic")))
+        Some(Box::new(int_array(read_value(&mut reader, 66, category)?)))
     } else {
         None
     };
@@ -340,19 +440,27 @@ pub(crate) fn prototype_defaults(
     let mut quantity = None;
     if category == 2 || (5..=14).contains(&category) {
         subtype_flags = read_value(&mut reader, 64, category)?.scalar();
-        if category != 2 {
-            for index in 65..=70 {
-                let field = read_value(&mut reader, index, category)?;
+        if let Some(item) = &mut item {
+            for index in 65..64 + ITEMS.len() {
+                let value = read_value(&mut reader, index, category)?;
+                item.read(category, index, value);
                 if index == 70 {
-                    inventory_art = field.scalar();
+                    inventory_art = value.scalar();
                 }
             }
-            if matches!(category, 6 | 8) {
-                for index in 71..64 + ITEMS.len() {
-                    read_value(&mut reader, index, category)?;
+            let last = match category {
+                5 => 107,
+                6 | 8 => 97,
+                7 => 101,
+                14 => 96,
+                _ => 95,
+            };
+            for index in 96..=last {
+                let value = read_value(&mut reader, index, category)?;
+                item.read(category, index, value);
+                if matches!(category, 6 | 8) && index == 97 {
+                    quantity = value.scalar();
                 }
-                read_value(&mut reader, 96, category)?;
-                quantity = read_value(&mut reader, 97, category)?.scalar();
             }
         }
     }
@@ -364,15 +472,53 @@ pub(crate) fn prototype_defaults(
         appearance: fields.appearance,
         current_art: fields.art_id,
         description,
-        dexterity,
+        character,
+        original_character_art,
+        armor_class,
+        resistance,
+        item: item.map(Box::new),
     })
 }
 
 pub(crate) fn has_inventory_script(value: FieldValue<'_>) -> bool {
     // CE ScriptAttachmentPoint: get, drop, insert, remove and transfer.
-    [4, 5, 21, 28, 32].into_iter().any(|slot| {
+    has_scripts(value, &[4, 5, 21, 28, 32])
+}
+
+fn has_scripts(value: FieldValue<'_>, slots: &[usize]) -> bool {
+    slots.iter().copied().any(|slot| {
         value
             .array_entry(slot)
             .is_some_and(|entry| entry[8..12] != [0; 4])
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn equipment_instance_explicit_zero_overrides_prototype() {
+        let instance = Instance {
+            id: OriginalId {
+                kind: 2,
+                payload: [0; 16],
+            },
+            prototype: SerializedPrototypeId(8042),
+            category: 7,
+            bitmap: [0; 5],
+            fields: vec![(98, FieldValue::Scalar(0)), (100, FieldValue::Null)],
+        };
+        let prototype = ItemStats {
+            weight: Some(40),
+            armor_class: Some(12),
+            resistance: Some([Some(3); 5]),
+            ..Default::default()
+        };
+        let stats = ItemStats::resolve(&instance, Some(&prototype));
+        assert_eq!(stats.weight, Some(40));
+        assert_eq!(stats.armor_class, Some(0));
+        assert_eq!(stats.resistance, Some([None; 5]));
+        assert_eq!(stats.magic_armor_class, None);
+    }
 }

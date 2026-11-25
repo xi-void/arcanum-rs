@@ -43,6 +43,12 @@ pub(super) struct Pose {
 }
 
 impl Pose {
+    /// TIG's unarmed standing critter ART identifier. NPC decoding and
+    /// player equipment both pass through the same filename normalization.
+    pub(super) fn standing_critter_art(gender: u32, body: u32, armor: u32, palette: u32) -> u32 {
+        (2 << 28) | (gender << 27) | (body << 24) | (armor << 20) | (palette << 4)
+    }
+
     pub(super) fn decode(raw: u32, names: Option<&Mes>) -> Result<Self, &'static str> {
         if raw & 0x0008_07cf != 0 {
             return Err("expected a weapon-free, shield-free standing critter");

@@ -278,7 +278,8 @@ impl Effective {
         let defaults = prototype
             .map(|proto| proto.defaults.appearance)
             .unwrap_or_default();
-        let inherited_dexterity = prototype.and_then(|proto| proto.defaults.dexterity);
+        let inherited_dexterity = prototype
+            .and_then(|proto| proto.defaults.character.as_ref().and_then(|stats| stats[1]));
         let current_art = Property::resolve(
             object.field(0).and_then(FieldValue::scalar),
             prototype.and_then(|proto| proto.defaults.current_art),
@@ -386,6 +387,12 @@ impl Resident {
             "instance_source":super::super::diagnostics::source(&self.source),
             "prototype":object.prototype.0,
             "description_id":Property::resolve(object.field(22).and_then(FieldValue::scalar), self.prototype.as_ref().and_then(|proto|proto.defaults.description)),
+            "character_base_statistics": matches!(self.category, 15 | 16).then(|| {
+                match object.field(66) {
+                    Some(field) => json!({"origin":"instance","values":objects::int_array::<28>(field)}),
+                    None => json!({"origin":"prototype","values":self.prototype.as_ref().and_then(|p|p.defaults.character.as_deref())}),
+                }
+            }),
             "prototype_source":self.prototype.as_ref().map(|proto|super::super::diagnostics::source(&proto.source)),
             "prototype_error":self.prototype_error.as_deref(),
             "field_bitmap":object.bitmap,"fields":slots,"stored_tile":object.tile(),

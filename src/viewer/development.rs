@@ -561,6 +561,7 @@ impl developer::Runtime for Viewer<'_> {
         let mutating = !matches!(
             &request,
             Request::Inventory
+                | Request::Character
                 | Request::Owner(_)
                 | Request::Maps(_)
                 | Request::Position
@@ -631,6 +632,21 @@ impl Viewer<'_> {
                 json!({"id":id,"route_steps":steps,"interaction_pending":true})
             }
             Request::Inventory => json!(world.inventory_view()),
+            Request::Character => json!(world.character_statistics()),
+            Request::Equip(id, slot) => {
+                let outcome = world
+                    .equip_inventory_item(&id, slot)
+                    .map_err(|error| Failure::new("equipment_rejected", error))?;
+                dev.event("equipment", None, outcome.clone());
+                outcome
+            }
+            Request::Unequip(slot, cell) => {
+                let outcome = world
+                    .unequip_inventory_item(slot, cell)
+                    .map_err(|error| Failure::new("equipment_rejected", error))?;
+                dev.event("equipment", None, outcome.clone());
+                outcome
+            }
             Request::Owner(id) => world.inventory_owner(&id)?,
             Request::OpenInventory(id) => {
                 if self.map_since.is_some() || self.pause.is_some() {
@@ -716,7 +732,7 @@ impl Viewer<'_> {
                     .map(|area| json!({"id":area.id,"name":area.name,"tile":area.tile}));
                 json!({
                     "map":map_state,
-                    "player":{"tile":tile,"facing":world.player_facing(),"collision_bypass":world.collision_bypassed(),
+                    "player":{"tile":tile,"facing":world.player_facing(),"appearance":world.player_appearance(),"collision_bypass":world.collision_bypassed(),
                         "collision":tile.and_then(|tile|world.debug_collision(tile)),"navigation":navigation},
                     "sector":{"coordinates":coordinates,"id":coordinates.and_then(|sector|sector.id()),
                         "town_map":position.map(|(_,town)|town),"terrain_source_summary":source},
@@ -911,7 +927,7 @@ impl Viewer<'_> {
             }
             Request::Inspect(tile) => {
                 let filter = if let Some(tile) = tile {
-                    dev.selected = world.debug_door_at(tile);
+                    dev.selected = world.debug_lockable_at(tile);
                     ObjectFilter {
                         tile: Some(tile),
                         ..Default::default()
@@ -930,12 +946,12 @@ impl Viewer<'_> {
                 data
             }
             Request::Unlock => {
-                let selected = dev.selected.ok_or("Select a door first")?;
+                let selected = dev.selected.ok_or("Select a door or container first")?;
                 let changed = world
                     .debug_unlock(selected)
                     .map_err(|err| Failure::new("unsupported_operation", err))?;
                 json!({"unlocked":true,"changed":changed,"id":InteractiveWorld::debug_selection_id(selected),
-                    "message":"Use the door normally to open it."})
+                    "message":"Use the object normally to open it."})
             }
             Request::SetTime(hour) => {
                 let clock = self.clock.as_mut().ok_or("Game clock unavailable")?;
@@ -984,15 +1000,13 @@ impl Viewer<'_> {
                 if applies("console") {
                     dev.scale = scale;
                 }
-                if applies("inventory")
-                    && let Some(ui) = inventory
-                {
-                    ui.scale = scale;
-                }
-                if applies("hud")
-                    && let Some(hud) = hud
-                {
-                    hud.set_scale(scale);
+                if applies("inventory") || applies("hud") {
+                    if let Some(ui) = inventory {
+                        ui.scale = scale;
+                    }
+                    if let Some(hud) = hud {
+                        hud.set_scale(scale);
+                    }
                 }
                 if applies("map")
                     && let Some(map) = map_ui

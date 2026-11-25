@@ -1372,7 +1372,7 @@ fn show_world_with_application(
             viewer::Hud::load(
                 theme,
                 &mut vfs,
-                ui_scale.or_else(|| ui.and_then(|ui| ui.hud_scale)),
+                ui_scale.or_else(|| ui.and_then(|ui| ui.hud_scale.or(ui.inventory_scale))),
             )
             .map_err(|error| format!("UI theme {}: {error}", theme.display()))?,
         ))
@@ -1419,7 +1419,9 @@ fn show_world_with_application(
                 mount_options,
                 policy,
             )?));
-            let world = world.with_inventory(vfs.clone());
+            let world = world
+                .with_inventory(vfs.clone())
+                .with_starting_inventory()?;
             let map = match viewer::MapUi::load(
                 &path,
                 vfs,
