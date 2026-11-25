@@ -74,6 +74,19 @@ impl OriginalId {
         }
         key
     }
+
+    pub(crate) fn parse_key(key: &str) -> Option<Self> {
+        let (kind, hash) = key.split_once(':')?;
+        let hash = hash.as_bytes();
+        if kind != "2" || hash.len() != 32 || !hash.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
+        let mut payload = [0; 16];
+        for (byte, pair) in payload.iter_mut().zip(hash.as_chunks::<2>().0) {
+            *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+        }
+        Some(Self { kind: 2, payload })
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -267,6 +280,19 @@ pub(crate) struct PrototypeDefaults {
     pub current_art: Option<u32>,
     pub description: Option<u32>,
     pub dexterity: Option<i32>,
+    pub subtype_flags: Option<u32>,
+    pub inventory_art: Option<u32>,
+    pub inventory_source: Option<u32>,
+    pub inventory_scripts: bool,
+}
+
+pub(crate) fn has_inventory_scripts(value: FieldValue<'_>) -> bool {
+    // SAP_GET, DROP, INSERT_ITEM, REMOVE_ITEM and TRANSFER.
+    [4, 5, 21, 28, 32].into_iter().any(|slot| {
+        value
+            .array_entry(slot)
+            .is_some_and(|entry| entry[8..12] != [0; 4])
+    })
 }
 
 pub(crate) fn prototype_defaults(
@@ -294,14 +320,17 @@ pub(crate) fn prototype_defaults(
         HEADER_SIZE + words * 4,
         "prototype header and change bitmap",
     )?;
-    // The prototype stores all slots. Read only the common appearance and
-    // critter stat prefix consumed by placement and stationary rendering.
+    // The prototype stores all slots. Read the prefixes used by runtime systems.
     let mut fields = Fields::default();
     let mut description = None;
+    let mut inventory_scripts = false;
     for index in 0..COMMON.len() {
         let value = read_value(&mut reader, index, category)?;
         if index == 22 {
             description = value.scalar();
+        }
+        if index == 31 {
+            inventory_scripts = has_inventory_scripts(value);
         }
         fields.project(index, category, value);
     }
@@ -315,10 +344,26 @@ pub(crate) fn prototype_defaults(
     } else {
         None
     };
+    let (mut subtype_flags, mut inventory_art, mut inventory_source) = (None, None, None);
+    if matches!(category, 2 | 5..=14) {
+        subtype_flags = read_value(&mut reader, 64, category)?.scalar();
+        for index in 65..=if category == 2 { 69 } else { 70 } {
+            let value = read_value(&mut reader, index, category)?;
+            match (category, index) {
+                (2, 69) => inventory_source = value.scalar(),
+                (5..=14, 70) => inventory_art = value.scalar(),
+                _ => {}
+            }
+        }
+    }
     Ok(PrototypeDefaults {
         appearance: fields.appearance,
         current_art: fields.art_id,
         description,
         dexterity,
+        subtype_flags,
+        inventory_art,
+        inventory_source,
+        inventory_scripts,
     })
 }

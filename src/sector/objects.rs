@@ -6,7 +6,8 @@ use std::{fmt, ops::Range};
 
 mod instances;
 pub(crate) use instances::{
-    FieldValue, Instance, OriginalId, PrototypeDefaults, decode_instance, prototype_defaults,
+    FieldValue, Instance, OriginalId, PrototypeDefaults, decode_instance, has_inventory_scripts,
+    prototype_defaults,
 };
 
 const WALL: u32 = 0;

@@ -156,8 +156,8 @@ paths, crash-site NPCs and quest interactions remain outside the alpha.
 Mouse routes can plan through an edge that becomes traversable by
 opening an eligible door. Actual movement stops at that edge and uses
 the door, waits for the last opening frame, then replans toward the
-original destination. Keyboard movement or a new click cancels the
-pending route. A locked edge remains blocked and can report the
+original destination. A new click replaces the pending route.
+A locked edge remains blocked and can report the
 reason the destination is unavailable.
 
 For hover feedback, CE adds a copy of the object's sprite tinted

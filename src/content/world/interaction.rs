@@ -103,7 +103,7 @@ impl DoorStates {
     }
 }
 
-fn locked(flags: u32, hour: u8) -> bool {
+pub(super) fn locked(flags: u32, hour: u8) -> bool {
     // CE object_locked_get. ALWAYS_LOCKED gates the indoor egress exception
     // in ai_attempt_open_portal, rather than replacing OPF_LOCKED.
     if flags & 8 != 0 {

@@ -277,10 +277,11 @@ impl InteractiveWorld {
         let WorldStream {
             region,
             mut loader,
-            cache,
+            mut cache,
         } = world;
         let reference = loader.reference;
         let map = loader.map.clone();
+        cache.inventory_context = Some((map.clone(), reference));
         let mobile_index = loader.mobile_index.clone();
         let resources = loader.stats();
         let worker = Worker::start(
@@ -730,18 +731,9 @@ impl InteractiveWorld {
         }
     }
 
-    pub fn move_player(
-        &mut self,
-        input: (i32, i32),
-        run: bool,
-        now: Duration,
-        camera: &mut Camera,
-    ) -> bool {
+    pub fn advance_player(&mut self, now: Duration, camera: &mut Camera) -> bool {
         if !self.player_started {
             return false;
-        }
-        if input != (0, 0) {
-            self.cancel_player_route();
         }
         if self.wait_for_door.is_some_and(|deadline| now >= deadline) {
             self.wait_for_door = None;
@@ -753,7 +745,7 @@ impl InteractiveWorld {
             let pose = p.sample(now);
             (pose.anchor, Arc::as_ptr(pose.asset), p.tile(), p.facing())
         });
-        let Some(anchor) = self.cache.update_player(input, run, now) else {
+        let Some(anchor) = self.cache.update_player(now) else {
             return false;
         };
         let pose = self.cache.player.as_ref().unwrap().sample(now);
@@ -892,7 +884,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires the installed original game"]
-    fn developer_collision_bypass_crosses_original_tulla_wall_by_key_and_mouse() {
+    fn developer_collision_bypass_crosses_original_tulla_wall_by_mouse() {
         let game = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
         let mut vfs = Vfs::from_game(game, crate::vfs::Policy::Ce).unwrap();
         let catalog = crate::content::maps::Catalog::load(&mut vfs).unwrap();
@@ -916,35 +908,34 @@ mod tests {
             world.debug_collision(wall).unwrap().edges[2],
             "original wall edge"
         );
-        world.move_player((1, -1), false, Duration::ZERO, &mut camera);
-        world.move_player((0, 0), false, Duration::from_secs(1), &mut camera);
-        assert_eq!(player(&world), outside);
+        let click = |world: &mut InteractiveWorld, camera: &Camera, tile, tick| {
+            let (x, y) = project_world_tile(tile, outside).unwrap();
+            let (cx, cy) = camera.position();
+            let point = (
+                (x - cx + viewport.0 as i32 / 2) as u32,
+                (y - cy + viewport.1 as i32 / 2) as u32,
+            );
+            world.set_player_destination(point, viewport, camera, false, tick);
+        };
         assert!(
             world
                 .developer_action(DeveloperAction::ToggleCollision)
                 .unwrap()
         );
-        world.move_player((1, -1), false, Duration::from_secs(2), &mut camera);
-        world.move_player((1, -1), false, Duration::from_secs(3), &mut camera);
-        world.move_player((0, 0), false, Duration::from_secs(4), &mut camera);
-        assert_eq!(player(&world), inside);
-        assert!(world.pending_use.is_none());
-
-        // Screen pick of the original outside tile, now across the wall.
-        world.set_player_destination((560, 400), viewport, &camera, false, Duration::from_secs(4));
-        assert!(world.player_moving() && world.pending_use.is_none());
-        for t in 5..9 {
-            world.move_player((0, 0), false, Duration::from_secs(t), &mut camera);
+        for (index, target) in [inside, outside].into_iter().enumerate() {
+            let start = (index * 4) as u64;
+            click(&mut world, &camera, target, Duration::from_secs(start));
+            assert!(world.player_moving() && world.pending_use.is_none());
+            for t in start..start + 4 {
+                world.advance_player(Duration::from_secs(t), &mut camera);
+            }
+            assert_eq!(player(&world), target);
         }
-        assert_eq!(player(&world), outside);
         assert!(
             !world
                 .developer_action(DeveloperAction::ToggleCollision)
                 .unwrap()
         );
-        world.move_player((1, -1), false, Duration::from_secs(9), &mut camera);
-        world.move_player((0, 0), false, Duration::from_secs(10), &mut camera);
-        assert_eq!(player(&world), outside);
     }
 
     #[test]
@@ -1009,20 +1000,15 @@ mod tests {
             assert!(world.update_hover(None, viewport, &camera, now));
         }
         world.route_to(to, false);
-        world.move_player((0, 0), false, Duration::ZERO, &mut camera);
+        world.advance_player(Duration::ZERO, &mut camera);
         let deadline = world
             .wait_for_door
             .expect("opened, waiting for the last frame");
         let early = deadline - Duration::from_millis(1);
-        world.move_player((0, 0), false, early, &mut camera);
+        world.advance_player(early, &mut camera);
         assert_eq!(camera.position(), (0, 0));
-        world.move_player((0, 0), false, deadline, &mut camera);
-        world.move_player(
-            (0, 0),
-            false,
-            deadline + Duration::from_secs(1),
-            &mut camera,
-        );
+        world.advance_player(deadline, &mut camera);
+        world.advance_player(deadline + Duration::from_secs(1), &mut camera);
         assert_eq!(world.cache.player.as_ref().unwrap().tile(), to);
         assert!(!world.player_moving());
     }

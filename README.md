@@ -37,11 +37,9 @@ game assets are not included.
 cargo run --locked --release --features windowed -- play "$HOME/Work/arcanum-ce-test"
 ```
 
-Hold **W/A/S/D** or the **arrow keys** to walk. Combine two keys to walk
-diagonally. Hold **Shift** to run. **Left-click** a destination on the floor
-to walk there, or **Shift + left-click** to run there. A new click replaces
-the route. Movement keys cancel it. An already-started step finishes at the
-next tile center. Left-click an original door or staircase to approach
+**Left-click** a destination on the floor to walk there, or **Shift + left-click**
+to run there. A new click replaces the route after the current step reaches
+the next tile center. Left-click an original door or staircase to approach
 and use it. **Mouse wheel** zooms from 1× to 3×. Press **0** to reset.
 **Escape** pauses the game. Use the mouse or **Up/Down** and **Enter**
 to choose Resume, Options, or Quit. Escape backs out of menus.

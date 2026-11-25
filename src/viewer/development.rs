@@ -533,6 +533,8 @@ impl developer::Runtime for Viewer<'_> {
                 | Request::Position
                 | Request::Sectors
                 | Request::Objects(_)
+                | Request::Inventory(_)
+                | Request::ItemOwner(_)
                 | Request::Resource(..)
                 | Request::Snapshot
                 | Request::Events(_)
@@ -678,6 +680,21 @@ impl Viewer<'_> {
                 data["map"] = map_state;
                 data
             }
+            Request::Inventory(owner) => world
+                .inspect_inventory(&mut dev.vfs, &owner)
+                .map_err(|err| Failure::new("inventory_unavailable", err))?,
+            Request::ItemOwner(id) => world
+                .inspect_item_owner(&mut dev.vfs, &id)
+                .map_err(|err| Failure::new("inventory_unavailable", err))?,
+            Request::Pickup(id, slot) => world
+                .pickup_item(&mut dev.vfs, &id, slot)
+                .map_err(|err| Failure::new("inventory_rejected", err))?,
+            Request::DropItem(id) => world
+                .drop_item(&mut dev.vfs, &id)
+                .map_err(|err| Failure::new("inventory_rejected", err))?,
+            Request::Transfer(id, from, to, slot) => world
+                .transfer_item(&mut dev.vfs, &id, &from, &to, slot, current_hour)
+                .map_err(|err| Failure::new("inventory_rejected", err))?,
             Request::Resource(path, frame) => {
                 let data = arcanum_rs::content::diagnostics::resource(&mut dev.vfs, &path, frame)
                     .map_err(|err| Failure::new("invalid_resource_path", err.to_string()))?;
@@ -835,7 +852,7 @@ impl Viewer<'_> {
                         "COLLISION ON"
                     }));
                 }
-                json!({"collision_bypass":disabled,"message":if disabled {"Collision disabled for keyboard and mouse"} else {"Collision enabled"}})
+                json!({"collision_bypass":disabled,"message":if disabled {"Collision disabled for mouse routes and developer arrivals"} else {"Collision enabled"}})
             }
             Request::Inspect(tile) => {
                 let filter = if let Some(tile) = tile {

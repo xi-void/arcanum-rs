@@ -33,6 +33,7 @@ mod debug;
 mod scan;
 pub use scan::{ScanOptions, compatibility_scan};
 mod interaction;
+mod inventory;
 pub use debug::{DebugCollision, DebugObject};
 mod prefetch;
 pub use super::jumps::Destination;
@@ -823,6 +824,8 @@ struct SectorCache {
     player_shadows: Option<MobileShadows>,
     jumps: super::jumps::Jumps,
     door_states: DoorStates,
+    inventory: inventory::Session,
+    inventory_context: Option<(String, (u32, u32))>,
     roof_state: Option<roof::State>,
     hover: Option<WorldOrder>,
     faded_roofs: BTreeSet<(u32, u32)>,
@@ -913,6 +916,7 @@ impl SectorCache {
             *touched = Some(self.step);
             self.ordered.extend(sector.draws.iter().cloned());
         }
+        self.project_inventory();
         self.ordered.sort_unstable_by_key(|draw| draw.key);
         self.walk_subject = required.iter().find_map(|id| {
             let (key, walk) = self.entries[id].0.walk.as_ref()?;
@@ -1802,12 +1806,12 @@ impl SectorCache {
         Self::available_tile(entries, next).then_some(next)
     }
 
-    fn update_player(&mut self, input: (i32, i32), run: bool, now: Duration) -> Option<(i32, i32)> {
+    fn update_player(&mut self, now: Duration) -> Option<(i32, i32)> {
         // Borrow the cache entries only while considering the next tile.
         let entries = &self.entries;
         let states = &self.door_states;
         let player = self.player.as_mut()?;
-        player.update(input, run, now, |tile, facing| {
+        player.update(now, |tile, facing| {
             if self.collision_disabled {
                 Self::unrestricted_step(entries, tile, facing)
             } else {
@@ -3051,9 +3055,9 @@ mod tests {
             }
         }
         assert_eq!(world.cache.approach(key, false), Some(1));
-        world.cache.update_player((0, 0), false, Duration::ZERO);
+        world.cache.update_player(Duration::ZERO);
         let arrived = Duration::from_secs(1);
-        world.cache.update_player((0, 0), false, arrived);
+        world.cache.update_player(arrived);
         assert_eq!(world.cache.player.as_ref().unwrap().tile(), tile);
         assert_eq!(
             world.cache.use_target(key, arrived).unwrap(),
@@ -3093,10 +3097,11 @@ mod tests {
             "art/critter/hmm/hmmv1xaa.art"
         );
         assert_eq!(still.anchor, (0, 0));
-        world.cache.update_player((-1, 1), false, Duration::ZERO);
+        world.cache.plan_route((384, 928), false).unwrap();
+        world.cache.update_player(Duration::ZERO);
         let middle = world
             .cache
-            .update_player((0, 0), false, Duration::from_millis(60))
+            .update_player(Duration::from_millis(60))
             .unwrap();
         assert!((-39..0).contains(&middle.0) && (1..20).contains(&middle.1));
         let stepping = world
@@ -3109,10 +3114,7 @@ mod tests {
             stepping.asset.source.virtual_path,
             "art/critter/hmm/hmmv1xab.art"
         );
-        let destination = world
-            .cache
-            .update_player((0, 0), false, Duration::from_secs(2))
-            .unwrap();
+        let destination = world.cache.update_player(Duration::from_secs(2)).unwrap();
         assert_eq!(destination, (-40, 20));
         let player = world.cache.player.as_ref().unwrap();
         assert_eq!(player.tile(), (384, 928));
@@ -3120,9 +3122,8 @@ mod tests {
         camera.follow(destination);
         camera.resize((1024, 576));
         assert_eq!(camera.position(), destination);
-        world
-            .cache
-            .update_player((1, -1), true, Duration::from_secs(3));
+        world.cache.plan_route(start, true).unwrap();
+        world.cache.update_player(Duration::from_secs(3));
         let running = world
             .cache
             .player
@@ -3134,9 +3135,8 @@ mod tests {
             "art/critter/hmm/hmmv1xag.art"
         );
         assert_ne!(running.anchor, destination);
-        world
-            .cache
-            .update_player((1, -1), false, Duration::from_secs(5));
+        world.cache.plan_route((384, 928), false).unwrap();
+        world.cache.update_player(Duration::from_secs(5));
         let resumed = world
             .cache
             .player
@@ -3262,12 +3262,9 @@ mod tests {
         eprintln!("Bates authored entry {spawn:?} to {target:?}: detour has {planned} steps");
         let mut visited = vec![spawn];
         for tick in 0..=planned {
-            player.update(
-                (0, 0),
-                false,
-                Duration::from_secs(tick as u64 * 2),
-                |tile, dir| collision::step(tile, dir, cell),
-            );
+            player.update(Duration::from_secs(tick as u64 * 2), |tile, dir| {
+                collision::step(tile, dir, cell)
+            });
             if tick != 0 {
                 visited.push(player.tile());
             }
@@ -3279,7 +3276,7 @@ mod tests {
         assert_eq!(player.destination(target, true, cell), Some(0));
         assert!(!player.moving());
         assert_eq!(player.destination(spawn, false, cell), Some(planned));
-        player.update((1, 0), false, Duration::from_secs(50), |_, _| None);
+        player.cancel_route();
         assert!(!player.moving());
         assert_eq!(player.tile(), target);
     }

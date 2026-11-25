@@ -21,6 +21,11 @@ pub enum Request {
     Fps,
     Sectors,
     Objects(ObjectFilter),
+    Inventory(String),
+    ItemOwner(String),
+    Pickup(String, Option<usize>),
+    DropItem(String),
+    Transfer(String, String, String, Option<usize>),
     Resource(String, Option<usize>),
     Snapshot,
     Restore(String),
@@ -226,7 +231,7 @@ const COMMANDS: &[Command] = &[
     ),
     simple!(
         "tcl",
-        "Toggle collision for keyboard and mouse movement.",
+        "Toggle collision for mouse routes and developer arrivals.",
         ToggleCollision
     ),
     command!(
@@ -292,6 +297,64 @@ const COMMANDS: &[Command] = &[
         "objects [near X Y RADIUS] [id SECTOR:RECORD] [original ORIGINAL_ID] [category CATEGORY] [prototype PROTOTYPE]",
         "Inspect up to 128 objects from loaded sectors.",
         |a| object_filter(a).map(Request::Objects)
+    ),
+    query!(
+        "inventory",
+        "inventory [OWNER]",
+        "Inspect player or original container contents and grid slots.",
+        |a| match a {
+            [] => Some(Request::Inventory("player".into())),
+            [owner] => Some(Request::Inventory(owner.clone())),
+            _ => None,
+        }
+    ),
+    query!(
+        "itemowner",
+        "itemowner ORIGINAL_ID",
+        "Inspect an original item's current placement and provenance.",
+        |a| match a {
+            [id] => Some(Request::ItemOwner(id.clone())),
+            _ => None,
+        }
+    ),
+    command!(
+        "pickup",
+        "pickup ORIGINAL_ID [SLOT]",
+        "Pick up a nearby ground item.",
+        |a| match a {
+            [id] => Some(Request::Pickup(id.clone(), None)),
+            [id, slot] => Some(Request::Pickup(id.clone(), Some(slot.parse().ok()?))),
+            _ => None,
+        }
+    ),
+    command!(
+        "drop",
+        "drop ORIGINAL_ID",
+        "Drop a player-owned item at the player tile.",
+        |a| match a {
+            [id] => Some(Request::DropItem(id.clone())),
+            _ => None,
+        }
+    ),
+    command!(
+        "transfer",
+        "transfer ORIGINAL_ID FROM TO [SLOT]",
+        "Move a whole item between owners or reposition it in its current grid.",
+        |a| match a {
+            [id, from, to] => Some(Request::Transfer(
+                id.clone(),
+                from.clone(),
+                to.clone(),
+                None
+            )),
+            [id, from, to, slot] => Some(Request::Transfer(
+                id.clone(),
+                from.clone(),
+                to.clone(),
+                Some(slot.parse().ok()?)
+            )),
+            _ => None,
+        }
     ),
     query!(
         "resource",
@@ -426,6 +489,8 @@ impl Command {
                     "on|off" => ("enum", name),
                     "ID" | "SECTOR:RECORD" => ("string", "sector:record"),
                     "ORIGINAL_ID" => ("string", "2: followed by 32 hexadecimal digits in serialized GUID-byte order"),
+                    "OWNER" | "FROM" | "TO" => ("string", "player or an original container ID"),
+                    "SLOT" => ("integer", "zero-based row-major grid slot"),
                     "CATEGORY" if self.name == "objects" => {
                         ("string", "mobile or a canonical category such as npc, container, armor, or wall")
                     }
@@ -447,6 +512,18 @@ impl Command {
             ],
             "sectors" => &["bounds", "cached", "required", "speculative", "stats"],
             "objects" | "inspect" => &["map", "objects", "issues", "truncated"],
+            "inventory" => &["owner", "columns", "rows", "container", "items"],
+            "itemowner" => &[
+                "id",
+                "prototype",
+                "original",
+                "current",
+                "slot",
+                "footprint",
+                "instance_source",
+                "prototype_source",
+            ],
+            "pickup" | "drop" | "transfer" => &["id", "from", "to", "slot", "footprint"],
             "maps" => &["maps", "areas"],
             "resource" => &["path", "winner", "candidates", "decode"],
             "capture" | "operation" => &["token", "path", "viewport"],

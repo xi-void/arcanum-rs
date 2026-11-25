@@ -283,7 +283,7 @@ impl InteractiveWorld {
                     truncated = true;
                     break;
                 }
-                let info = if let Some((record, raster)) = entry
+                let mut info = if let Some((record, raster)) = entry
                     .raster
                     .and_then(|record| rasters.get(&record).copied().map(|raster| (record, raster)))
                 {
@@ -293,6 +293,10 @@ impl InteractiveWorld {
                     info["sector"] = json!(id);
                     info
                 };
+                if let Some(place) = self.cache.inventory.current(&self.map, entry.id) {
+                    info["runtime_placement"] = place.report();
+                    info["rendering"] = json!({"state":"authored_placement_replaced"});
+                }
                 objects.push(info);
             }
             if truncated {

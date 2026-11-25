@@ -4,6 +4,7 @@ pub mod art;
 mod collision;
 pub mod diagnostics;
 pub mod effects;
+mod inventory;
 pub mod items;
 mod jumps;
 mod lighting;

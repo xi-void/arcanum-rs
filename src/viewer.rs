@@ -527,6 +527,7 @@ impl Viewer<'_> {
         if let Some(states) = travel.doors.remove(&map) {
             next.restore_door_states(states);
         }
+        next.inherit_object_state(world);
         eprintln!("Entered {map} at {:?}, game hour {hour:?}", target.tile);
         view.window.set_title(&format!("Arcanum-RS | {map} play"));
         view.developer_status = bypass.then(|| menu::developer_status("COLLISION OFF"));
@@ -1069,15 +1070,9 @@ impl ApplicationHandler for Viewer<'_> {
                 }
                 if world.playing() {
                     if self.player_deadline.is_some_and(|deadline| now >= deadline) {
-                        let input = self.navigation.direction();
                         if !*waiting && !view.occluded {
                             let before = camera.position();
-                            redraw |= world.move_player(
-                                input,
-                                *shift ^ self.settings.run,
-                                elapsed,
-                                camera,
-                            );
+                            redraw |= world.advance_player(elapsed, camera);
                             let after = camera.position();
                             if before != after {
                                 *direction = (after.0 - before.0, after.1 - before.1);
@@ -1091,9 +1086,8 @@ impl ApplicationHandler for Viewer<'_> {
                             eprintln!("{message}");
                             view.window.set_title(&format!("Arcanum-RS | {message}"));
                         }
-                        self.player_deadline = (!view.occluded
-                            && (input != (0, 0) || world.player_moving()))
-                        .then_some(now + CAMERA_TICK);
+                        self.player_deadline =
+                            (!view.occluded && world.player_moving()).then_some(now + CAMERA_TICK);
                     }
                 } else if self
                     .navigation
@@ -1452,7 +1446,6 @@ impl Viewer<'_> {
                     },
                 ) = (self.cursor, &mut self.content)
                     && world.playing()
-                    && self.navigation.held == 0
                 {
                     let size = view.window.inner_size();
                     if *last_viewport == (size.width, size.height) {
@@ -1489,7 +1482,7 @@ impl Viewer<'_> {
                 ref event,
                 is_synthetic: false,
                 ..
-            } if matches!(self.content, ViewContent::Stream { explore: true, .. })
+            } if matches!(&self.content, ViewContent::Stream { explore: true, world, .. } if !world.playing())
                 && Navigation::key(&event.logical_key).is_some() =>
             {
                 if !event.repeat {
@@ -1499,15 +1492,6 @@ impl Viewer<'_> {
                         event.state.is_pressed(),
                         now,
                     );
-                    if let ViewContent::Stream { world, .. } = &mut self.content
-                        && world.playing()
-                    {
-                        if event.state.is_pressed() {
-                            world.cancel_player_route();
-                        }
-                        self.navigation.sampled_at = None; // Gameplay uses its own tick, including after release.
-                        self.player_deadline = Some(now);
-                    }
                     self.update_control_flow(event_loop);
                 }
             }
@@ -1527,6 +1511,7 @@ impl Viewer<'_> {
                     } = &mut self.content
                 {
                     let handled = match key.as_str() {
+                        "w" | "s" if world.playing() => false,
                         "w" if animation_ms.is_none() && !event.repeat => {
                             let size = view.window.inner_size();
                             world.start_walk(
@@ -2004,7 +1989,7 @@ mod tests {
     }
 
     #[test]
-    fn held_navigation_integrates_elapsed_time_and_waits_without_catching_up() {
+    fn held_camera_pan_integrates_elapsed_time_and_waits_without_catching_up() {
         let now = Instant::now();
         let mut motion = Navigation::default();
         assert!(motion.deadline().is_none());

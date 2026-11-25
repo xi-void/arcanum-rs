@@ -29,7 +29,7 @@ use a numeric map ID. Enter `help` or `help <command>` for in-game usage.
 | `coc <map-or-area> [X Y]` | Loads an original map using its in-game map-list entry, or a named world area using its `GameArea.mes` coordinates on the overworld. An exact map name or ID has priority. |
 | `pos` | Shows the current map, player tile, facing, sector, atlas position where available, terrain source, and collision state. |
 | `teleport X Y` | Relocates the player within the active map through the same validated transition path. |
-| `tcl` | Toggles collision for keyboard movement, mouse routes, and developer arrivals. **F6** invokes the same runtime action. |
+| `tcl` | Toggles collision for mouse routes and developer arrivals. **F6** invokes the same runtime action. |
 | `inspect [X Y]` | Reports the selected object, or available raster and rejection evidence at a loaded tile. A tile with one supported door also selects that door. |
 | `unlock` | Overrides an ordinary lock for this session. Use the door to open it and update passability. Scripted, jammed, and magically restricted doors retain their restrictions. |
 | `settime <0..23>` | Sets the current game hour and updates HUD time and ambient lighting. The clock continues advancing. |
