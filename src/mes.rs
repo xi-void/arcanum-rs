@@ -2,7 +2,7 @@
 
 mod encoding;
 
-pub use encoding::Encoding;
+pub use encoding::{Encoding, windows_1252};
 use std::collections::BTreeMap;
 use std::fmt;
 

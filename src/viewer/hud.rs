@@ -1,4 +1,5 @@
 //! Declarative HUD layout, assets and hit testing, in physical window pixels.
+mod dialogue;
 mod inventory;
 use super::ThemeSource;
 use arcanum_rs::{
@@ -84,6 +85,7 @@ fn default_scale() -> u16 {
 #[serde(deny_unknown_fields)]
 struct Font {
     source: String,
+    #[serde(default)]
     size: u32,
     color: Color,
     #[serde(default)]
@@ -276,6 +278,34 @@ struct Component {
     state_art: [Option<Arc<LoadedFrame>>; 3],
 }
 
+impl Component {
+    fn update_text_states(&mut self, rasterize: impl Fn(&Self) -> Arc<LoadedFrame>) {
+        let Some(normal) = self.text.as_ref().map(|text| text.font.color) else {
+            return;
+        };
+        for (variant, color) in [
+            (0, self.config.hover_text_color),
+            (2, self.config.disabled_text_color),
+        ] {
+            if let Some(color) = color {
+                self.text.as_mut().unwrap().font.color = color;
+                self.state_art[variant] = Some(rasterize(self));
+            }
+        }
+        self.text.as_mut().unwrap().font.color = normal;
+    }
+
+    fn text_height(&self, width: u32) -> u32 {
+        let shadow = u32::from(self.config.text_shadow.is_some());
+        self.text
+            .as_ref()
+            .filter(|text| !text.glyphs.is_empty())
+            .map_or(0, |text| {
+                text.height(width.saturating_sub(shadow), self.config.wrap, 100) + shadow
+            })
+    }
+}
+
 struct ClockArt {
     day: LoadedFrame,
     moon: Vec<LoadedFrame>,
@@ -317,35 +347,231 @@ struct Text {
     native_height: u32,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct TextLine {
+    glyphs: std::ops::Range<usize>,
+    width: u32,
+    top: u32,
+    height: u32,
+}
+
+impl Text {
+    fn size(&self) -> u32 {
+        if self.font.size == 0 {
+            self.native_height
+        } else {
+            self.font.size
+        }
+    }
+
+    fn pixels(&self, units: u32, scale: u32) -> u32 {
+        self.scale_units(units * self.size(), scale)
+    }
+
+    fn scale_units(&self, units: u32, scale: u32) -> u32 {
+        let divisor = u64::from(self.native_height * 100);
+        ((u64::from(units) * u64::from(scale) + divisor / 2) / divisor) as u32
+    }
+
+    fn lines(&self, width: u32, wrap: bool, scale: u32) -> impl Iterator<Item = TextLine> + '_ {
+        let (mut start, mut top) = (0, 0);
+        std::iter::from_fn(move || {
+            if start == self.glyphs.len() {
+                return None;
+            }
+            let (mut end, mut advance, mut ink, mut height, mut space) = (start, 0, 0, 0, None);
+            let bold = if self.font.bold {
+                (scale / 100).max(1)
+            } else {
+                0
+            };
+            while let Some(Some((glyph, ch))) = self.glyphs.get(end) {
+                let next = ink.max(advance + glyph.width);
+                if wrap && self.pixels(next, scale) + bold > width && end > start {
+                    if *ch != ' '
+                        && let Some((word_end, word_width, word_height)) = space
+                    {
+                        (end, ink, height) = (word_end, word_width, word_height);
+                    }
+                    break;
+                }
+                if *ch == ' ' && end > start {
+                    space = Some((end, ink, height));
+                }
+                advance += glyph.hotspot.0 as u32;
+                ink = next;
+                height = height.max(glyph.height);
+                end += 1;
+            }
+            let height = height.max(self.native_height) * self.size();
+            let to_pixels = |value| self.scale_units(value, scale);
+            let line = TextLine {
+                glyphs: start..end,
+                width: self.pixels(ink, scale) + if ink > 0 { bold } else { 0 },
+                top: to_pixels(top),
+                height: to_pixels(top + height) - to_pixels(top),
+            };
+            top += height + self.font.line_gap * self.native_height;
+            start = end;
+            if self
+                .glyphs
+                .get(start)
+                .is_some_and(|g| g.as_ref().is_none_or(|(_, ch)| *ch == ' '))
+            {
+                start += 1;
+            }
+            Some(line)
+        })
+    }
+
+    fn height(&self, width: u32, wrap: bool, scale: u32) -> u32 {
+        self.lines(width, wrap, scale)
+            .last()
+            .map_or(0, |line| line.top + line.height)
+    }
+}
+
 struct Label {
     glyphs: BTreeMap<char, Arc<SpriteFrame>>,
     font: Font,
     native_height: u32,
     value: String,
-    ink_height: u32,
+    raster_slice: Option<(u32, u32)>,
 }
 
 impl Label {
     fn text(&self, value: &str) -> Text {
+        Text::new(&self.glyphs, self.font.clone(), self.native_height, value)
+    }
+}
+
+impl Text {
+    fn new(
+        alphabet: &BTreeMap<char, Arc<SpriteFrame>>,
+        font: Font,
+        native_height: u32,
+        value: &str,
+    ) -> Self {
         let glyphs = value
             .chars()
+            .filter(|ch| *ch != '\r')
             .take(4096)
             .map(|ch| {
                 if ch == '\n' {
                     None
                 } else {
-                    Some((
-                        Arc::clone(self.glyphs.get(&ch).unwrap_or(&self.glyphs[&'?'])),
-                        ch,
-                    ))
+                    let ch = if ch == '\t' { ' ' } else { ch };
+                    Some((Arc::clone(alphabet.get(&ch).unwrap_or(&alphabet[&'?'])), ch))
                 }
             })
             .collect();
-        Text {
+        Self {
             glyphs,
-            font: self.font.clone(),
-            native_height: self.native_height,
+            font,
+            native_height,
         }
+    }
+}
+
+pub(super) struct MenuFont {
+    glyphs: BTreeMap<char, Arc<SpriteFrame>>,
+    font: Font,
+    native_height: u32,
+}
+
+impl MenuFont {
+    pub(super) fn load(
+        game: &mut Vfs,
+        theme: &ThemeSource,
+        source: &str,
+        size: u32,
+    ) -> Result<Self, Box<dyn Error>> {
+        if size != 0 && !(5..=64).contains(&size) {
+            return Err("menu font size must be native (0) or 5–64 pixels".into());
+        }
+        let glyphs = load_glyphs(game, theme, source)?;
+        if !glyphs.contains_key(&'?') {
+            return Err(format!("{source}: menu font needs a '?' glyph").into());
+        }
+        let native_height = glyphs.get(&' ').unwrap_or(&glyphs[&'?']).height;
+        let glyphs = glyphs
+            .into_iter()
+            .map(|(ch, glyph)| (ch, Arc::new(glyph)))
+            .collect();
+        let font = Font {
+            source: source.into(),
+            size,
+            color: [255; 4],
+            bold: false,
+            line_gap: 0,
+            fallback: None,
+        };
+        Ok(Self {
+            glyphs,
+            font,
+            native_height,
+        })
+    }
+
+    pub(super) fn line_height(&self) -> u32 {
+        if self.font.size == 0 {
+            self.native_height
+        } else {
+            self.font.size
+        }
+    }
+
+    pub(super) fn visible_suffix<'a>(&self, value: &'a str, width: u32) -> &'a str {
+        let mut suffix = value.len();
+        let mut extent = None;
+        for (start, ch) in value.char_indices().rev() {
+            let glyph = self.glyphs.get(&ch).unwrap_or(&self.glyphs[&'?']);
+            let ink = glyph
+                .width
+                .max(extent.map_or(0, |right| right + glyph.hotspot.0 as u32));
+            if (ink * self.line_height() + self.native_height / 2) / self.native_height > width {
+                break;
+            }
+            extent = Some(ink);
+            suffix = start;
+        }
+        &value[suffix..]
+    }
+
+    pub(super) fn render(
+        &self,
+        value: &str,
+        bounds: [u32; 2],
+        color: Color,
+        wrap: bool,
+    ) -> SpriteFrame {
+        let text = Text::new(&self.glyphs, self.font.clone(), self.native_height, value);
+        let width = text
+            .lines(bounds[0], wrap, 100)
+            .map(|line| line.width)
+            .max()
+            .unwrap_or(0)
+            .clamp(1, bounds[0].max(1));
+        let height = text.height(bounds[0], wrap, 100).clamp(1, bounds[1].max(1));
+        let width = if wrap { bounds[0].max(1) } else { width };
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: width,
+            h: height,
+        };
+        let mut frame = sprite([width, height], [0; 4]);
+        let align = if wrap { Align::Center } else { Align::Left };
+        draw_text_colored(
+            &mut frame,
+            &text,
+            (align, wrap, 0),
+            rect,
+            rect,
+            100,
+            (color, 0),
+        );
+        frame
     }
 }
 
@@ -379,6 +605,7 @@ pub(crate) struct Hud {
     shared_band: Option<(Rect, u32)>,
     inventory: InventoryPanel,
     dialogue_open: bool,
+    dialogue_layout: dialogue::DialogueLayout,
     dialogue_available: [bool; 5],
 }
 
@@ -552,13 +779,13 @@ impl Hud {
                                 .iter()
                                 .flatten()
                                 .next()
-                                .map_or(font.size, |(g, _)| g.height)
+                                .map_or(font.size.max(1), |(g, _)| g.height)
                         },
                         |space| space.height,
                     );
                     if dynamic {
                         let mut alphabet = BTreeMap::new();
-                        for ch in ' '..='~' {
+                        for ch in font_characters() {
                             if let Ok(frame) = glyph(ch) {
                                 alphabet.insert(ch, frame);
                             }
@@ -575,7 +802,7 @@ impl Hud {
                             font: font.clone(),
                             native_height,
                             value: String::new(),
-                            ink_height: 0,
+                            raster_slice: None,
                         });
                     }
                     prepared_text = Some(Text {
@@ -673,6 +900,7 @@ impl Hud {
             shared_band: None,
             inventory: InventoryPanel::default(),
             dialogue_open: false,
+            dialogue_layout: dialogue::DialogueLayout::default(),
             dialogue_available: [false; 5],
         })
     }
@@ -862,7 +1090,7 @@ impl Hud {
             Some(serde_json::json!({"index":index,"bounds":[p.x,p.y,p.w,p.h],"available":self.dialogue_available[index]}))
         }).collect();
         serde_json::json!({"context_message":label(Binding::InventoryHover),
-            "npc_context":label(Binding::NpcContext),"dialogue_responses":responses,
+            "npc_context":label(Binding::NpcContext),"dialogue_responses":responses,"dialogue_scroll":self.dialogue_layout.diagnostics(),
             "map_status":label(Binding::MapStatus),"scale_percent":self.scale,"effective_scale_percent":self.effective_scale,"inventory":self.inventory_diagnostics(),"fonts":self.font_profiles,"image_references":images,
             "focused":control(self.focus),"hovered":control(self.hover),"pressed":control(self.pressed)})
     }
@@ -991,31 +1219,11 @@ impl Hud {
             && label.value != value
         {
             label.value = value.into();
+            label.raster_slice = None;
             self.components[index].text = Some(label.text(value));
             let component = &mut self.components[index];
             component.art = native_art(component, &component.base, None);
-            if component.config.binding == Some(Binding::DialogueText) {
-                let frame = &component.art.decoded.frame;
-                component.label.as_mut().unwrap().ink_height = frame
-                    .pixels
-                    .chunks_exact(frame.width as usize)
-                    .rposition(|row| row.iter().any(|pixel| pixel[3] != 0))
-                    .map_or(0, |row| row as u32 + 1);
-            }
-            if let Some(text) = &component.text {
-                let normal = text.font.color;
-                for (variant, color) in [
-                    (0, component.config.hover_text_color),
-                    (2, component.config.disabled_text_color),
-                ] {
-                    if let Some(color) = color {
-                        component.text.as_mut().unwrap().font.color = color;
-                        component.state_art[variant] =
-                            Some(native_art(component, &component.base, None));
-                    }
-                }
-                component.text.as_mut().unwrap().font.color = normal;
-            }
+            component.update_text_states(|c| native_art(c, &c.base, None));
         }
     }
 
@@ -1027,59 +1235,6 @@ impl Hud {
                 .iter()
                 .any(|c| c.config.response == Some(row) && !c.config.hidden && c.label.is_some())
         })
-    }
-
-    pub(super) fn set_dialogue(
-        &mut self,
-        session: Option<&arcanum_rs::content::dialogue::Conversation>,
-        npc_at: Option<(i32, i32)>,
-        size: (u32, u32),
-    ) {
-        if self.dialogue_open != session.is_some() {
-            self.dialogue_open = session.is_some();
-            self.clear_layout();
-        }
-        self.layout(size);
-        let Some(session) = session else { return };
-        self.set_label(Binding::NpcContext, &session.speaker);
-        self.set_label(Binding::DialogueText, &session.turn.text);
-        self.dialogue_available =
-            std::array::from_fn(|row| session.turn.responses.get(row).is_some_and(|r| r.available));
-        for index in 0..self.components.len() {
-            if let Some(row) = self.components[index].config.response {
-                self.write_label(
-                    index,
-                    session.turn.responses.get(row).map_or("", |r| &r.text),
-                );
-            }
-        }
-        let response_top = self
-            .components
-            .iter()
-            .zip(&self.placed)
-            .filter_map(|(c, p)| c.config.response.and(p.as_ref()).map(|p| p.rect.y))
-            .min();
-        if let Some(index) = self.bound(Binding::DialogueText)
-            && let Some(place) = self.placed[index].as_mut()
-            && let Some((x, y)) = npc_at
-        {
-            let band = self.panel_band;
-            let rect = &mut place.full;
-            let bottom = response_top.unwrap_or(band.y + band.h as i32);
-            let visible = self.components[index]
-                .label
-                .as_ref()
-                .map_or(0, |label| (label.ink_height * place.scale / 100) as i32);
-            rect.x = (x - rect.w as i32 / 2)
-                .clamp(band.x, band.x + band.w.saturating_sub(rect.w) as i32);
-            rect.y = (y - visible).clamp(band.y, (bottom - visible).max(band.y));
-            place.rect = rect
-                .intersect(Rect {
-                    h: (bottom - band.y).max(0) as u32,
-                    ..band
-                })
-                .unwrap_or(Rect { w: 0, h: 0, ..band });
-        }
     }
 
     pub(super) fn clear_dialogue_choices(&mut self) {
@@ -1395,7 +1550,7 @@ fn parse(source: &str) -> Result<Theme, Box<dyn Error>> {
     if pixels > 1024 * 1024
         || theme.hud.iter().filter(|e| e.inventory_panel).count() > 1
         || theme.fonts.values().any(|font| {
-            !(5..=48).contains(&font.size)
+            (font.size != 0 && !(5..=64).contains(&font.size))
                 || font.line_gap > 32
                 || font
                     .fallback
@@ -1533,7 +1688,7 @@ fn raster(
             draw_text_colored(
                 &mut frame,
                 text,
-                &c.config,
+                (c.config.align, c.config.wrap, 1),
                 full,
                 clip,
                 scale,
@@ -1570,6 +1725,12 @@ pub(super) fn generated_frame(id: &str, frame: SpriteFrame) -> Arc<LoadedFrame> 
     })
 }
 
+fn font_characters() -> impl Iterator<Item = char> {
+    (' '..='~')
+        .chain((0xa0..=0xff).map(char::from))
+        .chain((0x80..0xa0).filter_map(arcanum_rs::mes::windows_1252))
+}
+
 fn font_glyph(
     game: &mut Vfs,
     files: &mut Vfs,
@@ -1594,9 +1755,11 @@ fn font_glyph(
         frame.hotspot.0 = 7;
         Ok(frame)
     } else {
-        let frame = (ch as usize)
-            .checked_sub(31)
-            .ok_or("invalid font character")?;
+        let byte = (0x80..0xa0)
+            .find(|&byte| arcanum_rs::mes::windows_1252(byte) == Some(ch))
+            .or_else(|| u8::try_from(ch).ok())
+            .ok_or("character is outside the ART font code page")?;
+        let frame = usize::from(byte.checked_sub(31).ok_or("invalid font character")?);
         let mut glyph = resource(game, files, &font.source, frame)?.decoded.frame;
         if glyph.width > 64 || glyph.height > 64 || !(0..=128).contains(&glyph.hotspot.0) {
             return Err("ART font glyph dimensions or advance exceed bounds".into());
@@ -1622,7 +1785,11 @@ fn draw_text(
     draw_text_colored(
         frame,
         text,
-        element,
+        (
+            element.align,
+            element.wrap,
+            u32::from(element.text_shadow.is_some()),
+        ),
         full,
         clip,
         scale,
@@ -1633,65 +1800,37 @@ fn draw_text(
 fn draw_text_colored(
     frame: &mut SpriteFrame,
     text: &Text,
-    element: &Element,
+    (align, wrap, padding): (Align, bool, u32),
     full: Rect,
     clip: Rect,
     scale: u32,
     (color, offset): (Color, u32),
 ) {
-    let Text {
-        glyphs,
-        font,
-        native_height,
-    } = text;
-    let to_pixels = |units: u32| (units * scale + native_height * 50) / (native_height * 100);
-    let scale_glyph = |units| to_pixels(units * font.size);
-    let line_step = (font.size + font.line_gap) * native_height;
-    let (mut start, mut line) = (0, 0);
+    let Text { glyphs, font, .. } = text;
+    let scale_glyph = |units| text.pixels(units, scale);
     let visible_x = (clip.x - full.x) as u32;
     let visible_y = (clip.y - full.y) as u32;
-    while start < glyphs.len() {
-        let y = offset + to_pixels(line * line_step);
+    for line in text.lines(full.w.saturating_sub(padding), wrap, scale) {
+        let y = offset + line.top;
         if y >= visible_y + frame.height {
             break;
         }
-        let (mut end, mut advance, mut width, mut space) = (start, 0, 0, None);
-        while let Some(Some((glyph, ch))) = glyphs.get(end) {
-            let next = width.max(advance + glyph.width);
-            if element.wrap && scale_glyph(next) > full.w && end > start {
-                if let Some((word_end, line_width)) = space {
-                    end = word_end;
-                    width = line_width;
-                }
-                break;
-            }
-            if *ch == ' ' {
-                space = Some((end, width));
-            }
-            advance += glyph.hotspot.0 as u32;
-            width = next;
-            end += 1;
-        }
-        let space_left = full.w.saturating_sub(scale_glyph(width));
-        let origin = match element.align {
+        let bold = if font.bold { (scale / 100).max(1) } else { 0 };
+        let space_left = full.w.saturating_sub(padding + line.width);
+        let origin = match align {
             Align::Left => 0,
             Align::Center => space_left / 2,
             Align::Right => space_left,
         };
         let mut pen = 0;
-        for (glyph, _) in glyphs[start..end].iter().flatten() {
+        for (glyph, _) in glyphs[line.glyphs].iter().flatten() {
             let x = offset + origin + scale_glyph(pen);
             let w = (offset + origin + scale_glyph(pen + glyph.width) - x).max(1);
             let h = scale_glyph(glyph.height).max(1);
-            let bold = if font.bold { (scale / 100).max(1) } else { 0 };
             for py in y.max(visible_y)..(y + h).min(visible_y + frame.height) {
-                let sy = (2 * (py - y) + 1) * glyph.height / (2 * h);
                 for px in x.max(visible_x)..(x + w + bold).min(visible_x + frame.width) {
                     let u = px - x;
-                    let coverage = |ix: u32| {
-                        let sx = (2 * ix + 1) * glyph.width / (2 * w);
-                        glyph.pixels[(sy * glyph.width + sx) as usize][3]
-                    };
+                    let coverage = |ix| glyph_coverage(glyph, ix, py - y, w, h);
                     let alpha = if u < w { coverage(u) } else { 0 };
                     let alpha = if bold > 0 && u >= bold && u - bold < w {
                         alpha.max(coverage(u - bold))
@@ -1704,15 +1843,32 @@ fn draw_text_colored(
             }
             pen += glyph.hotspot.0 as u32;
         }
-        start = end;
-        if glyphs
-            .get(start)
-            .is_some_and(|g| g.as_ref().is_none_or(|(_, ch)| *ch == ' '))
-        {
-            start += 1;
-        }
-        line += 1;
     }
+}
+
+pub(super) fn glyph_coverage(glyph: &SpriteFrame, x: u32, y: u32, w: u32, h: u32) -> u8 {
+    if w >= glyph.width && h >= glyph.height {
+        let sx = (2 * x + 1) * glyph.width / (2 * w);
+        let sy = (2 * y + 1) * glyph.height / (2 * h);
+        glyph.pixels[(sy * glyph.width + sx) as usize][3]
+    } else {
+        reduced_coverage(glyph, x, y, w, h)
+    }
+}
+
+fn reduced_coverage(glyph: &SpriteFrame, x: u32, y: u32, w: u32, h: u32) -> u8 {
+    let (left, right) = (x * glyph.width, (x + 1) * glyph.width);
+    let (top, bottom) = (y * glyph.height, (y + 1) * glyph.height);
+    let mut sum = 0;
+    for sy in top / h..bottom.div_ceil(h) {
+        let dy = bottom.min((sy + 1) * h) - top.max(sy * h);
+        for sx in left / w..right.div_ceil(w) {
+            let dx = right.min((sx + 1) * w) - left.max(sx * w);
+            sum += dx * dy * u32::from(glyph.pixels[(sy * glyph.width + sx) as usize][3]);
+        }
+    }
+    let area = glyph.width * glyph.height;
+    ((sum + area / 2) / area) as u8
 }
 
 pub(super) fn blend_glyph(dst: &mut Color, color: Color, coverage: u8) {
@@ -1729,7 +1885,7 @@ pub(super) fn blend_glyph(dst: &mut Color, color: Color, coverage: u8) {
     dst[3] = ((total + 127) / 255) as u8;
 }
 
-pub(super) fn console_font(
+pub(super) fn load_glyphs(
     game: &mut Vfs,
     theme: &ThemeSource,
     source: &str,
@@ -1747,7 +1903,7 @@ pub(super) fn console_font(
         fallback: None,
     };
     let mut glyphs = BTreeMap::new();
-    for ch in ' '..='ÿ' {
+    for ch in font_characters() {
         match font_glyph(game, &mut files, &font, ch) {
             Ok(glyph) => {
                 glyphs.insert(ch, glyph);
@@ -1844,6 +2000,69 @@ mod tests {
             assert_eq!(frame.pixels[second_x - 1], [0, 0, 0, 255]);
             assert_eq!(frame.pixels[second_x], [64, 64, 64, 255]);
         }
+    }
+
+    #[test]
+    fn native_text_wraps_using_drawable_bounds_and_preserves_line_spacing() {
+        let mut a = sprite([5, 7], [255; 4]);
+        a.hotspot.0 = 3;
+        let mut space = sprite([2, 7], [0; 4]);
+        space.hotspot.0 = 2;
+        let face = BTreeMap::from([
+            ('?', Arc::new(a.clone())),
+            ('A', Arc::new(a)),
+            (' ', Arc::new(space)),
+        ]);
+        let mut font = parse(EXAMPLE).unwrap().fonts.remove("controls").unwrap();
+        font.size = 0;
+        font.bold = false;
+        font.line_gap = 2;
+        let text = Text::new(&face, font, 7, "AA A");
+        assert_eq!(
+            text.lines(8, true, 100).collect::<Vec<_>>(),
+            [
+                TextLine {
+                    glyphs: 0..2,
+                    width: 8,
+                    top: 0,
+                    height: 7
+                },
+                TextLine {
+                    glyphs: 3..4,
+                    width: 5,
+                    top: 9,
+                    height: 7
+                },
+            ]
+        );
+        assert_eq!(text.height(8, true, 100), 16);
+        let frame_bounds = Rect {
+            x: 0,
+            y: 0,
+            w: 8,
+            h: 16,
+        };
+        let mut frame = sprite([8, 16], [0; 4]);
+        draw_text_colored(
+            &mut frame,
+            &text,
+            (Align::Left, true, 0),
+            frame_bounds,
+            frame_bounds,
+            100,
+            ([255; 4], 0),
+        );
+        assert_eq!(frame.pixels[7][3], 255);
+        assert_eq!(frame.pixels[8 * 7][3], 0);
+        assert_eq!(frame.pixels[8 * 9][3], 255);
+    }
+
+    #[test]
+    fn downscaling_retains_coverage_of_a_stroke_between_sample_centers() {
+        let mut glyph = sprite([1, 3], [0; 4]);
+        glyph.pixels[1] = [255; 4];
+        assert_eq!(reduced_coverage(&glyph, 0, 0, 1, 2), 85);
+        assert_eq!(reduced_coverage(&glyph, 0, 1, 1, 2), 85);
     }
 
     #[test]

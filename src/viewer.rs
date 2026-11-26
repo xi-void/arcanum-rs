@@ -2234,6 +2234,13 @@ impl Viewer<'_> {
                             preferences.set("ui", "scale", i64::from(hud.scale()));
                         }
                     }
+                    Key::Named(NamedKey::PageUp | NamedKey::PageDown) => {
+                        hud.scroll_dialogue(
+                            self.cursor,
+                            key.logical_key == Key::Named(NamedKey::PageUp),
+                            true,
+                        );
+                    }
                     _ => {}
                 }
                 true
@@ -2251,9 +2258,17 @@ impl Viewer<'_> {
                 }
                 true
             }
-            WindowEvent::KeyboardInput { .. }
-            | WindowEvent::MouseInput { .. }
-            | WindowEvent::MouseWheel { .. } => true,
+            WindowEvent::MouseWheel { delta, .. } => {
+                let y = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
+                    MouseScrollDelta::PixelDelta(point) => point.y,
+                };
+                if y != 0. {
+                    hud.scroll_dialogue(self.cursor, y > 0., false);
+                }
+                true
+            }
+            WindowEvent::KeyboardInput { .. } | WindowEvent::MouseInput { .. } => true,
             WindowEvent::Resized { .. } | WindowEvent::ScaleFactorChanged { .. } => {
                 hud.clear_dialogue_choices();
                 false

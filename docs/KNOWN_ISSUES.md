@@ -1,6 +1,6 @@
 # Arcanum-RS — Known Issues
 
-Baseline: Milestone 69-R (NPC interaction and dialogue foundation). Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
+Baseline: Milestone 70-R (Classic UI typography). Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
 
 ## Triage
 
@@ -27,15 +27,13 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
   service-specific dialogue. Talk-triggered scripts, trade and companion
   recruitment are deferred. Scriptless NPCs have no conversation panel.
 
-### DLG-002 — Generated greetings and long-response layout
+### DLG-002 — Generated greetings and talk eligibility
 
 - **Priority:** P2 | **Status:** Deferred
 - Plain `G:` greetings and several original generic response directives
   use installed tables. Variant selection currently uses the first matching
   entry. Reputation, complex greeting branches and alternate dialogue
   overrides require the corresponding systems.
-- Classic uses five fixed-width response rows. CE can widen the response
-  region for unusually long lines. The current HUD clips long responses.
 - Talk eligibility uses available object, stat and flag data. Temporary
   effects, hostility scripts, and scripted or autonomous NPC behavior need
   their respective runtime systems.
@@ -199,6 +197,13 @@ These are not open defects. Retain focused regression coverage and reopen only i
 
 - HUD and active panels overlap at large UI scales, or opening a panel changes HUD scale. M63-R reports a stable viewport-fitted layout based on 800×600.
 - Inventory button cannot close an open panel; keyboard and mouse toggle behavior diverge.
+- UI-010. Classic HUD and dialogue text discarded fine strokes by reducing
+  15-pixel Flare12 frames to 12 pixels with nearest sampling. M70-R restores
+  native ART metrics and preserves coverage for explicit reductions. Vulkan
+  checks cover both requested desktop scales and the 800×600 reference.
+- DLG-002 layout. Long Classic dialogue responses used fixed, clipped rows.
+  M70-R wraps and scrolls rows with shared input bounds. Native checks use a
+  long VFS override at 800×600 and select a response after scrolling.
 - UI-007. Classic item hover text and counters display original stack quantities. Native checks use the authored Crash Site Cave ammunition.
 - UI scale changes trigger expensive asset reconstruction, texture uploads or noticeable stalls.
 - Scenery-ART containers fail to render or open. M63-R reports generic classification and reachability corrections; verify ordinary locked containers still reject access.

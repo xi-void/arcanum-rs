@@ -97,7 +97,7 @@ impl Layout {
 impl Console {
     pub fn load(source: &ThemeSource, vfs: &mut Vfs) -> Result<Self, Box<dyn std::error::Error>> {
         let theme = parse_theme(&source.read(128 * 1024 + 1)?)?;
-        let glyphs = hud::console_font(vfs, source, &theme.font)?;
+        let glyphs = hud::load_glyphs(vfs, source, &theme.font)?;
         let mut console = Self::new(theme, glyphs);
         console.notice("Developer console. Type help for commands.");
         Ok(console)
@@ -399,10 +399,17 @@ impl Console {
 
     fn layout(&self, (w, h): (u32, u32), scale: u16) -> Layout {
         let font = (self.theme.font_size * u32::from(scale)).div_ceil(100);
+        let step = self
+            .glyphs
+            .values()
+            .map(|glyph| (glyph.width * font).div_ceil(glyph.height))
+            .max()
+            .unwrap_or(font)
+            + 1;
         Layout {
             width: (w * self.theme.width_percent / 100).max(1),
             height: (h * self.theme.height_percent / 100).max(1),
-            step: font * 3 / 4 + 1,
+            step,
             font,
             padding: font / 2 + 1,
         }
@@ -528,18 +535,13 @@ impl Console {
             let Some(glyph) = self.glyphs.get(&ch).or_else(|| self.glyphs.get(&'?')) else {
                 continue;
             };
-            let width = (glyph.width * layout.font / glyph.height.max(1))
-                .max(1)
-                .min(layout.step);
-            let x = x + index as u32 * layout.step;
+            let width = ((glyph.width * layout.font + glyph.height / 2) / glyph.height).max(1);
+            let x = x + index as u32 * layout.step + (layout.step - width) / 2;
             for dy in 0..layout.font.min(frame.height.saturating_sub(y)) {
                 for dx in 0..width.min(frame.width.saturating_sub(x)) {
-                    let src = ((dy * glyph.height / layout.font) * glyph.width
-                        + dx * glyph.width / width) as usize;
                     let dst = ((y + dy) * frame.width + x + dx) as usize;
-                    if let Some(pixel) = glyph.pixels.get(src) {
-                        hud::blend_glyph(&mut frame.pixels[dst], color, pixel[3]);
-                    }
+                    let coverage = hud::glyph_coverage(glyph, dx, dy, width, layout.font);
+                    hud::blend_glyph(&mut frame.pixels[dst], color, coverage);
                 }
             }
         }

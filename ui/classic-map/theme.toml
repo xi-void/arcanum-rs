@@ -6,7 +6,6 @@ fit_viewport = [800, 600]
 
 [fonts.map]
 source = "vfs:art/interface/newtimes16font.art"
-size = 21
 color = [250, 250, 250, 255]
 
 [[hud]]
@@ -99,7 +98,7 @@ map_views = ["continent"]
 id = "west"
 parent = "frame"
 offset = [707, 159]
-size = [60, 18]
+size = [60, 21]
 font = "map"
 align = "left"
 fill = [0, 0, 0, 255]
@@ -109,7 +108,7 @@ binding = "map-west"
 id = "south"
 parent = "frame"
 offset = [707, 191]
-size = [60, 18]
+size = [60, 21]
 font = "map"
 align = "left"
 fill = [0, 0, 0, 255]

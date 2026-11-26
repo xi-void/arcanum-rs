@@ -103,7 +103,7 @@ fn detect_encoding(bytes: &[u8], requested: Option<Encoding>) -> Result<Encoding
     Ok(encoding)
 }
 
-fn windows_1252(byte: u8) -> Option<char> {
+pub fn windows_1252(byte: u8) -> Option<char> {
     // Bytes outside the C1 range have the same code points as Latin-1.
     const C1: [Option<char>; 32] = [
         Some('€'),

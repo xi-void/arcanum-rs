@@ -1,10 +1,23 @@
 name = "Classic"
 scale = 125
 
-[fonts.inventory]
+[fonts.body]
 source = "vfs:art/interface/flare12font.art"
-size = 12
 color = [255, 255, 255, 255]
+
+[fonts.counters]
+source = "vfs:art/interface/cloister18font.art"
+color = [255, 255, 255, 255]
+
+[fonts.speech]
+source = "vfs:art/interface/flare14font.art"
+color = [255, 255, 255, 255]
+line_gap = 2
+
+[fonts.responses]
+source = "vfs:art/interface/flare14font.art"
+color = [255, 255, 255, 255]
+line_gap = 2
 
 [[hud]]
 id = "top"
@@ -290,7 +303,7 @@ parent = "bottom"
 offset = [204, 61]
 size = [397, 80]
 binding = "inventory-hover"
-font = "inventory"
+font = "body"
 wrap = true
 
 [[hud]]
@@ -588,7 +601,7 @@ parent = "inventory-panel"
 offset = [729, 70]
 size = [58, 20]
 binding = "inventory-gold"
-font = "inventory"
+font = "counters"
 
 [[hud]]
 id = "inventory-arrows"
@@ -596,7 +609,7 @@ parent = "inventory-panel"
 offset = [729, 93]
 size = [58, 20]
 binding = "inventory-arrows"
-font = "inventory"
+font = "counters"
 
 [[hud]]
 id = "inventory-bullets"
@@ -604,7 +617,7 @@ parent = "inventory-panel"
 offset = [729, 116]
 size = [58, 20]
 binding = "inventory-bullets"
-font = "inventory"
+font = "counters"
 
 [[hud]]
 id = "inventory-charges"
@@ -612,7 +625,7 @@ parent = "inventory-panel"
 offset = [729, 139]
 size = [58, 20]
 binding = "inventory-charges"
-font = "inventory"
+font = "counters"
 
 [[hud]]
 id = "inventory-fuel"
@@ -620,7 +633,7 @@ parent = "inventory-panel"
 offset = [729, 162]
 size = [58, 20]
 binding = "inventory-fuel"
-font = "inventory"
+font = "counters"
 
 [[hud]]
 id = "inventory-weight"
@@ -629,7 +642,7 @@ inventory_views = ["inventory"]
 offset = [145, 29]
 size = [185, 15]
 binding = "inventory-weight"
-font = "inventory"
+font = "body"
 
 [[hud]]
 id = "inventory-burden"
@@ -638,7 +651,7 @@ inventory_views = ["inventory"]
 offset = [145, 44]
 size = [185, 15]
 binding = "inventory-burden"
-font = "inventory"
+font = "body"
 
 [[hud]]
 id = "inventory-speed"
@@ -647,7 +660,7 @@ inventory_views = ["inventory"]
 offset = [145, 59]
 size = [185, 15]
 binding = "inventory-speed"
-font = "inventory"
+font = "body"
 
 [[hud]]
 id = "inventory-defense"
@@ -656,7 +669,7 @@ inventory_views = ["inventory"]
 offset = [261, 358]
 size = [23, 35]
 binding = "inventory-defense"
-font = "inventory"
+font = "counters"
 
 [[hud]]
 id = "dialogue-options"
@@ -669,10 +682,10 @@ capture = true
 [[hud]]
 id = "dialogue-speaker"
 anchor = "center"
-size = [200, 200]
+size = [280, 200]
 dialogue_only = true
 binding = "dialogue-text"
-font = "inventory"
+font = "speech"
 text_shadow = [0, 0, 0, 255]
 align = "center"
 wrap = true
@@ -683,7 +696,7 @@ parent = "bottom"
 offset = [211, 66]
 size = [383, 84]
 binding = "npc-context"
-font = "inventory"
+font = "body"
 wrap = true
 
 [[hud]]
@@ -693,7 +706,8 @@ offset = [6, 3]
 size = [388, 17]
 binding = "dialogue-response"
 response = 0
-font = "inventory"
+wrap = true
+font = "responses"
 hover_text_color = [255, 255, 0, 255]
 disabled_text_color = [150, 150, 150, 255]
 text_shadow = [0, 0, 0, 255]
@@ -705,7 +719,8 @@ offset = [6, 23]
 size = [388, 17]
 binding = "dialogue-response"
 response = 1
-font = "inventory"
+wrap = true
+font = "responses"
 hover_text_color = [255, 255, 0, 255]
 disabled_text_color = [150, 150, 150, 255]
 text_shadow = [0, 0, 0, 255]
@@ -717,7 +732,8 @@ offset = [6, 43]
 size = [388, 17]
 binding = "dialogue-response"
 response = 2
-font = "inventory"
+wrap = true
+font = "responses"
 hover_text_color = [255, 255, 0, 255]
 disabled_text_color = [150, 150, 150, 255]
 text_shadow = [0, 0, 0, 255]
@@ -729,7 +745,8 @@ offset = [6, 63]
 size = [388, 17]
 binding = "dialogue-response"
 response = 3
-font = "inventory"
+wrap = true
+font = "responses"
 hover_text_color = [255, 255, 0, 255]
 disabled_text_color = [150, 150, 150, 255]
 text_shadow = [0, 0, 0, 255]
@@ -741,7 +758,8 @@ offset = [6, 83]
 size = [388, 17]
 binding = "dialogue-response"
 response = 4
-font = "inventory"
+wrap = true
+font = "responses"
 hover_text_color = [255, 255, 0, 255]
 disabled_text_color = [150, 150, 150, 255]
 text_shadow = [0, 0, 0, 255]

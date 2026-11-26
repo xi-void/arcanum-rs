@@ -3,7 +3,9 @@
 With Classic active, hover an NPC to read their description in the bottom HUD.
 Left-click to approach and talk. Click a response to continue. **Escape**
 closes the conversation. **[** and **]** change the shared interface scale
-while dialogue is open. The Voice slider under **Escape → Options → Sound**
+while dialogue is open. Scroll over the speech or responses to read
+overflowing text. **Page Up** and **Page Down** advance by a page.
+The Voice slider under **Escape → Options → Sound**
 controls dialogue volume.
 
 The world picker selects NPCs by their visible original ART. The same route
@@ -82,14 +84,18 @@ Themes use the same HUD components and font definitions as inventory.
 placed in the shared band between the top and bottom HUDs. The
 `dialogue-text` binding displays the speaker bubble. Five
 `dialogue-response` bindings with `response = 0` through `4` define clickable
-rows. Use `hover_text_color` for the available choice under the pointer.
+rows. Set `wrap = true` to wrap a response using the font metrics. Place
+the rows with top-left anchors under a shared bottom-anchored dialogue
+root to let the panel grow and scroll within the gameplay band. The
+configured row sizes are minimums and the offsets set the gaps. Use `hover_text_color` for the available choice under the pointer.
 `npc-context` displays the contextual name. See the Classic package for
 working geometry and font definitions. Use `disabled_text_color` to
 style a visible response with an unresolved action.
 
 `rpc pos` includes `player.navigation.hovered_npc`, `dialogue.active`,
 `dialogue.last_result`, physical choice bounds in `ui.hud.dialogue_responses`,
-and `audio.output.active_voice`. The active conversation includes the
+scroll bounds and offsets in `ui.hud.dialogue_scroll`, and
+`audio.output.active_voice`. The active conversation includes the
 NPC identity, script attachment and entry statement, DLG source, current
 line, available response IDs and unresolved dependencies.
 `rpc resource dlg/01324virgil.dlg` verifies DLG structure and VFS provenance. Dialogue is
