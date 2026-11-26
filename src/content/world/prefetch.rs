@@ -590,6 +590,7 @@ impl InteractiveWorld {
                     format!("{error}; choose another starting tile with --center X Y")
                 })?;
         }
+        self.cache.update_character_sector();
         self.player_started = true;
         Ok(())
     }

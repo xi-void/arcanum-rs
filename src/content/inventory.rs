@@ -2,10 +2,14 @@
 use super::{
     Source,
     art::FrameCache,
+    character::EquipmentSlot,
     diagnostics, load_mes,
     mobile::{item_art_entry, population::Effective},
 };
-use crate::{sector::objects::OriginalId, vfs::Vfs};
+use crate::{
+    sector::objects::{ItemStats, OriginalId},
+    vfs::Vfs,
+};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -35,6 +39,8 @@ impl Owner {
 pub(super) enum Place {
     Ground(String, Tile),
     Owned(Owner),
+    Equipped(EquipmentSlot),
+    Merged(OriginalId),
 }
 
 impl Place {
@@ -47,6 +53,8 @@ impl Place {
             Self::Owned(Owner::OriginalObject(map, id)) => {
                 json!({"kind":"original_object","map":map,"id":id.key()})
             }
+            Self::Equipped(slot) => json!({"kind":"equipped","slot":slot}),
+            Self::Merged(id) => json!({"kind":"merged","into":id.key()}),
             Self::Ground(map, tile) => json!({"kind":"world","map":map,"tile":tile}),
         }
     }
@@ -129,13 +137,59 @@ pub(super) struct Item {
     pub effective: Effective,
     pub flags: u32,
     pub scripted: bool,
+    pub stats: ItemStats,
+    pub generated: bool,
 }
 
 impl Item {
+    pub fn weight(&self, aptitude: i32) -> i64 {
+        if self.category == 8 {
+            return 0;
+        }
+        let quantity = if self.category == 6 {
+            self.stats.quantity.unwrap_or_default() / 4
+        } else {
+            1
+        };
+        // Bound malformed negative weights and keep even extreme wire values representable.
+        (i64::from(self.stats.weight.unwrap_or_default())
+            + self.stats.adjust_magic(self.stats.magic_weight, aptitude))
+        .clamp(0, i64::from(i32::MAX))
+            * i64::from(quantity)
+    }
+
+    pub fn detail(&self, aptitude: i32) -> String {
+        let mut detail = self
+            .stats
+            .quantity
+            .map_or_else(String::new, |quantity| format!("×{quantity}  "));
+        use std::fmt::Write;
+        let _ = write!(detail, "Weight: {} st", self.weight(aptitude));
+        if self.category == 7 {
+            let armor = i64::from(self.stats.armor_class.unwrap_or_default())
+                + self
+                    .stats
+                    .adjust_magic(self.stats.magic_armor_class, aptitude);
+            let _ = write!(detail, "  AC: {armor:+}");
+        }
+        detail
+    }
+
+    pub fn same_stack(&self, other: &Self) -> bool {
+        matches!(self.category, 6 | 8)
+            && self.category == other.category
+            && self.prototype == other.prototype
+            && self.stats.ammo_type == other.stats.ammo_type
+            && self.stats.quantity.is_some()
+            && other.stats.quantity.is_some()
+    }
+
     pub fn report(&self, place: &Place, slot: Option<usize>) -> Value {
         json!({
             "id":self.id.key(),"category":crate::sector::objects::category_name(self.category),
-            "prototype":self.prototype,"origin_map":self.origin_map,
+            "prototype":self.prototype,"origin_map":self.origin_map,"generated":self.generated,
+            "quantity":self.stats.quantity, "ammo_type":self.stats.ammo_type,
+            "item_statistics":self.stats,
             "instance_source":diagnostics::source(&self.instance_source),
             "prototype_source":diagnostics::source(&self.prototype_source),
             "original":self.original.report(),"current":place.report(),
@@ -153,6 +207,15 @@ pub(super) struct Grid {
 }
 
 impl Grid {
+    pub fn contains_cell(&self, id: OriginalId, slot: usize) -> bool {
+        self.items
+            .get(&id)
+            .is_some_and(|&(start, [width, height])| {
+                (start / COLUMNS..start / COLUMNS + height).contains(&(slot / COLUMNS))
+                    && (start % COLUMNS..start % COLUMNS + width).contains(&(slot % COLUMNS))
+            })
+    }
+
     pub fn fit(
         &self,
         id: OriginalId,
@@ -208,6 +271,7 @@ pub(super) struct Change {
 #[derive(Default)]
 pub(super) struct State {
     pub changes: BTreeMap<OriginalId, Change>,
+    pub next_generated: u64,
 }
 
 impl State {
@@ -231,14 +295,28 @@ impl State {
             (Place::Ground(..), None) => None,
             _ => return Err("Invalid inventory destination"),
         };
+        let result = json!({
+            "id":item.id.key(),"from":self.place(&item).report(),"to":destination.report(),
+            "slot":slot,"footprint":item.footprint.cells,"quantity":item.stats.quantity,
+        });
+        self.put(item, destination, slot);
+        Ok(result)
+    }
+
+    pub fn generated_id(&self) -> OriginalId {
+        let mut payload = [0; 16];
+        payload[..8].copy_from_slice(&self.next_generated.to_le_bytes());
+        OriginalId {
+            kind: u16::MAX,
+            payload,
+        }
+    }
+
+    pub fn put(&mut self, item: Item, destination: Place, slot: Option<usize>) {
         let order = self
             .changes
             .get(&item.id)
             .map_or(self.changes.len(), |change| change.order);
-        let result = json!({
-            "id":item.id.key(),"from":self.place(&item).report(),"to":destination.report(),
-            "slot":slot,"footprint":item.footprint.cells,
-        });
         self.changes.insert(
             item.id,
             Change {
@@ -248,7 +326,6 @@ impl State {
                 order,
             },
         );
-        Ok(result)
     }
 }
 

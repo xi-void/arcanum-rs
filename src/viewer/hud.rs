@@ -115,6 +115,15 @@ pub(super) enum Binding {
     ContainerThumb,
     InventoryLens,
     InventoryHover,
+    InventoryGold,
+    InventoryArrows,
+    InventoryBullets,
+    InventoryCharges,
+    InventoryFuel,
+    InventoryWeight,
+    InventoryBurden,
+    InventorySpeed,
+    InventoryDefense,
     InventoryDrop,
 }
 
@@ -128,6 +137,15 @@ impl Binding {
                 | Self::MapStatus
                 | Self::PlaceLabel
                 | Self::InventoryHover
+                | Self::InventoryGold
+                | Self::InventoryArrows
+                | Self::InventoryBullets
+                | Self::InventoryCharges
+                | Self::InventoryFuel
+                | Self::InventoryWeight
+                | Self::InventoryBurden
+                | Self::InventorySpeed
+                | Self::InventoryDefense
         )
     }
 
@@ -174,6 +192,7 @@ struct Element {
     #[serde(default)]
     inventory_views: Vec<InventoryView>,
     cell: Option<u32>,
+    equipment_slot: Option<arcanum_rs::content::character::EquipmentSlot>,
     hover_message: Option<String>,
     thumb_height: Option<u32>,
     thumb_middle: Option<String>,
@@ -1108,6 +1127,13 @@ impl Hud {
             .filter_map(move |(index, placement)| {
                 let p = placement.as_ref()?;
                 let component = &self.components[index];
+                if component
+                    .config
+                    .equipment_slot
+                    .is_some_and(|slot| self.equipped(slot).is_some())
+                {
+                    return None;
+                }
                 if component.config.binding == Some(Binding::ContainerThumb)
                     || (p.live_asset.is_none()
                         && component.config.image.is_none()

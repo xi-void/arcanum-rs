@@ -76,16 +76,21 @@ impl OriginalId {
     }
 
     pub(crate) fn parse_key(key: &str) -> Option<Self> {
+        Self::parse_with_kind(key, 2)
+    }
+
+    pub(crate) fn parse_with_kind(key: &str, expected: u16) -> Option<Self> {
         let (kind, hash) = key.split_once(':')?;
+        let kind: u16 = kind.parse().ok()?;
         let hash = hash.as_bytes();
-        if kind != "2" || hash.len() != 32 || !hash.iter().all(u8::is_ascii_hexdigit) {
+        if kind != expected || hash.len() != 32 || !hash.iter().all(u8::is_ascii_hexdigit) {
             return None;
         }
         let mut payload = [0; 16];
         for (byte, pair) in payload.iter_mut().zip(hash.as_chunks::<2>().0) {
             *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
         }
-        Some(Self { kind: 2, payload })
+        Some(Self { kind, payload })
     }
 }
 
@@ -274,6 +279,87 @@ pub(crate) fn decode_instance(input: &[u8]) -> Result<Instance<'_>, Error> {
     })
 }
 
+fn int_array<const N: usize>(value: FieldValue<'_>) -> [Option<i32>; N] {
+    std::array::from_fn(|index| {
+        value
+            .array_entry(index)
+            .map(|bytes| i32::from_le_bytes(bytes.try_into().expect("int32 array entry")))
+    })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub(crate) struct ItemStats {
+    pub weight: Option<i32>,
+    pub magic_weight: Option<i32>,
+    pub complexity: Option<i32>,
+    pub use_art: Option<u32>,
+    pub equipment_flags: Option<u32>,
+    pub paper_doll_art: Option<u32>,
+    pub armor_class: Option<i32>,
+    pub magic_armor_class: Option<i32>,
+    pub resistance: Option<[Option<i32>; 5]>,
+    pub magic_resistance: Option<[Option<i32>; 5]>,
+    pub weapon_hit_bonus: Option<i32>,
+    pub weapon_speed: Option<i32>,
+    pub weapon_min_strength: Option<i32>,
+    pub wield_script: bool,
+    pub quantity: Option<u32>,
+    pub ammo_type: Option<u32>,
+    pub spells: [Option<u32>; 5],
+}
+
+impl ItemStats {
+    pub(crate) fn adjust_magic(&self, value: Option<i32>, aptitude: i32) -> i64 {
+        let value = i64::from(value.unwrap_or_default());
+        let complexity = i64::from(self.complexity.unwrap_or_default());
+        let power = (complexity + i64::from(aptitude)) / 2;
+        match complexity.cmp(&0) {
+            std::cmp::Ordering::Greater => value * power.clamp(0, complexity) / complexity,
+            std::cmp::Ordering::Less => value - value * power.clamp(complexity, 0) / complexity,
+            std::cmp::Ordering::Equal => value,
+        }
+    }
+
+    fn read(&mut self, category: u32, field: usize, value: FieldValue<'_>) {
+        let scalar = value.scalar();
+        let signed = scalar.map(|v| v as i32);
+        match (category, field) {
+            (_, 31) => {
+                self.wield_script = [24, 25].into_iter().any(|slot| {
+                    value
+                        .array_entry(slot)
+                        .is_some_and(|entry| entry[8..12] != [0; 4])
+                })
+            }
+            (_, 66) => self.weight = signed,
+            (_, 67) => self.magic_weight = signed,
+            (_, 72) => self.use_art = scalar,
+            (_, 73) => self.complexity = signed,
+            (_, 77..=81) => self.spells[field - 77] = scalar,
+            (6 | 8, 97) => self.quantity = scalar,
+            (6, 98) => self.ammo_type = scalar,
+            (5 | 7 | 14, 96) => self.equipment_flags = scalar,
+            (5 | 7, 97) => self.paper_doll_art = scalar,
+            (5, 98) => self.weapon_hit_bonus = signed,
+            (5, 103) => self.weapon_speed = signed,
+            (5, 107) => self.weapon_min_strength = signed,
+            (7, 98) => self.armor_class = signed,
+            (7, 99) => self.magic_armor_class = signed,
+            (7, 100) => self.resistance = Some(int_array(value)),
+            (7, 101) => self.magic_resistance = Some(int_array(value)),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn resolve(instance: &Instance<'_>, defaults: Option<&Self>) -> Self {
+        let mut result = defaults.cloned().unwrap_or_default();
+        for &(index, value) in &instance.fields {
+            result.read(instance.category, index, value);
+        }
+        result
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PrototypeDefaults {
     pub appearance: AppearanceFields,
@@ -284,6 +370,14 @@ pub(crate) struct PrototypeDefaults {
     pub inventory_art: Option<u32>,
     pub inventory_source: Option<u32>,
     pub inventory_scripts: bool,
+    pub item: Option<Box<ItemStats>>,
+    pub character: Option<Box<[Option<i32>; 28]>>,
+    pub background: Option<i32>,
+    pub original_art: Option<u32>,
+    pub armor_class: Option<i32>,
+    pub resistance: Option<[Option<i32>; 5]>,
+    pub hp: [i32; 2],
+    pub fatigue: [i32; 2],
 }
 
 pub(crate) fn has_inventory_scripts(value: FieldValue<'_>) -> bool {
@@ -324,35 +418,79 @@ pub(crate) fn prototype_defaults(
     let mut fields = Fields::default();
     let mut description = None;
     let mut inventory_scripts = false;
+    let mut hp = [0; 2];
+    let mut fatigue = [0; 2];
+    let mut item = (5..=14).contains(&category).then(ItemStats::default);
+    let (mut original_art, mut armor_class, mut resistance) = (None, None, None);
     for index in 0..COMMON.len() {
         let value = read_value(&mut reader, index, category)?;
-        if index == 22 {
-            description = value.scalar();
+        match index {
+            22 => description = value.scalar(),
+            23 if category == 15 => original_art = value.scalar(),
+            25 if category == 15 => armor_class = value.scalar().map(|v| v as i32),
+            26..=27 if category == 15 => hp[index - 26] = value.scalar().unwrap_or_default() as i32,
+            30 if category == 15 => resistance = Some(int_array(value)),
+            _ => {}
+        }
+        if let Some(item) = &mut item {
+            item.read(category, index, value);
         }
         if index == 31 {
             inventory_scripts = has_inventory_scripts(value);
         }
         fields.project(index, category, value);
     }
-    let dexterity = if matches!(category, 15 | NPC) {
+    let character = if matches!(category, 15 | NPC) {
         for index in 64..66 {
             fields.read(&mut reader, index, category)?;
         }
-        read_value(&mut reader, 66, category)?
-            .array_entry(1)
-            .map(|bytes| i32::from_le_bytes(bytes.try_into().expect("32-bit statistic")))
+        Some(Box::new(int_array::<28>(read_value(
+            &mut reader,
+            66,
+            category,
+        )?)))
     } else {
         None
     };
+    let mut background = None;
+    if category == 15 {
+        // PC-specific fields begin in bitmap word four. Background follows the two reputation arrays.
+        for index in (67..=96).chain(128..=132) {
+            if field_type(category, index).is_some() {
+                let value = read_value(&mut reader, index, category)?;
+                match index {
+                    70..=71 => fatigue[index - 70] = value.scalar().unwrap_or_default() as i32,
+                    132 => background = value.scalar().map(|v| v as i32),
+                    _ => {}
+                }
+            }
+        }
+    }
     let (mut subtype_flags, mut inventory_art, mut inventory_source) = (None, None, None);
     if matches!(category, 2 | 5..=14) {
         subtype_flags = read_value(&mut reader, 64, category)?.scalar();
-        for index in 65..=if category == 2 { 69 } else { 70 } {
-            let value = read_value(&mut reader, index, category)?;
-            match (category, index) {
-                (2, 69) => inventory_source = value.scalar(),
-                (5..=14, 70) => inventory_art = value.scalar(),
-                _ => {}
+        if let Some(item) = &mut item {
+            let last = match category {
+                5 => 107,
+                6 => 98,
+                7 => 101,
+                8 => 97,
+                14 => 96,
+                _ => 95,
+            };
+            for index in (65..64 + ITEMS.len()).chain(96..=last) {
+                let value = read_value(&mut reader, index, category)?;
+                item.read(category, index, value);
+                if index == 70 {
+                    inventory_art = value.scalar();
+                }
+            }
+        } else {
+            for index in 65..=69 {
+                let value = read_value(&mut reader, index, category)?;
+                if index == 69 {
+                    inventory_source = value.scalar();
+                }
             }
         }
     }
@@ -360,10 +498,18 @@ pub(crate) fn prototype_defaults(
         appearance: fields.appearance,
         current_art: fields.art_id,
         description,
-        dexterity,
+        dexterity: character.as_ref().and_then(|values| values[1]),
         subtype_flags,
         inventory_art,
         inventory_source,
         inventory_scripts,
+        item: item.map(Box::new),
+        character,
+        background,
+        original_art,
+        armor_class,
+        resistance,
+        hp,
+        fatigue,
     })
 }

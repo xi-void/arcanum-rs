@@ -51,7 +51,7 @@ enter, then click the exit inside to return. Select Bates Mansion with
 The windowed build uses Vulkan through wgpu.
 
 The default Classic HUD uses your installed Arcanum interface artwork.
-Use **[** and **]** to scale the HUD and active panel together. Click the bag or press **I** to open inventory. Click an accessible container to open its loot panel and use the wheel to scroll it.
+Use **[** and **]** to scale the HUD and active panel together. Click the bag or press **I** to open inventory. Click an accessible container to open its loot panel and use the wheel to scroll it. Drag gear onto a paper-doll slot to equip it, or back to the backpack to unequip it. Drag a stack between owners and enter the amount to move, or right-click to transfer the entire stack.
 Pass `--ui ui/field-notes` for the example replacement,
 `--ui /path/to/package` for your own, or `--ui off` to play without a HUD.
 [Theme format and controls](docs/UI_THEMES.md)

@@ -449,6 +449,7 @@ pub struct RoomOverview {
     pub(super) original_records: Vec<serde_json::Value>,
     pub object_list_failed: bool,
     pub(super) townmap: u32,
+    pub(super) aptitude: i32,
     pub(super) roof_words: Vec<(usize, u32)>,
     pub(super) collision: Option<super::collision::Collision>,
 }
@@ -691,7 +692,13 @@ fn load_overview_timed(
     } else {
         0
     };
-    let townmap = crate::sector::objects::townmap(&bytes, floor.tile_offset).unwrap_or(0);
+    let (townmap, aptitude) =
+        crate::sector::objects::townmap_and_aptitude(&bytes, floor.tile_offset).unwrap_or_default();
+    let aptitude = if source.virtual_path.starts_with("terrain/") {
+        0
+    } else {
+        aptitude
+    };
     let roof_words = crate::sector::objects::roof_words(&bytes, floor.tile_offset)
         .unwrap_or_default()
         .iter()
@@ -775,6 +782,7 @@ fn load_overview_timed(
                 original_records: Vec::new(),
                 object_list_failed: true,
                 townmap,
+                aptitude,
                 roof_words,
                 collision: None,
             });
@@ -1003,6 +1011,7 @@ fn load_overview_timed(
         sector_object_counts: counts,
         object_list_failed: false,
         townmap,
+        aptitude,
         roof_words,
         collision,
         traps: objects.traps,

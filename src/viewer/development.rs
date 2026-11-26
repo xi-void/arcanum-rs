@@ -657,7 +657,8 @@ impl Viewer<'_> {
                 json!({
                     "map":map_state,
                     "player":{"tile":tile,"facing":world.player_facing(),"collision_bypass":world.collision_bypassed(),
-                        "collision":tile.and_then(|tile|world.debug_collision(tile)),"navigation":navigation},
+                        "collision":tile.and_then(|tile|world.debug_collision(tile)),"navigation":navigation,
+                        "appearance":world.player_appearance(),"statistics":world.character_statistics()},
                     "sector":{"coordinates":coordinates,"id":coordinates.and_then(|sector|sector.id()),
                         "town_map":position.map(|(_,town)|town),"terrain_source_summary":source},
                     "world":{"hour":current_hour,"world_tile":mapped,"area":area,
@@ -695,6 +696,12 @@ impl Viewer<'_> {
                 .map_err(|err| Failure::new("inventory_rejected", err))?,
             Request::Transfer(id, from, to, slot) => world
                 .transfer_item(&mut dev.vfs, &id, &from, &to, slot, current_hour)
+                .map_err(|err| Failure::new("inventory_rejected", err))?,
+            Request::TransferQuantity(id, from, to, slot, quantity) => world
+                .transfer_quantity(&mut dev.vfs, &id, &from, &to, slot, quantity)
+                .map_err(|err| Failure::new("inventory_rejected", err))?,
+            Request::Equipment(slot, item, cell) => world
+                .change_equipment(&mut dev.vfs, slot, item.as_deref(), cell)
                 .map_err(|err| Failure::new("inventory_rejected", err))?,
             Request::Resource(path, frame) => {
                 let data = arcanum_rs::content::diagnostics::resource(&mut dev.vfs, &path, frame)

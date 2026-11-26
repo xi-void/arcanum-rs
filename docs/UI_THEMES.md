@@ -97,8 +97,15 @@ alternating between rows and columns.
 
 Drag a backpack item to the Drop box to place it at the player's feet.
 Click a ground item to approach and pick it up. **Escape** cancels the
-active drag, then closes the panel on a second press. Use and equipment
-controls are inactive.
+active drag or quantity entry, then closes the panel on a second press.
+Drag a backpack item onto a compatible equipment slot to wear it. Drag
+equipped gear back onto a free backpack cell or right-click it to remove it.
+Replacement requires room in the backpack for the displaced item.
+
+Dragging a multi-unit stack between owners or to Drop prompts for a quantity.
+Type the amount and press **Enter**. Right-click in the loot panel to move
+the entire stack. Hover over a stack to view its quantity.
+The Use action remains inactive.
 
 A package can opt in with a center-anchored root using
 `inventory_panel = true`, zero offset, and `capture = true`. The root is
@@ -194,3 +201,13 @@ and `selected_frame` from their existing `image`. Frame artwork takes
 precedence over a configured hover fill. The Classic top panel uses
 the original empty spell-slot artwork and a fixed daytime crop of
 `Clk_timestrip.ART`. Clock simulation remains deferred.
+
+
+Bind an equipment component with `equipment_slot` set to `helmet`,
+`ring1`, `ring2`, `medallion`, `weapon`, `shield`, `armor`,
+`gauntlet` or `boots`. The component's image supplies the empty-slot
+artwork and its rectangle supplies the icon placement and hit area.
+Text bindings for the existing inventory counters are `inventory-gold`,
+`inventory-arrows`, `inventory-bullets`, `inventory-charges` and
+`inventory-fuel`. Paper-doll summary labels support `inventory-weight`,
+`inventory-burden`, `inventory-speed` and `inventory-defense`.

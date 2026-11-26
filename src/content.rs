@@ -1,6 +1,7 @@
 //! Bounded loading of resolved content from a caller-owned virtual filesystem.
 
 pub mod art;
+pub mod character;
 mod collision;
 pub mod diagnostics;
 pub mod effects;
