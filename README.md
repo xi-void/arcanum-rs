@@ -88,6 +88,8 @@ flags, static scenery, and orientation-dependent wall and door edges. Open doors
 Hover an interactive object to highlight its visible sprite. Clicking
 past an accessible closed door routes to the doorway, opens it, and
 resumes the route after the animation. Click an open leaf to close it.
+Carry the matching key and click the door or container to use it. The
+key stays in your inventory. Hover a key there to read its authored name.
 Locked doors and unsupported scripts report why ordinary use failed.
 Door state survives map transitions and is included in native saves.
 

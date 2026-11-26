@@ -1570,6 +1570,7 @@ fn show_world(
                             region.camera(center).ok_or("invalid destination bounds")?;
                         camera.follow((0, 0));
                         if let viewer::LocationMode::Save { state, .. } = &mode {
+                            state.scripts.validate_maps(&catalog)?;
                             for (directory, saved_doors) in &state.doors {
                                 if !catalog.maps.iter().any(|map| &map.directory == directory) {
                                     return Err(format!(

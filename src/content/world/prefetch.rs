@@ -913,6 +913,18 @@ impl InteractiveWorld {
                     self.route_goal = None;
                 }
                 Some(Ok(None)) => {
+                    if let Some(interaction::Action::Door(door)) =
+                        self.cache.target(key).map(|target| &target.action)
+                    {
+                        self.notice = Some(
+                            if self.cache.door_states.is_open(door) {
+                                "door opened"
+                            } else {
+                                "door closed"
+                            }
+                            .into(),
+                        );
+                    }
                     if let Some((tile, run)) = self.route_goal {
                         if let Some(delay) = self.cache.door_opening_delay(key, now) {
                             self.wait_for_door = Some(now + delay);

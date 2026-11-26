@@ -181,6 +181,8 @@ pub struct ImportedPortal {
     pub placement: Placement,
     /// The same-tile wall that precedes this leaf in the supported room pass.
     pub paired_wall_index: Option<usize>,
+    pub(super) key_id: i32,
+    pub(super) use_local: super::script::Local,
     pub(super) use_script: i32,
     pub(super) unlock_script: i32,
     pub(super) unlock_local: super::script::Local,
@@ -266,6 +268,16 @@ impl PortalImport {
             pixel_offset: appearance.offset,
         };
         Ok(ImportedPortal {
+            key_id: record
+                .fields
+                .lock_key_id
+                .or(prototype.appearance.lock_key_id)
+                .ok_or("Missing portal key field")?,
+            use_local: record
+                .fields
+                .use_local
+                .or(prototype.appearance.use_local)
+                .unwrap_or_default(),
             sound_effect: record
                 .fields
                 .sound_effect

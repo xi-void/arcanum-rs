@@ -31,12 +31,14 @@ pub struct AppearanceFields {
     pub light_color: Option<u32>,
     pub wall_flags: Option<u32>,
     pub scenery_flags: Option<u32>,
+    pub lock_key_id: Option<i32>,
     pub portal_flags: Option<u32>,
     pub critter_flags: Option<u32>,
     pub critter_flags2: Option<u32>,
     pub spell_flags: Option<u32>,
     pub material: Option<u32>,
     pub sound_effect: Option<i32>,
+    pub(crate) use_local: Option<crate::content::script::Local>,
     pub use_script: Option<i32>,
     pub unlock_script: Option<i32>,
     pub(crate) unlock_local: Option<crate::content::script::Local>,
@@ -622,6 +624,10 @@ impl Fields {
                     i32::from_le_bytes(entry[8..12].try_into().unwrap())
                 })
             };
+            self.appearance.use_local = Some(value.array_entry(1).map_or(
+                Default::default(),
+                crate::content::script::Local::from_attachment,
+            ));
             self.appearance.use_script = Some(script(1));
             self.appearance.unlock_script = Some(script(3));
             self.appearance.unlock_local = Some(value.array_entry(3).map_or(
@@ -663,6 +669,9 @@ impl Fields {
             65 if matches!(category, 15 | NPC) => self.appearance.critter_flags2 = Some(value),
             64 if category == WALL => self.appearance.wall_flags = Some(value),
             64 if category == SCENERY => self.appearance.scenery_flags = Some(value),
+            66 if matches!(category, PORTAL | 2) => {
+                self.appearance.lock_key_id = Some(value as i32)
+            }
             64 if category == PORTAL => self.appearance.portal_flags = Some(value),
             _ => {}
         }

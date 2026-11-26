@@ -1,6 +1,6 @@
 # Arcanum-RS — Known Issues
 
-Baseline: Milestone 73-R (vendor trading and scripted transfers). Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
+Baseline: Milestone 74-R (authored keys and matching locks). Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
 
 ## Triage
 
@@ -62,12 +62,7 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
   statement 16 and requires `SAT_CRITTER_FOLLOW` (action 21) at statement 17.
   Dialogue does not implement recruitment or the bank fight.
 - Native clicks now reach the Wise Woman's and Black Root Herbalist's greetings and barter responses. Their other services, including identification, remain pending.
-- The freestanding bridge gate now renders and takes Use input. Its original
-  lock and local collision still apply. Use attachment 30019 requires
-  `SCT_SECTOR_IS_BLOCKED` (condition 45) and
-  `SAT_TOGGLE_SECTOR_BLOCKED` (action 106) at statement 0 for overland
-  travel. Lukan's paid dialogue now hands over his original key through `in -4402`. Using a matching key in the gate lock remains pending. See the
-  [installed-data reproduction](AGENT_WORKFLOW.md#shrouded-hills-interaction-check).
+- **Bridge gate resolved in M74-R.** Paying Lukan transfers his original bridge key. Clicking the leaf opens the gate and runs Use script 30019. The changed collision edge allows passage. [Installed-data reproduction](AGENT_WORKFLOW.md#shrouded-hills-interaction-check).
 - The original NPC event scheduler remains deferred. Doc's first heartbeat
   `01302docfirst_heartbeat.scr` can change his day standpoint and remove the
   attachment. His `01759docroberts_heartbeat1.scr` and the bridge copy's
@@ -75,6 +70,12 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
   Lukan's `02774bridgethugshb.scr` also checks reputation 1050 and can kill
   its attachee. The bridge copy starts with `OF_OFF`. The Wise Woman and
   Black Root Herbalist have no First Heartbeat or Heartbeat attachment.
+
+### LOCK-001 — Remaining access dependencies
+
+- **Priority:** P2 | **Status:** Deferred
+- Key checks read carried keys and authored key-ring entries. Automatic collection into rings, follower key sharing, lockpicking and forced entry remain outside the playable subset.
+- Unsupported script operations still refuse access. Bates Mansion's pedestrian gate has key ID 64 and Unlock script 1151. With global flag 1024 set, the script requests attachment removal at statement 1. The engine reports that dependency even with the right key. Its timed gate-control branch also needs the event scheduler. Container Use and Unlock checks support read-only predicates.
 
 ### TRADE-001 — Merchant service and equipment dependencies
 

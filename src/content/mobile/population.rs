@@ -327,6 +327,8 @@ impl Effective {
             light_color: explicit.light_color.or(defaults.light_color),
             wall_flags: explicit.wall_flags.or(defaults.wall_flags),
             scenery_flags: explicit.scenery_flags.or(defaults.scenery_flags),
+            lock_key_id: explicit.lock_key_id.or(defaults.lock_key_id),
+            use_local: explicit.use_local.or(defaults.use_local),
             portal_flags: explicit.portal_flags.or(defaults.portal_flags),
             critter_flags: explicit.critter_flags.or(defaults.critter_flags),
             critter_flags2: explicit.critter_flags2.or(defaults.critter_flags2),

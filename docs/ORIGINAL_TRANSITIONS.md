@@ -49,8 +49,14 @@ so opening a door cannot remove a wall. Supported original locks,
 jams and magical holding block opening. The bounded Unlock evaluator
 supports global-flag comparisons and literal branches on the new-game
 path. Unsupported executed instructions refuse opening with a diagnostic.
-Key inventory, lockpicking, quest or save flags, and scripted side
-effects are outside the playable subset.
+A matching carried key authorizes each attempt. Its code comes from the
+effective key field or an authored key-ring list. CE's `item.c` rejects
+zero on either side, accepts code 1 on either side for a nonzero pair,
+and otherwise requires equality. `ai_attempt_open_portal` and
+`ai_attempt_open_container` retain the key and the authored lock flag.
+The runtime applies changes to door pose and collision together. It also
+runs supported portal Use scripts after the access check. Lockpicking
+and forced entry remain unimplemented.
 
 The Tarant importer also recognizes the original INT32 portal
 notification field and the original common scenery fields used by
@@ -82,13 +88,14 @@ row 3 returns `SAT_RETURN_AND_RUN_DEFAULT`. Flag 1024 instead takes
 the handler-removal branch. With 2117 set and 1024 clear, the
 handler can toggle the door, play sounds, and schedule a later
 close. The engine checks the live global flags on each use or
-route check. The clear-flags path runs the default lock check.
-The other branches require attachment removal, portal actions,
-sound and timed script execution. The base record has portal flags `0x11` (`LOCKED | ALWAYS_LOCKED`), so
-ordinary use reaches the lock check and leaves the gate closed.
-The lock difficulty is 64 and key ID is 6438. The current alpha
-has no keys or lockpicking. The separate mansion entrance
-still uses script 1267 to return to the interior.
+route check. The winning sector supplies portal flags `0x11`
+(`LOCKED | ALWAYS_LOCKED`) and key ID 64 in field 66. In a prepared
+save with the original key and both flags clear, clicking the gate
+opened it and cleared its collision edge. With flag 1024 set, the
+same key and click left it closed and reported the unsupported
+attachment removal at statement 1. The timed branch also needs
+portal actions, sound and scheduled script execution. The separate
+mansion entrance uses script 1267 to return to the interior.
 
 The two gatehouse roofs use `art/roof/gb0.art` (roof ordinal 6).
 The north group is in sector 68786586568 at zero-based slots

@@ -133,7 +133,23 @@ impl Clock {
     }
 }
 
+pub(super) fn load_blocks(vfs: &mut Vfs, map: &str) -> Result<BTreeSet<u64>, Box<dyn StdError>> {
+    let block_path = format!("maps/{map}/map.sbf");
+    match read_bounded(vfs, &block_path, 256 * 1024) {
+        Ok((source, bytes)) => {
+            parse_blocks(&bytes).map_err(|e| format!("{block_path} from {source}: {e}").into())
+        }
+        Err(Error::Resource {
+            error: vfs::Error::NotFound(_),
+            ..
+        }) => Ok(BTreeSet::new()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub struct TravelMap {
+    map: String,
+    toggled: BTreeSet<u64>,
     terrain: TerrainMap,
     blocked_sectors: BTreeSet<u64>,
     authored_sectors: BTreeSet<u64>,
@@ -143,17 +159,7 @@ pub struct TravelMap {
 impl TravelMap {
     pub fn load(vfs: &mut Vfs, map: &str) -> Result<Self, Box<dyn StdError>> {
         let terrain = TerrainMap::load(vfs, map)?.ok_or("original map has no terrain.tdf")?;
-        let block_path = format!("maps/{map}/map.sbf");
-        let blocked_sectors = match read_bounded(vfs, &block_path, 256 * 1024) {
-            Ok((source, bytes)) => {
-                parse_blocks(&bytes).map_err(|e| format!("{block_path} from {source}: {e}"))?
-            }
-            Err(Error::Resource {
-                error: vfs::Error::NotFound(_),
-                ..
-            }) => BTreeSet::new(),
-            Err(error) => return Err(error.into()),
-        };
+        let blocked_sectors = load_blocks(vfs, map)?;
         let prefix = format!("maps/{map}/");
         let authored_sectors = vfs
             .paths_with_prefix(&prefix)
@@ -173,10 +179,32 @@ impl TravelMap {
             .collect();
         Ok(Self {
             terrain,
+            map: map.to_owned(),
+            toggled: BTreeSet::new(),
             terrain_sectors,
             blocked_sectors,
             authored_sectors,
         })
+    }
+
+    pub fn observe_blocks(&mut self, scripts: &super::script::State) -> bool {
+        let toggled = scripts.sector_toggles.get(&self.map);
+        if toggled.map_or(self.toggled.is_empty(), |set| set == &self.toggled) {
+            return false;
+        }
+        self.toggled = toggled.cloned().unwrap_or_default();
+        true
+    }
+
+    pub fn sector_blocked(&self, map: &str, tile: Point) -> Option<bool> {
+        if map != self.map {
+            return None;
+        }
+        sector_id(sector(tile)).map(|id| self.blocked(id))
+    }
+
+    fn blocked(&self, id: u64) -> bool {
+        self.blocked_sectors.contains(&id) ^ self.toggled.contains(&id)
     }
 
     pub fn can_depart(&self, tile: Point) -> bool {
@@ -201,7 +229,7 @@ impl TravelMap {
         let Some(id) = sector_id(at) else {
             return false;
         };
-        if self.blocked_sectors.contains(&id) {
+        if self.blocked(id) {
             return false;
         }
         self.authored_sectors.contains(&id) || self.terrain.passable(at)

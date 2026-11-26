@@ -293,6 +293,8 @@ fn int_array<const N: usize>(value: FieldValue<'_>) -> [Option<i32>; N] {
 pub(crate) struct ItemStats {
     pub worth: i32,
     pub name: u32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub key_ids: Vec<i32>,
     pub hp: [i32; 3],
     pub weight: Option<i32>,
     pub magic_weight: Option<i32>,
@@ -346,6 +348,19 @@ impl ItemStats {
             (_, 73) => self.complexity = signed,
             (_, 75) => self.unknown_description = scalar,
             (_, 77..=81) => self.spells[field - 77] = scalar,
+            (11, 96) => self.key_ids = signed.into_iter().collect(),
+            (12, 97) => {
+                self.key_ids = match value {
+                    FieldValue::Array { values, .. } => values
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .copied()
+                        .map(i32::from_le_bytes)
+                        .collect(),
+                    _ => Vec::new(),
+                }
+            }
             (6 | 8, 97) => self.quantity = scalar,
             (6, 98) => self.ammo_type = scalar,
             (5 | 7 | 14, 96) => self.equipment_flags = scalar,
@@ -543,7 +558,8 @@ pub(crate) fn prototype_defaults(
                 6 => 98,
                 7 => 101,
                 8 => 97,
-                14 => 96,
+                11 | 14 => 96,
+                12 => 97,
                 _ => 95,
             };
             for index in (65..64 + ITEMS.len()).chain(96..=last) {
@@ -556,6 +572,7 @@ pub(crate) fn prototype_defaults(
         } else {
             for index in 65..=69 {
                 let value = read_value(&mut reader, index, category)?;
+                fields.project(index, category, value);
                 if index == 69 {
                     inventory_source = value.scalar();
                 }
