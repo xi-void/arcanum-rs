@@ -163,6 +163,7 @@ impl MapUi {
 
     pub(super) fn diagnostic(&self) -> serde_json::Value {
         serde_json::json!({"open":self.open,"mode":match self.mode { Mode::Local=>"local",Mode::World=>"world",Mode::Continent=>"continent" },"travel_eligible":self.can_travel,
+            "sector_blocked":self.origin_map.as_ref().and_then(|(name,tile,_)|self.travel_map.as_ref().ok()?.sector_blocked(name,*tile)),
             "journey":self.journey.as_ref().map(Journey::diagnostic),
             "waypoints":self.waypoints.iter().map(|point|point.tile).collect::<Vec<_>>(),
             "hud":self.hud.diagnostics()})
@@ -240,11 +241,22 @@ impl MapUi {
         self.dirty = true;
     }
 
-    pub(super) fn observe(&mut self, map: &str, tile: Point, town_id: u32) {
-        if self
-            .origin_map
-            .as_ref()
-            .is_some_and(|(name, pos, id)| name == map && *pos == tile && *id == town_id)
+    pub(super) fn observe(
+        &mut self,
+        map: &str,
+        tile: Point,
+        town_id: u32,
+        scripts: &crate::content::script::State,
+    ) {
+        let blocks_changed = self
+            .travel_map
+            .as_mut()
+            .is_ok_and(|map| map.observe_blocks(scripts));
+        if !blocks_changed
+            && self
+                .origin_map
+                .as_ref()
+                .is_some_and(|(name, pos, id)| name == map && *pos == tile && *id == town_id)
         {
             return;
         }

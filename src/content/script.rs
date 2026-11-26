@@ -6,7 +6,11 @@ use super::{
 };
 use crate::{random::Random, vfs::Vfs};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    sync::Arc,
+};
 
 const STEP_BUDGET: usize = 1000;
 const GLOBAL_FLAGS: i32 = 3200;
@@ -16,6 +20,7 @@ const GLOBAL_VARIABLES: i32 = 2000;
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Event {
     Unlock,
+    Use,
     BuyObject,
     Dialogue,
 }
@@ -48,6 +53,10 @@ impl Local {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct State {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) sector_toggles: BTreeMap<String, BTreeSet<u64>>,
+    #[serde(skip)]
+    pub(super) sector_map: Option<Arc<(String, BTreeSet<u64>)>>,
     flags: BTreeMap<i32, bool>,
     variables: BTreeMap<i32, i32>,
     attachments: BTreeMap<String, BTreeMap<Event, Local>>,
@@ -168,6 +177,15 @@ impl State {
         self.random.get_or_insert_with(Random::fresh);
     }
 
+    pub fn validate_maps(&self, catalog: &super::maps::Catalog) -> Result<(), String> {
+        for map in self.sector_toggles.keys() {
+            if !catalog.maps.iter().any(|entry| &entry.directory == map) {
+                return Err(format!("Saved sector block map {map:?} is unavailable"));
+            }
+        }
+        Ok(())
+    }
+
     fn local(&self, attachment: &Attachment) -> Local {
         self.attachments
             .get(&attachment.owner)
@@ -281,6 +299,15 @@ impl State {
                 .any(|&i| !(0..GLOBAL_VARIABLES).contains(&i))
         {
             return Err("Invalid saved script global index".into());
+        }
+        if self.sector_toggles.iter().any(|(map, ids)| {
+            map.is_empty()
+                || map.contains(['/', '\\'])
+                || ids
+                    .iter()
+                    .any(|&id| crate::sector::Coordinates::from_id(id).is_none())
+        }) {
+            return Err("Invalid saved sector block identity".into());
         }
         self.quests.validate()
     }
@@ -401,6 +428,14 @@ impl Operation {
             _ => return None,
         })
     }
+}
+
+fn sector_operand(x: Option<i32>, y: Option<i32>) -> Option<u64> {
+    crate::sector::Coordinates {
+        x: u32::try_from(x?).ok()? / 64,
+        y: u32::try_from(y?).ok()? / 64,
+    }
+    .id()
 }
 
 enum Operand {
@@ -676,6 +711,17 @@ impl Code {
                     Actor::Player => None,
                 },
                 18 if [cond.focus(0), cond.focus(1)] == [1, 0] => input.follows_player,
+                45 => sector_operand(value(cond, 0), value(cond, 1)).and_then(|id| {
+                    let (map, base) = view.state().sector_map.as_deref()?;
+                    Some(
+                        base.contains(&id)
+                            ^ view
+                                .state()
+                                .sector_toggles
+                                .get(map)
+                                .is_some_and(|set| set.contains(&id)),
+                    )
+                }),
                 34 => input
                     .location(cond.focus(0))
                     .zip(value(cond, 1))
@@ -826,6 +872,22 @@ impl Code {
                     .map_err(fault)?;
                     None
                 }
+                106 => {
+                    let id = sector_operand(value(action, 0), value(action, 1))
+                        .ok_or_else(unresolved)?;
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    let (map, _) = state.sector_map.as_deref().ok_or_else(unresolved)?;
+                    let set = state.sector_toggles.entry(map.clone()).or_default();
+                    if !set.remove(&id) {
+                        set.insert(id);
+                    }
+                    if set.is_empty() {
+                        state.sector_toggles.remove(map);
+                    }
+                    None
+                }
                 37 => {
                     let random_fault = |reason: &str| Fault {
                         reason: format!("SAT_RANDOM (opcode 37): {reason}"),
@@ -923,6 +985,42 @@ mod tests {
         );
         input.locations[1] = None;
         assert_eq!(run(&input).unwrap_err().statement, Some(0));
+    }
+
+    #[test]
+    fn sector_use_toggles_only_the_target_map_and_survives_serialization() {
+        let code = Code::decode(&original_rows(
+            2,
+            &[
+                (64, 45),
+                (68, 0x0303),
+                (76, 127),
+                (80, 64),
+                (108, 106),
+                (112, 0x0303),
+                (120, 65),
+                (124, 100),
+                (240, 2),
+            ],
+        ))
+        .unwrap();
+        let owner = attachment("door", Event::Use);
+        let input = invocation(&owner);
+        let sector = sector_operand(Some(127), Some(64)).unwrap();
+        let mut state = State::default();
+        let map = Arc::new(("exterior".to_owned(), BTreeSet::from([sector])));
+        state.sector_map = Some(map.clone());
+        for _ in 0..2 {
+            code.run(&input, View::Writable(&mut state), &source())
+                .unwrap();
+            assert_eq!(state.sector_toggles["exterior"], BTreeSet::from([sector]));
+            state = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+            state.sector_map = Some(map.clone());
+        }
+        state.sector_map = Some(Arc::new(("interior".to_owned(), BTreeSet::new())));
+        code.run(&input, View::Writable(&mut state), &source())
+            .unwrap();
+        assert_eq!(state.sector_toggles.len(), 1);
     }
 
     #[test]

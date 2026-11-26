@@ -1052,8 +1052,12 @@ impl SectorCache {
 
     fn outdoor(&self, tile: (u32, u32)) -> bool {
         let id = tile_sector_id(tile);
-        self.active.contains(&id)
-            && self.entries[&id].0.outdoor_rows[(tile.1 & 63) as usize] & (1 << (tile.0 & 63)) != 0
+        self.active.contains(&id) && self.outdoor_at(tile) == Some(true)
+    }
+
+    fn outdoor_at(&self, tile: (u32, u32)) -> Option<bool> {
+        let sector = &self.entries.get(&tile_sector_id(tile))?.0;
+        Some(sector.outdoor_rows[(tile.1 & 63) as usize] & (1 << (tile.0 & 63)) != 0)
     }
 
     fn refresh_roofs(&mut self) {
@@ -2080,6 +2084,8 @@ impl WorldStream {
         if self.loader.walking || !self.cache.entries.is_empty() {
             return Err("player mode must be selected before loading sectors and without the rabbit preview".into());
         }
+        let blocks = super::travel::load_blocks(&mut self.loader.vfs, &self.loader.map)?;
+        self.cache.scripts.sector_map = Some(Arc::new((self.loader.map.clone(), blocks)));
         self.cache.jumps = super::jumps::load(&mut self.loader.vfs, &self.loader.map)?;
         let reference = self.loader.reference;
         if let Some((inventory, appearance)) = saved {

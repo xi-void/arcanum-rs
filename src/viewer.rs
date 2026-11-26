@@ -1296,7 +1296,7 @@ impl Viewer<'_> {
         {
             if let Some((tile, town)) = world.player_map_position() {
                 if let Some(travel) = travel {
-                    map.observe(&travel.map, tile, town);
+                    map.observe(&travel.map, tile, town, world.script_state());
                 }
                 if *trace {
                     eprintln!("Map player tile {tile:?}, town map {town}");
@@ -2840,7 +2840,7 @@ impl Viewer<'_> {
                             travel.as_ref(),
                             world.player_map_position(),
                         ) {
-                            map_ui.observe(&travel.map, tile, town);
+                            map_ui.observe(&travel.map, tile, town, world.script_state());
                             if let Some(hud) = hud {
                                 hud.set_travel_available(map_ui.can_travel());
                             }
@@ -2876,7 +2876,7 @@ impl Viewer<'_> {
                                     travel.as_ref(),
                                     world.player_map_position(),
                                 ) {
-                                    map_ui.observe(&travel.map, tile, town);
+                                    map_ui.observe(&travel.map, tile, town, world.script_state());
                                     if let Some(hud) = hud
                                         && hud.set_travel_available(map_ui.can_travel())
                                     {

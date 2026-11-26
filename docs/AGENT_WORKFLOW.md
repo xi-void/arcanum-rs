@@ -11,7 +11,7 @@ in `[developer]` and run the executable directly. Use the socket path printed
 at startup. See [Application configuration](APPLICATION_CONFIG.md) for
 path precedence and cleanup.
 
-Run from the repository in a Wayland session with Vulkan available. Use a fresh
+Run from the repository in an X11 or Wayland session with Vulkan available. Use a fresh
 private socket directory for each debug instance.
 
 ```sh
@@ -253,13 +253,30 @@ after the click.
 | Herbalist, Black Root | `rpc coc 5000 70179 92088` | `2:5ce5e69a89ff8f4cb6e02aadf2f4cbf4`. Click, then choose the barter response. This merchant uses a different dialogue and stock source. |
 | Lukan's bridge gate | `rpc coc 5000 90100 84189` | `88248157567:54`. Click its leaf to get `door is locked` in the window title. Click the ground toward `(90096,84189)` to check that the player cannot cross the closed gate. |
 
-The gate record is at `(90099,84189)`. Its sector and the original
-`map.sbf` come from module `Arcanum.dat`. Its prototype 2030 comes from
-loose `data/proto`. `Arcanum2.dat` supplies `art/portal/portal.mes`,
-`art/portal/xxxe3au0.art` and `scr/30019unblockshroudedhills.scr`.
-`rpc objects id 88248157567:54` reports frame 0, a direction-5 collision
-edge, and the separate lock and Use attachment. The sector is also
-authored blocked for overland travel in `map.sbf`.
+The gate record at `(90099,84189)` and `map.sbf` come from module
+`Arcanum.dat`. Its prototype 2030 comes from loose `data/proto`.
+`Arcanum2.dat` supplies `art/portal/xxxe3au0.art` and
+`scr/30019unblockshroudedhills.scr`. From the town side, talk to Lukan,
+ask to cross the bridge, ask the charge, and pay 1,000 gold. The winning
+`dlg/01041lukan.dlg` from `Arcanum5.dat` debits the payment on response
+97 and transfers item named 4402 on line 139. Its key code is 3.
+Click the gate and click the bridge deck beyond it. Opening with the key
+clears the direction-5 collision edge and displays ART frame 3. Closing
+restores the edge and frame 0. The key stays in the backpack.
+
+`rpc objects id 88248157567:54` reports the original key ID, matching
+carried item ID, lock flag, live pose, collision and Use source.
+`rpc inventory` reports carried codes under `item_statistics.key_ids`.
+`pos.result.world.travel.sector_blocked` reports the effective overland
+sector block. Script 30019 clears it on first use. The town-map departure
+rule still applies. Use F7, restart, and use F8 to reload the result.
+
+For a container check, Simon Plough's warehouse barrel at
+`(62126,65725)` uses code 14. Its original ID is
+`2:50cd22ea203ad4118f1d00e02920220c`. Its key is in the container
+at `(62132,65722)`. Click the barrel from the interior, for example
+`(62127,65725)`. `rpc inventory ID` reports the matching key and
+current access error. Lukan's key alone cannot open the barrel.
 
 For NPCs, `rpc objects original GUID` reports the original instance,
 effective placement and flags, loaded ART, blit scale and interaction target.

@@ -76,7 +76,7 @@ pub(super) fn use_destination(vfs: &mut Vfs, id: i32) -> Result<Destination, Str
     })
 }
 
-fn decode_use(code: &Code) -> Result<Destination, &'static str> {
+pub(super) fn decode_use(code: &Code) -> Result<Destination, &'static str> {
     let unsupported = "Use script requires unsupported behavior";
     code.check_flags().map_err(|_| unsupported)?;
     let [teleport, ret] = code.statements.as_slice() else {

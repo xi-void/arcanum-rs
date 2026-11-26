@@ -49,7 +49,28 @@ impl GroundArt {
     }
 }
 
+// CE item.c sub_463340. A zero on either side takes precedence over the master code.
+fn key_matches(lock: i32, key: i32) -> bool {
+    lock != 0 && key != 0 && (lock == key || lock == 1 || key == 1)
+}
+
 impl Session {
+    pub(super) fn matching_key(&self, lock_id: i32) -> Option<OriginalId> {
+        if lock_id == 0 {
+            return None;
+        }
+        self.state.changes.values().find_map(|change| {
+            (change.place == Place::Owned(Owner::Player)
+                && change
+                    .item
+                    .stats
+                    .key_ids
+                    .iter()
+                    .any(|&id| key_matches(lock_id, id)))
+            .then_some(change.item.id)
+        })
+    }
+
     pub(super) fn hides_original(&self, map: &str, id: OriginalId) -> bool {
         self.state
             .changes
@@ -243,14 +264,31 @@ impl Records<'_> {
                 .appearance
                 .sound_effect
                 .filter(|&id| id > 0 && id <= i32::MAX - 2),
+            unlock: interaction::handler(
+                self.vfs,
+                &id.key(),
+                super::super::script::Event::Unlock,
+                effective.appearance.unlock_script.unwrap_or_default(),
+                effective.appearance.unlock_local.unwrap_or_default(),
+            ),
+            on_use: interaction::handler(
+                self.vfs,
+                &id.key(),
+                super::super::script::Event::Use,
+                effective.appearance.use_script.unwrap_or_default(),
+                effective.appearance.use_local.unwrap_or_default(),
+            ),
+            key_id: effective
+                .appearance
+                .lock_key_id
+                .ok_or("Missing container key field")?,
             subtype_flags: subtype(64, proto.defaults.subtype_flags)
                 .ok_or("Unresolved container flags")?,
             inventory_source: subtype(69, proto.defaults.inventory_source),
             scripted: object.field(31).map_or(
                 proto.defaults.inventory_scripts,
                 objects::has_inventory_scripts,
-            ) || effective.appearance.use_script != Some(0)
-                || effective.appearance.unlock_script != Some(0),
+            ),
             provenance: json!({
                 "prototype":object.prototype.0,
                 "instance_source":super::super::diagnostics::source(&source),
@@ -359,6 +397,9 @@ struct Container {
     tile: Tile,
     flags: u32,
     subtype_flags: u32,
+    key_id: i32,
+    unlock: interaction::Handler,
+    on_use: interaction::Handler,
     inventory_source: Option<u32>,
     scripted: bool,
     sound_effect: Option<i32>,
@@ -387,22 +428,38 @@ impl Container {
         if self.flags & (UNAVAILABLE | CLICK_THROUGH | 0x1000) != 0 {
             return Err("Container is hidden, inactive, trapped or otherwise unavailable".into());
         }
-        let unlocked = world.container_unlocked(id);
-        if self.subtype_flags & 0x80 == 0
-            && (self.subtype_flags & 6 != 0
-                || (!unlocked && interaction::locked(self.subtype_flags, hour)))
-        {
-            return Err("Container is locked, jammed or magically held".into());
+        if self.subtype_flags & 0x80 == 0 {
+            interaction::check_handler(
+                &self.unlock,
+                hour,
+                &world.cache.scripts,
+                self.tile,
+                Some(player.tile()),
+            )?;
+            interaction::check_lock(
+                "Container",
+                self.subtype_flags,
+                hour,
+                world.container_unlocked(id)
+                    || world.cache.inventory.matching_key(self.key_id).is_some(),
+            )?;
         }
+        interaction::check_handler(
+            &self.on_use,
+            hour,
+            &world.cache.scripts,
+            self.tile,
+            Some(player.tile()),
+        )?;
         if self.scripted {
-            return Err("Container requires unsupported inventory, use or unlock scripts".into());
+            return Err("Container requires unsupported inventory scripts".into());
         }
         Ok(())
     }
 
     fn report(&self) -> Value {
         json!({"tile":self.tile,"flags":self.subtype_flags,"inventory_source":self.inventory_source,
-            "scripted":self.scripted,"provenance":self.provenance})
+            "key_id":self.key_id,"scripted":self.scripted || self.unlock.is_some() || self.on_use.is_some(),"provenance":self.provenance})
     }
 }
 
@@ -474,6 +531,7 @@ pub struct InventoryReader {
     pub(super) vfs: Vfs,
     pub(super) frames: FrameCache,
     pub(super) descriptions: Vec<super::super::LoadedMes>,
+    key_descriptions: Option<super::super::LoadedMes>,
     pub quest_catalog: super::super::quest::Catalog,
 }
 
@@ -483,11 +541,13 @@ impl InventoryReader {
             .into_iter()
             .filter_map(|path| super::super::load_mes(&mut vfs, path).ok())
             .collect();
+        let key_descriptions = super::super::load_mes(&mut vfs, "mes/gamekey.mes").ok();
         let quest_catalog = super::super::quest::Catalog::load(&mut vfs);
         Self {
             vfs,
             frames: FrameCache::default(),
             descriptions,
+            key_descriptions,
             quest_catalog,
         }
     }
@@ -574,12 +634,21 @@ impl InventoryReader {
             if !item_visible(item) {
                 continue;
             }
-            let name = item
-                .description
-                .and_then(|id| {
-                    self.descriptions
-                        .iter()
-                        .find_map(|table| table.mes.get(id as i32))
+            let key_name = if item.category == 11 {
+                item.stats
+                    .key_ids
+                    .first()
+                    .and_then(|id| self.key_descriptions.as_ref()?.mes.get(*id))
+            } else {
+                None
+            };
+            let name = key_name
+                .or_else(|| {
+                    item.description.and_then(|id| {
+                        self.descriptions
+                            .iter()
+                            .find_map(|table| table.mes.get(id as i32))
+                    })
                 })
                 .or_else(|| objects::category_name(item.category))
                 .unwrap_or("Item")
@@ -703,6 +772,8 @@ impl InteractiveWorld {
             "container":container.as_ref().map(|container| {
                 let mut report = container.report();
                 if let Owner::Container(_, id) = owner {
+                    report["access_error"] = json!(container.check_access(self, id, self.cache.hour).err());
+                    report["matching_key"] = json!(self.cache.inventory.matching_key(container.key_id).map(OriginalId::key));
                     report["developer_unlock"] = json!(self.container_unlocked(id));
                 }
                 report
@@ -1165,7 +1236,11 @@ impl InteractiveWorld {
         id: OriginalId,
     ) -> Result<bool, String> {
         let container = self.records(vfs).container(id)?;
-        if container.scripted || container.subtype_flags & 6 != 0 {
+        if container.scripted
+            || container.unlock.is_some()
+            || container.on_use.is_some()
+            || container.subtype_flags & 6 != 0
+        {
             return Err("Container has a scripted, jammed or magical restriction".into());
         }
         if container.flags & (UNAVAILABLE | CLICK_THROUGH | 0x1000) != 0 {
@@ -1187,7 +1262,7 @@ impl InteractiveWorld {
     pub fn inherit_object_state(&mut self, previous: &mut Self) {
         self.met_npcs = std::mem::take(&mut previous.met_npcs);
         self.cache.inventory = std::mem::take(&mut previous.cache.inventory);
-        self.cache.scripts = std::mem::take(&mut previous.cache.scripts);
+        self.restore_script_state(std::mem::take(&mut previous.cache.scripts));
         if let (Some(player), Some(old)) = (&mut self.cache.player, &previous.cache.player) {
             player.appearance = Arc::clone(&old.appearance);
         }
@@ -1244,6 +1319,21 @@ enum Move {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn original_key_codes() {
+        for (lock, key, allowed) in [
+            (0, 0, false),
+            (0, 1, false),
+            (1, 0, false),
+            (1, 62, true),
+            (62, 1, true),
+            (3, 3, true),
+            (3, 14, false),
+        ] {
+            assert_eq!(key_matches(lock, key), allowed);
+        }
+    }
 
     #[test]
     #[ignore = "requires the installed original game"]
