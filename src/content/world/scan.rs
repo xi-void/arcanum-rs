@@ -789,7 +789,7 @@ pub fn compatibility_scan(
             coverage.use_transitions_prepared += sector
                 .interactions
                 .values()
-                .filter(|target| matches!(target.action, interaction::Action::Travel(_)))
+                .filter(|target| target.action.destination().is_some())
                 .count();
             let doors = sector.doors_at.values().map(Vec::len).sum::<usize>();
             coverage.door_targets_prepared += doors;
@@ -800,7 +800,7 @@ pub fn compatibility_scan(
                     "object_preparation_bytes":r.object_preparation_bytes,
                     "prepared_objects":{"walls":r.wall_count,"scenery":r.scenery_count,"portals":r.portal_count,"mobiles":sector.mobiles.iter().filter(|mobile| mobile.raster.is_some()).count()},
                     "keyed_doors":sector.interactions.values().filter_map(|target| match &target.action {
-                        interaction::Action::Door(door) if door.key_id != 0 => Some(json!({"record":door.id.1,"tile":target.tile,"key_id":door.key_id,"flags":door.flags})),
+                        interaction::Action::Door(door) if door.key_id != 0 => Some(json!({"record":door.id.1,"tile":target.tile,"key_id":door.key_id,"flags":door.flags,"difficulty":door.difficulty,"notify_npc":door.notify})),
                         _ => None,
                     }).collect::<Vec<_>>(),
                     "door_targets":doors,"interaction_targets":sector.interactions.len(),

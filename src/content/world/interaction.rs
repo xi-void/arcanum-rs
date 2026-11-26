@@ -72,10 +72,35 @@ fn invocation(attachment: &Attachment, hour: u8, tile: Tile, from: Option<Tile>)
 pub(super) enum Action {
     Travel(Destination),
     Door(Box<Door>),
+    Window {
+        placement: ((i32, i32), u8),
+        id: Id,
+        flags: u32,
+        difficulty: i32,
+        notify: i32,
+    },
     Container(crate::sector::objects::OriginalId),
     Pickup(crate::sector::objects::OriginalId),
     Npc(crate::sector::objects::OriginalId),
     Unsupported(String),
+}
+
+impl Action {
+    pub(super) fn portal_placement(&self) -> Option<((i32, i32), u8)> {
+        match self {
+            Self::Door(door) => Some((door.offset, door.rotation)),
+            Self::Window { placement, .. } => Some(*placement),
+            _ => None,
+        }
+    }
+
+    pub(super) fn destination(&self) -> Option<Destination> {
+        match self {
+            Self::Travel(dst) => Some(*dst),
+            Self::Door(door) => door.destination,
+            _ => None,
+        }
+    }
 }
 
 pub(super) struct Target {
@@ -92,8 +117,11 @@ pub(super) struct Door {
     sound_effect: Option<i32>,
     unlock_script: i32,
     unlock: Handler,
+    pub(super) notify: i32,
+    pub(super) difficulty: i32,
     pub(super) key_id: i32,
     rotation: u8,
+    offset: (i32, i32),
     use_script: i32,
     on_use: Handler,
     destination: Option<Destination>,
@@ -109,18 +137,44 @@ struct Change {
 
 /// Keyed by original sector and record index; never evicted with raster data.
 #[derive(Clone, Default)]
-pub struct DoorStates(BTreeMap<Id, Change>, BTreeSet<Id>);
+pub struct DoorStates {
+    poses: BTreeMap<Id, Change>,
+    developer_unlocked: BTreeSet<Id>,
+    pub(super) locks: BTreeMap<abilities::LockId, abilities::LockChange>,
+}
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct SavedDoors {
     changed: Vec<(Id, bool)>,
     unlocked: Vec<Id>,
+    #[serde(default)]
+    locks: Vec<(abilities::LockId, abilities::LockChange)>,
 }
 
 impl SavedDoors {
     pub fn validate(&self, vfs: &mut Vfs, map: &str) -> Result<(), Box<dyn std::error::Error>> {
         let mut sectors: BTreeMap<u64, BTreeSet<usize>> = BTreeMap::new();
-        for &(sector, record) in self.changed.iter().map(|(id, _)| id).chain(&self.unlocked) {
+        let mut containers = None;
+        for (id, _) in &self.locks {
+            if let abilities::LockId::Container(id) = id {
+                let index =
+                    containers.get_or_insert_with(|| mobile::population::Index::load(vfs, map));
+                if index.category(*id) != Some(2) {
+                    return Err("Saved lock container is unavailable".into());
+                }
+            }
+        }
+        let portals = self.locks.iter().filter_map(|(id, _)| match id {
+            abilities::LockId::Door(id) => Some(id),
+            _ => None,
+        });
+        for &(sector, record) in self
+            .changed
+            .iter()
+            .map(|(id, _)| id)
+            .chain(&self.unlocked)
+            .chain(portals)
+        {
             if let std::collections::btree_map::Entry::Vacant(entry) = sectors.entry(sector) {
                 let coordinates =
                     Coordinates::from_id(sector).ok_or("Invalid saved door sector")?;
@@ -139,8 +193,17 @@ impl SavedDoors {
 impl DoorStates {
     pub fn for_save(&self) -> SavedDoors {
         SavedDoors {
-            changed: self.0.iter().map(|(&id, state)| (id, state.open)).collect(),
-            unlocked: self.1.iter().copied().collect(),
+            changed: self
+                .poses
+                .iter()
+                .map(|(&id, state)| (id, state.open))
+                .collect(),
+            locks: self
+                .locks
+                .iter()
+                .map(|(id, lock)| (*id, lock.clone()))
+                .collect(),
+            unlocked: self.developer_unlocked.iter().copied().collect(),
         }
     }
 
@@ -162,32 +225,69 @@ impl DoorStates {
         if changed.len() != saved.changed.len() || unlocked.len() != saved.unlocked.len() {
             return Err("Duplicate door identities in save".into());
         }
-        Ok(Self(changed, unlocked))
+        let locks: BTreeMap<_, _> = saved.locks.iter().cloned().collect();
+        if locks.len() != saved.locks.len() {
+            return Err("Duplicate saved lock".into());
+        }
+        Ok(Self {
+            poses: changed,
+            developer_unlocked: unlocked,
+            locks,
+        })
     }
 }
 
 impl DoorStates {
+    pub(super) fn flags(&self, id: abilities::LockId, original: u32) -> u32 {
+        self.locks
+            .get(&id)
+            .map_or(original, |change| change.flags(original))
+    }
+
+    pub(super) fn expire_locks(&mut self, now: u64) -> bool {
+        let mut closed = false;
+        for (id, change) in &mut self.locks {
+            if change.expire(now) {
+                if let abilities::LockId::Door(id) = id {
+                    self.poses.insert(
+                        *id,
+                        Change {
+                            open: false,
+                            started: None,
+                        },
+                    );
+                }
+                closed = true;
+            }
+        }
+        closed
+    }
+
     pub(super) fn is_open(&self, door: &Door) -> bool {
-        self.0
+        self.poses
             .get(&door.id)
             .map_or(door.originally_open, |change| change.open)
     }
 
     pub(super) fn diagnostic(&self, door: &Door, cache: &SectorCache) -> serde_json::Value {
         let open = self.is_open(door);
-        serde_json::json!({"kind":"door","open":open,"flags":door.flags,
-            "locked":!self.1.contains(&door.id)&&locked(door.flags,cache.hour),
-            "developer_unlock":self.1.contains(&door.id),"unlock_script":door.unlock_script,
+        let id = abilities::LockId::Door(door.id);
+        let flags = self.flags(id, door.flags);
+        serde_json::json!({"difficulty":door.difficulty, "effective_flags":flags,"lock_change":self.locks.get(&id), "kind":"door","open":open,"flags":door.flags,
+            "locked":!self.developer_unlocked.contains(&door.id)&&locked(flags,cache.hour),
+            "developer_unlock":self.developer_unlocked.contains(&door.id),"unlock_script":door.unlock_script,
             "key_id":door.key_id,"matching_key":cache.inventory.matching_key(door.key_id).map(|id| id.key()),
             "unlock_check":check_handler(&door.unlock, cache.hour, &cache.scripts, door.tile, cache.player.as_ref().map(|p|p.tile())).err(),
-            "use_script":door.use_script,"use_source":door.on_use.as_ref().and_then(|h|h.as_ref().ok()).map(|h|super::super::diagnostics::source(&h.1.source)), "use_issue":door.on_use.as_ref().and_then(|h|h.as_ref().err())})
+            "destination":door.destination,"use_script":door.use_script,"use_source":door.on_use.as_ref().and_then(|h|h.as_ref().ok()).map(|h|super::super::diagnostics::source(&h.1.source)), "use_issue":door.on_use.as_ref().and_then(|h|h.as_ref().err())})
     }
 
     pub(super) fn unlock(&mut self, door: &Door) -> Result<bool, String> {
-        if door.unlock_script > 0 || door.flags & 6 != 0 {
+        if door.unlock_script > 0
+            || self.flags(abilities::LockId::Door(door.id), door.flags) & 6 != 0
+        {
             return Err("Door has a scripted, jammed or magical restriction".into());
         }
-        Ok(self.1.insert(door.id))
+        Ok(self.developer_unlocked.insert(door.id))
     }
 }
 
@@ -203,7 +303,7 @@ impl DoorStates {
             let Action::Door(door) = &sector.interactions[key].action else {
                 continue;
             };
-            if let Some(change) = self.0.get(&door.id) {
+            if let Some(change) = self.poses.get(&door.id) {
                 cell = cell.portal_state(door.direction, door.originally_open, change.open);
             }
         }
@@ -220,7 +320,7 @@ impl DoorStates {
         scripts: &mut State,
     ) -> Result<bool, String> {
         if self
-            .0
+            .poses
             .get(&door.id)
             .is_some_and(|change| door.delay(*change, tick).is_some())
         {
@@ -228,7 +328,13 @@ impl DoorStates {
         }
         let open = !self.is_open(door);
         if open {
-            door.may_open(hour, self.1.contains(&door.id) || access, scripts, from)?;
+            door.may_open(
+                self,
+                hour,
+                self.developer_unlocked.contains(&door.id) || access,
+                scripts,
+                from,
+            )?;
         }
         if let Some(handler) = &door.on_use {
             let (attachment, script) = handler.as_deref().map_err(Clone::clone)?;
@@ -252,7 +358,7 @@ impl DoorStates {
             }
             *scripts = staged;
         }
-        self.0.insert(
+        self.poses.insert(
             door.id,
             Change {
                 open,
@@ -284,7 +390,7 @@ pub(super) fn check_lock(
 pub(super) fn locked(flags: u32, hour: u8) -> bool {
     // CE object_locked_get. ALWAYS_LOCKED gates the indoor egress exception
     // in ai_attempt_open_portal, rather than replacing OPF_LOCKED.
-    if flags & 8 != 0 {
+    if flags & (8 | 0x80) != 0 {
         return false;
     } // NEVER_LOCKED
     let day = (7..=21).contains(&hour);
@@ -292,15 +398,33 @@ pub(super) fn locked(flags: u32, hour: u8) -> bool {
 }
 
 impl Door {
+    pub(super) fn direct_transition(&self) -> bool {
+        self.destination.is_some() && self.unlock_script == 0 && self.flags & 7 == 0
+    }
+
+    pub(super) fn within_reach(&self, player: Tile) -> bool {
+        if self.direct_transition() {
+            self.tile.0.abs_diff(player.0) + self.tile.1.abs_diff(player.1) <= 1
+        } else {
+            self.tile == player || neighbor(self.tile, self.direction) == Some(player)
+        }
+    }
+
     fn may_open(
         &self,
+        states: &DoorStates,
         hour: u8,
         unlocked: bool,
         scripts: &State,
         from: Tile,
     ) -> Result<(), String> {
         check_handler(&self.unlock, hour, scripts, self.tile, Some(from))?;
-        check_lock("door", self.flags, hour, unlocked)?;
+        check_lock(
+            "door",
+            states.flags(abilities::LockId::Door(self.id), self.flags),
+            hour,
+            unlocked,
+        )?;
         if let Some(Err(issue)) = &self.on_use {
             return Err(issue.clone());
         }
@@ -324,7 +448,7 @@ impl Door {
 
     fn pose(&self, states: &DoorStates, tick: Duration) -> usize {
         states
-            .0
+            .poses
             .get(&self.id)
             .map_or(usize::from(self.originally_open) * 3, |change| {
                 self.index(*change, tick)
@@ -361,35 +485,43 @@ pub(super) fn prepare(
 ) -> BTreeMap<WorldOrder, Target> {
     let mut targets = BTreeMap::new();
     for portal in &room.portals {
-        if portal.art.kind != super::super::portal::Kind::Door {
+        let tile = portal.placement.tile;
+        if portal.art.kind == super::super::portal::Kind::Window {
+            targets.insert(
+                (true, portal.order()),
+                Target {
+                    tile,
+                    action: Action::Window {
+                        placement: (portal.placement.pixel_offset, portal.art.rotation),
+                        id: (sector, portal.record.index),
+                        flags: portal.appearance.portal_flags,
+                        difficulty: portal.difficulty,
+                        notify: portal.notify,
+                    },
+                },
+            );
             continue;
         }
-        let tile = portal.placement.tile;
         let owner = format!("{map}/{sector}:{}", portal.record.index);
         let use_handler = handler(vfs, &owner, Event::Use, portal.use_script, portal.use_local);
         let destination = use_handler
             .as_ref()
             .and_then(|handler| handler.as_ref().ok())
             .and_then(|handler| super::super::jumps::decode_use(handler.1.code()).ok());
-        if let Some(destination) = destination
+        let direct_transition = destination.is_some()
             && portal.unlock_script == 0
-            && portal.appearance.portal_flags & 7 == 0
-        {
-            targets.insert(
-                (true, portal.order()),
-                Target {
-                    tile,
-                    action: Action::Travel(destination),
-                },
-            );
-            continue;
-        }
+            && portal.appearance.portal_flags & 7 == 0;
         let action = {
             let build = || -> Result<_, Box<dyn std::error::Error>> {
                 let art = portal.art;
                 let first = usize::from(art.first_opening_frame());
                 let mut sequence = Vec::with_capacity(4);
-                for index in [0, first, first + 1, first + 2] {
+                let indices = if direct_transition {
+                    [usize::from(art.frame); 4]
+                } else {
+                    [0, first, first + 1, first + 2]
+                };
+                for index in indices {
                     let asset = frames.load(
                         vfs,
                         &portal.artwork.source.virtual_path,
@@ -418,8 +550,11 @@ pub(super) fn prepare(
                     flags: portal.appearance.portal_flags,
                     sound_effect: portal.sound_effect,
                     unlock_script: portal.unlock_script,
+                    notify: portal.notify,
+                    difficulty: portal.difficulty,
                     key_id: portal.key_id,
                     rotation: art.rotation,
+                    offset: portal.placement.pixel_offset,
                     unlock: handler(
                         vfs,
                         &owner,
@@ -553,8 +688,10 @@ impl SectorCache {
                 let (next, door) = self.planned_edge(tile, direction)?;
                 if !allow_locked && let Some((_, door)) = door {
                     door.may_open(
+                        &self.door_states,
                         self.hour,
-                        self.door_states.1.contains(&door.id) || self.key_or_egress(door, tile),
+                        self.door_states.developer_unlocked.contains(&door.id)
+                            || self.key_or_egress(door, tile),
                         &self.scripts,
                         tile,
                     )
@@ -587,8 +724,10 @@ impl SectorCache {
             let (next, door) = self.planned_edge(tile, direction).expect("planned edge");
             if let Some((_, door)) = door {
                 door.may_open(
+                    &self.door_states,
                     self.hour,
-                    self.door_states.1.contains(&door.id) || self.key_or_egress(door, tile),
+                    self.door_states.developer_unlocked.contains(&door.id)
+                        || self.key_or_egress(door, tile),
                     &self.scripts,
                     tile,
                 )?;
@@ -602,7 +741,7 @@ impl SectorCache {
         let Action::Door(door) = &self.target(key)?.action else {
             return None;
         };
-        let change = self.door_states.0.get(&door.id)?;
+        let change = self.door_states.poses.get(&door.id)?;
         (change.started? + 2 * door.period).checked_sub(tick)
     }
     pub(super) fn target(&self, key: WorldOrder) -> Option<&Target> {
@@ -652,7 +791,10 @@ impl SectorCache {
         elapsed: Duration,
     ) -> Option<WorldOrder> {
         self.pick_raster(point, reference, elapsed, false)
-            .filter(|&key| self.target(key).is_some())
+            .filter(|&key| {
+                self.target(key)
+                    .is_some_and(|t| !matches!(t.action, Action::Window { .. }))
+            })
     }
 
     pub(super) fn pick_raster(
@@ -697,7 +839,9 @@ impl SectorCache {
         let target = self.target(key)?;
         let tile = target.tile;
         let directions: &[u8] = match &target.action {
-            Action::Door(door) => std::slice::from_ref(&door.direction),
+            Action::Door(door) if !door.direct_transition() => {
+                std::slice::from_ref(&door.direction)
+            }
             Action::Container(_) | Action::Npc(_) => &[0, 1, 2, 3, 4, 5, 6, 7],
             _ => &[1, 3, 5, 7],
         };
@@ -740,9 +884,7 @@ impl SectorCache {
         let tile = player.tile();
         let facing = player.facing();
         let near = match &target.action {
-            Action::Door(door) => {
-                target.tile == tile || neighbor(target.tile, door.direction) == Some(tile)
-            }
+            Action::Door(door) => door.within_reach(tile),
             _ => tile.0.abs_diff(target.tile.0) + tile.1.abs_diff(target.tile.1) <= 1,
         };
         if !near {
@@ -754,8 +896,9 @@ impl SectorCache {
                 if let Some(destination) = door.destination {
                     return Some(
                         door.may_open(
+                            &self.door_states,
                             self.hour,
-                            access || self.door_states.1.contains(&door.id),
+                            access || self.door_states.developer_unlocked.contains(&door.id),
                             &self.scripts,
                             tile,
                         )
@@ -771,8 +914,9 @@ impl SectorCache {
                     Err(_)
                         if door
                             .may_open(
+                                &self.door_states,
                                 self.hour,
-                                access || self.door_states.1.contains(&door.id),
+                                access || self.door_states.developer_unlocked.contains(&door.id),
                                 &self.scripts,
                                 tile,
                             )
@@ -797,12 +941,14 @@ impl SectorCache {
                 Some(Ok(Some(*dst)))
             }
             Action::Unsupported(reason) => Some(Err(reason.clone())),
-            Action::Container(_) | Action::Pickup(_) | Action::Npc(_) => None,
+            Action::Window { .. } | Action::Container(_) | Action::Pickup(_) | Action::Npc(_) => {
+                None
+            }
         }
     }
 
     pub(super) fn door_delay(&self, viewport: &Viewport, tick: Duration) -> Option<Duration> {
-        if self.door_states.0.is_empty() {
+        if self.door_states.poses.is_empty() {
             return None;
         }
         self.active
@@ -812,7 +958,7 @@ impl SectorCache {
                 let Action::Door(door) = &target.action else {
                     return None;
                 };
-                let change = *self.door_states.0.get(&door.id)?;
+                let change = *self.door_states.poses.get(&door.id)?;
                 let (_, sprite) = door.draw(&self.door_states, tick);
                 viewport
                     .intersects(RasterBounds::new(sprite))
@@ -837,7 +983,7 @@ fn hits_scaled(sprite: SpriteDraw<'_>, point: (i64, i64), scale: u32) -> bool {
     sprite.frame.pixels[source(y) * sprite.frame.width as usize + source(x)][3] != 0
 }
 
-fn neighbor((x, y): Tile, direction: u8) -> Option<Tile> {
+pub(super) fn neighbor((x, y): Tile, direction: u8) -> Option<Tile> {
     let (dx, dy) = collision::DIRECTIONS[usize::from(direction)];
     Some((x.checked_add_signed(dx)?, y.checked_add_signed(dy)?))
 }
@@ -947,8 +1093,11 @@ mod tests {
             unlock_script: 0,
             unlock: None,
             use_script: 0,
+            difficulty: 0,
+            notify: 0,
             key_id: 0,
             rotation: door.rotation,
+            offset: door.offset,
             on_use: None,
             destination: None,
             frames: door.frames.clone(),
@@ -993,8 +1142,8 @@ mod tests {
             }
         );
         assert!(bates.interactions.values().any(|target| matches!(
-            target.action,
-            Action::Travel(Destination {
+            target.action.destination(),
+            Some(Destination {
                 map: Some(5012),
                 tile: (99, 91)
             })
@@ -1021,8 +1170,8 @@ mod tests {
                 .interactions
                 .values()
                 .any(|target| matches!(
-                    target.action,
-                    Action::Travel(Destination {
+                    target.action.destination(),
+                    Some(Destination {
                         map: Some(5011),
                         tile: (104, 92)
                     })

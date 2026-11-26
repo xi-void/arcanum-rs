@@ -17,7 +17,7 @@ pub(super) fn in_range(a: Tile, b: Tile) -> bool {
     a.0.abs_diff(b.0).max(a.1.abs_diff(b.1)) < 5
 }
 
-fn facing(a: Tile, b: Tile) -> Option<u8> {
+pub(super) fn facing(a: Tile, b: Tile) -> Option<u8> {
     if a == b {
         return None;
     }

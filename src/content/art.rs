@@ -278,6 +278,10 @@ impl FrameLoop {
         })
     }
 
+    pub(super) fn period(&self) -> Duration {
+        Duration::from_millis(u64::from(self.period_ms))
+    }
+
     pub(super) fn index(&self, initial: usize, elapsed: Duration) -> usize {
         let step = elapsed.as_millis() / u128::from(self.period_ms);
         ((step + initial as u128) % self.frames.len() as u128) as usize

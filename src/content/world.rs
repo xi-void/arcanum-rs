@@ -32,9 +32,11 @@ use std::{
 mod debug;
 mod scan;
 pub use scan::{ScanOptions, compatibility_scan};
+mod abilities;
 mod interaction;
 mod inventory;
 mod npc;
+mod spell_fx;
 pub use debug::{DebugCollision, DebugObject};
 mod prefetch;
 pub use super::jumps::Destination;
@@ -869,6 +871,8 @@ struct SectorCache {
     lights: LightGrid,
     shades: Vec<PreparedShade>,
     dynamic: Vec<DynamicLight>,
+    effects: BTreeMap<Option<WorldOrder>, spell_fx::Playback>,
+    effect_time: Duration,
     dynamic_grid: LightGrid,
     hour: u8,
     shadows_disabled: bool,
@@ -1041,6 +1045,7 @@ impl SectorCache {
                 self.lights.merge(&self.entries[id].0.lights);
             }
         }
+        self.update_character_sector();
         if ambient == next && !nocturnal_changed {
             return false;
         }
@@ -1160,10 +1165,19 @@ impl SectorCache {
     }
 
     fn refresh_dynamic_grid(&mut self) {
-        // The dynamic grid contains only the footprints of the bounded probes.
+        // Track localized receivers for movable lights and temporary spell overlays.
         let mut grid = LightGrid::default();
         for source in self.dynamic.iter().filter(|light| self.light_active(light)) {
             grid.insert_light(&source.mask);
+        }
+        for fx in self
+            .effects
+            .values()
+            .filter(|fx| self.active.contains(&tile_sector_id(fx.tile)))
+        {
+            if let Some(light) = &fx.light {
+                grid.insert_light(light);
+            }
         }
         self.dynamic_grid = grid;
     }
@@ -1295,6 +1309,12 @@ impl SectorCache {
                     tile_sector_id(light.state.tile) == id && self.light_active(light)
                 })
                 .map(|light| &light.mask)
+                .chain(
+                    self.effects
+                        .values()
+                        .filter(move |effect| tile_sector_id(effect.tile) == id)
+                        .filter_map(|effect| effect.light.as_ref()),
+                )
                 .chain(self.entries[&id].0.emitters.iter().rev())
         })
     }
@@ -1371,7 +1391,7 @@ impl SectorCache {
         Some((eligible, self.refresh_shadows()))
     }
 
-    fn shadow_candidates(&self) -> impl Iterator<Item = shadow::Candidate> {
+    fn shadow_candidates(&self, player_shadow: bool) -> impl Iterator<Item = shadow::Candidate> {
         self.active.iter().rev().flat_map(move |id| {
             let probes = self
                 .dynamic
@@ -1387,7 +1407,13 @@ impl SectorCache {
                     }
                     Some(candidate)
                 });
-            probes.chain(
+            let overlays = self.effects.iter().filter_map(move |(owner, effect)| {
+                if tile_sector_id(effect.tile) != *id || player_shadow && owner.is_none() {
+                    return None;
+                }
+                effect.light.as_ref()?.shadow_candidate()
+            });
+            probes.chain(overlays).chain(
                 self.entries[id]
                     .0
                     .emitters
@@ -1421,7 +1447,7 @@ impl SectorCache {
                             anchor: moving.raster.anchor,
                             tile: (moving.raster.key.1.2, moving.raster.key.1.1),
                         });
-                    let (masks, invalid) = self.caster_masks(resources, caster, ambient);
+                    let (masks, invalid) = self.caster_masks(resources, caster, ambient, false);
                     error = error.or(invalid);
                     for mask in masks {
                         let frame = resources.frame(mask);
@@ -1463,6 +1489,7 @@ impl SectorCache {
         resources: &MobileShadows,
         caster: Caster,
         ambient: Ambient,
+        player_shadow: bool,
     ) -> (Vec<shadow::Mask>, Option<shadow::Error>) {
         let base = if self.outdoor(caster.tile) {
             ambient.outdoor
@@ -1476,7 +1503,7 @@ impl SectorCache {
             base,
             0,
             true,
-            self.shadow_candidates(),
+            self.shadow_candidates(player_shadow),
         ) {
             Ok(masks) => (masks, None),
             Err(invalid) => (
@@ -1650,6 +1677,7 @@ impl SectorCache {
                     .then(|| raster.next_change(&viewport, elapsed, self.fidget))
                     .flatten()
             })
+            .chain(self.effect_delay(elapsed))
             .chain(self.walk_delay(&viewport, elapsed))
             .chain(self.door_delay(&viewport, elapsed))
             .min()
@@ -1707,6 +1735,7 @@ impl SectorCache {
                     anchor,
                 },
                 ambient,
+                false,
             );
             masks.into_iter().any(|mask| {
                 viewport.intersects(RasterBounds::new(SpriteDraw {
@@ -1742,56 +1771,71 @@ impl SectorCache {
         viewport: Viewport,
         elapsed: Duration,
     ) -> impl Iterator<Item = WorldDraw<'_>> {
+        range.flat_map(move |index| {
+            let draw = self.visible_raster(index, viewport, elapsed);
+            let raster = &self.ordered[index];
+            let effect = self
+                .effects
+                .get(&Some(raster.key))
+                .filter(|_| self.raster_revealed(raster));
+            let overlay = |front| effect.and_then(|fx| fx.draw(front, elapsed, viewport));
+            [overlay(false), draw, overlay(true)].into_iter().flatten()
+        })
+    }
+
+    fn visible_raster(
+        &self,
+        index: usize,
+        viewport: Viewport,
+        elapsed: Duration,
+    ) -> Option<WorldDraw<'_>> {
         let replaced = self
             .walking
             .as_ref()
             .and(self.walk_subject.as_ref())
             .map(|&(source, _)| source);
-        range.filter_map(move |index| {
-            if replaced == Some(index) {
-                return None;
-            }
-            let raster = &self.ordered[index];
-            let (asset, sprite) =
-                if let Some((asset, draw)) = self.interaction_frame(raster, elapsed) {
-                    (
-                        asset,
-                        viewport.place(draw, RasterBounds::scaled(draw, raster.scale))?,
-                    )
-                } else {
-                    raster.visible_at(&viewport, elapsed, self.fidget)?
-                };
-            if !self.raster_revealed(raster) {
-                return None;
-            }
-            let mut modulation = self.shades.get(index).map_or_else(
-                || {
-                    if matches!(raster.object_light, ObjectLight::Additive) {
-                        Modulation::Additive
-                    } else {
-                        Modulation::Unlit
-                    }
-                },
-                PreparedShade::modulation,
-            );
-            if let Some(corners) = self.fade(raster) {
-                let (color, columns) = match modulation {
-                    Modulation::Uniform(color) => (color, &[][..]),
-                    Modulation::Columns(columns) => ([255; 3], columns),
-                    _ => ([255; 3], &[][..]),
-                };
-                modulation = Modulation::Fade {
-                    corners,
-                    color,
-                    columns,
-                };
-            }
-            Some(WorldDraw {
+        if replaced == Some(index) {
+            return None;
+        }
+        let raster = &self.ordered[index];
+        let (asset, sprite) = if let Some((asset, draw)) = self.interaction_frame(raster, elapsed) {
+            (
                 asset,
-                sprite,
-                scale: raster.scale,
-                modulation,
-            })
+                viewport.place(draw, RasterBounds::scaled(draw, raster.scale))?,
+            )
+        } else {
+            raster.visible_at(&viewport, elapsed, self.fidget)?
+        };
+        if !self.raster_revealed(raster) {
+            return None;
+        }
+        let mut modulation = self.shades.get(index).map_or_else(
+            || {
+                if matches!(raster.object_light, ObjectLight::Additive) {
+                    Modulation::Additive
+                } else {
+                    Modulation::Unlit
+                }
+            },
+            PreparedShade::modulation,
+        );
+        if let Some(corners) = self.fade(raster) {
+            let (color, columns) = match modulation {
+                Modulation::Uniform(color) => (color, &[][..]),
+                Modulation::Columns(columns) => ([255; 3], columns),
+                _ => ([255; 3], &[][..]),
+            };
+            modulation = Modulation::Fade {
+                corners,
+                color,
+                columns,
+            };
+        }
+        Some(WorldDraw {
+            asset,
+            sprite,
+            scale: raster.scale,
+            modulation,
         })
     }
 
@@ -1916,7 +1960,7 @@ impl SectorCache {
                     tile: pose.tile,
                     anchor: pose.anchor,
                 };
-                let (masks, _) = self.caster_masks(bank, caster, ambient);
+                let (masks, _) = self.caster_masks(bank, caster, ambient, true);
                 (caster.anchor, masks)
             });
         player.into_iter().flat_map(move |(anchor, masks)| {
@@ -1956,9 +2000,7 @@ impl SectorCache {
                 .ordered
                 .binary_search_by_key(&key, |raster| raster.key)
                 .ok()?;
-            let mut draw = self
-                .visible_rasters(index..index + 1, viewport, elapsed)
-                .next()?;
+            let mut draw = self.visible_raster(index, viewport, elapsed)?;
             draw.modulation = Modulation::AdditiveTint([200; 3]);
             Some(draw)
         });
@@ -1988,6 +2030,8 @@ impl SectorCache {
                 modulation: moving.shade.modulation(),
             })
         });
+        let caster_effect = player.as_ref().and_then(|_| self.effects.get(&None));
+        let caster_layer = |front| caster_effect.and_then(|fx| fx.draw(front, elapsed, viewport));
         self.visible_rasters(0..split, viewport, elapsed)
             .chain(shadows.iter().filter_map(move |draw| {
                 let sprite = SpriteDraw {
@@ -2004,7 +2048,9 @@ impl SectorCache {
             .chain(self.visible_player_shadows(viewport, elapsed))
             .chain(self.visible_rasters(split..insertion, viewport, elapsed))
             .chain(moving)
+            .chain(caster_layer(false))
             .chain(player.map(|(_, draw)| draw))
+            .chain(caster_layer(true))
             .chain(self.visible_rasters(insertion..roof_start, viewport, elapsed))
             .chain(hover)
             .chain(self.visible_rasters(roof_start..self.ordered.len(), viewport, elapsed))
@@ -2631,14 +2677,15 @@ impl SectorLoader {
                             reason,
                         ));
                     }
-                    if let interaction::Action::Travel(dst) = target.action {
+                    if let Some(dst) = target.action.destination() {
                         cached.report.diagnostics.push(format!(
                             "Use transition {:?} record {} -> {dst:?}",
                             target.tile,
                             key.1.6.unwrap_or(key.1.5)
                         ));
                     }
-                    if matches!(target.action, interaction::Action::Door(_)) {
+                    if matches!(&target.action, interaction::Action::Door(door) if !door.direct_transition())
+                    {
                         cached.doors_at.entry(target.tile).or_default().push(key);
                     }
                 }
@@ -3956,7 +4003,7 @@ mod tests {
         assert!(cache.dynamic[0].state.active);
         assert!(
             cache
-                .shadow_candidates()
+                .shadow_candidates(false)
                 .any(|candidate| candidate.flags & 0x40 != 0)
         );
         assert_eq!(centers(&cache), moved_shades);

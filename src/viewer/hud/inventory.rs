@@ -543,6 +543,22 @@ impl Hud {
         let Some(drag) = self.inventory.drag.take() else {
             return;
         };
+        if let Some((rect, _)) = self.bounds(Binding::InventoryUse)
+            && point.is_some_and(|p| rect.contains(p))
+        {
+            if drag.source == 0
+                && drag.equipped.is_none()
+                && self.inventory.view != Some(InventoryView::Trade)
+            {
+                match world.select_tool(&drag.id) {
+                    Ok(()) => {
+                        self.close_inventory();
+                    }
+                    Err(e) => self.inventory.error = Some(e),
+                }
+            }
+            return;
+        }
         if let Some((slot, _)) = point.and_then(|point| self.equipment_at(point)) {
             if drag.source == 0 && drag.equipped.is_none() {
                 self.inventory.error = reader
@@ -892,7 +908,10 @@ impl Hud {
                             | Action::InventoryScrollUp
                             | Action::InventoryScrollDown
                     )
-                ) || component.binding == Some(Binding::InventoryDrop))
+                ) || matches!(
+                    component.binding,
+                    Some(Binding::InventoryDrop | Binding::InventoryUse)
+                ))
                 .then_some((component.id.as_str(), rect(placement.as_ref()?.rect)))
             })
             .collect::<BTreeMap<_, _>>();

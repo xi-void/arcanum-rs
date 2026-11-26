@@ -22,6 +22,8 @@ Merchant purses, trade reaction adjustments, identified items, named-item transf
 
 Using a key retains its original inventory identity. The engine restores its code from the winning instance and prototype on load. Open doors retain their pose and collision state. Optional `scripts.sector_toggles` records overland sector block changes by map directory and sector ID. Older saves start with the authored `map.sbf` blocks.
 
+Lockpicking and Cantrip persist the changed lock bits by original door or container identity. Jam and relock deadlines use absolute game seconds. Character skill entries, known colleges, college mastery, fatigue damage, recovery deadline, equipped-item mana expenditure and the skill random stream travel with the player. Current fatigue, effective skills and aptitude are recalculated using the restored character, location and installed rules. Loading a pre-ability version-1 save starts with no purchased technological skills or spells and zero fatigue damage. Pending targeting and unfinished attempts are transient.
+
 ## Format version 1
 
 Each slot is a single `.ars` file. Its name is an engine-generated identifier.

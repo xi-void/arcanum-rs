@@ -430,6 +430,7 @@ fn portal_lock_difficulty_preserves_the_next_record_boundary() {
     let list = decode(&bytes).unwrap();
     assert_eq!(list.portals[0].span, portal_start..wall_start);
     assert_eq!(list.portals[0].fields.portal_flags, Some(0x11));
+    assert_eq!(list.portals[0].fields.lock_difficulty, Some(100));
     assert_eq!(list.walls[0].span.start, wall_start);
     assert!(list.walls[0].index > list.portals[0].index);
 

@@ -181,6 +181,8 @@ pub struct ImportedPortal {
     pub placement: Placement,
     /// The same-tile wall that precedes this leaf in the supported room pass.
     pub paired_wall_index: Option<usize>,
+    pub(super) notify: i32,
+    pub(super) difficulty: i32,
     pub(super) key_id: i32,
     pub(super) use_local: super::script::Local,
     pub(super) use_script: i32,
@@ -268,6 +270,16 @@ impl PortalImport {
             pixel_offset: appearance.offset,
         };
         Ok(ImportedPortal {
+            notify: record
+                .fields
+                .lock_notify
+                .or(prototype.appearance.lock_notify)
+                .unwrap_or_default(),
+            difficulty: record
+                .fields
+                .lock_difficulty
+                .or(prototype.appearance.lock_difficulty)
+                .ok_or("Missing portal difficulty")?,
             key_id: record
                 .fields
                 .lock_key_id

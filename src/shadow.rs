@@ -179,7 +179,7 @@ pub fn select(
     Ok(masks)
 }
 
-fn grayscale([r, g, b]: [u8; 3]) -> u8 {
+pub(crate) fn grayscale([r, g, b]: [u8; 3]) -> u8 {
     ((77 * u32::from(r) + 150 * u32::from(g) + 28 * u32::from(b)) / 255) as u8
 }
 

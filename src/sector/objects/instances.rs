@@ -291,6 +291,8 @@ fn int_array<const N: usize>(value: FieldValue<'_>) -> [Option<i32>; N] {
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub(crate) struct ItemStats {
+    pub usage_bonus: i32,
+    pub mana_store: i32,
     pub worth: i32,
     pub name: u32,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -341,6 +343,8 @@ impl ItemStats {
             }
             (_, 21) => self.name = scalar.unwrap_or_default(),
             (_, 26..=28) => self.hp[field - 26] = signed.unwrap_or_default(),
+            (14, 97) => self.usage_bonus = signed.unwrap_or_default(),
+            (_, 69) => self.mana_store = signed.unwrap_or_default(),
             (_, 68) => self.worth = signed.unwrap_or_default(),
             (_, 66) => self.weight = signed,
             (_, 67) => self.magic_weight = signed,
@@ -413,6 +417,10 @@ pub(crate) struct PrototypeDefaults {
     pub merchant_gold: u32,
     pub retail: i32,
     pub substitute: Option<OriginalId>,
+    pub tech_skills: [u32; 4],
+    pub colleges: [u32; 16],
+    pub mastery: Option<u32>,
+    pub fatigue_damage: i32,
     pub haggle: u32,
 }
 
@@ -510,6 +518,10 @@ pub(crate) fn prototype_defaults(
         (0, 0, None, None, 0);
     let (mut npc_flags, mut reaction_base, mut npc_leader, mut social_class) =
         (None, None, None, None);
+    let mut tech_skills = [0; 4];
+    let mut colleges = [0; 16];
+    let mut mastery = None;
+    let mut fatigue_damage = 0;
     if category == 15 {
         // PC-specific fields begin in bitmap word four. Background follows the two reputation arrays.
         for index in (67..=96).chain(128..=132) {
@@ -517,6 +529,15 @@ pub(crate) fn prototype_defaults(
                 let value = read_value(&mut reader, index, category)?;
                 match index {
                     70..=71 => fatigue[index - 70] = value.scalar().unwrap_or_default() as i32,
+                    68 => tech_skills = int_array(value).map(|x| x.unwrap_or_default() as u32),
+                    69 => {
+                        colleges = int_array(value).map(|x| x.unwrap_or_default() as u32);
+                        mastery = value
+                            .array_entry(16)
+                            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                            .filter(|n| *n < 16);
+                    }
+                    72 => fatigue_damage = value.scalar().unwrap_or_default() as i32,
                     67 => {
                         haggle = value
                             .array_entry(9)
@@ -558,7 +579,8 @@ pub(crate) fn prototype_defaults(
                 6 => 98,
                 7 => 101,
                 8 => 97,
-                11 | 14 => 96,
+                11 => 96,
+                14 => 97,
                 12 => 97,
                 _ => 95,
             };
@@ -570,7 +592,7 @@ pub(crate) fn prototype_defaults(
                 }
             }
         } else {
-            for index in 65..=69 {
+            for index in 65..=70 {
                 let value = read_value(&mut reader, index, category)?;
                 fields.project(index, category, value);
                 if index == 69 {
@@ -607,5 +629,9 @@ pub(crate) fn prototype_defaults(
         retail,
         substitute,
         haggle,
+        tech_skills,
+        colleges,
+        mastery,
+        fatigue_damage,
     })
 }

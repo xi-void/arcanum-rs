@@ -8,6 +8,7 @@ use arcanum_rs::{
     content::{
         Source,
         art::{LoadedFrame, load_frame},
+        world::InteractiveWorld,
     },
     gpu::OverlayDraw,
     vfs::{MountId, Policy, Storage, Vfs},
@@ -26,6 +27,8 @@ pub(super) enum Action {
     ResetZoom,
     OpenMap,
     ToggleInventory,
+    ToggleSpells,
+    CastCantrip,
     ToggleJournal,
     JournalQuests,
     JournalPrevious,
@@ -148,13 +151,17 @@ pub(super) enum Binding {
     InventorySpeed,
     InventoryDefense,
     InventoryDrop,
+    InventoryUse,
+    FatigueFill,
+    FatigueValue,
 }
 
 impl Binding {
     fn is_label(self) -> bool {
         matches!(
             self,
-            Self::MapTitle
+            Self::FatigueValue
+                | Self::MapTitle
                 | Self::MapWest
                 | Self::MapSouth
                 | Self::MapStatus
@@ -228,6 +235,9 @@ struct Element {
     journal_panel: bool,
     #[serde(default)]
     dialogue_only: bool,
+    #[serde(default)]
+    spell_panel: bool,
+    required_conveyance: Option<u32>,
     response: Option<usize>,
     hover_text_color: Option<Color>,
     disabled_text_color: Option<Color>,
@@ -631,6 +641,10 @@ pub(crate) struct Hud {
     panel_band: Rect,
     external_panel: Option<[u32; 2]>,
     shared_band: Option<(Rect, u32)>,
+    fatigue_percent: u32,
+    fatigue_revision: Option<u64>,
+    spells_open: bool,
+    spell_level: u32,
     inventory: InventoryPanel,
     journal: journal::Journal,
     journal_style: Option<journal::Style>,
@@ -928,6 +942,10 @@ impl Hud {
             },
             external_panel: None,
             shared_band: None,
+            fatigue_percent: 100,
+            fatigue_revision: None,
+            spells_open: false,
+            spell_level: 0,
             inventory: InventoryPanel::default(),
             journal: journal::Journal::default(),
             journal_style: theme.journal,
@@ -937,6 +955,40 @@ impl Hud {
         })
     }
 
+    pub fn reset_character(&mut self) {
+        self.fatigue_revision = None;
+        self.close_spells();
+    }
+    pub fn update_fatigue(&mut self, world: &InteractiveWorld) {
+        if self.fatigue_revision == Some(world.inventory_revision()) {
+            return;
+        }
+        self.fatigue_revision = Some(world.inventory_revision());
+        let (current, maximum) = world.fatigue();
+        self.fatigue_percent = if maximum <= 0 {
+            0
+        } else {
+            (current.saturating_mul(100) / maximum).clamp(0, 100) as u32
+        };
+        self.set_label(Binding::FatigueValue, &format!("{current:03}"));
+    }
+    pub fn toggle_spells(&mut self) {
+        self.spells_open = !self.spells_open;
+        self.clear_layout();
+    }
+    pub fn close_spells(&mut self) -> bool {
+        if !self.spells_open {
+            return false;
+        }
+        self.toggle_spells();
+        true
+    }
+    pub fn set_spell_level(&mut self, level: u32) {
+        if self.spell_level != level {
+            self.spell_level = level;
+            self.clear_layout();
+        }
+    }
     pub fn layout(&mut self, size: (u32, u32)) {
         self.layout_group(size, None, None);
     }
@@ -1077,10 +1129,20 @@ impl Hud {
                 if self.map_view.is_some_and(|mode| {
                     !component.config.map_views.is_empty()
                         && !component.config.map_views.contains(&mode)
-                }) || component.config.hidden
+                }) || (component.config.spell_panel
+                    && (!self.spells_open
+                        || self.dialogue_open
+                        || panel.is_some()
+                        || self.journal.open))
+                    || component
+                        .config
+                        .required_conveyance
+                        .is_some_and(|n| n > self.spell_level)
+                    || component.config.hidden
                     || (component.config.dialogue_only && !self.dialogue_open)
                     || (component.config.journal_panel && !self.journal.open)
-                    || (component.config.binding == Some(Binding::NpcContext) && panel.is_some())
+                    || (component.config.binding == Some(Binding::NpcContext)
+                        && (panel.is_some() || self.spells_open))
                     || (self.dialogue_open
                         && component.config.binding == Some(Binding::InventoryHover))
                     || (component.config.inventory_panel && panel.is_none())
@@ -1131,7 +1193,22 @@ impl Hud {
             let p = p.as_ref()?.rect;
             Some(serde_json::json!({"index":index,"bounds":[p.x,p.y,p.w,p.h],"available":self.dialogue_available[index]}))
         }).collect();
-        serde_json::json!({"journal":self.journal_diagnostic(),"context_message":label(Binding::InventoryHover),
+        let spell_controls: BTreeMap<_, _> = self
+            .components
+            .iter()
+            .zip(&self.placed)
+            .filter(|(c, _)| {
+                matches!(
+                    c.config.action,
+                    Some(Action::ToggleSpells | Action::CastCantrip)
+                )
+            })
+            .filter_map(|(c, p)| {
+                let r = p.as_ref()?.rect;
+                Some((&c.config.id, [r.x, r.y, r.w as i32, r.h as i32]))
+            })
+            .collect();
+        serde_json::json!({"spell_controls":spell_controls,"spell_panel":self.spells_open,"journal":self.journal_diagnostic(),"context_message":label(Binding::InventoryHover),
             "npc_context":label(Binding::NpcContext),"dialogue_responses":responses,"dialogue_scroll":self.dialogue_layout.diagnostics(),
             "map_status":label(Binding::MapStatus),"scale_percent":self.scale,"effective_scale_percent":self.effective_scale,"inventory":self.inventory_diagnostics(),"fonts":self.font_profiles,"image_references":images,
             "focused":control(self.focus),"hovered":control(self.hover),"pressed":control(self.pressed)})
@@ -1460,6 +1537,8 @@ impl Hud {
         config.action.filter(|action| {
             !config.disabled
                 && Some(*action) != self.unavailable_action
+                && (!matches!(action, Action::ToggleSpells | Action::CastCantrip)
+                    || !self.inventory_open() && !self.dialogue_open)
                 && (*action != Action::ToggleInventory || self.has_inventory())
                 && (!self.journal.open
                     || matches!(
@@ -1545,6 +1624,23 @@ impl Hud {
                     .or(highlighted)
                     .or(p.live_asset.as_ref())
                     .unwrap_or(&component.art);
+                if component.config.binding == Some(Binding::FatigueFill) {
+                    if self.fatigue_percent == 0 {
+                        return None;
+                    }
+                    // CE draws the liquid surface eight original pixels above the fill line.
+                    let track = component
+                        .parent
+                        .and_then(|i| self.placed[i].as_ref())
+                        .map_or(p.full.h, |parent| parent.full.h);
+                    let empty = track - track * self.fatigue_percent / 100;
+                    let extra = p.full.h.saturating_sub(track);
+                    let rect = Rect {
+                        y: p.full.y + empty as i32 - extra as i32,
+                        ..p.full
+                    };
+                    return Some(overlay(asset, rect, p.rect.intersect(rect)?));
+                }
                 Some(overlay(asset, p.full, p.rect))
             })
             .chain(self.inventory_draws())

@@ -351,16 +351,11 @@ impl InteractiveWorld {
             }
         }
         let stats = self.character_statistics();
-        let cap = match stats.attributes[6] {
-            ..=5 => 3,
-            6..=8 => 7,
-            9..=11 => 11,
-            12..=14 => 15,
-            15..=17 => 19,
-            _ => 20,
-        };
-        let level = (i64::from(4 * (character.haggle & 63)) + self.cache.inventory.rules.haggle())
-            .clamp(0, i64::from(cap)) as i32;
+        let level = crate::content::character::SkillValue::level(
+            character.haggle,
+            self.cache.inventory.rules.haggle(),
+            stats.attributes[6],
+        );
         let haggle = (4 * level + 10 + if stats.attributes[4] >= 20 { 10 } else { 0 }).min(95);
         let worth = if item.stats.complexity.unwrap_or_default() > 0 && item.flags & 1 == 0 {
             300
