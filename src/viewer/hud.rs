@@ -1,13 +1,15 @@
 //! Declarative HUD layout, assets and hit testing, in physical window pixels.
+mod inventory;
 use arcanum_rs::{
     art::{DecodedFrame, SpriteFrame},
-    compositor::SpriteDraw,
     content::{
         Source,
         art::{LoadedFrame, load_frame},
     },
+    gpu::OverlayDraw,
     vfs::{MountId, Policy, Storage, Vfs},
 };
+use inventory::{InventoryPanel, InventoryView};
 use serde::Deserialize;
 use std::{collections::BTreeMap, error::Error, fs::File, io::Read, path::Path, sync::Arc};
 
@@ -20,6 +22,9 @@ pub(super) enum Action {
     ToggleRun,
     ResetZoom,
     OpenMap,
+    ToggleInventory,
+    InventoryScrollUp,
+    InventoryScrollDown,
     MapLocal,
     MapWorld,
     MapZoomIn,
@@ -103,13 +108,23 @@ pub(super) enum Binding {
     PlayerMarker,
     WaypointMarker,
     GameClock,
+    Backpack,
+    ContainerGrid,
+    ContainerThumb,
+    InventoryLens,
+    InventoryHover,
 }
 
 impl Binding {
     fn is_label(self) -> bool {
         matches!(
             self,
-            Self::MapTitle | Self::MapWest | Self::MapSouth | Self::MapStatus | Self::PlaceLabel
+            Self::MapTitle
+                | Self::MapWest
+                | Self::MapSouth
+                | Self::MapStatus
+                | Self::PlaceLabel
+                | Self::InventoryHover
         )
     }
 
@@ -151,6 +166,15 @@ struct Element {
     #[serde(default)]
     map_views: Vec<MapView>,
     travel_available: Option<bool>,
+    #[serde(default)]
+    inventory_panel: bool,
+    #[serde(default)]
+    inventory_views: Vec<InventoryView>,
+    cell: Option<u32>,
+    hover_message: Option<String>,
+    thumb_height: Option<u32>,
+    thumb_middle: Option<String>,
+    thumb_bottom: Option<String>,
     clock_phases: Option<[String; 8]>,
     source_rect: Option<[u32; 4]>,
     #[serde(default)]
@@ -209,10 +233,11 @@ struct Component {
     config: Element,
     parent: Option<usize>,
     base: SpriteFrame,
-    state_frames: [Option<SpriteFrame>; 3],
     text: Option<Text>,
     label: Option<Label>,
     clock: Option<ClockArt>,
+    art: Arc<LoadedFrame>,
+    state_art: [Option<Arc<LoadedFrame>>; 3],
 }
 
 struct ClockArt {
@@ -291,8 +316,7 @@ struct Placement {
     full: Rect,
     scale: u32,
     rect: Rect,
-    art: Arc<LoadedFrame>,
-    state_art: [Option<Arc<LoadedFrame>>; 3],
+    live_asset: Option<Arc<LoadedFrame>>,
 }
 
 pub(crate) struct Hud {
@@ -312,6 +336,11 @@ pub(crate) struct Hud {
     focus: Option<usize>,
     map_view: Option<MapView>,
     travel_available: bool,
+    effective_scale: u32,
+    panel_band: Rect,
+    external_panel: Option<[u32; 2]>,
+    shared_band: Option<(Rect, u32)>,
+    inventory: InventoryPanel,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -358,7 +387,18 @@ impl Hud {
             if indices.insert(config.id.clone(), index).is_some() {
                 return Err(format!("duplicate UI component {}", config.id).into());
             }
-            let mut base = sprite(config.size, config.fill.unwrap_or([0; 4]));
+            let mut base = sprite(
+                if config.fill.is_some()
+                    || config.text.is_some()
+                    || (config.hover_fill.is_some() && config.cell.is_none())
+                    || config.binding.is_some_and(Binding::is_label)
+                {
+                    config.size
+                } else {
+                    [1, 1]
+                },
+                config.fill.unwrap_or([0; 4]),
+            );
             let mut state_frames = [None, None, None];
             let mut prepared_text = None;
             let mut label = None;
@@ -389,7 +429,11 @@ impl Hud {
                     let mut load = |frame| -> Result<SpriteFrame, Box<dyn Error>> {
                         let art = resource(game, &mut files, asset, frame)
                             .map_err(|error| format!("{}: {error}", config.id))?;
-                        let mut raster = sprite(config.size, config.fill.unwrap_or([0; 4]));
+                        let size = [
+                            config.size[0],
+                            config.thumb_height.unwrap_or(config.size[1]),
+                        ];
+                        let mut raster = sprite(size, config.fill.unwrap_or([0; 4]));
                         scale_into(&art.decoded.frame, &mut raster, config.source_rect)
                             .map_err(|error| format!("{}: {error}", config.id))?;
                         Ok(raster)
@@ -402,6 +446,31 @@ impl Hud {
                     ]) {
                         *out = frame.map(&mut load).transpose()?;
                     }
+                }
+                if let (Some(middle), Some(bottom)) = (&config.thumb_middle, &config.thumb_bottom) {
+                    let middle = resource(game, &mut files, middle, 0)?.decoded.frame;
+                    let bottom = resource(game, &mut files, bottom, 0)?.decoded.frame;
+                    let width = base.width;
+                    let top_height = base.height;
+                    if top_height + middle.height + bottom.height > config.size[1] {
+                        return Err(
+                            format!("{}: thumb artwork exceeds its track", config.id).into()
+                        );
+                    }
+                    let mut thumb =
+                        sprite([width, top_height + middle.height + bottom.height], [0; 4]);
+                    for (frame, y) in [
+                        (&base, 0),
+                        (&middle, top_height),
+                        (&bottom, top_height + middle.height),
+                    ] {
+                        let mut rows = sprite([width, frame.height], [0; 4]);
+                        scale_into(frame, &mut rows, None)?;
+                        let begin = (y * width) as usize;
+                        thumb.pixels[begin..begin + rows.pixels.len()]
+                            .copy_from_slice(&rows.pixels);
+                    }
+                    base = thumb;
                 }
                 let dynamic = config.binding.is_some_and(Binding::is_label);
                 if let Some(text) = config.text.as_deref().or(dynamic.then_some("")) {
@@ -458,9 +527,11 @@ impl Hud {
                             }
                         }
                         if !alphabet.contains_key(&'?') {
-                            return Err(
-                                format!("{}: map label font needs a '?' glyph", config.id).into()
-                            );
+                            return Err(format!(
+                                "{}: dynamic label font needs a '?' glyph",
+                                config.id
+                            )
+                            .into());
                         }
                         label = Some(Label {
                             glyphs: alphabet,
@@ -476,15 +547,34 @@ impl Hud {
                     });
                 }
             }
-            components.push(Component {
+            let mut component = Component {
                 config,
                 parent,
                 base,
-                state_frames,
                 text: prepared_text,
                 label,
                 clock,
-            });
+                art: generated_frame("empty", sprite([1, 1], [0; 4])),
+                state_art: [None, None, None],
+            };
+            component.art = native_art(&component, &component.base, None);
+            if !component.config.disabled && component.config.action.is_some() {
+                component.state_art = std::array::from_fn(|i| {
+                    if let Some(frame) = &state_frames[i] {
+                        return Some(native_art(&component, frame, None));
+                    }
+                    (i == 0)
+                        .then_some(component.config.hover_fill)
+                        .flatten()
+                        .map(|color| native_art(&component, &component.base, Some(color)))
+                });
+            }
+            if component.config.cell.is_some()
+                && let Some(color) = component.config.hover_fill
+            {
+                component.state_art[0] = Some(generated_frame("grid-hover", sprite([1, 1], color)));
+            }
+            components.push(component);
         }
         if let Some(author) = &theme.author {
             eprintln!("HUD author: {author}");
@@ -507,47 +597,142 @@ impl Hud {
             focus: None,
             map_view: None,
             travel_available: false,
+            effective_scale: 0,
+            panel_band: Rect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            },
+            external_panel: None,
+            shared_band: None,
+            inventory: InventoryPanel::default(),
         })
     }
 
     pub fn layout(&mut self, size: (u32, u32)) {
-        if size == self.size {
+        self.layout_group(size, None, None);
+    }
+
+    pub(super) fn panel_size(&self) -> [u32; 2] {
+        let mut size = [1, 1];
+        for c in self
+            .components
+            .iter()
+            .filter(|c| c.parent.is_none() && !c.config.hidden)
+        {
+            for (axis, side) in size.iter_mut().enumerate() {
+                *side = (*side).max(c.config.size[axis] + 2 * c.config.offset[axis].unsigned_abs());
+            }
+        }
+        if let Some(fit) = self.fit_viewport {
+            size[0] = size[0].max(fit[0]);
+        }
+        size
+    }
+
+    pub(super) fn layout_with_panel(&mut self, size: (u32, u32), panel: [u32; 2]) -> (Rect, u32) {
+        self.layout_group(size, Some(panel), None);
+        (self.panel_band, self.effective_scale)
+    }
+
+    pub(super) fn layout_group(
+        &mut self,
+        size: (u32, u32),
+        external_panel: Option<[u32; 2]>,
+        shared_band: Option<(Rect, u32)>,
+    ) {
+        if size == self.size
+            && self.external_panel == external_panel
+            && self.shared_band == shared_band
+        {
             return;
         }
         self.size = size;
+        self.external_panel = external_panel;
+        self.shared_band = shared_band;
         self.placed.clear();
-        let viewport = Rect {
+        let viewport = shared_band.map(|(rect, _)| rect).unwrap_or(Rect {
             x: 0,
             y: 0,
             w: size.0,
             h: size.1,
-        };
-        let widest = self
+        });
+        let panel = self.inventory.view();
+        let mut top = 0;
+        let mut bottom = 0;
+        let [mut widest, mut middle] = external_panel.unwrap_or([1, 0]);
+        for c in self
             .components
             .iter()
             .filter(|c| c.parent.is_none() && !c.config.hidden)
-            .map(|c| c.config.size[0])
-            .max()
-            .unwrap_or(1);
-        // Keep wide stock panels usable on narrow windows. Both hit testing and
-        // raster placement use this exact effective scale.
+        {
+            let e = &c.config;
+            if e.inventory_panel {
+                // Reserve the full gameplay layout even while inventory is closed.
+                middle = middle.max(e.size[1]);
+                widest = widest.max(e.size[0]);
+                continue;
+            }
+            widest = widest.max(e.size[0]);
+            match e.anchor {
+                Anchor::Top | Anchor::TopLeft | Anchor::TopRight => {
+                    top = top.max(e.size[1].saturating_add_signed(e.offset[1]));
+                }
+                Anchor::Bottom | Anchor::BottomLeft | Anchor::BottomRight => {
+                    bottom = bottom.max(e.size[1].saturating_add_signed(-e.offset[1]));
+                }
+                _ => {}
+            }
+        }
         let fit = self.fit_viewport.map_or(u32::MAX, |[width, height]| {
             (size.0.saturating_mul(100) / width).min(size.1.saturating_mul(100) / height)
         });
-        let scale = u32::from(self.scale)
-            .min(size.0.saturating_mul(100) / widest)
-            .min(fit)
-            .max(1);
+        let scale = shared_band.map(|(_, scale)| scale).unwrap_or_else(|| {
+            u32::from(self.scale)
+                .min(size.0.saturating_mul(100) / widest)
+                .min(size.1.saturating_mul(100) / (top + bottom + middle).max(1))
+                .min(fit)
+        });
+        self.effective_scale = scale;
+        self.panel_band = Rect {
+            w: 0,
+            h: 0,
+            ..viewport
+        };
+        if scale == 0 {
+            return;
+        }
+        let top = top * scale / 100;
+        let bottom = bottom * scale / 100;
+        let band = Rect {
+            y: viewport.y + top as i32,
+            h: viewport.h.saturating_sub(top + bottom),
+            ..viewport
+        };
+        self.panel_band = band;
         let mut bounds = Vec::with_capacity(self.components.len());
         for component in &self.components {
-            let parent = component
-                .parent
-                .map_or(Some((viewport, viewport)), |id| bounds[id]);
+            let parent = component.parent.map_or_else(
+                || {
+                    let area = if component.config.inventory_panel {
+                        band
+                    } else {
+                        viewport
+                    };
+                    Some((area, area))
+                },
+                |id| bounds[id],
+            );
             let placement = parent.and_then(|(parent, clip)| {
                 if self.map_view.is_some_and(|mode| {
                     !component.config.map_views.is_empty()
                         && !component.config.map_views.contains(&mode)
                 }) || component.config.hidden
+                    || (component.config.inventory_panel && panel.is_none())
+                    || (!component.config.inventory_views.is_empty()
+                        && panel
+                            .is_none_or(|view| !component.config.inventory_views.contains(&view)))
                     || component
                         .config
                         .travel_available
@@ -560,29 +745,11 @@ impl Hud {
                 Some((rect, rect.intersect(clip)?))
             });
             bounds.push(placement);
-            self.placed.push(placement.map(|(rect, clip)| {
-                let art = raster(component, &component.base, rect, clip, scale, None);
-                let state_art = std::array::from_fn(|i| {
-                    if component.config.disabled || component.config.action.is_none() {
-                        return None;
-                    }
-                    if let Some(frame) = &component.state_frames[i] {
-                        return Some(raster(component, frame, rect, clip, scale, None));
-                    }
-                    if i == 0 {
-                        return component.config.hover_fill.map(|color| {
-                            raster(component, &component.base, rect, clip, scale, Some(color))
-                        });
-                    }
-                    None
-                });
-                Placement {
-                    full: rect,
-                    scale,
-                    rect: clip,
-                    art,
-                    state_art,
-                }
+            self.placed.push(placement.map(|(rect, clip)| Placement {
+                full: rect,
+                scale,
+                rect: clip,
+                live_asset: None,
             }));
         }
     }
@@ -600,7 +767,7 @@ impl Hud {
             .iter()
             .filter_map(|component| component.config.image.as_deref())
             .collect();
-        serde_json::json!({"scale_percent":self.scale,"fonts":self.font_profiles,"image_references":images,
+        serde_json::json!({"scale_percent":self.scale,"effective_scale_percent":self.effective_scale,"inventory":self.inventory_diagnostics(),"fonts":self.font_profiles,"image_references":images,
             "focused":control(self.focus),"hovered":control(self.hover),"pressed":control(self.pressed)})
     }
 
@@ -639,11 +806,11 @@ impl Hud {
         )
     }
 
-    pub(super) fn set_lens_asset(&mut self, frame: Arc<LoadedFrame>) {
-        if let Some(index) = self.bound(Binding::PlayerLens)
+    pub(super) fn set_lens_asset(&mut self, binding: Binding, frame: Arc<LoadedFrame>) {
+        if let Some(index) = self.placed_bound(binding)
             && let Some(Some(place)) = self.placed.get_mut(index)
         {
-            place.art = frame;
+            place.live_asset = Some(frame);
         }
     }
 
@@ -663,8 +830,18 @@ impl Hud {
             .position(|c| c.config.binding == Some(binding))
     }
 
+    fn placed_bound(&self, binding: Binding) -> Option<usize> {
+        self.components.iter().enumerate().position(|(index, c)| {
+            c.config.binding == Some(binding) && self.placed.get(index).is_some_and(Option::is_some)
+        })
+    }
+
+    pub(super) fn native_size(&self, binding: Binding) -> Option<[u32; 2]> {
+        Some(self.components[self.placed_bound(binding)?].config.size)
+    }
+
     pub(super) fn bounds(&self, binding: Binding) -> Option<(Rect, u32)> {
-        let place = self.placed.get(self.bound(binding)?)?.as_ref()?;
+        let place = self.placed.get(self.placed_bound(binding)?)?.as_ref()?;
         Some((place.rect, place.scale))
     }
 
@@ -681,10 +858,8 @@ impl Hud {
     }
 
     pub(super) fn set_canvas(&mut self, frame: SpriteFrame) {
-        if let Some(index) = self.bound(Binding::MapCanvas)
-            && let Some(place) = self.placed[index].as_mut()
-        {
-            place.art = generated_frame(&self.components[index].config.id, frame);
+        if let Some(index) = self.bound(Binding::MapCanvas) {
+            self.components[index].art = generated_frame(&self.components[index].config.id, frame);
         }
     }
 
@@ -705,16 +880,7 @@ impl Hud {
             hours,
             component.config.fill.unwrap_or([0; 4]),
         );
-        if let Some(Some(place)) = self.placed.get_mut(index) {
-            place.art = raster(
-                component,
-                &component.base,
-                place.full,
-                place.rect,
-                place.scale,
-                None,
-            );
-        }
+        component.art = native_art(component, &component.base, None);
         true
     }
 
@@ -725,16 +891,8 @@ impl Hud {
         {
             label.value = value.into();
             self.components[index].text = Some(label.text(value));
-            if let Some(place) = self.placed[index].as_mut() {
-                place.art = raster(
-                    &self.components[index],
-                    &self.components[index].base,
-                    place.full,
-                    place.rect,
-                    place.scale,
-                    None,
-                );
-            }
+            let component = &mut self.components[index];
+            component.art = native_art(component, &component.base, None);
         }
     }
 
@@ -818,7 +976,7 @@ impl Hud {
     pub fn adjust_scale(&mut self, step: i16) {
         self.scale = (self.scale as i16 + step).clamp(50, 300) as u16;
         let size = std::mem::take(&mut self.size);
-        self.layout(size);
+        self.layout_group(size, self.external_panel, self.shared_band);
     }
 
     fn select(&self, point: (u32, u32)) -> Option<usize> {
@@ -842,7 +1000,8 @@ impl Hud {
         let hover = point
             .and_then(|point| self.select(point))
             .filter(|&index| self.available_action(index).is_some());
-        std::mem::replace(&mut self.hover, hover) != hover
+        let controls_changed = std::mem::replace(&mut self.hover, hover) != hover;
+        self.inventory_hover(point) || controls_changed
     }
 
     pub(super) fn press(&mut self, point: (u32, u32)) -> bool {
@@ -858,8 +1017,12 @@ impl Hud {
             .flatten()
     }
 
-    pub(super) fn cancel_press(&mut self) {
-        self.pressed = None;
+    pub(super) fn cancel_press(&mut self) -> bool {
+        self.pressed.take().is_some()
+    }
+
+    pub(super) fn is_pressed(&self) -> bool {
+        self.pressed.is_some()
     }
 
     pub(super) fn set_selected_action(&mut self, action: Action) {
@@ -898,45 +1061,60 @@ impl Hud {
     fn available_action(&self, index: usize) -> Option<Action> {
         self.placed.get(index)?.as_ref()?;
         let config = &self.components[index].config;
-        config
-            .action
-            .filter(|action| !config.disabled && Some(*action) != self.unavailable_action)
+        config.action.filter(|action| {
+            !config.disabled
+                && Some(*action) != self.unavailable_action
+                && (*action != Action::ToggleInventory || self.has_inventory())
+        })
     }
 
-    pub fn draws(
-        &self,
-        running: bool,
-    ) -> impl Iterator<Item = (&Arc<LoadedFrame>, SpriteDraw<'_>)> {
+    pub fn draws(&self, running: bool) -> impl Iterator<Item = OverlayDraw<'_>> {
         self.placed
             .iter()
             .enumerate()
             .filter_map(move |(index, placement)| {
                 let p = placement.as_ref()?;
-                let action = self.components[index].config.action;
+                let component = &self.components[index];
+                if component.config.binding == Some(Binding::ContainerThumb)
+                    || (p.live_asset.is_none()
+                        && component.config.image.is_none()
+                        && component.config.fill.is_none()
+                        && component.config.hover_fill.is_none()
+                        && component
+                            .text
+                            .as_ref()
+                            .is_none_or(|text| text.glyphs.is_empty())
+                        && component.config.binding != Some(Binding::MapCanvas))
+                    || component.config.cell.is_some()
+                {
+                    return None;
+                }
+                let action = component.config.action;
                 let hot = self.hover == Some(index);
                 let state = if hot && self.pressed == Some(index) {
-                    p.state_art[1].as_ref()
+                    component.state_art[1].as_ref()
                 } else {
                     None
                 };
                 let selected = (action.is_some()
-                    && (action == self.selected_action || action == self.active_action))
-                    .then_some(p.state_art[2].as_ref())
-                    .flatten();
+                    && (action == self.selected_action
+                        || action == self.active_action
+                        || (action == Some(Action::ToggleInventory) && self.inventory_open())))
+                .then_some(component.state_art[2].as_ref())
+                .flatten();
                 let highlighted = (hot
                     || self.focus == Some(index)
                     || (running && action == Some(Action::ToggleRun)))
-                .then_some(p.state_art[0].as_ref())
+                .then_some(component.state_art[0].as_ref())
                 .flatten();
-                let asset = state.or(selected).or(highlighted).unwrap_or(&p.art);
-                Some((
-                    asset,
-                    SpriteDraw {
-                        frame: &asset.decoded.frame,
-                        anchor: (p.rect.x, p.rect.y),
-                    },
-                ))
+                let asset = state
+                    .or(selected)
+                    .or(highlighted)
+                    .or(p.live_asset.as_ref())
+                    .unwrap_or(&component.art);
+                Some(overlay(asset, p.full, p.rect))
             })
+            .chain(self.inventory_draws())
     }
 }
 
@@ -946,7 +1124,7 @@ fn parse(source: &str) -> Result<Theme, Box<dyn Error>> {
     }
     let theme: Theme = toml::from_str(source)?;
     if theme.name.trim().is_empty()
-        || theme.hud.len() > 64
+        || theme.hud.len() > 128
         || theme.fonts.len() > 16
         || theme
             .fit_viewport
@@ -965,6 +1143,21 @@ fn parse(source: &str) -> Result<Theme, Box<dyn Error>> {
                     || [e.hover_frame, e.pressed_frame, e.selected_frame]
                         .into_iter()
                         .any(|frame| frame.is_some())))
+            || e.thumb_height.is_some_and(|height| {
+                height == 0 || height > e.size[1] || e.binding != Some(Binding::ContainerThumb)
+            })
+            || (e.thumb_middle.is_some() != e.thumb_bottom.is_some())
+            || (e.thumb_middle.is_some() && (e.thumb_height.is_none() || e.image.is_none()))
+            || e.cell.is_some_and(|cell| {
+                !(1..=128).contains(&cell) || e.size.iter().any(|&side| side % cell != 0)
+            })
+            || e.cell.is_some()
+                != matches!(e.binding, Some(Binding::Backpack | Binding::ContainerGrid))
+            || (e.inventory_panel
+                && (e.parent.is_some()
+                    || !matches!(e.anchor, Anchor::Center)
+                    || e.offset != [0, 0]
+                    || !e.inventory_views.is_empty()))
             || e.text.as_ref().is_some_and(|s| s.len() > 256)
         {
             return Err(format!("invalid size, offset or text in component {}", e.id).into());
@@ -973,9 +1166,20 @@ fn parse(source: &str) -> Result<Theme, Box<dyn Error>> {
             .into_iter()
             .flatten()
             .count() as u32;
-        pixels += e.size[0] * e.size[1] * (1 + variants);
+        let hover_fill = e.hover_fill.is_some() && e.cell.is_none();
+        if e.image.is_some()
+            || e.text.is_some()
+            || e.fill.is_some()
+            || e.binding.is_some_and(Binding::is_label)
+            || hover_fill
+        {
+            pixels += e.size[0]
+                * e.size[1]
+                * (1 + variants + u32::from(hover_fill && e.hover_frame.is_none()));
+        }
     }
-    if pixels > 768 * 1024
+    if pixels > 1024 * 1024
+        || theme.hud.iter().filter(|e| e.inventory_panel).count() > 1
         || theme.fonts.values().any(|font| {
             !(5..=48).contains(&font.size)
                 || font.line_gap > 32
@@ -1060,6 +1264,28 @@ fn scale_into(
         }
     }
     Ok(())
+}
+
+fn overlay(asset: &Arc<LoadedFrame>, rect: Rect, clip: Rect) -> OverlayDraw<'_> {
+    let pixels = |r: Rect| [r.x as f32, r.y as f32, r.w as f32, r.h as f32];
+    OverlayDraw {
+        asset,
+        rect: pixels(rect),
+        clip: pixels(clip),
+    }
+}
+
+fn native_art(c: &Component, src: &SpriteFrame, hover: Option<Color>) -> Arc<LoadedFrame> {
+    if c.text.is_none() && hover.is_none() {
+        return generated_frame(&c.config.id, src.clone());
+    }
+    let rect = Rect {
+        x: 0,
+        y: 0,
+        w: src.width,
+        h: src.height,
+    };
+    raster(c, src, rect, rect, 100, hover)
 }
 
 fn raster(
@@ -1454,9 +1680,9 @@ mod tests {
         let current = |hud: &Hud| {
             Arc::clone(
                 hud.draws(false)
-                    .find(|(art, _)| art.source.virtual_path == "ui/zoom")
+                    .find(|draw| draw.asset.source.virtual_path == "ui/zoom")
                     .unwrap()
-                    .0,
+                    .asset,
             )
         };
         let idle = current(&hud);
@@ -1487,14 +1713,7 @@ mod tests {
         assert_eq!(first.focused_action(), Some(Action::Pause));
         first.advance_focus(true);
         assert_eq!(first.focused_action(), Some(Action::ResetZoom));
-        let original_text = first.placed[1]
-            .as_ref()
-            .unwrap()
-            .art
-            .decoded
-            .frame
-            .pixels
-            .clone();
+        let original_text = first.components[1].art.decoded.frame.pixels.clone();
         first.adjust_scale(25);
         assert_eq!(first.placed[0].as_ref().unwrap().rect.x, 21);
 
@@ -1505,13 +1724,7 @@ mod tests {
         let mut replacement = package.theme(&replaced).unwrap();
         replacement.layout((800, 600));
         assert_ne!(
-            replacement.placed[1]
-                .as_ref()
-                .unwrap()
-                .art
-                .decoded
-                .frame
-                .pixels,
+            replacement.components[1].art.decoded.frame.pixels,
             original_text
         );
         assert_eq!(replacement.placed[0].as_ref().unwrap().rect.x, 578);

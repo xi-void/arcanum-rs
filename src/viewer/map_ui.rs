@@ -797,14 +797,23 @@ impl MapUi {
             .map(|(_, id)| id)
     }
 
-    pub(super) fn prepare(&mut self, size: Point, cursor: Option<Point>) -> &mut Hud {
+    pub(super) fn panel_size(&self) -> [u32; 2] {
+        self.hud.panel_size()
+    }
+
+    pub(super) fn prepare(
+        &mut self,
+        size: Point,
+        cursor: Option<Point>,
+        band: Option<(Rect, u32)>,
+    ) -> &mut Hud {
         self.hud.set_unavailable_action(
             (!self.travelling() && (!self.can_travel || self.arrival_waypoint().is_none()))
                 .then_some(Action::MapTravel),
         );
         self.hud
             .set_active_action(self.travelling().then_some(Action::MapTravel));
-        self.hud.layout(size);
+        self.hud.layout_group(size, None, band);
         let bounds = self.hud.bounds(Binding::MapCanvas);
         if self.bounds != bounds {
             self.bounds = bounds;

@@ -1,6 +1,11 @@
 name = "Classic"
 scale = 125
 
+[fonts.inventory]
+source = "vfs:art/interface/flare12font.art"
+size = 12
+color = [255, 255, 255, 255]
+
 [[hud]]
 id = "top"
 anchor = "top"
@@ -57,7 +62,10 @@ parent = "top"
 offset = [115, 2]
 size = [34, 34]
 image = "vfs:art/interface/invn_but.art"
-disabled = true
+hover_frame = 2
+selected_frame = 1
+pressed_frame = 1
+action = "toggle-inventory"
 
 [[hud]]
 id = "fate"
@@ -275,3 +283,286 @@ offset = [616, 14]
 size = [14, 14]
 image = "vfs:art/interface/hktshoff.art"
 disabled = true
+
+[[hud]]
+id = "inventory-hover"
+parent = "bottom"
+offset = [204, 61]
+size = [397, 80]
+binding = "inventory-hover"
+font = "inventory"
+wrap = true
+
+[[hud]]
+id = "inventory-panel"
+size = [800, 400]
+anchor = "center"
+inventory_panel = true
+capture = true
+
+[[hud]]
+id = "paper-doll"
+parent = "inventory-panel"
+inventory_views = ["inventory"]
+offset = [0, 0]
+size = [358, 400]
+image = "vfs:art/interface/pdoll.art"
+
+[[hud]]
+id = "loot-background"
+parent = "inventory-panel"
+inventory_views = ["container"]
+offset = [0, 0]
+size = [358, 400]
+image = "vfs:art/interface/loot.art"
+
+[[hud]]
+id = "backpack-background"
+parent = "inventory-panel"
+offset = [358, 0]
+size = [442, 400]
+image = "vfs:art/interface/inventor.art"
+
+[[hud]]
+id = "equipment-world-inset"
+parent = "inventory-panel"
+inventory_views = ["inventory"]
+offset = [11, 9]
+size = [89, 89]
+binding = "inventory-lens"
+
+[[hud]]
+id = "equipment-inset-border"
+parent = "inventory-panel"
+inventory_views = ["inventory"]
+offset = [11, 9]
+size = [89, 89]
+image = "vfs:art/interface/lns_papr.art"
+
+[[hud]]
+id = "loot-world-inset"
+parent = "inventory-panel"
+inventory_views = ["container"]
+offset = [16, 17]
+size = [89, 89]
+binding = "inventory-lens"
+
+[[hud]]
+id = "loot-inset-border"
+parent = "inventory-panel"
+inventory_views = ["container"]
+offset = [16, 17]
+size = [89, 89]
+image = "vfs:art/interface/lns_loot.art"
+
+[[hud]]
+id = "container-portrait"
+parent = "inventory-panel"
+inventory_views = ["container"]
+offset = [183, 33]
+size = [64, 64]
+image = "vfs:art/interface/containericon.art"
+
+[[hud]]
+id = "equipment-helmet"
+parent = "inventory-panel"
+inventory_views = ["inventory"]
+offset = [151, 107]
+size = [62, 64]
+image = "vfs:art/interface/cvr_helmet.art"
+hover_message = "Helmet"
+
+[[hud]]
+id = "equipment-ring1"
+parent = "inventory-panel"
+inventory_views = ["inventory"]
+offset = [247, 107]
+size = [32, 32]
+image = "vfs:art/interface/cvr_ring1.art"
+hover_message = "Left ring"
+
+[[hud]]
+id = "equipment-ring2"
+parent = "inventory-panel"
+inventory_views = ["inventory"]
+offset = [279, 107]
+size = [32, 32]
+image = "vfs:art/interface/cvr_ring2.art"
+hover_message = "Right ring"
+
+[[hud]]
+id = "equipment-medalion"
+parent = "inventory-panel"
+inventory_views = ["inventory"]
+offset = [247, 139]
+size = [64, 31]
+image = "vfs:art/interface/cvr_medalion.art"
+hover_message = "Medallion"
+
+[[hud]]
+id = "equipment-weapon"
+parent = "inventory-panel"
+inventory_views = ["inventory"]
+offset = [23, 170]
+size = [96, 129]
+image = "vfs:art/interface/cvr_weapon.art"
+hover_message = "Weapon"
+
+[[hud]]
+id = "equipment-shield"
+parent = "inventory-panel"
+inventory_views = ["inventory"]
+offset = [247, 171]
+size = [95, 127]
+image = "vfs:art/interface/cvr_shield.art"
+hover_message = "Shield"
+
+[[hud]]
+id = "equipment-armor"
+parent = "inventory-panel"
+inventory_views = ["inventory"]
+offset = [119, 171]
+size = [128, 160]
+image = "vfs:art/interface/cvr_armor.art"
+hover_message = "Armor"
+
+[[hud]]
+id = "equipment-gauntlet"
+parent = "inventory-panel"
+inventory_views = ["inventory"]
+offset = [55, 107]
+size = [63, 64]
+image = "vfs:art/interface/cvr_gauntlet.art"
+hover_message = "Gauntlet"
+
+[[hud]]
+id = "equipment-boot"
+parent = "inventory-panel"
+inventory_views = ["inventory"]
+offset = [150, 331]
+size = [64, 63]
+image = "vfs:art/interface/cvr_boot.art"
+hover_message = "Boots"
+
+[[hud]]
+id = "attack"
+parent = "inventory-panel"
+inventory_views = ["inventory"]
+offset = [29, 318]
+size = [54, 71]
+image = "vfs:art/interface/totalattack.art"
+disabled = true
+
+[[hud]]
+id = "defense"
+parent = "inventory-panel"
+inventory_views = ["inventory"]
+offset = [254, 319]
+size = [83, 71]
+image = "vfs:art/interface/totaldefens.art"
+disabled = true
+
+[[hud]]
+id = "take-all"
+parent = "inventory-panel"
+inventory_views = ["container"]
+offset = [301, 47]
+size = [51, 50]
+image = "vfs:art/interface/takeallbutt.art"
+disabled = true
+
+[[hud]]
+id = "equipment-tab"
+parent = "inventory-panel"
+inventory_views = ["container"]
+offset = [713, 37]
+size = [28, 27]
+image = "vfs:art/interface/pd_lil_butt.art"
+disabled = true
+
+[[hud]]
+id = "backpack-tab"
+parent = "inventory-panel"
+inventory_views = ["container"]
+offset = [751, 37]
+size = [28, 27]
+image = "vfs:art/interface/inven_lil_butt.art"
+frame = 1
+disabled = true
+
+[[hud]]
+id = "arrange"
+parent = "inventory-panel"
+offset = [763, 197]
+size = [28, 27]
+image = "vfs:art/interface/tiny_butt.art"
+disabled = true
+
+[[hud]]
+id = "use-item"
+parent = "inventory-panel"
+offset = [703, 290]
+size = [80, 43]
+image = "vfs:art/interface/use_box_off.art"
+disabled = true
+
+[[hud]]
+id = "drop-item"
+parent = "inventory-panel"
+offset = [703, 344]
+size = [80, 43]
+image = "vfs:art/interface/drop_off.art"
+disabled = true
+
+[[hud]]
+id = "backpack-grid"
+parent = "inventory-panel"
+offset = [368, 8]
+size = [320, 384]
+binding = "backpack"
+cell = 32
+hover_fill = [64, 0, 0, 144]
+
+[[hud]]
+id = "container-grid"
+parent = "inventory-panel"
+inventory_views = ["container"]
+offset = [8, 136]
+size = [320, 256]
+binding = "container-grid"
+cell = 32
+hover_fill = [64, 0, 0, 144]
+
+[[hud]]
+id = "loot-scroll-up"
+parent = "inventory-panel"
+inventory_views = ["container"]
+offset = [333, 136]
+size = [11, 15]
+image = "vfs:art/interface/scrllup.art"
+hover_frame = 2
+pressed_frame = 1
+action = "inventory-scroll-up"
+
+[[hud]]
+id = "loot-scroll-down"
+parent = "inventory-panel"
+inventory_views = ["container"]
+offset = [333, 378]
+size = [11, 14]
+image = "vfs:art/interface/scrlldwn.art"
+hover_frame = 2
+pressed_frame = 1
+action = "inventory-scroll-down"
+
+[[hud]]
+id = "loot-scroll-thumb"
+parent = "inventory-panel"
+inventory_views = ["container"]
+offset = [333, 151]
+size = [11, 227]
+image = "vfs:art/interface/scrllslidet.art"
+binding = "container-thumb"
+thumb_height = 5
+thumb_middle = "vfs:art/interface/scrllslidem1.art"
+thumb_bottom = "vfs:art/interface/scrllslideb.art"

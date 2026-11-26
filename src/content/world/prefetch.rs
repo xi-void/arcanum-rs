@@ -262,6 +262,7 @@ pub struct InteractiveWorld {
     player_started: bool,
     transition: Option<(Destination, u8)>,
     pending_use: Option<WorldOrder>,
+    container_request: Option<crate::sector::objects::OriginalId>,
     route_goal: Option<((u32, u32), bool)>,
     wait_for_door: Option<Duration>,
     notice: Option<String>,
@@ -312,6 +313,7 @@ impl InteractiveWorld {
             player_started: false,
             transition: None,
             pending_use: None,
+            container_request: None,
             route_goal: None,
             wait_for_door: None,
             notice: None,
@@ -677,6 +679,10 @@ impl InteractiveWorld {
         }
     }
 
+    pub fn take_container_request(&mut self) -> Option<String> {
+        self.container_request.take().map(|id| id.key())
+    }
+
     pub fn take_notice(&mut self) -> Option<String> {
         self.notice.take()
     }
@@ -782,6 +788,12 @@ impl InteractiveWorld {
             && !moving
             && let Some(key) = self.pending_use.take()
         {
+            if let Some(interaction::Action::Container(id)) =
+                self.cache.target(key).map(|target| &target.action)
+            {
+                self.container_request = Some(*id);
+                return true;
+            }
             let facing = facing_now;
             match self.cache.use_target(key, now) {
                 Some(Ok(Some(dst))) => self.transition = Some((dst, facing)),

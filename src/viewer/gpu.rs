@@ -158,7 +158,7 @@ impl WindowRenderer {
         (size, zoom): ((u32, u32), u8),
         background: [u8; 3],
         draws: impl IntoIterator<Item = WorldDraw<'a>>,
-        hud: impl IntoIterator<Item = WorldDraw<'a>>,
+        hud: impl IntoIterator<Item = gpu::OverlayDraw<'a>>,
         window: &Window,
         trace: bool,
     ) -> Result<(), String> {

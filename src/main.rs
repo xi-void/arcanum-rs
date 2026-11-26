@@ -1322,18 +1322,20 @@ fn show_world(
         (None, None, world_args)
     };
     let options = stripped.as_slice();
-    let hud = if let Some(theme) = &theme {
+    let (hud, inventory_reader) = if let Some(theme) = &theme {
         let mods = options
             .iter()
             .position(|arg| arg == "--mods")
             .map_or(&[][..], |index| &options[index..]);
         let mut vfs = inspection_vfs(game, mods, policy)?;
-        Some(Box::new(
-            viewer::Hud::load(theme, &mut vfs, ui_scale)
-                .map_err(|error| format!("UI theme {}: {error}", theme.display()))?,
-        ))
+        let hud = viewer::Hud::load(theme, &mut vfs, ui_scale)
+            .map_err(|error| format!("UI theme {}: {error}", theme.display()))?;
+        (
+            Some(Box::new(hud)),
+            Some(Box::new(content::world::InventoryReader::new(vfs))),
+        )
     } else {
-        None
+        (None, None)
     };
     if let Some((world, camera, size, trace, map, animation_ms, explore)) =
         streaming_world(game, options, policy, playing)?
@@ -1437,6 +1439,7 @@ fn show_world(
                 travel: travel.map(|loader| (map, loader)),
                 map_ui,
                 hud,
+                inventory_reader,
             },
         )
         .map_err(Into::into);

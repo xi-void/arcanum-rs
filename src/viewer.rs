@@ -1,6 +1,7 @@
 //! Optional desktop presentation for the sprite diagnostic.
 
 use arcanum_rs::art::SpriteFrame;
+use arcanum_rs::gpu::OverlayDraw;
 
 mod console;
 mod development;
@@ -16,7 +17,7 @@ use arcanum_rs::compositor::{Modulation, SpriteDraw};
 use arcanum_rs::content::travel::Clock;
 use arcanum_rs::content::{
     art::LoadedFrame,
-    world::{Destination, DoorStates, InteractiveWorld, WorldDraw, WorldStream},
+    world::{Destination, DoorStates, InteractiveWorld, InventoryReader, WorldDraw, WorldStream},
 };
 pub(super) use hud::Hud;
 use menu::{Command as MenuCommand, Menu, Settings};
@@ -192,6 +193,7 @@ pub struct StreamOptions<'a> {
     pub developer: Option<Developer>,
     pub travel: Option<(String, TravelLoader<'a>)>,
     pub hud: Option<Box<Hud>>,
+    pub inventory_reader: Option<Box<InventoryReader>>,
     pub map_ui: Option<Box<MapUi>>,
 }
 
@@ -210,6 +212,7 @@ pub fn show_stream(
         developer,
         travel,
         hud,
+        inventory_reader,
         map_ui,
     } = options;
     let event_loop = make_loop()?;
@@ -246,6 +249,7 @@ pub fn show_stream(
             animation_ms,
             travel,
             hud,
+            inventory_reader,
             map_ui,
         },
         PhysicalSize::<u32>::from(size).into(),
@@ -271,6 +275,7 @@ enum ViewContent<'a> {
         animation_ms: Option<u64>,
         travel: Option<Travel<'a>>,
         hud: Option<Box<Hud>>,
+        inventory_reader: Option<Box<InventoryReader>>,
         map_ui: Option<Box<MapUi>>,
     },
     World {
@@ -442,6 +447,7 @@ impl Navigation {
 struct WindowSurface {
     renderer: gpu::WindowRenderer,
     map_inset: Option<Arc<LoadedFrame>>,
+    inventory_inset: Option<Arc<LoadedFrame>>,
     developer_status: Option<Arc<LoadedFrame>>,
     last_frame_time: Duration,
     frame_presented_at: Option<Instant>,
@@ -497,6 +503,7 @@ impl Viewer<'_> {
             waiting,
             last_presented,
             last_viewport,
+            hud,
             ..
         } = &mut self.content
         else {
@@ -533,6 +540,9 @@ impl Viewer<'_> {
         view.developer_status = bypass.then(|| menu::developer_status("COLLISION OFF"));
         travel.map = map;
         **world = next;
+        if let Some(hud) = hud {
+            hud.close_inventory();
+        }
         *camera = next_camera;
         *last_presented = None;
         *last_viewport = (0, 0);
@@ -617,6 +627,30 @@ impl Viewer<'_> {
             hud::Action::ToggleRun => self.settings.run = !self.settings.run,
             hud::Action::ResetZoom => self.settings.zoom = 1,
             hud::Action::OpenMap => self.open_map(event_loop),
+            hud::Action::ToggleInventory => {
+                if let ViewContent::Stream {
+                    world,
+                    hud: Some(hud),
+                    inventory_reader: Some(reader),
+                    ..
+                } = &mut self.content
+                    && !hud.close_inventory()
+                    && let Err(error) = hud.open_inventory(reader, world, None)
+                {
+                    eprintln!("Inventory: {error}");
+                }
+            }
+            hud::Action::InventoryScrollUp | hud::Action::InventoryScrollDown => {
+                if let ViewContent::Stream { hud: Some(hud), .. } = &mut self.content {
+                    let step = if action == hud::Action::InventoryScrollUp {
+                        -1
+                    } else {
+                        1
+                    };
+                    hud.scroll_inventory(None, step);
+                    hud.hover(self.cursor);
+                }
+            }
             _ => {}
         }
         if let Some(view) = &self.view {
@@ -664,6 +698,9 @@ impl Viewer<'_> {
                 if *trace {
                     eprintln!("Map player tile {tile:?}, town map {town}");
                 }
+            }
+            if let Some(hud) = hud {
+                hud.close_inventory();
             }
             map.open(hud.as_ref().map(|hud| hud.scale()));
             *shift = false;
@@ -726,7 +763,13 @@ impl Viewer<'_> {
                 let size = view.window.inner_size();
                 if size.width > 0 && size.height > 0 {
                     let viewport = (size.width, size.height);
-                    let map = map.prepare(viewport, self.cursor);
+                    let band = hud.as_deref_mut().map(|hud| {
+                        if let Some(hours) = hours {
+                            hud.set_game_time(hours);
+                        }
+                        hud.layout_with_panel(viewport, map.panel_size())
+                    });
+                    let map = map.prepare(viewport, self.cursor, band);
                     let camera = last_presented.as_ref().unwrap_or(camera);
                     if let Some([w, h]) = map.lens_size()
                         && let Some((rect, _)) = map.bounds(hud::Binding::PlayerLens)
@@ -760,15 +803,11 @@ impl Viewer<'_> {
                             }
                             view.map_inset = Some(asset);
                         }
-                        map.set_lens_asset(Arc::clone(view.map_inset.as_ref().unwrap()));
+                        map.set_lens_asset(
+                            hud::Binding::PlayerLens,
+                            Arc::clone(view.map_inset.as_ref().unwrap()),
+                        );
                     }
-                    let hud = hud.as_deref_mut().map(|hud| {
-                        if let Some(hours) = hours {
-                            hud.set_game_time(hours);
-                        }
-                        hud.layout(viewport);
-                        &*hud
-                    });
                     let scene = scene_draws(
                         world,
                         camera,
@@ -776,7 +815,9 @@ impl Viewer<'_> {
                         elapsed,
                         settings,
                     );
-                    if let Err(error) = view.redraw_map(size, settings.zoom, scene, map, hud) {
+                    if let Err(error) =
+                        view.redraw_map(size, settings.zoom, scene, map, hud.as_deref())
+                    {
                         self.fail(loop_, error);
                     }
                 }
@@ -988,6 +1029,7 @@ impl Viewer<'_> {
         Ok(WindowSurface {
             renderer,
             map_inset: None,
+            inventory_inset: None,
             developer_status: None,
             last_frame_time: Duration::ZERO,
             frame_presented_at: None,
@@ -1059,12 +1101,13 @@ impl ApplicationHandler for Viewer<'_> {
                 direction,
                 waiting,
                 hud,
+                inventory_reader,
                 ..
             } = &mut self.content
             {
                 if let Some(clock) = &self.clock {
                     redraw |= world.set_game_hour(clock.hour(game_elapsed));
-                    if let Some(hud) = hud {
+                    if let Some(hud) = hud.as_mut() {
                         redraw |= hud.set_game_time(clock.hours(game_elapsed));
                     }
                 }
@@ -1077,6 +1120,16 @@ impl ApplicationHandler for Viewer<'_> {
                             if before != after {
                                 *direction = (after.0 - before.0, after.1 - before.1);
                             }
+                        }
+                        if let Some(target) = world.take_container_request()
+                            && let (Some(hud), Some(reader)) =
+                                (hud.as_mut(), inventory_reader.as_mut())
+                        {
+                            if let Err(error) = hud.open_inventory(reader, world, Some(target)) {
+                                eprintln!("Container: {error}");
+                                view.window.set_title(&format!("Arcanum-RS | {error}"));
+                            }
+                            redraw = true;
                         }
                         transition = world.take_transition();
                         if transition.is_some() {
@@ -1197,6 +1250,10 @@ impl ApplicationHandler for Viewer<'_> {
                     if let Some((menu, _)) = &mut self.pause {
                         let command = menu.back();
                         self.menu_action(command, event_loop);
+                    } else if let ViewContent::Stream { hud: Some(hud), .. } = &mut self.content
+                        && hud.close_inventory()
+                    {
+                        self.view.as_ref().unwrap().window.request_redraw();
                     } else {
                         self.pause_game(event_loop);
                     }
@@ -1318,6 +1375,12 @@ impl ApplicationHandler for Viewer<'_> {
                     self.hud_action(action, event_loop);
                     return;
                 }
+                if matches!(&key.logical_key, Key::Character(ch) if ch.eq_ignore_ascii_case("i"))
+                    && hud.has_inventory()
+                {
+                    self.hud_action(hud::Action::ToggleInventory, event_loop);
+                    return;
+                }
                 let step = match &key.logical_key {
                     Key::Character(ch) if ch == "[" => -25,
                     Key::Character(ch) if ch == "]" => 25,
@@ -1334,6 +1397,27 @@ impl ApplicationHandler for Viewer<'_> {
                 view.window.request_redraw();
             }
             let hit = self.cursor.map_or(hud::Hit::World, |point| hud.hit(point));
+            if matches!(event, WindowEvent::Focused(false)) && hud.cancel_press() {
+                view.window.request_redraw();
+            }
+            if matches!(
+                event,
+                WindowEvent::MouseInput {
+                    state: ElementState::Released,
+                    button: MouseButton::Left,
+                    ..
+                }
+            ) && hud.is_pressed()
+            {
+                let action = self.cursor.and_then(|point| hud.release(point));
+                hud.cancel_press();
+                if let Some(action) = action {
+                    self.hud_action(action, event_loop);
+                } else {
+                    view.window.request_redraw();
+                }
+                return;
+            }
             if hit != hud::Hit::World {
                 match event {
                     WindowEvent::MouseInput {
@@ -1342,13 +1426,40 @@ impl ApplicationHandler for Viewer<'_> {
                         ..
                     } => {
                         if let hud::Hit::Button(action) = hit {
-                            self.hud_action(action, event_loop);
+                            if matches!(
+                                action,
+                                hud::Action::ToggleInventory
+                                    | hud::Action::InventoryScrollUp
+                                    | hud::Action::InventoryScrollDown
+                            ) {
+                                hud.press(self.cursor.unwrap());
+                                view.window.request_redraw();
+                            } else {
+                                self.hud_action(action, event_loop);
+                            }
                         }
                         return;
                     }
-                    WindowEvent::MouseWheel { .. } => return,
+                    WindowEvent::MouseWheel { delta, .. } => {
+                        let vertical = match delta {
+                            MouseScrollDelta::LineDelta(_, y) => {
+                                y.signum() as i32 * y.abs().ceil() as i32
+                            }
+                            MouseScrollDelta::PixelDelta(p) => {
+                                i32::from(p.y > 0.) - i32::from(p.y < 0.)
+                            }
+                        };
+                        if vertical != 0 && hud.scroll_inventory(self.cursor, -vertical) {
+                            hud.hover(self.cursor);
+                            view.window.request_redraw();
+                        }
+                        return;
+                    }
                     _ => {}
                 }
+            }
+            if hud.inventory_open() && matches!(event, WindowEvent::MouseInput { .. }) {
+                return;
             }
         }
         self.render_event(event_loop, id, event, elapsed);
@@ -1666,6 +1777,7 @@ impl Viewer<'_> {
                         trace,
                         animation_ms,
                         hud,
+                        inventory_reader,
                         map_ui,
                         travel,
                         ..
@@ -1688,6 +1800,10 @@ impl Viewer<'_> {
                             if let Some(hud) = hud {
                                 hud.set_travel_available(map_ui.can_travel());
                             }
+                        }
+                        if let (Some(hud), Some(reader)) = (hud.as_mut(), inventory_reader.as_mut())
+                        {
+                            hud.refresh_inventory(reader, world);
                         }
                         view.redraw_stream(
                             size,
@@ -1788,6 +1904,19 @@ fn logical_size(size: PhysicalSize<u32>, zoom: u8) -> (u32, u32) {
     (size.width.div_ceil(zoom), size.height.div_ceil(zoom))
 }
 
+fn inventory_inset(width: u32, height: u32) -> Arc<LoadedFrame> {
+    hud::generated_frame(
+        "inventory-world-inset",
+        SpriteFrame {
+            width,
+            height,
+            hotspot: (0, 0),
+            offset: (0, 0),
+            pixels: Vec::new(),
+        },
+    )
+}
+
 struct FrameOptions<'a> {
     elapsed: Duration,
     settings: Settings,
@@ -1830,12 +1959,16 @@ impl WindowSurface {
             return Ok(false);
         }
         world.start_player()?;
-        let hud = hud.filter(|_| menu.is_none()).map(|hud| {
+        let frame_start = Instant::now();
+        let mut hud = hud.filter(|_| menu.is_none());
+        if let Some(hud) = hud.as_deref_mut() {
             hud.layout((size.width, size.height));
-            &*hud
+            hud.hover(cursor);
+        }
+        let cursor = cursor.filter(|&point| {
+            hud.as_ref()
+                .is_none_or(|hud| hud.hit(point) == hud::Hit::World)
         });
-        let cursor =
-            cursor.filter(|&point| hud.is_none_or(|hud| hud.hit(point) == hud::Hit::World));
         if world.playing() {
             let scale = u32::from(zoom);
             world.update_hover(
@@ -1856,6 +1989,25 @@ impl WindowSurface {
                 start.elapsed()
             );
         }
+        if let Some(hud) = hud.as_deref_mut()
+            && let Some([w, h]) = hud.native_size(hud::Binding::InventoryLens)
+        {
+            let inset = self
+                .inventory_inset
+                .get_or_insert_with(|| inventory_inset(w, h));
+            if (inset.decoded.frame.width, inset.decoded.frame.height) != (w, h) {
+                *inset = inventory_inset(w, h);
+            }
+            let source = (w * 2, h * 2);
+            self.renderer.render_inset(
+                inset,
+                0.5,
+                background,
+                scene_draws(world, camera, source, elapsed, settings),
+            )?;
+            hud.set_lens_asset(hud::Binding::InventoryLens, Arc::clone(inset));
+        }
+        let hud = hud.as_deref();
         let scale = hud.map(|hud| hud.scale());
         let (console, status) = developer.as_deref_mut().map_or((None, None), |dev| {
             let scale = scale.unwrap_or(dev.ui_scale());
@@ -1893,21 +2045,23 @@ impl WindowSurface {
                 prepared.shading,
             );
         }
-        let frame_start = Instant::now();
         self.renderer.redraw(
             ((size.width, size.height), zoom),
             background,
             draws,
             hud.into_iter()
                 .flat_map(|hud| hud.draws(settings.run))
-                .map(|(asset, sprite)| unlit(asset, sprite.anchor))
                 .chain(
                     self.developer_status
                         .iter()
-                        .map(|asset| unlit(asset, (12, 52))),
+                        .map(|asset| OverlayDraw::at(asset, (12, 52))),
                 )
-                .chain(status.iter().map(|asset| unlit(asset, (12, 85))))
-                .chain(console.iter().map(|(asset, anchor)| unlit(asset, *anchor))),
+                .chain(status.iter().map(|asset| OverlayDraw::at(asset, (12, 85))))
+                .chain(
+                    console
+                        .iter()
+                        .map(|(asset, anchor)| OverlayDraw::at(asset, *anchor)),
+                ),
             &self.window,
             trace,
         )?;
@@ -1952,7 +2106,7 @@ impl WindowSurface {
             ((size.width, size.height), zoom),
             stream_background(true),
             scene,
-            layers.map(|(asset, sprite)| unlit(asset, sprite.anchor)),
+            layers,
             &self.window,
             false,
         )

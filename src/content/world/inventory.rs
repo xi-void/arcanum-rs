@@ -16,6 +16,7 @@ const CLICK_THROUGH: u32 = 0x800;
 #[derive(Default)]
 pub(super) struct Session {
     state: State,
+    revision: u64,
     ground: BTreeMap<OriginalId, GroundArt>,
 }
 
@@ -151,6 +152,7 @@ impl Records<'_> {
         Ok(Item {
             id,
             category: object.category,
+            description: field(22).or(proto.defaults.description),
             prototype: object.prototype.0,
             instance_source: source,
             prototype_source: proto.source.clone(),
@@ -313,7 +315,17 @@ struct Container {
 
 impl Container {
     fn check_access(&self, world: &InteractiveWorld, hour: u8) -> Result<(), String> {
-        world.check_inventory_reach(self.tile)?;
+        let player = world
+            .cache
+            .player
+            .as_ref()
+            .filter(|p| !p.moving())
+            .ok_or("Player must be stationary")?;
+        let cell =
+            |tile| SectorCache::player_cell(&world.cache.entries, &world.cache.door_states, tile);
+        if !collision::can_reach_container(player.tile(), self.tile, cell) {
+            return Err("Container is outside loaded interaction reach".into());
+        }
         if self.flags & (UNAVAILABLE | CLICK_THROUGH | 0x1000) != 0 {
             return Err("Container is hidden, inactive, trapped or otherwise unavailable".into());
         }
@@ -344,7 +356,103 @@ fn parse_id(key: &str) -> Result<OriginalId, String> {
     OriginalId::parse_key(key).ok_or_else(|| "Expected a serialized item or container GUID".into())
 }
 
+/// Read-only presentation data projected from the same owner layout as inventory RPC.
+pub struct InventoryContents {
+    pub columns: usize,
+    pub rows: usize,
+    pub entries: Vec<InventoryEntry>,
+}
+
+pub struct InventoryEntry {
+    pub id: String,
+    pub slot: usize,
+    pub cells: [usize; 2],
+    pub name: String,
+    pub icon: Result<Arc<LoadedFrame>, String>,
+}
+
+pub struct InventoryReader {
+    vfs: Vfs,
+    frames: FrameCache,
+    descriptions: Vec<super::super::LoadedMes>,
+}
+
+impl InventoryReader {
+    pub fn new(mut vfs: Vfs) -> Self {
+        let descriptions = ["mes/gamedesc.mes", "mes/description.mes"]
+            .into_iter()
+            .filter_map(|path| super::super::load_mes(&mut vfs, path).ok())
+            .collect();
+        Self {
+            vfs,
+            frames: FrameCache::default(),
+            descriptions,
+        }
+    }
+
+    pub fn contents(
+        &mut self,
+        world: &InteractiveWorld,
+        target: Option<&str>,
+    ) -> Result<InventoryContents, String> {
+        let target = target.map(parse_id).transpose()?;
+        let owner = target.map_or(Owner::Player, |id| Owner::Container(world.map.clone(), id));
+        let mut records = world.records(&mut self.vfs);
+        let container = target.map(|id| records.container(id)).transpose()?;
+        if let Some(container) = &container {
+            container.check_access(world, world.cache.hour)?;
+        }
+        let layout = records.layout(&world.cache.inventory.state, &owner, container.as_ref())?;
+        let mut entries = Vec::new();
+        for (id, (slot, cells)) in layout.grid.items {
+            let item = &layout.items[&id];
+            if item
+                .effective
+                .flags
+                .value()
+                .is_some_and(|flags| flags & UNAVAILABLE != 0)
+                || item.flags & ITEM_NO_DISPLAY != 0
+            {
+                continue;
+            }
+            let name = item
+                .description
+                .and_then(|id| {
+                    self.descriptions
+                        .iter()
+                        .find_map(|table| table.mes.get(id as i32))
+                })
+                .or_else(|| objects::category_name(item.category))
+                .unwrap_or("Item")
+                .to_owned();
+            let icon = super::super::inventory::inventory_frame(
+                &mut self.vfs,
+                &mut self.frames,
+                item.inventory_art,
+            )
+            .map_err(|error| error.to_string());
+            entries.push(InventoryEntry {
+                id: id.key(),
+                slot,
+                cells,
+                name,
+                icon,
+            });
+        }
+        self.frames.finish_sector();
+        Ok(InventoryContents {
+            columns: COLUMNS,
+            rows: owner.rows(),
+            entries,
+        })
+    }
+}
+
 impl InteractiveWorld {
+    pub fn inventory_revision(&self) -> u64 {
+        self.cache.inventory.revision
+    }
+
     fn records<'a>(&'a self, vfs: &'a mut Vfs) -> Records<'a> {
         Records {
             vfs,
@@ -574,6 +682,7 @@ impl InteractiveWorld {
             destination,
             layout.as_ref().map(|l| (&l.grid, requested)),
         )?;
+        session.revision += 1;
         if let Some(art) = ground {
             session.ground.insert(id, art);
         } else {
