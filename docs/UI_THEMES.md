@@ -230,3 +230,6 @@ background, lens, cyclic controls, arrow and gauge ART, heading font,
 colors and positions. Coordinates are in the background ART's canvas. Older
 pause packages use the bundled Classic Options layout. Control actions use
 the active gameplay settings and the shared pause-menu scale.
+
+NPC dialogue uses HUD bindings for the speaker bubble, response rows, and
+contextual information. See [NPC dialogue](DIALOGUE.md#theme-and-diagnostics).

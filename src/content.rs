@@ -4,6 +4,7 @@ pub mod art;
 pub mod character;
 mod collision;
 pub mod diagnostics;
+pub mod dialogue;
 pub mod effects;
 mod inventory;
 pub mod items;

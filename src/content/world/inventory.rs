@@ -458,9 +458,9 @@ pub struct InventoryEntry {
 }
 
 pub struct InventoryReader {
-    vfs: Vfs,
-    frames: FrameCache,
-    descriptions: Vec<super::super::LoadedMes>,
+    pub(super) vfs: Vfs,
+    pub(super) frames: FrameCache,
+    pub(super) descriptions: Vec<super::super::LoadedMes>,
 }
 
 impl InventoryReader {
@@ -1101,6 +1101,7 @@ impl InteractiveWorld {
     }
 
     pub fn inherit_object_state(&mut self, previous: &mut Self) {
+        self.met_npcs = std::mem::take(&mut previous.met_npcs);
         self.cache.inventory = std::mem::take(&mut previous.cache.inventory);
         if let (Some(player), Some(old)) = (&mut self.cache.player, &previous.cache.player) {
             player.appearance = Arc::clone(&old.appearance);

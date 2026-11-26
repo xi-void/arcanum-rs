@@ -382,6 +382,12 @@ pub(crate) struct PrototypeDefaults {
     pub resistance: Option<[Option<i32>; 5]>,
     pub hp: [i32; 2],
     pub fatigue: [i32; 2],
+    pub npc_flags: Option<u32>,
+    pub npc_damage: [i32; 2],
+    pub npc_unknown_description: Option<u32>,
+    pub reaction_base: Option<i32>,
+    pub social_class: Option<i32>,
+    pub npc_leader: Option<OriginalId>,
 }
 
 pub(crate) fn has_inventory_scripts(value: FieldValue<'_>) -> bool {
@@ -423,6 +429,8 @@ pub(crate) fn prototype_defaults(
     let mut description = None;
     let mut inventory_scripts = false;
     let mut hp = [0; 2];
+    let mut npc_damage = [0; 2];
+    let mut npc_unknown_description = None;
     let mut fatigue = [0; 2];
     let mut item = (5..=14).contains(&category).then(ItemStats::default);
     let (mut original_art, mut armor_class, mut resistance) = (None, None, None);
@@ -432,7 +440,10 @@ pub(crate) fn prototype_defaults(
             22 => description = value.scalar(),
             23 if category == 15 => original_art = value.scalar(),
             25 if category == 15 => armor_class = value.scalar().map(|v| v as i32),
-            26..=27 if category == 15 => hp[index - 26] = value.scalar().unwrap_or_default() as i32,
+            26..=27 if matches!(category, 15 | NPC) => {
+                hp[index - 26] = value.scalar().unwrap_or_default() as i32
+            }
+            28 if category == NPC => npc_damage[0] = value.scalar().unwrap_or_default() as i32,
             30 if category == 15 => resistance = Some(int_array(value)),
             _ => {}
         }
@@ -457,6 +468,8 @@ pub(crate) fn prototype_defaults(
         None
     };
     let mut background = None;
+    let (mut npc_flags, mut reaction_base, mut npc_leader, mut social_class) =
+        (None, None, None, None);
     if category == 15 {
         // PC-specific fields begin in bitmap word four. Background follows the two reputation arrays.
         for index in (67..=96).chain(128..=132) {
@@ -465,6 +478,23 @@ pub(crate) fn prototype_defaults(
                 match index {
                     70..=71 => fatigue[index - 70] = value.scalar().unwrap_or_default() as i32,
                     132 => background = value.scalar().map(|v| v as i32),
+                    _ => {}
+                }
+            }
+        }
+    }
+    if category == NPC {
+        for index in (67..=96).chain(128..=144) {
+            if field_type(category, index).is_some() {
+                let value = read_value(&mut reader, index, category)?;
+                match index {
+                    70..=71 => fatigue[index - 70] = value.scalar().unwrap_or_default() as i32,
+                    72 => npc_damage[1] = value.scalar().unwrap_or_default() as i32,
+                    86 => npc_unknown_description = value.scalar(),
+                    128 => npc_flags = value.scalar(),
+                    129 => npc_leader = value.reference(),
+                    143 => reaction_base = value.scalar().map(|v| v as i32),
+                    144 => social_class = value.scalar().map(|v| v as i32),
                     _ => {}
                 }
             }
@@ -515,5 +545,11 @@ pub(crate) fn prototype_defaults(
         resistance,
         hp,
         fatigue,
+        npc_flags,
+        npc_damage,
+        npc_unknown_description,
+        reaction_base,
+        social_class,
+        npc_leader,
     })
 }

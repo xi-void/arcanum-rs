@@ -695,6 +695,7 @@ impl Viewer<'_> {
                             .map(|((menu, _), theme)| menu.diagnostic(theme, [viewport.0,viewport.1], scale)),
                         "save_directory":self.saves.as_ref().ok().map(|store| store.directory()),"reload_generation":dev.reloads,"reload_status":dev.reload_status,
                         "selected":dev.selected.map(InteractiveWorld::debug_selection_id)},
+                    "dialogue":world.dialogue_diagnostic(),
                     "audio":self.audio.as_ref().map(|audio| audio.diagnostic(self.settings.audio)),
                     "renderer":{"stats":self.view.as_ref().and_then(|view|view.renderer.stats.as_ref()),
                         "frames_presented":self.view.as_ref().map(|view|view.submitted_frames),
@@ -932,6 +933,11 @@ impl Viewer<'_> {
             Request::ReloadUi => {
                 let loaded = (|| -> Result<_, String> {
                     let next_hud = load_hud(dev.hud_theme.as_ref(), &mut dev.vfs, scale)?;
+                    if world.conversation().is_some()
+                        && !next_hud.as_ref().is_some_and(|hud| hud.supports_dialogue())
+                    {
+                        return Err("The replacement HUD needs dialogue components while a conversation is active".into());
+                    }
                     let next_map = map_ui
                         .as_mut()
                         .map(|map| map.prepare_theme(&dev.map_theme, scale))

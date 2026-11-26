@@ -100,7 +100,7 @@ impl Pose {
         Ok(Self::new(raw, path))
     }
 
-    fn new(raw: u32, path: String) -> Self {
+    pub(super) fn new(raw: u32, path: String) -> Self {
         let direction = ((raw >> 11) & 7) as u8;
         Self {
             path,

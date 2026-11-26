@@ -219,6 +219,28 @@ pub(crate) fn parse_source_with_encoding(
     Mes::parse_fields(&input)
 }
 
+/// Read the same brace-delimited text fields used by legacy DLG resources.
+pub(crate) fn fields(
+    bytes: &[u8],
+) -> Result<impl Iterator<Item = Result<String, Error>> + '_, Error> {
+    let input = encoding::Input::new(bytes, None)?;
+    let mut cursor = Cursor {
+        bytes,
+        offset: input.start,
+        line: 1,
+    };
+    Ok(std::iter::from_fn(move || {
+        cursor.field().transpose().map(|field| {
+            field.map(|field| {
+                input
+                    .decode_field(field.bytes)
+                    .replace("\r\n", "\n")
+                    .replace('\r', "\n")
+            })
+        })
+    }))
+}
+
 struct Field<'a> {
     bytes: &'a [u8],
     opening: Location,

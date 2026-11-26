@@ -67,6 +67,12 @@ pub fn resource(
                 json!({"status":"failed","code":"prototype_header_failed","message":error})
             }
         },
+        (true, Some("dlg"), None) => match super::dialogue::Dialogue::load(vfs, &path) {
+            Ok(dialogue) => dialogue.structure(),
+            Err(error) => {
+                json!({"status":"failed","code":"dialogue_decode_failed","message":error})
+            }
+        },
         (false, _, _) => json!({"status":"missing"}),
         (_, _, Some(_)) => json!({"status":"unsupported","code":"frame_requires_art"}),
         _ => json!({"status":"untested"}),

@@ -335,6 +335,11 @@ impl Effective {
             sound_effect: explicit.sound_effect.or(defaults.sound_effect),
             use_script: explicit.use_script.or(defaults.use_script),
             unlock_script: explicit.unlock_script.or(defaults.unlock_script),
+            dialog_script: explicit.dialog_script.or(defaults.dialog_script),
+            dialog_local_flags: explicit.dialog_local_flags.or(defaults.dialog_local_flags),
+            dialog_override_script: explicit
+                .dialog_override_script
+                .or(defaults.dialog_override_script),
         };
         Self {
             current_art,
