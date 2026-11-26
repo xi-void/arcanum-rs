@@ -1,7 +1,7 @@
 //! Character calculations and equipment rules verified against CE's stat, critter and item code.
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EquipmentSlot {
     Helmet,
@@ -240,6 +240,7 @@ impl Rules {
     }
 }
 
+#[derive(Clone, Serialize, serde::Deserialize)]
 pub(crate) struct Character {
     pub(crate) base: [i32; 28],
     pub(crate) background: i32,
@@ -248,6 +249,7 @@ pub(crate) struct Character {
     pub(crate) base_resistance: [i32; 5],
     pub(crate) hp: [i32; 2],
     pub(crate) fatigue: [i32; 2],
+    #[serde(skip)]
     pub(crate) sector_aptitude: i32,
 }
 

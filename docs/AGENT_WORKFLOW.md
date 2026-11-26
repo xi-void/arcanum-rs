@@ -183,6 +183,16 @@ to 120 seconds for a response. A timeout or disconnect can leave a dispatched
 mutation in effect. Reconnect and query state before retrying, especially for
 toggles such as `tcl`. Use `rpc --id N COMMAND ...` to correlate requests.
 
+## Native save diagnostics
+
+Use the actual pause menu and F7/F8 for native input coverage. `pos.result.ui.pause_menu`
+reports the active screen, physical control and slot row bounds, selection,
+whether a preview is displayed, and any operation error. The save directory
+is exposed in `pos.result.ui.save_directory`. For isolated tests, set
+`XDG_DATA_HOME` to a private temporary directory before starting the game.
+With tracing enabled, `events` can report `save_written`, `save_loaded`,
+`save_deleted` and `save_operation_failed`. See [Native savegames](SAVEGAMES.md).
+
 ## Diagnostic snapshots
 
 ```sh

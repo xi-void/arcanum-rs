@@ -75,6 +75,7 @@ impl Default for Camera {
 pub(crate) struct Ui {
     pub hud: Option<PathBuf>,
     pub map: Option<PathBuf>,
+    pub pause: Option<PathBuf>,
     pub scale: Option<u16>,
     // Read the archived M63 HUD preference when a unified scale hasn't been set.
     pub hud_scale: Option<u16>,

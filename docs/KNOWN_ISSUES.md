@@ -12,6 +12,11 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 
 ## Open issues
 
+### UI-009 — Quit Game exits the application
+
+The Classic Quit Game button asks for confirmation and then exits. Return to
+the original main menu when the main menu and new-game lifecycle exist.
+
 ### DEV-001 — Atlas presents are absent from the frame counter
 - **Priority:** P2 | **Status:** Open
 - **Observed:** During M66-R native scale verification, an atlas redraw changed the displayed scale while `rpc pos` kept the previous `renderer.frames_presented` value.
@@ -90,6 +95,22 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 - Verify original gender, race and body-type equipment restrictions against CE.
 - Enforce applicable restrictions through the shared equipment validation system.
 
+### UI — Pause menu background
+- Priority: P2
+- The game world remains visible around the pause menu.
+- Render a black background outside the menu artwork.
+- Preserve existing menu dimensions and scaling.
+
+### UI — Pause menu text color
+- Priority: P2
+- Menu lettering appears gold instead of the original red.
+- Investigate original text colors and button states using CE and installed resources.
+
+### SAVE — New save name entry
+- Priority: P2
+- Clicking New requires an additional click on the green confirmation arrow before entering a save name.
+
+
 ## Historical issues requiring revalidation
 
 The M61 rollback removed the first M62–M64 implementation. The following observations must not be assumed to affect the reworked engine until reproduced.
@@ -109,7 +130,7 @@ These are planned capabilities, not regressions. Implement in their own mileston
 
 - **M64-R:** interactive inventory rearrangement, transfers, Take All, Arrange, ground pickup/drop and drag cancellation; developer unlocking of ordinary locked containers (verify existing command behavior first).
 - **Inventory extensions:** generated loot, consumption, decay and scripted inventory behavior as their dependencies become available.
-- **Later systems:** persistent application settings, disk save/load, audio, dialogue, scripting, combat, magick, technology, crafting, trading and progression.
+- **Later systems:** audio, dialogue, scripting, combat, magick, technology, crafting, trading and progression.
 - **Use action:** remains inactive until the relevant gameplay mechanics exist.
 
 ## Regression watchlist — previously corrected

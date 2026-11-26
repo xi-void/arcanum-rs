@@ -15,6 +15,7 @@ mod mobile;
 mod player;
 pub mod portal;
 mod roof;
+pub mod save;
 pub mod scenery;
 pub mod schematics;
 pub mod sector;

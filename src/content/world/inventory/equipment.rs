@@ -148,7 +148,46 @@ impl Session {
         Ok(())
     }
 
-    fn body_art(&self, armor: Option<&Item>) -> Result<u32, String> {
+    pub(super) fn load_rules(
+        &mut self,
+        vfs: &mut Vfs,
+        backgrounds: &crate::content::LoadedMes,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let effects = load_mes(vfs, "rules/effect.mes")?;
+        let block = self
+            .character
+            .background
+            .checked_mul(10)
+            .ok_or("Invalid background index")?;
+        let background_value = |offset| {
+            backgrounds
+                .mes
+                .get(block.checked_add(offset)?)?
+                .trim()
+                .parse::<i32>()
+                .ok()
+        };
+        let effect = |id| {
+            effects.mes.get(id).and_then(|value| {
+                super::super::super::character::Adjustments::parse(value)
+                    .map_err(|error| eprintln!("Character effect {id}: {error}"))
+                    .ok()
+            })
+        };
+        self.rules = Rules {
+            race: self.character.race_effect().and_then(effect),
+            gender: (self.character.gender() == 0)
+                .then(|| effect(330))
+                .flatten(),
+            background: (block != 0)
+                .then(|| background_value(1).and_then(effect))
+                .flatten(),
+            encumbrance: effect(158),
+        };
+        Ok(())
+    }
+
+    pub(super) fn body_art(&self, armor: Option<&Item>) -> Result<u32, String> {
         let fragment = armor
             .map(|item| item.stats.use_art.ok_or("Unresolved armor use ART"))
             .transpose()?;
@@ -162,7 +201,19 @@ impl Session {
         prototype: u32,
         category: u32,
     ) -> Result<Item, String> {
-        let id = self.state.generated_id();
+        let item =
+            Self::prototype_item(vfs, frames, self.state.generated_id(), prototype, category)?;
+        self.state.next_generated += 1;
+        Ok(item)
+    }
+
+    pub(super) fn prototype_item(
+        vfs: &mut Vfs,
+        frames: &mut FrameCache,
+        id: OriginalId,
+        prototype: u32,
+        category: u32,
+    ) -> Result<Item, String> {
         let prototype = crate::prototype::SerializedPrototypeId(prototype);
         let (source, bytes) = super::super::super::sector::read_static_prototype(vfs, prototype)
             .map_err(|error| error.to_string())?;
@@ -177,7 +228,7 @@ impl Session {
         };
         let proto = mobile::population::Prototype { source, defaults };
         let inventory_art = proto.defaults.inventory_art;
-        let item = Item {
+        Ok(Item {
             id,
             category,
             description: proto.defaults.description,
@@ -197,9 +248,7 @@ impl Session {
             scripted: proto.defaults.inventory_scripts,
             stats: proto.defaults.item.map(|stats| *stats).unwrap_or_default(),
             generated: true,
-        };
-        self.state.next_generated += 1;
-        Ok(item)
+        })
     }
 }
 
@@ -217,7 +266,7 @@ impl SectorCache {
         }
     }
 
-    pub(super) fn update_character_movement(&mut self) {
+    pub(in crate::content::world) fn update_character_movement(&mut self) {
         if let Some(player) = &mut self.player {
             let statistics = self.inventory.statistics();
             player.speed = statistics.speed.unwrap_or(statistics.attributes[1]);
@@ -257,13 +306,9 @@ impl SectorCache {
                 .unwrap_or_default()
                 .map(Option::unwrap_or_default);
         }
-        let effects = load_mes(vfs, "rules/effect.mes")?;
         let backgrounds = load_mes(vfs, "rules/backgrnd.mes")?;
-        let block = inventory
-            .character
-            .background
-            .checked_mul(10)
-            .ok_or("Invalid background index")?;
+        inventory.load_rules(vfs, &backgrounds)?;
+        let block = inventory.character.background * 10;
         let background_value = |offset| {
             backgrounds
                 .mes
@@ -271,23 +316,6 @@ impl SectorCache {
                 .trim()
                 .parse::<i32>()
                 .ok()
-        };
-        let effect = |id| {
-            effects.mes.get(id).and_then(|value| {
-                super::super::super::character::Adjustments::parse(value)
-                    .map_err(|error| eprintln!("Character effect {id}: {error}"))
-                    .ok()
-            })
-        };
-        inventory.rules = Rules {
-            race: inventory.character.race_effect().and_then(effect),
-            gender: (inventory.character.gender() == 0)
-                .then(|| effect(330))
-                .flatten(),
-            background: (block != 0)
-                .then(|| background_value(1).and_then(effect))
-                .flatten(),
-            encumbrance: effect(158),
         };
         let gold = background_value(3)
             .and_then(|value| u32::try_from(value).ok())

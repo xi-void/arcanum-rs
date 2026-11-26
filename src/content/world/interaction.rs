@@ -33,12 +33,67 @@ pub(super) struct Door {
 #[derive(Clone, Copy)]
 struct Change {
     open: bool,
-    started: Duration,
+    started: Option<Duration>,
 }
 
 /// Keyed by original sector and record index; never evicted with raster data.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct DoorStates(BTreeMap<Id, Change>, BTreeSet<Id>);
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct SavedDoors {
+    changed: Vec<(Id, bool)>,
+    unlocked: Vec<Id>,
+}
+
+impl SavedDoors {
+    pub fn validate(&self, vfs: &mut Vfs, map: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let mut sectors: BTreeMap<u64, BTreeSet<usize>> = BTreeMap::new();
+        for &(sector, record) in self.changed.iter().map(|(id, _)| id).chain(&self.unlocked) {
+            if let std::collections::btree_map::Entry::Vacant(entry) = sectors.entry(sector) {
+                let coordinates =
+                    Coordinates::from_id(sector).ok_or("Invalid saved door sector")?;
+                let (_, bytes) = super::super::sector::read_base_sector(vfs, map, coordinates)?;
+                let objects = crate::sector::objects::decode(&bytes)?;
+                entry.insert(objects.portals.into_iter().map(|door| door.index).collect());
+            }
+            if !sectors[&sector].contains(&record) {
+                return Err(format!("Saved door {map}/{sector}:{record} is unavailable").into());
+            }
+        }
+        Ok(())
+    }
+}
+
+impl DoorStates {
+    pub fn for_save(&self) -> SavedDoors {
+        SavedDoors {
+            changed: self.0.iter().map(|(&id, state)| (id, state.open)).collect(),
+            unlocked: self.1.iter().copied().collect(),
+        }
+    }
+
+    pub fn from_save(saved: &SavedDoors) -> Result<Self, String> {
+        let changed: BTreeMap<_, _> = saved
+            .changed
+            .iter()
+            .map(|&(id, open)| {
+                (
+                    id,
+                    Change {
+                        open,
+                        started: None,
+                    },
+                )
+            })
+            .collect();
+        let unlocked: BTreeSet<_> = saved.unlocked.iter().copied().collect();
+        if changed.len() != saved.changed.len() || unlocked.len() != saved.unlocked.len() {
+            return Err("Duplicate door identities in save".into());
+        }
+        Ok(Self(changed, unlocked))
+    }
+}
 
 impl DoorStates {
     pub(super) fn diagnostic(&self, door: &Door, hour: u8) -> serde_json::Value {
@@ -98,7 +153,7 @@ impl DoorStates {
             door.id,
             Change {
                 open,
-                started: tick,
+                started: Some(tick),
             },
         );
         Ok(open)
@@ -131,13 +186,16 @@ impl Door {
     }
 
     fn index(&self, change: Change, tick: Duration) -> usize {
-        let step = (tick.saturating_sub(change.started).as_millis() / self.period.as_millis())
-            .min(2) as usize;
+        let Some(started) = change.started else {
+            return if change.open { 3 } else { 0 };
+        };
+        let step =
+            (tick.saturating_sub(started).as_millis() / self.period.as_millis()).min(2) as usize;
         if change.open { step + 1 } else { 2 - step }
     }
 
     fn delay(&self, change: Change, tick: Duration) -> Option<Duration> {
-        let n = tick.saturating_sub(change.started).as_millis();
+        let n = tick.saturating_sub(change.started?).as_millis();
         let p = self.period.as_millis();
         (n < 2 * p).then(|| Duration::from_millis((p - n % p) as u64))
     }
@@ -365,7 +423,7 @@ impl SectorCache {
             return None;
         };
         let change = self.door_states.0.get(&door.id)?;
-        (change.started + 2 * door.period).checked_sub(tick)
+        (change.started? + 2 * door.period).checked_sub(tick)
     }
     pub(super) fn target(&self, key: WorldOrder) -> Option<&Target> {
         if let Some(target) = self.dropped_targets.get(&key) {

@@ -6,10 +6,12 @@ use super::super::read_bounded;
 use crate::sector::objects::ItemStats;
 
 mod equipment;
+mod save;
 use super::*;
 use crate::prototype::MAX_PROTOTYPE_BYTES;
 use crate::sector::objects::{self, FieldValue, OriginalId};
 use mobile::population::{Effective, Index, Prototypes};
+pub use save::Objects;
 use serde_json::{Value, json};
 
 const ITEM_NO_DISPLAY: u32 = 0x10;
@@ -1198,6 +1200,22 @@ mod tests {
         );
         let carried = world.inspect_item_owner(&mut data, id).unwrap();
         assert_eq!(carried["current"]["kind"], "player");
+
+        // Persist base character data and the modified original item independently of caches.
+        world.cache.inventory.character.base[0] = 13;
+        let saved = serde_json::to_vec(&world.save_objects()).unwrap();
+        let saved = serde_json::from_slice(&saved).unwrap();
+        let map = catalog.find("5011").unwrap();
+        let region = map.files(&mut data).unwrap().bounds();
+        let mut stream = WorldStream::new(open(), map.directory.clone(), region, tile)
+            .unwrap()
+            .with_saved_player(DoorStates::default(), &saved, &catalog)
+            .unwrap();
+        stream.prepare(&camera, size).unwrap();
+        let mut restored = stream.into_interactive(|| {}, false).unwrap();
+        restored.start_player().unwrap();
+        assert_eq!(restored.cache.inventory.character.base[0], 13);
+        assert_eq!(restored.inspect_item_owner(&mut data, id).unwrap(), carried);
 
         // A faded wall lies between the camera and this authored room tile.
         let (mut room, _) = make_world("5011", (84, 104));

@@ -37,8 +37,8 @@ mod inventory;
 pub use debug::{DebugCollision, DebugObject};
 mod prefetch;
 pub use super::jumps::Destination;
-pub use interaction::DoorStates;
-pub use inventory::{InventoryContents, InventoryEntry, InventoryReader};
+pub use interaction::{DoorStates, SavedDoors};
+pub use inventory::{InventoryContents, InventoryEntry, InventoryReader, Objects};
 pub use lighting::DynamicLightState;
 pub use prefetch::{DeveloperAction, InteractiveWorld, PrefetchStats};
 
@@ -2018,26 +2018,31 @@ impl WorldStream {
 
     /// Spawn the first-playable character at the resolved original map entry.
     pub fn with_player(self) -> Result<Self, Box<dyn std::error::Error>> {
-        self.prepare_player(None)
+        self.prepare_player(None, None)
     }
 
     pub fn with_arriving_player(
         self,
         previous: &InteractiveWorld,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        self.prepare_player(previous.cache.player.as_ref())
+        self.prepare_player(previous.cache.player.as_ref(), None)
     }
 
     fn prepare_player(
         mut self,
         previous: Option<&Player>,
+        saved: Option<(inventory::Session, Arc<super::player::Appearance>)>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if self.loader.walking || !self.cache.entries.is_empty() {
             return Err("player mode must be selected before loading sectors and without the rabbit preview".into());
         }
         self.cache.jumps = super::jumps::load(&mut self.loader.vfs, &self.loader.map)?;
         let reference = self.loader.reference;
-        if let Some(previous) = previous {
+        if let Some((inventory, appearance)) = saved {
+            self.cache.inventory = inventory;
+            self.cache.player = Some(Player::new(appearance, reference));
+            self.cache.update_character_movement();
+        } else if let Some(previous) = previous {
             self.cache.player = Some(Player::new(Arc::clone(&previous.appearance), reference));
         } else {
             self.cache.initialize_character(
@@ -2095,6 +2100,20 @@ impl WorldStream {
 
     pub fn validate_arrival(&self, tile: (u32, u32)) -> Result<(), String> {
         self.cache.validate_arrival(tile)
+    }
+
+    /// A saved position is already occupied by the player and can be inside a
+    /// doorway. Require authoritative terrain without applying arrival rules.
+    pub fn validate_saved_position(&self, tile: (u32, u32)) -> Result<(), String> {
+        if SectorCache::available_tile(&self.cache.entries, tile)
+            && SectorCache::collision_cell(&self.cache.entries, tile).is_some()
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "Original terrain or collision for saved tile {tile:?} is unavailable"
+            ))
+        }
     }
 
     /// Opt in to static surface lighting at a fixed original scheme hour.

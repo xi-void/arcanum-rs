@@ -33,6 +33,13 @@ impl ThemeSource {
         )
     }
 
+    pub(crate) fn pause() -> Self {
+        Self::builtin(
+            "classic-pause/theme.toml",
+            include_str!("../../ui/classic-pause/theme.toml"),
+        )
+    }
+
     pub(crate) fn console() -> Self {
         Self::builtin(
             "developer-console.toml",

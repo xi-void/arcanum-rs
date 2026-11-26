@@ -2,7 +2,6 @@
 
 use arcanum_rs::{
     art::{DecodedFrame, SpriteFrame},
-    compositor::SpriteDraw,
     content::{Source, art::LoadedFrame},
     vfs::{MountId, Storage},
 };
@@ -10,7 +9,6 @@ use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Page {
-    Pause,
     Options,
     Controls,
 }
@@ -39,7 +37,6 @@ impl Default for Settings {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Command {
     Continue,
-    Quit,
     Stay,
 }
 
@@ -51,14 +48,13 @@ pub(super) struct Menu {
 impl Menu {
     pub(super) fn new() -> Self {
         Self {
-            page: Page::Pause,
+            page: Page::Options,
             index: 0,
         }
     }
 
     fn rows(&self) -> usize {
         match self.page {
-            Page::Pause => 3,
             Page::Options => 6,
             Page::Controls => 1,
         }
@@ -71,11 +67,7 @@ impl Menu {
     pub(super) fn back(&mut self) -> Command {
         self.index = 0;
         match self.page {
-            Page::Pause => Command::Continue,
-            Page::Options => {
-                self.page = Page::Pause;
-                Command::Stay
-            }
+            Page::Options => Command::Continue,
             Page::Controls => {
                 self.page = Page::Options;
                 Command::Stay
@@ -85,12 +77,6 @@ impl Menu {
 
     pub(super) fn activate(&mut self, settings: &mut Settings) -> Command {
         match (self.page, self.index) {
-            (Page::Pause, 0) => return Command::Continue,
-            (Page::Pause, 1) => {
-                self.page = Page::Options;
-                self.index = 0;
-            }
-            (Page::Pause, 2) => return Command::Quit,
             (Page::Options, 0) => settings.zoom = settings.zoom % 3 + 1,
             (Page::Options, 1) => settings.lighting = !settings.lighting,
             (Page::Options, 2) => settings.shadows = !settings.shadows,
@@ -139,13 +125,11 @@ impl Menu {
             pixels: vec![[31, 26, 22, 255]; (WIDTH * HEIGHT) as usize],
         };
         let title = match self.page {
-            Page::Pause => "PAUSED",
             Page::Options => "OPTIONS",
             Page::Controls => "CONTROLS",
         };
         let on = |enabled| if enabled { "ON" } else { "OFF" };
         let labels: Vec<String> = match self.page {
-            Page::Pause => ["RESUME", "OPTIONS", "QUIT"].map(String::from).into(),
             Page::Options => vec![
                 format!("ZOOM  {}X  DEFAULT 1X", settings.zoom),
                 format!("LIGHTING  {}", on(settings.lighting)),
@@ -243,13 +227,6 @@ fn origin(size: (u32, u32), scale: u32) -> (i32, i32) {
     )
 }
 
-pub(super) fn layer(asset: &LoadedFrame, size: (u32, u32)) -> SpriteDraw<'_> {
-    SpriteDraw {
-        frame: &asset.decoded.frame,
-        anchor: origin(size, asset.decoded.frame.width / WIDTH),
-    }
-}
-
 fn print(frame: &mut SpriteFrame, x: u32, y: u32, text: &str) {
     for (i, glyph) in text.bytes().enumerate() {
         for (dy, row) in glyph_rows(glyph).iter().enumerate() {
@@ -342,15 +319,12 @@ mod tests {
     fn menu_click_and_keyboard_only_change_the_selected_setting() {
         let mut menu = Menu::new();
         let mut settings = Settings::default();
-        menu.adjust(1);
-        assert!(menu.activate(&mut settings) == Command::Stay);
         assert_eq!(menu.page, Page::Options);
         let size = (640, 360);
         let (x, y) = origin(size, 2);
         let click = (x as u32 + 24, y as u32 + 2 * (30 + ROW));
         assert!(menu.click(click, size, &mut settings) == Command::Stay);
         assert!(!settings.lighting && settings.shadows);
-        assert!(menu.back() == Command::Stay);
         assert!(menu.back() == Command::Continue);
     }
 }

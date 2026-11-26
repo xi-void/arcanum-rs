@@ -49,8 +49,9 @@ by its absolute path. An executable on your `PATH` can be launched with
 to run there. A new click replaces the route after the current step reaches
 the next tile center. Left-click an original door or staircase to approach
 and use it. **Mouse wheel** zooms from 1× to 3×. Press **0** to reset.
-**Escape** pauses the game. Use the mouse or **Up/Down** and **Enter**
-to choose Resume, Options, or Quit. Escape backs out of menus.
+**Escape** opens the Classic pause menu. Choose Save Game, Load Game,
+Options, Quit Game or Continue. **F7** writes the quicksave and **F8** loads
+the newest save. [Native savegames](docs/SAVEGAMES.md)
 The camera follows the character by default, and original sectors load in the
 background. The default spawn is the original Zephyr crash site, resolved
 from the game's `START_MAP` metadata. Click the nearby cave entrance to
@@ -84,8 +85,7 @@ Hover an interactive object to highlight its visible sprite. Clicking
 past an accessible closed door routes to the doorway, opens it, and
 resumes the route after the animation. Click an open leaf to close it.
 Locked doors and unsupported scripts report why ordinary use failed.
-Door state lasts for the current session
-and survives leaving the map.
+Door state survives map transitions and is included in native saves.
 
 Walk across the original front exit of Bates Mansion to reach Tarant.
 Click the mansion entrance from outside to return. Click the original
