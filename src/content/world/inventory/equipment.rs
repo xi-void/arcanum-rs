@@ -512,6 +512,10 @@ impl InteractiveWorld {
         } else {
             None
         };
+        let sound = incoming
+            .as_ref()
+            .or(displaced.as_ref().map(|(item, _)| item))
+            .map(|item| item.handling_sound(false, inventory.aptitude()));
         let equipped = incoming.as_ref().map(|item| item.id.key());
         let unequipped = displaced
             .as_ref()
@@ -532,6 +536,9 @@ impl InteractiveWorld {
         }
         inventory.revision += 1;
         self.cache.update_character_movement();
+        if let Some(id) = sound {
+            self.queue_sound(super::super::SoundEvent::Effect(id));
+        }
         Ok(
             json!({"slot":slot,"equipped":equipped,"unequipped":unequipped,"statistics":self.character_statistics()}),
         )

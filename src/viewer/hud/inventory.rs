@@ -155,6 +155,13 @@ impl Hud {
         self.inventory.view.is_some()
     }
 
+    pub(in crate::viewer) fn container_sound(&self) -> Option<(&str, i32)> {
+        Some((
+            self.inventory.target.as_deref()?,
+            self.inventory.container.as_ref()?.container_sound?,
+        ))
+    }
+
     pub(in crate::viewer) fn close_inventory(&mut self) -> bool {
         let was_open = self.inventory_open();
         if was_open {
@@ -365,10 +372,11 @@ impl Hud {
         })
     }
 
-    pub(in crate::viewer) fn begin_inventory_drag(&mut self, point: (u32, u32)) -> bool {
+    pub(in crate::viewer) fn begin_inventory_drag(&mut self, point: (u32, u32)) -> Option<i32> {
         if let Some((slot, placement)) = self.equipment_at(point)
             && let Some(item) = self.equipped(slot)
         {
+            let sound = item.pickup_sound;
             self.inventory.drag = Some(Drag {
                 id: item.id.clone(),
                 source: 0,
@@ -382,11 +390,10 @@ impl Hud {
             });
             self.inventory.pointer = Some(point);
             self.inventory.error = None;
-            return true;
+            return Some(sound);
         }
-        let Some((source, grid, item)) = self.grid_item(point) else {
-            return false;
-        };
+        let (source, grid, item) = self.grid_item(point)?;
+        let sound = item.pickup_sound;
         let columns = self
             .inventory
             .contents(source)
@@ -407,7 +414,7 @@ impl Hud {
         });
         self.inventory.pointer = Some(point);
         self.inventory.error = None;
-        true
+        Some(sound)
     }
 
     pub(in crate::viewer) fn dragging_inventory(&self) -> bool {

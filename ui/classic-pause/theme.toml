@@ -88,3 +88,31 @@ frames = 3
 art = "vfs:art/interface/lil_cancel.art"
 at = [462, 334]
 frames = 3
+
+# CE mainmenu_ui and options_ui use the pause canvas at 800 × 600.
+[options]
+background = "vfs:art/interface/optionsmenuback.art"
+lens = "vfs:art/interface/optionspclens.art"
+choice = "vfs:art/interface/optionmultichoice.art"
+slider = "vfs:art/interface/optionslider.art"
+decrease = "vfs:art/interface/sldrbutt_l_arrow.art"
+increase = "vfs:art/interface/sldrbutt_r_arrow.art"
+gauge = "vfs:art/interface/skilgauge.art"
+heading_font = "vfs:art/interface/morph15font.art"
+strings = "mes/options_ui.mes"
+lens_at = [84, 67]
+nav_center = 130
+nav_y = [221, 261, 301, 341]
+nav_width = 164
+row_x = [261, 531]
+row_y = [122, 197, 272, 347]
+arrow_x = [6, 180]
+arrow_y = 21
+gauge_at = [47, 24]
+heading_color = [255, 255, 255, 255]
+inactive_color = [130, 130, 130, 255]
+value_color = [255, 0, 0, 255]
+nav_color = [100, 0, 0, 255]
+nav_hover_color = [240, 15, 15, 255]
+nav_shadow_color = [0, 0, 0, 255]
+nav_highlight_color = [110, 83, 57, 255]

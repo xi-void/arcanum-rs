@@ -12,6 +12,11 @@ fullscreen = false  # Borderless fullscreen on the current monitor.
 lighting = true
 shadows = true
 
+[audio]
+effects = 5  # 0–10, with 0 muting the channel.
+voice = 5
+music = 5
+
 [ui]
 hud = "classic"  # "classic", "off", package directory or theme.toml.
 # map = "themes/my-map"  # Package directory or theme.toml.

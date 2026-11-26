@@ -223,3 +223,10 @@ table, control placement and clipping rectangles. ART sources use the same
 the shared requested UI scale and fits inside the physical viewport, with
 identical coordinates for input and Vulkan composition. Gameplay and slot
 operations are independent of the package.
+
+
+The pause package's optional `[options]` table supplies the Options
+background, lens, cyclic controls, arrow and gauge ART, heading font,
+colors and positions. Coordinates are in the background ART's canvas. Older
+pause packages use the bundled Classic Options layout. Control actions use
+the active gameplay settings and the shared pause-menu scale.

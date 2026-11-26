@@ -1,6 +1,6 @@
 # Arcanum-RS — Known Issues
 
-Baseline: Milestone 66-R (application startup and preferences). Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
+Baseline: Milestone 68-R (audio and Classic Options). Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
 
 ## Triage
 
@@ -16,6 +16,14 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 
 The Classic Quit Game button asks for confirmation and then exits. Return to
 the original main menu when the main menu and new-game lifecycle exist.
+
+### AUD-001 — Missing resources in the authored wasteland scheme
+
+- **Priority:** P2 | **Status:** Open
+- The installed `sound/schemelist.mes` entries 4300–4302 reference
+  `wastland_day.wav` and `wastland_night.wav`. The VFS resolves the
+  `wasteland_day.wav` spelling and reports the authored day path as missing.
+  A content override can correct the scheme entry.
 
 ### DEV-001 — Atlas presents are absent from the frame counter
 - **Priority:** P2 | **Status:** Open
@@ -110,6 +118,17 @@ the original main menu when the main menu and new-game lifecycle exist.
 - Priority: P2
 - Clicking New requires an additional click on the green confirmation arrow before entering a save name.
 
+### HUD — Missing day/night indicator artwork
+- Priority: P2
+- The day/night indicator in the top HUD displays a blank pale rectangle instead of the original animated artwork.
+- Predates M68-R.
+- Investigate ART selection, frame resolution and game-time binding.
+
+### AUDIO — Incorrect inventory opening sound
+- Priority: P2
+- Opening inventory plays a different sound from vanilla.
+- Verify the original sound ID and activation event against CE.
+- Preserve the existing audio event and mixer architecture.
 
 ## Historical issues requiring revalidation
 
@@ -130,7 +149,7 @@ These are planned capabilities, not regressions. Implement in their own mileston
 
 - **M64-R:** interactive inventory rearrangement, transfers, Take All, Arrange, ground pickup/drop and drag cancellation; developer unlocking of ordinary locked containers (verify existing command behavior first).
 - **Inventory extensions:** generated loot, consumption, decay and scripted inventory behavior as their dependencies become available.
-- **Later systems:** audio, dialogue, scripting, combat, magick, technology, crafting, trading and progression.
+- **Later systems:** dialogue, scripting, combat, magick, technology, crafting, trading and progression.
 - **Use action:** remains inactive until the relevant gameplay mechanics exist.
 
 ## Regression watchlist — previously corrected

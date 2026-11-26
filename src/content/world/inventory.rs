@@ -235,6 +235,10 @@ impl Records<'_> {
                 .filter(|&tile| tile != (0, 0))
                 .ok_or("Unresolved container tile")?,
             flags,
+            sound_effect: effective
+                .appearance
+                .sound_effect
+                .filter(|&id| id > 0 && id <= i32::MAX - 2),
             subtype_flags: subtype(64, proto.defaults.subtype_flags)
                 .ok_or("Unresolved container flags")?,
             inventory_source: subtype(69, proto.defaults.inventory_source),
@@ -345,6 +349,7 @@ struct Container {
     subtype_flags: u32,
     inventory_source: Option<u32>,
     scripted: bool,
+    sound_effect: Option<i32>,
     provenance: Value,
     members: BTreeSet<OriginalId>,
 }
@@ -407,6 +412,7 @@ pub struct InventoryContents {
     pub rows: usize,
     pub entries: Vec<InventoryEntry>,
     pub equipment: Vec<InventoryEntry>,
+    pub container_sound: Option<i32>,
     grid: Grid,
 }
 
@@ -446,6 +452,7 @@ pub struct InventoryEntry {
     pub cells: [usize; 2],
     pub name: String,
     pub movable: bool,
+    pub pickup_sound: i32,
     pub removable: bool,
     pub icon: Result<Arc<LoadedFrame>, String>,
 }
@@ -557,6 +564,7 @@ impl InventoryReader {
             )
             .map_err(|error| error.to_string());
             let entry = InventoryEntry {
+                pickup_sound: item.handling_sound(true, world.cache.inventory.aptitude()),
                 id: item.id.key(),
                 equipment: equipped,
                 quantity: item.stats.quantity,
@@ -580,6 +588,9 @@ impl InventoryReader {
         self.frames.finish_sector();
         Ok(InventoryContents {
             columns: COLUMNS,
+            container_sound: container
+                .as_ref()
+                .and_then(|container| container.sound_effect),
             rows: owner.rows(),
             entries,
             equipment,
@@ -777,6 +788,7 @@ impl InteractiveWorld {
                 remainder = Some(rest);
             }
         }
+        let pickup = matches!(action, Move::Pickup(_));
         let (destination, requested) = match action {
             Move::Pickup(slot) => {
                 let Place::Ground(map, tile) = &current else {
@@ -914,6 +926,7 @@ impl InteractiveWorld {
         let world_changed = matches!(current, Place::Ground(..)) || ground.is_some();
         let session = &mut self.cache.inventory;
         let moved_id = item.id;
+        let sound = item.handling_sound(pickup, session.aptitude());
         let mut result = if let Some(mut target) = merge {
             let quantity = item.stats.quantity.expect("matching stack");
             let total = target
@@ -960,6 +973,7 @@ impl InteractiveWorld {
         if world_changed {
             self.cache.activate(&self.cache.active.clone());
         }
+        self.queue_sound(super::SoundEvent::Effect(sound));
         Ok(result)
     }
 

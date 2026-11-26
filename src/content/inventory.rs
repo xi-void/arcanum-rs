@@ -142,6 +142,25 @@ pub(super) struct Item {
 }
 
 impl Item {
+    /// CE sfx_item_sound maps object materials to pickup and drop sound IDs.
+    pub fn handling_sound(&self, pickup: bool, aptitude: i32) -> i32 {
+        let offset = if self.stats.unknown_description == Some(9056) {
+            8
+        } else {
+            match self.effective.appearance.material {
+                Some(0 | 1) => 3,
+                Some(2 | 3) => 4,
+                Some(5) if self.weight(aptitude) > 2000 => 2,
+                Some(5 | 11) => 1,
+                Some(6) => 5,
+                Some(7) => 6,
+                Some(9) => 7,
+                _ => 0,
+            }
+        };
+        (if pickup { 5950 } else { 5960 }) + offset
+    }
+
     pub fn weight(&self, aptitude: i32) -> i64 {
         if self.category == 8 {
             return 0;

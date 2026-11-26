@@ -56,6 +56,7 @@ pub(super) struct Sample<'a> {
     pub tile: Tile,
     pub offset: (i32, i32),
     pub anchor: (i32, i32),
+    pub gait_frame: Option<usize>,
     pub asset: &'a Arc<LoadedFrame>,
 }
 
@@ -327,6 +328,7 @@ impl Player {
         let Some(step) = self.step else {
             return Sample {
                 asset: &direction.stand,
+                gait_frame: None,
                 tile: self.tile,
                 offset: (0, 0),
                 anchor: origin,
@@ -348,9 +350,10 @@ impl Player {
         let gait = direction.gait(self.running);
         let phase = self.phase_cycles
             + now.saturating_sub(self.phase_start).as_secs_f64() / self.cycle_period.as_secs_f64();
+        let frame = (phase.fract() * gait.frames.len() as f64) as usize % gait.frames.len();
         Sample {
-            asset: &gait.frames
-                [(phase.fract() * gait.frames.len() as f64) as usize % gait.frames.len()],
+            asset: &gait.frames[frame],
+            gait_frame: Some(frame),
             tile,
             offset: (anchor.0 - c.0, anchor.1 - c.1),
             anchor,

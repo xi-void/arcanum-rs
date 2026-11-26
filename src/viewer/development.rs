@@ -695,6 +695,7 @@ impl Viewer<'_> {
                             .map(|((menu, _), theme)| menu.diagnostic(theme, [viewport.0,viewport.1], scale)),
                         "save_directory":self.saves.as_ref().ok().map(|store| store.directory()),"reload_generation":dev.reloads,"reload_status":dev.reload_status,
                         "selected":dev.selected.map(InteractiveWorld::debug_selection_id)},
+                    "audio":self.audio.as_ref().map(|audio| audio.diagnostic(self.settings.audio)),
                     "renderer":{"stats":self.view.as_ref().and_then(|view|view.renderer.stats.as_ref()),
                         "frames_presented":self.view.as_ref().map(|view|view.submitted_frames),
                         "host_frame_time":self.view.as_ref().map(|view|view.last_frame_time)},

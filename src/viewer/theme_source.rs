@@ -34,10 +34,15 @@ impl ThemeSource {
     }
 
     pub(crate) fn pause() -> Self {
-        Self::builtin(
-            "classic-pause/theme.toml",
-            include_str!("../../ui/classic-pause/theme.toml"),
-        )
+        let embedded = Self::embedded_pause();
+        Self::builtin("classic-pause/theme.toml", embedded.embedded.unwrap())
+    }
+
+    pub(super) fn embedded_pause() -> Self {
+        Self {
+            path: PathBuf::from("ui/classic-pause/theme.toml"),
+            embedded: Some(include_str!("../../ui/classic-pause/theme.toml")),
+        }
     }
 
     pub(crate) fn console() -> Self {

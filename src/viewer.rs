@@ -3,6 +3,8 @@
 use arcanum_rs::art::SpriteFrame;
 use arcanum_rs::gpu::OverlayDraw;
 
+mod audio;
+pub(crate) use audio::Audio;
 mod classic_menu;
 pub(crate) use classic_menu::Classic;
 mod console;
@@ -20,7 +22,10 @@ use arcanum_rs::camera::{Camera, CameraScene};
 use arcanum_rs::compositor::{Modulation, SpriteDraw};
 use arcanum_rs::content::{
     art::LoadedFrame,
-    world::{Destination, DoorStates, InteractiveWorld, InventoryReader, WorldDraw, WorldStream},
+    world::{
+        Destination, DoorStates, InteractiveWorld, InventoryReader, SoundEvent, WorldDraw,
+        WorldStream,
+    },
 };
 use arcanum_rs::content::{save, travel::Clock};
 use classic_menu::{Command as MenuCommand, Menu};
@@ -208,6 +213,7 @@ pub(crate) struct Startup {
     pub preferences: Option<ConfigFile>,
     pub pause_theme: Option<Box<Classic>>,
     pub ui_scale: u16,
+    pub audio: Option<Audio>,
 }
 
 pub struct StreamOptions<'a> {
@@ -352,6 +358,9 @@ fn run_content(
         player_deadline: None,
         cursor: None,
         settings: startup.settings,
+        audio: startup.audio,
+        sounding_container: None,
+        reset_audio: false,
         fullscreen: startup.fullscreen,
         preferences: startup.preferences,
         pause: None,
@@ -397,6 +406,9 @@ struct Viewer<'a> {
     player_deadline: Option<Instant>,
     cursor: Option<(u32, u32)>,
     settings: Settings,
+    audio: Option<Audio>,
+    sounding_container: Option<(String, i32)>,
+    reset_audio: bool,
     fullscreen: bool,
     preferences: Option<ConfigFile>,
     pause: Option<(Menu, Instant)>,
@@ -616,6 +628,8 @@ impl Viewer<'_> {
         if let Some(hud) = hud {
             hud.close_inventory();
         }
+        self.sounding_container = None;
+        self.reset_audio |= restoring;
         *camera = next_camera;
         world.follow_player(Duration::ZERO, camera);
         *last_presented = None;
@@ -694,13 +708,30 @@ impl Viewer<'_> {
         self.navigation = Navigation::default();
         self.player_deadline = None;
         self.animation_deadline = None;
+        if let Some(audio) = &self.audio {
+            audio.pause(true);
+        }
         self.pause = Some((Menu::default(), Instant::now()));
         self.menu_action(MenuCommand::Stay, event_loop);
     }
 
     fn record_settings(&mut self, previous: Settings) {
+        let current = self.settings;
+        if current.audio != previous.audio
+            && let Some(audio) = &self.audio
+        {
+            audio.volumes(current.audio);
+        }
         if let Some(preferences) = &mut self.preferences {
-            let current = self.settings;
+            for (key, value, old) in [
+                ("effects", current.audio.effects, previous.audio.effects),
+                ("voice", current.audio.voice, previous.audio.voice),
+                ("music", current.audio.music, previous.audio.music),
+            ] {
+                if value != old {
+                    preferences.set("audio", key, i64::from(value));
+                }
+            }
             if current.zoom != previous.zoom {
                 preferences.set("camera", "zoom", i64::from(current.zoom));
             }
@@ -718,6 +749,9 @@ impl Viewer<'_> {
 
     fn hud_action(&mut self, action: hud::Action, event_loop: &ActiveEventLoop) {
         let previous = self.settings;
+        if let Some(audio) = &self.audio {
+            audio.effect(3000, false);
+        }
         match action {
             hud::Action::Pause => self.pause_game(event_loop),
             hud::Action::ToggleRun => self.settings.run = !self.settings.run,
@@ -773,6 +807,9 @@ impl Viewer<'_> {
                     let pause = paused.elapsed();
                     self.paused_for += pause;
                     self.clock_paused_for += pause;
+                    if let Some(audio) = &self.audio {
+                        audio.pause(false);
+                    }
                 }
                 if matches!(&self.content, ViewContent::Stream { world, .. } if world.player_moving())
                 {
@@ -1053,60 +1090,63 @@ impl Viewer<'_> {
         let physical = [size.width, size.height];
         let previous = self.settings;
         let store = self.saves.as_ref().map_err(String::as_str);
+        if let WindowEvent::KeyboardInput { event, .. } = event
+            && event.state.is_pressed()
+            && let Key::Character(key) = &event.logical_key
+            && matches!(key.as_str(), "[" | "]")
+        {
+            self.change_pause_scale(if key == "[" { -25 } else { 25 });
+            self.menu_action(MenuCommand::Stay, event_loop);
+            return true;
+        }
+        let mut options_done = false;
         let command = if let Some(options) = &mut menu.options {
-            let action = match event {
+            match event {
                 WindowEvent::KeyboardInput { event, .. }
                     if event.state.is_pressed() && !event.repeat =>
                 {
-                    match event.logical_key {
-                        Key::Named(NamedKey::Escape) => options.back(),
-                        Key::Named(NamedKey::Enter) => options.activate(&mut self.settings),
-                        Key::Named(NamedKey::ArrowUp) => {
-                            options.adjust(-1);
-                            menu::Command::Stay
-                        }
-                        Key::Named(NamedKey::ArrowDown) => {
-                            options.adjust(1);
-                            menu::Command::Stay
-                        }
-                        _ => return true,
+                    options_done = options.key(&event.logical_key);
+                }
+                WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } => {
+                    if !options.hover(self.cursor, physical, scale, theme, &mut self.settings) {
+                        return true;
                     }
                 }
+                WindowEvent::Focused(false) => {
+                    options.cancel_pointer();
+                }
                 WindowEvent::MouseInput {
-                    state: ElementState::Released,
+                    state,
                     button: MouseButton::Left,
                     ..
                 } => {
-                    if let Some((x, y)) = self.cursor {
-                        let zoom = u32::from(self.settings.zoom);
-                        options.click(
-                            (x / zoom, y / zoom),
-                            logical_size(size, self.settings.zoom),
-                            &mut self.settings,
-                        )
-                    } else {
-                        menu::Command::Stay
+                    let (done, effect) = options.mouse(
+                        state.is_pressed(),
+                        self.cursor,
+                        physical,
+                        scale,
+                        theme,
+                        &mut self.settings,
+                    );
+                    options_done = done;
+                    if let Some(id) = effect
+                        && let Some(audio) = &self.audio
+                    {
+                        audio.effect(id, false);
                     }
                 }
                 WindowEvent::MouseInput { .. }
                 | WindowEvent::KeyboardInput { .. }
                 | WindowEvent::MouseWheel { .. } => return true,
                 _ => return false,
-            };
-            if action == menu::Command::Continue {
+            }
+            if options_done {
                 menu.options = None;
             }
             MenuCommand::Stay
         } else {
             match event {
                 WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
-                    if let Key::Character(key) = &event.logical_key
-                        && matches!(key.as_str(), "[" | "]")
-                    {
-                        self.change_pause_scale(if key == "[" { -25 } else { 25 });
-                        self.menu_action(MenuCommand::Stay, event_loop);
-                        return true;
-                    }
                     if event.repeat && !menu.editing() {
                         return true;
                     }
@@ -1124,6 +1164,12 @@ impl Viewer<'_> {
                     ..
                 } => {
                     menu.hover(self.cursor, physical, scale, theme);
+                    if state.is_pressed()
+                        && menu.has_hover()
+                        && let Some(audio) = &self.audio
+                    {
+                        audio.effect(3027, false);
+                    }
                     menu.mouse(
                         state.is_pressed(),
                         (self.cursor, physical, scale),
@@ -1155,6 +1201,17 @@ impl Viewer<'_> {
             }
         };
         self.record_settings(previous);
+        if options_done
+            && let Some(preferences) = &mut self.preferences
+            && let Err(error) = preferences.flush()
+        {
+            let error = format!(
+                "Cannot save preferences to {}: {error}",
+                preferences.path().display()
+            );
+            eprintln!("{error}");
+            self.menu_error(error);
+        }
         self.menu_action(command, event_loop);
         true
     }
@@ -1719,6 +1776,39 @@ impl ApplicationHandler for Viewer<'_> {
         self.pump_automation(event_loop);
     }
 
+    fn about_to_wait(&mut self, _: &ActiveEventLoop) {
+        let ViewContent::Stream { world, hud, .. } = &mut self.content else {
+            return;
+        };
+        let Some(audio) = &mut self.audio else {
+            world.take_sounds().for_each(drop);
+            return;
+        };
+        if let Some((map, sector, hour)) = world.sound_location() {
+            audio.location(map, sector, hour, std::mem::take(&mut self.reset_audio));
+        }
+        for sound in world.take_sounds() {
+            match sound {
+                SoundEvent::Effect(id) => audio.effect(id, true),
+                SoundEvent::Footstep { surface, armor } => audio.footstep(surface, armor),
+            }
+        }
+        let container = hud.as_ref().and_then(|hud| hud.container_sound());
+        let previous = self
+            .sounding_container
+            .as_ref()
+            .map(|(id, sound)| (id.as_str(), *sound));
+        if previous != container {
+            if let Some((_, sound)) = previous {
+                audio.effect(sound + 1, false);
+            }
+            if let Some((_, sound)) = container {
+                audio.effect(sound, false);
+            }
+            self.sounding_container = container.map(|(id, sound)| (id.to_owned(), sound));
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.view.is_none() {
             match self.open(event_loop) {
@@ -1964,11 +2054,14 @@ impl ApplicationHandler for Viewer<'_> {
                 }
                 if let Some(point) = self.cursor {
                     match (button, state) {
-                        (MouseButton::Left, ElementState::Pressed)
-                            if hud.begin_inventory_drag(point) =>
-                        {
-                            view.window.request_redraw();
-                            return;
+                        (MouseButton::Left, ElementState::Pressed) => {
+                            if let Some(id) = hud.begin_inventory_drag(point) {
+                                if let Some(audio) = &self.audio {
+                                    audio.effect(id, false);
+                                }
+                                view.window.request_redraw();
+                                return;
+                            }
                         }
                         (MouseButton::Right, ElementState::Released) => {
                             hud.quick_inventory_transfer(reader, world, point);
@@ -2588,6 +2681,25 @@ impl WindowSurface {
                 start.elapsed()
             );
         }
+        let options_inset = if let Some((w, h)) = menu.and_then(classic_menu::Frame::lens_size) {
+            let inset = self
+                .inventory_inset
+                .get_or_insert_with(|| inventory_inset(w, h));
+            if (inset.decoded.frame.width, inset.decoded.frame.height) != (w, h) {
+                *inset = inventory_inset(w, h);
+            }
+            let mut focused = camera.clone();
+            world.follow_player(elapsed, &mut focused);
+            self.renderer.render_inset(
+                inset,
+                0.5,
+                background,
+                scene_draws(world, &focused, (w * 2, h * 2), elapsed, settings),
+            )?;
+            Some(Arc::clone(inset))
+        } else {
+            None
+        };
         if let Some(hud) = hud.as_deref_mut()
             && let Some([w, h]) = hud.native_size(hud::Binding::InventoryLens)
         {
@@ -2645,6 +2757,10 @@ impl WindowSurface {
             hud.into_iter()
                 .flat_map(|hud| hud.draws(settings.run))
                 .chain(menu.into_iter().flat_map(classic_menu::Frame::draws))
+                .chain(
+                    menu.into_iter()
+                        .flat_map(|frame| frame.lens_draws(options_inset.as_ref())),
+                )
                 .chain(
                     self.save_status
                         .iter()

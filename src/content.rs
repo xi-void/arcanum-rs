@@ -228,7 +228,8 @@ fn load(vfs: &mut Vfs, path: &str, encoding: Option<Encoding>) -> Result<LoadedM
     }
 }
 
-fn read_bounded(vfs: &mut Vfs, path: &str, limit: usize) -> Result<(Source, Vec<u8>), Error> {
+/// Read the winning resource with provenance and a caller-specified byte limit.
+pub fn read_bounded(vfs: &mut Vfs, path: &str, limit: usize) -> Result<(Source, Vec<u8>), Error> {
     let (source, size) = Source::resolve(vfs, path)?;
     let too_large = |source| Error::TooLarge {
         provenance: Box::new(source),

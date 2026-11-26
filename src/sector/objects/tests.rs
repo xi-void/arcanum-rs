@@ -20,6 +20,20 @@ fn sector_header(marker: u32) -> Vec<u8> {
     bytes
 }
 
+#[test]
+fn decodes_sound_scheme_without_changing_object_list_framing() {
+    let mut input = sector_header(0xaa0004);
+    let music = input.len() - SIDE * SIDE / 8 - 8;
+    input[music..music + 4].copy_from_slice(&16_u32.to_le_bytes());
+    input[music + 4..music + 8].copy_from_slice(&49_u32.to_le_bytes());
+    input.extend(0_u32.to_le_bytes());
+    assert_eq!(
+        sector_properties(&input, 4).unwrap().sound_schemes,
+        [16, 49]
+    );
+    assert_eq!(decode(&input).unwrap().count, 0);
+}
+
 fn instance(kind: u32, bitmap: [u32; 3], data: &[u8]) -> Vec<u8> {
     let mut record = vec![0; 52];
     record[0..4].copy_from_slice(&119u32.to_le_bytes());

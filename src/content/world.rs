@@ -40,7 +40,7 @@ pub use super::jumps::Destination;
 pub use interaction::{DoorStates, SavedDoors};
 pub use inventory::{InventoryContents, InventoryEntry, InventoryReader, Objects};
 pub use lighting::DynamicLightState;
-pub use prefetch::{DeveloperAction, InteractiveWorld, PrefetchStats};
+pub use prefetch::{DeveloperAction, InteractiveWorld, PrefetchStats, SoundEvent};
 
 const MAX_SECTORS: usize = 12;
 const OVERHANG: i64 = 640;
@@ -375,6 +375,8 @@ struct CachedSector {
     mobiles: Vec<mobile::population::Resident>,
     townmap: u32,
     aptitude: i32,
+    sound_schemes: [i32; 2],
+    sound_surfaces: Option<Box<[u8; 4096]>>,
     report: SectorReport,
     draws: Vec<Raster>,
     lights: LightGrid,
@@ -409,6 +411,8 @@ impl CachedSector {
         Self {
             townmap: 0,
             aptitude: 0,
+            sound_schemes: [0; 2],
+            sound_surfaces: None,
             mobiles: Vec::new(),
             report: SectorReport {
                 id,
@@ -646,6 +650,17 @@ impl CachedSector {
         Self {
             townmap: world.townmap,
             aptitude: world.aptitude,
+            sound_schemes: world.sound_schemes,
+            sound_surfaces: {
+                let mut surfaces = Box::new([0; 4096]);
+                for tile in room.floor.tiles() {
+                    let raw = tile.id.0;
+                    let group = u8::from(raw & 0x100 == 0) * 2 + u8::from(raw & 0x80 == 0);
+                    surfaces[((tile.world.1 & 63) * 64 + (tile.world.0 & 63)) as usize] =
+                        group * 64 + ((raw >> 22) & 63) as u8;
+                }
+                Some(surfaces)
+            },
             mobiles: Vec::new(),
             report,
             draws,
@@ -2985,7 +3000,7 @@ mod tests {
         assert_eq!(world.cache.approach(key, false), Some(0));
         let destination = world
             .cache
-            .use_target(key, Duration::ZERO)
+            .use_target(key, Duration::ZERO, &mut None)
             .unwrap()
             .unwrap()
             .unwrap();
@@ -3130,7 +3145,7 @@ mod tests {
         world.cache.update_player(arrived);
         assert_eq!(world.cache.player.as_ref().unwrap().tile(), tile);
         assert_eq!(
-            world.cache.use_target(key, arrived).unwrap(),
+            world.cache.use_target(key, arrived, &mut None).unwrap(),
             Err("door is locked".into())
         );
         assert_eq!(crosses_gate(&world.cache), None);
