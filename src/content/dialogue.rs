@@ -1,6 +1,11 @@
-//! Read-only interpretation of original DLG and dialogue entry statements.
+//! Original DLG conditions, effects and dialogue lifecycle.
 
-use super::{Source, character::CharacterStatistics, load_mes, read_bounded};
+use super::{
+    Source,
+    character::CharacterStatistics,
+    load_mes, read_bounded,
+    script::{Actor, Attachment, Invocation, Outcome, Script, Slot, State},
+};
 use crate::{mes, resource_path, vfs::Vfs};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -87,57 +92,25 @@ impl Dialogue {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone)]
 pub(crate) struct EntryContext {
-    pub script: i32,
-    pub local_flags: Option<u32>,
+    pub attachment: Attachment,
     pub follows_player: Option<bool>,
     pub npc_flags: Option<u32>,
     pub hour: u8,
 }
 
-fn word(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
-}
-
-fn entry(bytes: &[u8], context: EntryContext) -> Result<(usize, i32), String> {
-    let header = bytes.get(..64).ok_or("truncated script header")?;
-    let (rows, tail) = bytes[64..].as_chunks::<132>();
-    if !tail.is_empty() || rows.len() != word(header, 52) as usize {
-        return Err("invalid dialogue script length".into());
-    }
-    if word(header, 48) != 0 {
-        return Err("unsupported dialogue script flags".into());
-    }
-    let mut pc = 0;
-    for _ in 0..rows.len() {
-        let row = rows
-            .get(pc)
-            .ok_or("dialogue script branch outside resource")?;
-        let op = word(row, 0);
-        let test = match op {
-            0 => Some(true),                            // SCT_TRUE
-            1 => Some((6..18).contains(&context.hour)), // SCT_DAYTIME
-            3 if row[4] == 3 => local_flag(context.local_flags, word(row, 12)),
-            18 if row[4..6] == [1, 0] => context.follows_player, // SCT_OBJ_FOLLOWING_PC
-            39 if row[4] == 1 => context.npc_flags.map(|flags| flags & 0x20 != 0), // SCT_OBJ_JILTED
-            _ => None,
-        }
-        .ok_or_else(|| format!("unresolved script condition {op} at statement {pc}"))?;
-        let action = if test { &row[44..88] } else { &row[88..] };
-        match word(action, 0) {
-            0 => pc += 1,
-            1 | 2 => {
-                return Err(format!(
-                    "script returned without starting dialogue at statement {pc}"
-                ));
-            }
-            3 if action[4] == 3 => pc = word(action, 12) as usize,
-            4 if action[4] == 3 => return Ok((pc, word(action, 12) as i32)), // SAT_DIALOG, literal
-            op => return Err(format!("unresolved script action {op} at statement {pc}")),
+impl EntryContext {
+    pub(crate) fn invocation(&self, position: usize) -> Invocation<'_> {
+        Invocation {
+            attachment: &self.attachment,
+            triggerer: Actor::Player,
+            position,
+            hour: self.hour,
+            follows_player: self.follows_player,
+            npc_flags: self.npc_flags,
         }
     }
-    Err("dialogue script did not reach an entry point".into())
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -176,10 +149,11 @@ pub struct Conversation {
     pub facing: u8,
     pub turn: Turn,
     dialogue: Dialogue,
-    script: Source,
-    script_id: i32,
+    script: Script,
+    context: EntryContext,
     entry_statement: usize,
     entry_line: i32,
+    continuation: Option<super::script::Execution>,
     npc_gender: Option<i32>,
     npc_intelligence: Option<i32>,
     npc_race: Option<i32>,
@@ -212,13 +186,15 @@ pub(crate) struct Context {
 }
 
 impl Conversation {
-    pub(crate) fn open(vfs: &mut Vfs, context: &Context) -> Result<Self, String> {
-        let script_id = context.entry.script;
-        let path = super::jumps::script_path(vfs, script_id)?;
-        let (script, bytes) =
-            read_bounded(vfs, &path, mes::MAX_INPUT_BYTES).map_err(|e| e.to_string())?;
-        let (entry_statement, entry_line) = entry(&bytes, context.entry)
-            .map_err(|error| format!("{path} from {script}: {error}"))?;
+    pub(crate) fn open(
+        vfs: &mut Vfs,
+        context: &Context,
+        script: Script,
+        entry_statement: usize,
+        entry_line: i32,
+        scripts: &mut State,
+    ) -> Result<Self, String> {
+        let path = &script.source.virtual_path;
         let stem = path
             .strip_prefix("scr/")
             .unwrap()
@@ -262,9 +238,10 @@ impl Conversation {
             },
             dialogue,
             script,
-            script_id,
+            context: context.entry.clone(),
             entry_statement,
             entry_line,
+            continuation: None,
             npc_gender: context.npc_gender,
             npc_intelligence: context.npc_intelligence,
             npc_race: context.npc_race,
@@ -272,16 +249,17 @@ impl Conversation {
             player_armor: context.player_armor,
             state: Conditions {
                 reaction: context.reaction,
-                flags: context.entry.local_flags,
                 met: context.met,
+                ..Conditions::default()
             },
             override_script: context.override_script,
             generic,
             voice_map,
             voice_map_error,
         };
-        session.turn = session.build_turn(vfs, entry_line, &context.stats, context.gold)?;
-        session.state = session.turn.conditions;
+        session.turn =
+            session.build_turn(vfs, entry_line, &context.stats, context.gold, scripts)?;
+        session.state = session.turn.conditions.clone();
         Ok(session)
     }
 
@@ -291,6 +269,8 @@ impl Conversation {
         index: usize,
         stats: &CharacterStatistics,
         gold: u64,
+        scripts: &mut State,
+        hour: u8,
     ) -> Result<bool, String> {
         let response = self
             .turn
@@ -298,30 +278,91 @@ impl Conversation {
             .get(index)
             .filter(|r| r.available)
             .ok_or("response unavailable")?;
-        if response.next <= 0 {
-            return Ok(false);
+        let attachment = &self.context.attachment;
+        if !conditions(
+            &response.condition,
+            stats,
+            gold,
+            &self.state,
+            scripts,
+            attachment,
+        )
+        .0
+        {
+            return Err("response conditions no longer pass".into());
         }
-        let state = self.state;
-        if !response.effect.is_empty() {
-            self.state.reaction = None;
+        let mut staged = scripts.clone();
+        let previous = self.state.clone();
+        match effects(&response.effect) {
+            Some(effects) => {
+                apply_effects(&effects, &mut staged, attachment)?;
+                self.state
+                    .unresolved
+                    .retain(|slot| !effects.iter().any(|(written, _)| written == slot));
+            }
+            None if legacy_reaction(&response.effect) && response.next >= 0 => {
+                self.state.reaction = None
+            }
+            None => return Err("unresolved response effect".into()),
         }
-        match self.build_turn(vfs, response.next, stats, gold) {
-            Ok(turn) => {
-                self.state = turn.conditions;
+        let destination = response.next;
+        let result = (|| {
+            let mut continuation = None;
+            let next = match destination {
+                ..0 => {
+                    let mut context = self.context.invocation(
+                        continuation_position(destination).ok_or("invalid script continuation")?,
+                    );
+                    context.hour = hour;
+                    let execution =
+                        self.script
+                            .execute(&context, &mut staged)
+                            .map_err(|error| {
+                                format!(
+                                    "{} from {}: {error}",
+                                    self.script.source.virtual_path, self.script.source
+                                )
+                            })?;
+                    let line = match execution.outcome {
+                        Outcome::Return { .. } => 0,
+                        Outcome::Dialogue { line } => line,
+                    };
+                    continuation = Some(execution);
+                    line
+                }
+                next => next,
+            };
+            let turn = if next == 0 {
+                None
+            } else {
+                Some(self.build_turn(vfs, next, stats, gold, &mut staged)?)
+            };
+            self.continuation = continuation;
+            Ok(turn)
+        })();
+        match result {
+            Ok(Some(turn)) => {
+                self.state = turn.conditions.clone();
                 self.turn = turn;
+                *scripts = staged;
+                Ok(true)
+            }
+            Ok(None) => {
+                *scripts = staged;
+                Ok(false)
             }
             Err(error) => {
-                self.state = state;
-                return Err(error);
+                self.state = previous;
+                Err(error)
             }
         }
-        Ok(true)
     }
 
     pub fn diagnostic(&self) -> serde_json::Value {
         serde_json::json!({"target":self.target,"speaker":self.speaker,"tile":self.tile,"facing":self.facing,
-            "npc_gender":self.npc_gender,"reaction":self.state.reaction,"met_before":self.state.met,"override_script":self.override_script,"turn":self.turn,"script_id":self.script_id,
-            "script":self.script.virtual_path,"script_mount":self.script.to_string(),"entry_statement":self.entry_statement,
+            "npc_gender":self.npc_gender,"reaction":self.state.reaction,"met_before":self.state.met,"override_script":self.override_script,"turn":self.turn,"script_id":self.context.attachment.script,
+            "attachment":self.context.attachment,"triggerer":Actor::Player,"continuation":self.continuation,
+            "script":self.script.source.virtual_path,"script_mount":self.script.source.to_string(),"entry_statement":self.entry_statement,
             "entry_line":self.entry_line,"exit_script":"unsupported","resource":self.dialogue.source.virtual_path,
             "mount":self.dialogue.source.to_string()})
     }
@@ -332,6 +373,7 @@ impl Conversation {
         id: i32,
         stats: &CharacterStatistics,
         gold: u64,
+        scripts: &mut State,
     ) -> Result<Turn, String> {
         let line = self
             .dialogue
@@ -339,6 +381,36 @@ impl Conversation {
             .get(&id)
             .filter(|l| l.iq == 0)
             .ok_or_else(|| format!("missing NPC dialogue line {id}"))?;
+        let mut condition_state = self.state.clone();
+        let attachment = &self.context.attachment;
+        let mut block_progression = false;
+        let speaker_effects = effects(&line.effect);
+        if let Some(effects) = &speaker_effects {
+            apply_effects(effects, scripts, attachment)?;
+            condition_state
+                .unresolved
+                .retain(|slot| !effects.iter().any(|(written, _)| written == slot));
+        } else {
+            // Preserve visibility for the existing text-only fallback. Conditions
+            // affected by a skipped write stay unresolved until a supported write.
+            for effect in line
+                .effect
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                match effect.get(..2).map(str::to_ascii_lowercase).as_deref() {
+                    Some("gf" | "gv" | "lf" | "lc") => {
+                        if let Some(slot) = state_slot(effect).map(|(slot, _)| slot) {
+                            condition_state.unresolved.push(slot);
+                        }
+                    }
+                    Some("re") => condition_state.reaction = None,
+                    Some("qu" | "ru" | "rq" | "in" | "mm") => {}
+                    _ => block_progression = true,
+                }
+            }
+        }
         let raw = if stats.gender == 1 {
             &line.text
         } else {
@@ -356,22 +428,6 @@ impl Conversation {
         } else {
             raw.clone()
         };
-        let mut condition_state = self.state;
-        let mut block_progression = false;
-        for effect in line
-            .effect
-            .split(',')
-            .map(str::trim)
-            .filter(|effect| !effect.is_empty())
-        {
-            match effect.get(..2).map(str::to_ascii_lowercase).as_deref() {
-                Some("lf") => condition_state.flags = None,
-                Some("re") => condition_state.reaction = None,
-                // These affect gameplay state, leaving the authored next-line selection intact.
-                Some("gf" | "gv" | "qu" | "ru" | "rq" | "in" | "lc" | "mm") => {}
-                _ => block_progression = true,
-            }
-        }
         let mut turn = Turn {
             line: id,
             text: String::new(),
@@ -382,7 +438,7 @@ impl Conversation {
             conditions: condition_state,
         };
         turn.text = substitute(&raw, &self.speaker, line.id, &mut turn.dependencies);
-        if !line.effect.is_empty() {
+        if speaker_effects.is_none() {
             turn.dependencies.push(Dependency {
                 line: id,
                 kind: if block_progression {
@@ -421,7 +477,14 @@ impl Conversation {
                     false
                 }
             };
-            let (passes, unknown) = conditions(&response.test, stats, gold, condition_state);
+            let (passes, unknown) = conditions(
+                &response.test,
+                stats,
+                gold,
+                &turn.conditions,
+                scripts,
+                attachment,
+            );
             for value in unknown {
                 turn.dependencies.push(Dependency {
                     line: response.id,
@@ -459,24 +522,21 @@ impl Conversation {
             if turn.responses.len() == 5 {
                 continue;
             }
-            // RE only adjusts reaction. Within a text-only conversation, retain the
-            // response and diagnose the skipped adjustment. Other effects can alter control flow.
+            let supported_effect = effects(&response.effect).is_some();
+            let supported_link = response.next >= 0
+                || continuation_position(response.next)
+                    .is_some_and(|pc| pc < self.script.code().statements.len());
             let available = !block_progression
-                && response.next >= 0
-                && (response.effect.is_empty()
-                    || response
-                        .effect
-                        .get(..2)
-                        .is_some_and(|op| op.eq_ignore_ascii_case("re"))
-                        && response.effect[2..].trim().parse::<i32>().is_ok());
-            if !response.effect.is_empty() {
+                && supported_link
+                && (supported_effect || response.next >= 0 && legacy_reaction(&response.effect));
+            if !supported_effect {
                 turn.dependencies.push(Dependency {
                     line: response.id,
                     kind: "response_effect",
                     value: response.effect.clone(),
                 });
             }
-            if response.next < 0 {
+            if !supported_link {
                 turn.dependencies.push(Dependency {
                     line: response.id,
                     kind: "script_continuation",
@@ -595,7 +655,7 @@ impl Conversation {
         let original = |gender| {
             format!(
                 "sound/speech/{:05}/v{speech}_{gender}.mp3",
-                self.script_id & 0x7fff
+                self.context.attachment.script & 0x7fff
             )
         };
         [if gender == 1 { 'm' } else { 'f' }, 'm']
@@ -646,22 +706,62 @@ fn threshold(value: i64, limit: i32) -> bool {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct Conditions {
     reaction: Option<i32>,
-    flags: Option<u32>,
     met: bool,
+    unresolved: Vec<Slot>,
 }
 
-fn local_flag(flags: Option<u32>, index: u32) -> Option<bool> {
-    Some(flags? & 1u32.checked_shl(index)? != 0)
+fn continuation_position(next: i32) -> Option<usize> {
+    usize::try_from(next.checked_neg()?).ok()
+}
+
+fn state_slot(raw: &str) -> Option<(Slot, i32)> {
+    let code = raw.get(..2)?.to_ascii_lowercase();
+    let mut args = raw[2..].split_ascii_whitespace();
+    let slot = Slot::dlg(&code, args.next()?.parse().ok()?)?;
+    let value = args.next()?.parse().ok()?;
+    args.next().is_none().then_some((slot, value))
+}
+
+fn effects(raw: &str) -> Option<Vec<(Slot, i32)>> {
+    if raw.is_empty() {
+        return Some(vec![]);
+    }
+    raw.split(',')
+        .map(|effect| {
+            let (slot, value) = state_slot(effect.trim())?;
+            slot.accepts(value).then_some((slot, value))
+        })
+        .collect()
+}
+
+fn apply_effects(
+    writes: &[(Slot, i32)],
+    scripts: &mut State,
+    attachment: &Attachment,
+) -> Result<(), String> {
+    for &(slot, value) in writes {
+        scripts
+            .write(attachment, slot, value)
+            .ok_or("invalid dialogue state write")?;
+    }
+    Ok(())
+}
+
+fn legacy_reaction(raw: &str) -> bool {
+    raw.get(..2).is_some_and(|op| op.eq_ignore_ascii_case("re"))
+        && raw[2..].trim().parse::<i32>().is_ok()
 }
 
 fn conditions(
     test: &str,
     stats: &CharacterStatistics,
     gold: u64,
-    state: Conditions,
+    state: &Conditions,
+    scripts: &State,
+    attachment: &Attachment,
 ) -> (bool, Vec<String>) {
     let mut passes = true;
     let mut unknown = Vec::new();
@@ -682,13 +782,18 @@ fn conditions(
         let raw = rest[..end].trim_end_matches(|ch: char| ch == ',' || ch.is_ascii_whitespace());
         let code = code.to_ascii_lowercase();
         let args = raw[2..].trim();
-        let result = if code == "lf" {
-            let mut pair = args.split_ascii_whitespace();
-            pair.next()
-                .and_then(|index| local_flag(state.flags, index.parse().ok()?))
-                .zip(pair.next().filter(|&value| value == "0" || value == "1"))
-                .filter(|_| pair.next().is_none())
-                .map(|(actual, expected)| actual == (expected == "1"))
+        let result = if matches!(code.as_str(), "gf" | "gv" | "lf" | "lc") {
+            state_slot(raw)
+                .filter(|(slot, expected)| {
+                    (!matches!(slot, Slot::GlobalFlag(_) | Slot::LocalFlag(_))
+                        || slot.accepts(*expected))
+                        && !state.unresolved.contains(slot)
+                })
+                .and_then(|(slot, expected)| {
+                    scripts
+                        .read_dialogue(attachment, slot)
+                        .map(|actual| actual == expected)
+                })
         } else {
             args.parse::<i32>().ok().and_then(|n| {
                 let stat = match code.as_str() {
@@ -757,56 +862,158 @@ mod tests {
     }
 
     #[test]
-    fn entry_follows_literal_jump_and_rejects_unresolved_condition() {
-        let mut script = vec![0; 64 + 2 * 132];
-        script[52] = 2;
-        script[64 + 44] = 3;
-        script[64 + 48] = 3;
-        script[64 + 56] = 1;
-        script[196 + 44] = 4;
-        script[196 + 48] = 3;
-        script[196 + 56] = 42;
-        let context = EntryContext {
-            script: 1,
-            local_flags: Some(0),
-            follows_player: Some(false),
-            npc_flags: Some(0),
-            hour: 12,
+    fn response_writes_precede_script_and_speaker_effects_precede_conditions() {
+        use crate::vfs::Policy;
+        use std::{
+            fs,
+            time::{SystemTime, UNIX_EPOCH},
         };
-        assert_eq!(entry(&script, context).unwrap(), (1, 42));
-        script[196] = 43;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("arcanum-dialogue-{}-{unique}", std::process::id()));
+        for directory in ["scr", "dlg"] {
+            fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        let mut bytes = vec![0; 64 + 3 * 132];
+        for (at, value) in [
+            (52, 3u32),
+            (108, 4),
+            (112, 3),
+            (120, 10), // entry: DLG 10
+            (196, 4),
+            (200, 0x0304),
+            (208, 7),
+            (212, 1), // when gf7 == 1
+            (240, 4),
+            (244, 3),
+            (252, 20), // DLG 20
+            (284, 2),  // otherwise return with default enabled
+            (372, 23), // unsupported action at statement 2
+        ] {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        fs::write(root.join("scr/00001fixture.scr"), bytes).unwrap();
+        fs::write(
+            root.join("dlg/00001fixture.dlg"),
+            concat!(
+                "{10}{Hello}{Hello}{}{}{}{lf2 1}
+",
+                "{11}{Invalid continuation}{}{1}{lf2 1}{-2}{gv3 90}
+",
+                "{12}{Continue}{}{1}{lf2 1}{-1}{gf7 1}
+",
+                "{20}{Continue again}{Continue again}{}{}{}{gv3 10}
+",
+                "{21}{Done}{}{1}{gv3 10, gf7 1}{}{lf2 0}
+"
+            ),
+        )
+        .unwrap();
+        let mut vfs = Vfs::new(Policy::Ordered);
+        vfs.mount_directory(&root).unwrap();
+        let mut scripts = State::default();
+        let context = Context {
+            target: "fixture".into(),
+            speaker: "NPC".into(),
+            tile: (0, 0),
+            facing: 0,
+            npc_gender: None,
+            npc_intelligence: None,
+            npc_race: None,
+            social_class: None,
+            player_armor: None,
+            met: false,
+            stats: Character::default().statistics(&Rules::default(), None, 0, [0; 5], false),
+            gold: 0,
+            reaction: None,
+            override_script: 0,
+            entry: EntryContext {
+                attachment: Attachment {
+                    owner: "fixture".into(),
+                    event: super::super::script::Event::Dialogue,
+                    script: 1,
+                    initial: Default::default(),
+                },
+                follows_player: None,
+                npc_flags: None,
+                hour: 12,
+            },
+        };
+        let script = Script::load(&mut vfs, 1).unwrap();
+        let entry = script
+            .execute(&context.entry.invocation(0), &mut scripts)
+            .unwrap();
+        assert_eq!(entry.outcome, Outcome::Dialogue { line: 10 });
+        let mut conversation = Conversation::open(
+            &mut vfs,
+            &context,
+            script,
+            entry.statement,
+            10,
+            &mut scripts,
+        )
+        .unwrap();
+        let local = &context.entry.attachment;
+        assert_eq!(scripts.read(local, Slot::LocalFlag(2)), Some(1));
+        assert_eq!(conversation.turn.responses[0].id, Some(11));
         assert!(
-            entry(&script, context)
+            conversation
+                .choose(&mut vfs, 0, &context.stats, 0, &mut scripts, 12)
                 .unwrap_err()
-                .contains("condition 43 at statement 1")
+                .contains("statement 2")
         );
-        script[196] = 0;
-        script[196 + 48] = 4;
-        assert!(entry(&script, context).unwrap_err().contains("action 4"));
+        assert_eq!(conversation.turn.line, 10);
+        assert_eq!(scripts.read(local, Slot::GlobalVariable(3)), Some(0));
+        assert!(
+            conversation
+                .choose(&mut vfs, 1, &context.stats, 0, &mut scripts, 12)
+                .unwrap()
+        );
+        assert_eq!(conversation.turn.line, 20);
+        assert_eq!(conversation.turn.responses[0].id, Some(21));
+        assert!(
+            !conversation
+                .choose(&mut vfs, 0, &context.stats, 0, &mut scripts, 12)
+                .unwrap()
+        );
+        assert_eq!(scripts.read(local, Slot::LocalFlag(2)), Some(0));
+        drop(vfs);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn supported_conditions_combine_and_unknowns_fail_closed() {
         let stats = Character::default().statistics(&Rules::default(), None, 0, [0; 5], false);
+        let attachment = Attachment {
+            owner: "fixture".into(),
+            event: super::super::script::Event::Dialogue,
+            script: 1,
+            initial: Default::default(),
+        };
+        let mut scripts = State::default();
+        let state = Conditions {
+            reaction: Some(60),
+            ..Conditions::default()
+        };
+        let check =
+            |text, scripts: &State| conditions(text, &stats, 5, &state, scripts, &attachment);
+        assert_eq!(check("ch8, pe -9 ra1 $$5 re-61", &scripts), (true, vec![]));
+        assert_eq!(check("ch9, pe -9, $$5", &scripts), (false, vec![]));
         assert_eq!(
-            conditions(
-                "ch8, pe -9 ra1 $$5 re-61",
-                &stats,
-                5,
-                Conditions {
-                    reaction: Some(60),
-                    ..Conditions::default()
-                }
-            ),
+            check("ch8gf2010 0, qu1020 2", &scripts),
+            (false, vec!["qu1020 2".into()])
+        );
+        let writes = effects("GF2010 1, lf3 0, lf3 1, gv4 -5, lc2 3").unwrap();
+        apply_effects(&writes, &mut scripts, &attachment).unwrap();
+        assert_eq!(
+            check("gf2010 1 lf3 1 gv4 -5 lc2 3", &scripts),
             (true, vec![])
         );
-        assert_eq!(
-            conditions("ch9, pe -9, $$5", &stats, 5, Conditions::default()),
-            (false, vec![])
-        );
-        assert_eq!(
-            conditions("ch8gf2010 0, qu1020 2", &stats, 5, Conditions::default()),
-            (false, vec!["gf2010 0".into(), "qu1020 2".into()])
-        );
+        assert!(effects("gf2010 0, qu1020 2, lf3 0").is_none());
+        assert!(effects("gv2000 -5").is_none());
     }
 }

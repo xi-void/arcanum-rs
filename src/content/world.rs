@@ -868,6 +868,7 @@ struct SectorCache {
     player_shadows: Option<MobileShadows>,
     jumps: super::jumps::Jumps,
     door_states: DoorStates,
+    scripts: super::script::State,
     inventory: inventory::Session,
     dropped_targets: BTreeMap<WorldOrder, interaction::Target>,
     inventory_context: Option<(String, (u32, u32))>,
@@ -2561,6 +2562,7 @@ impl SectorLoader {
                         &mut self.vfs,
                         &mut self.frames,
                         &room.room,
+                        &self.map,
                         id,
                         self.reference,
                     )
@@ -3151,6 +3153,34 @@ mod tests {
         assert_eq!(
             world.cache.use_target(key, arrived, &mut None).unwrap(),
             Err("door is locked".into())
+        );
+        assert_eq!(crosses_gate(&world.cache), None);
+
+        // Mutate the live state after preparation to exercise the same cached
+        // gate with the handler-removal branch selected.
+        use crate::content::script::{Attachment, Event, Slot};
+        world
+            .cache
+            .scripts
+            .write(
+                &Attachment {
+                    owner: "fixture".into(),
+                    event: Event::Dialogue,
+                    script: 1,
+                    initial: Default::default(),
+                },
+                Slot::GlobalFlag(1024),
+                1,
+            )
+            .unwrap();
+        let error = world
+            .cache
+            .use_target(key, arrived, &mut None)
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            error.contains("unresolved script action 5 at statement 1"),
+            "{error}"
         );
         assert_eq!(crosses_gate(&world.cache), None);
     }

@@ -19,11 +19,23 @@ sprite and the responses immediately above the bottom HUD, following CE
 
 The effective object script array supplies the Dialogue attachment
 (`SAP_DIALOG`), with the original prototype as fallback. The engine resolves
-its numbered `scr/*.scr` resource in the VFS and considers the matching
-`dlg/*.dlg` stem. It follows literal dialogue entries, literal jumps, and a
-small read-only condition subset from statement zero. An unknown condition
-or action before entry rejects the conversation with its statement index.
-There is no fallback entry guess.
+its numbered `scr/*.scr` resource in the VFS and uses the matching
+`dlg/*.dlg` stem. SCR begins at statement zero. The shared interpreter
+supports equality, signed less-than-or-equal, local and global flag tests,
+the existing daytime and NPC tests, assignment, addition and subtraction,
+flag writes, branches, both return modes, and dialogue entry. It reads
+literals, global state, attachment counters, and invocation-local temporary
+variables. It reports unsupported instructions, invalid branches, and
+execution beyond 1,000 statements with the failing statement and SCR source.
+
+CE's `script_file_load_code` defines 132-byte statements with a condition
+and two 44-byte actions. The resource flags are separate from the flags and
+packed counters in each object's 12-byte attachment record. Nonzero resource
+flags defer execution because traps, automatic removal, speech eligibility, and
+movement triggers require their original event behavior. The existing literal
+Use teleport decoder shares this framing. Unlock checks evaluate read-only
+handlers against the current world script state. Static worlds initialize that
+state to new-game defaults.
 
 A DLG record contains seven brace-delimited fields in CE order.
 
@@ -40,15 +52,26 @@ A DLG record contains seven brace-delimited fields in CE order.
 The parser accepts UTF-8 and Windows-1252, with CE-style `//` comments outside
 fields. Responses are the following records in numeric order until the next
 speaker line. The supported response tests use Charisma, Perception, alignment,
-aptitude, race, level, gold, initial reaction, authored local flags, and
-whether the actors have met in this session. Available character
-statistics and inventory supply their values. Unresolved conditions are
-recorded with their line IDs and hide the associated responses. Speaker
-effects and script continuations retain their original references. No
-dialogue effects or exit scripts run. A response with a standalone reaction
-change may follow its literal text link with the skipped effect reported.
-Later tests that rely on a skipped change remain unresolved.
-Other effectful responses and negative continuations remain unavailable.
+aptitude, race, level, gold, initial reaction, whether the actors have met in
+this session, and shared script state. The `gf`, `gv`, `lf`, and `lc` tests
+compare the addressed global flag, global variable, attachment flag, and
+attachment counter to the specified value. The same opcodes can write state
+in a speaker or response effect list.
+
+Response effects run in source order before the destination. Speaker effects
+run when entering the line, before building its choices. A zero destination
+closes the conversation after applying the response effects. A negative
+destination executes the Dialogue attachment at the absolute statement index.
+An explicit continuation can return or open another dialogue line. Effects
+from a rejected transition are discarded together with its staged script
+writes. The implicit exit handler and the default floating reply on an
+entry return remain deferred. Diagnostics retain the original return mode.
+
+Unresolved conditions hide the associated responses and identify their line
+IDs in diagnostics. A mixed effect list with an unsupported operation cannot
+commit a partial set of writes. The existing text fallback can display
+speaker lines with deferred gameplay effects. A standalone reaction change
+can still follow its literal text link with the skipped effect reported.
 Plain `G:` greetings use the original class or race tables and available
 character state. Several simple CE generic response directives use the installed `gd_*.mes`
 tables. More complex directives depend on their corresponding gameplay systems.
@@ -98,5 +121,11 @@ scroll bounds and offsets in `ui.hud.dialogue_scroll`, and
 `audio.output.active_voice`. The active conversation includes the
 NPC identity, script attachment and entry statement, DLG source, current
 line, available response IDs and unresolved dependencies.
-`rpc resource dlg/01324virgil.dlg` verifies DLG structure and VFS provenance. Dialogue is
-transient and excluded from savegames and diagnostic snapshots.
+`rpc resource dlg/01324virgil.dlg` and `rpc resource scr/01324virgil.scr`
+report resource framing and VFS provenance. `rpc pos` includes committed
+script state under `scripts`. Globals initialize to zero. Local state starts
+from the original attachment and writes are stored by persistent object
+identity and attachment point. It survives sector eviction, map changes and
+native save/load. Conversations, invocation temporaries, and the session's
+meeting history are transient. Diagnostic snapshots preserve the current
+session's script state without capturing or restoring it.

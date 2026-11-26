@@ -39,8 +39,10 @@ pub struct AppearanceFields {
     pub sound_effect: Option<i32>,
     pub use_script: Option<i32>,
     pub unlock_script: Option<i32>,
+    pub(crate) unlock_local: Option<crate::content::script::Local>,
     pub dialog_script: Option<i32>,
     pub dialog_local_flags: Option<u32>,
+    pub(crate) dialog_local_counters: Option<u32>,
     pub dialog_override_script: Option<i32>,
 }
 
@@ -622,9 +624,16 @@ impl Fields {
             };
             self.appearance.use_script = Some(script(1));
             self.appearance.unlock_script = Some(script(3));
+            self.appearance.unlock_local = Some(value.array_entry(3).map_or(
+                Default::default(),
+                crate::content::script::Local::from_attachment,
+            ));
             self.appearance.dialog_script = Some(script(9));
             self.appearance.dialog_local_flags = Some(value.array_entry(9).map_or(0, |entry| {
                 u32::from_le_bytes(entry[..4].try_into().unwrap())
+            }));
+            self.appearance.dialog_local_counters = Some(value.array_entry(9).map_or(0, |entry| {
+                u32::from_le_bytes(entry[4..8].try_into().unwrap())
             }));
             self.appearance.dialog_override_script = Some(script(31));
         }

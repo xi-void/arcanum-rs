@@ -221,7 +221,20 @@ sprite. The navigation state reports `hovered_npc` and any pending approach.
 Use `ui.hud.dialogue_responses` for physical mouse coordinates. Inspect
 `audio.output.active_voice` and the winning VFS source in
 `audio.output.recent` while a line plays. Use an isolated sound monitor for
-sample-level verification. See [NPC dialogue and voice packs](DIALOGUE.md).
+sample-level verification. `rpc resource scr/01039constable_owens.scr`
+reports SCR structure and the winning mount. `pos.result.scripts` reports
+committed global and attachment state. Conversation diagnostics identify the
+original entry statement, attachment owner and event, triggerer, and any
+explicit continuation that ran. See [NPC dialogue and voice packs](DIALOGUE.md).
+
+For an installed-data fixture, use `rpc coc 5000 90226 84176` and talk to
+Constable Owens. Report the blimp crash, then reopen the conversation and
+choose the response about having something to tell him. DLG response 431
+depends on local flag 3 being clear. Reporting the crash sets that flag and
+global flag 2342. Close dialogue before using F7, then use F8 and confirm the
+response is still absent. This also distinguishes a saved script consequence
+from the session-only meeting condition on the opening reply.
+
 
 ## Diagnostic snapshots
 
@@ -239,7 +252,7 @@ when available. Camera coordinates, viewport dimensions, and cached-sector
 references are recorded for context. The camera follows the player after
 restore and the window keeps its current size. Snapshots cover reproduction
 context. Door changes, inventory and ground-item state, pending interactions,
-travel progress, cache ordering, and exact animation phase are outside the
+travel progress, script state, cache ordering, and exact animation phase are outside the
 restore scope. A restore within the running session preserves current inventory
 changes through the normal map loader.
 

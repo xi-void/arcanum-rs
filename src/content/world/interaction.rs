@@ -1,5 +1,6 @@
 //! Prepared interactive objects and bounded session-local door state.
 
+use super::super::script::{Actor, Attachment, Event, Invocation, Outcome, Script, State};
 use super::*;
 use crate::compositor::sprite_origin;
 
@@ -27,7 +28,7 @@ pub(super) struct Door {
     pub(super) flags: u32,
     sound_effect: Option<i32>,
     unlock_script: i32,
-    unlock: Result<(), String>,
+    unlock: Option<Result<Box<(Attachment, Script)>, String>>,
     frames: [(Arc<LoadedFrame>, (i32, i32)); 4],
     period: Duration,
 }
@@ -98,14 +99,15 @@ impl DoorStates {
 }
 
 impl DoorStates {
-    pub(super) fn diagnostic(&self, door: &Door, hour: u8) -> serde_json::Value {
+    pub(super) fn diagnostic(&self, door: &Door, hour: u8, scripts: &State) -> serde_json::Value {
         let open = self
             .0
             .get(&door.id)
             .map_or(door.originally_open, |change| change.open);
         serde_json::json!({"kind":"door","open":open,"flags":door.flags,
             "locked":!self.1.contains(&door.id)&&locked(door.flags,hour),
-            "developer_unlock":self.1.contains(&door.id),"unlock_script":door.unlock_script})
+            "developer_unlock":self.1.contains(&door.id),"unlock_script":door.unlock_script,
+            "unlock_check":door.check_unlock(hour, scripts).err()})
     }
 
     pub(super) fn unlock(&mut self, door: &Door) -> Result<bool, String> {
@@ -135,7 +137,13 @@ impl DoorStates {
         cell
     }
 
-    fn change(&mut self, door: &Door, tick: Duration, hour: u8) -> Result<bool, String> {
+    fn change(
+        &mut self,
+        door: &Door,
+        tick: Duration,
+        hour: u8,
+        scripts: &State,
+    ) -> Result<bool, String> {
         if self
             .0
             .get(&door.id)
@@ -148,8 +156,7 @@ impl DoorStates {
             .get(&door.id)
             .map_or(door.originally_open, |change| change.open);
         if open {
-            door.may_open(hour, self.1.contains(&door.id))
-                .map_err(str::to_owned)?;
+            door.may_open(hour, self.1.contains(&door.id), scripts)?;
         }
         self.0.insert(
             door.id,
@@ -173,16 +180,44 @@ pub(super) fn locked(flags: u32, hour: u8) -> bool {
 }
 
 impl Door {
-    fn may_open(&self, hour: u8, unlocked: bool) -> Result<(), &str> {
-        self.unlock.as_ref().map_err(String::as_str)?;
+    fn check_unlock(&self, hour: u8, scripts: &State) -> Result<(), String> {
+        let Some(handler) = &self.unlock else {
+            return Ok(());
+        };
+        let (attachment, script) = handler.as_deref().map_err(Clone::clone)?;
+        let input = Invocation {
+            attachment,
+            triggerer: Actor::Player,
+            position: 0,
+            hour,
+            follows_player: None,
+            npc_flags: None,
+        };
+        let result = script.inspect(&input, scripts).map_err(|fault| {
+            format!(
+                "Unlock {} from {}: {fault}",
+                script.source.virtual_path, script.source
+            )
+        })?;
+        if result.outcome != (Outcome::Return { run_default: true }) {
+            return Err(format!(
+                "Unlock {} disallows opening at statement {}",
+                script.source.virtual_path, result.statement
+            ));
+        }
+        Ok(())
+    }
+
+    fn may_open(&self, hour: u8, unlocked: bool, scripts: &State) -> Result<(), String> {
+        self.check_unlock(hour, scripts)?;
         if self.flags & 0x02 != 0 {
-            return Err("door is jammed");
+            return Err("door is jammed".into());
         }
         if self.flags & 0x04 != 0 {
-            return Err("door is magically held");
+            return Err("door is magically held".into());
         }
         if !unlocked && locked(self.flags, hour) {
-            return Err("door is locked");
+            return Err("door is locked".into());
         }
         Ok(())
     }
@@ -228,6 +263,7 @@ pub(super) fn prepare(
     vfs: &mut Vfs,
     frames: &mut FrameCache,
     room: &super::super::scenery::Room,
+    map: &str,
     sector: u64,
     reference: Tile,
 ) -> BTreeMap<WorldOrder, Target> {
@@ -272,11 +308,16 @@ pub(super) fn prepare(
                     flags: portal.appearance.portal_flags,
                     sound_effect: portal.sound_effect,
                     unlock_script: portal.unlock_script,
-                    unlock: if portal.unlock_script > 0 {
-                        super::super::jumps::unlock_for_new_game(vfs, portal.unlock_script)
-                    } else {
-                        Ok(())
-                    },
+                    unlock: (portal.unlock_script > 0).then(|| {
+                        let script = Script::load(vfs, portal.unlock_script)?;
+                        let attachment = Attachment {
+                            owner: format!("{map}/{sector}:{}", portal.record.index),
+                            event: Event::Unlock,
+                            script: portal.unlock_script,
+                            initial: portal.unlock_local,
+                        };
+                        Ok(Box::new((attachment, script)))
+                    }),
                     frames: sequence.try_into().expect("four door poses"),
                     period,
                 })
@@ -384,8 +425,12 @@ impl SectorCache {
             super::super::player::path::find_with(origin, goal, |tile, direction| {
                 let (next, door) = self.planned_edge(tile, direction)?;
                 if !allow_locked && let Some((_, door)) = door {
-                    door.may_open(self.hour, self.door_states.1.contains(&door.id))
-                        .ok()?;
+                    door.may_open(
+                        self.hour,
+                        self.door_states.1.contains(&door.id),
+                        &self.scripts,
+                    )
+                    .ok()?;
                 }
                 Some((next, if door.is_some() { 20 } else { 0 }))
             })
@@ -413,8 +458,11 @@ impl SectorCache {
         for direction in find(true).into_iter().flatten() {
             let (next, door) = self.planned_edge(tile, direction).expect("planned edge");
             if let Some((_, door)) = door {
-                door.may_open(self.hour, self.door_states.1.contains(&door.id))
-                    .map_err(str::to_owned)?;
+                door.may_open(
+                    self.hour,
+                    self.door_states.1.contains(&door.id),
+                    &self.scripts,
+                )?;
             }
             tile = next;
         }
@@ -573,13 +621,19 @@ impl SectorCache {
         }
         match &target.action {
             Action::Door(door) => {
-                let result = self.door_states.change(door, tick, self.hour);
+                let result = self
+                    .door_states
+                    .change(door, tick, self.hour, &self.scripts);
                 let offset = match &result {
                     Ok(true) => Some(0),
                     Ok(false) => Some(1),
                     Err(_)
                         if door
-                            .may_open(self.hour, self.door_states.1.contains(&door.id))
+                            .may_open(
+                                self.hour,
+                                self.door_states.1.contains(&door.id),
+                                &self.scripts,
+                            )
                             .is_err() =>
                     {
                         Some(2)
@@ -699,7 +753,11 @@ mod tests {
         };
         let closed = edge_cell(&states);
         assert_eq!(travel(&states), None);
-        assert!(states.change(door, Duration::ZERO, 15).unwrap());
+        assert!(
+            states
+                .change(door, Duration::ZERO, 15, &State::default())
+                .unwrap()
+        );
         assert!(door.draw(&states, Duration::ZERO).0.decoded.frame_count > 1);
         assert!(!Arc::ptr_eq(
             door.draw(&states, Duration::ZERO).0,
@@ -708,7 +766,11 @@ mod tests {
         let open = edge_cell(&states);
         assert_ne!(closed, open);
         assert_eq!(travel(&states), Some(tile));
-        assert!(!states.change(door, Duration::from_secs(2), 15).unwrap());
+        assert!(
+            !states
+                .change(door, Duration::from_secs(2), 15, &State::default())
+                .unwrap()
+        );
         assert_eq!(closed, edge_cell(&states));
         assert_eq!(travel(&states), None);
 
@@ -720,18 +782,22 @@ mod tests {
             direction: door.direction,
             flags: 1,
             unlock_script: 0,
-            unlock: Ok(()),
+            unlock: None,
             frames: door.frames.clone(),
             period: door.period,
         };
         let mut states = DoorStates::default();
         assert_eq!(
-            states.change(&ordinary, Duration::ZERO, 15),
+            states.change(&ordinary, Duration::ZERO, 15, &State::default()),
             Err("door is locked".into())
         );
         assert!(states.unlock(&ordinary).unwrap());
         assert_eq!(travel(&states), None);
-        assert!(states.change(&ordinary, Duration::ZERO, 15).unwrap());
+        assert!(
+            states
+                .change(&ordinary, Duration::ZERO, 15, &State::default())
+                .unwrap()
+        );
         assert_eq!(travel(&states), Some(tile));
         ordinary.unlock_script = 1151;
         assert!(DoorStates::default().unlock(&ordinary).is_err());

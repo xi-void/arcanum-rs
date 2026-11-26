@@ -2,7 +2,10 @@
 
 use super::*;
 use crate::{
-    content::dialogue::{Context, Conversation, EntryContext},
+    content::{
+        dialogue::{Context, Conversation, EntryContext},
+        script::{Actor, Attachment, Event, Local, Outcome, Script, State},
+    },
     sector::objects::FieldValue,
 };
 use serde_json::json;
@@ -64,6 +67,14 @@ impl InteractiveWorld {
     pub fn dialogue_diagnostic(&self) -> serde_json::Value {
         json!({"active":self.dialogue.as_ref().map(Conversation::diagnostic),
             "last_result":self.dialogue_status})
+    }
+
+    pub fn script_state(&self) -> &State {
+        &self.cache.scripts
+    }
+
+    pub fn restore_script_state(&mut self, state: State) {
+        self.cache.scripts = state;
     }
 
     pub fn dialogue_anchor(&self) -> Option<(i32, i32)> {
@@ -272,14 +283,50 @@ impl super::inventory::InventoryReader {
                 .dialog_override_script
                 .unwrap_or_default(),
             entry: EntryContext {
-                script,
-                local_flags: effective.appearance.dialog_local_flags,
+                attachment: Attachment {
+                    // These NPCs have persistent original GUIDs independent of the loaded sector.
+                    owner: resident.id.key(),
+                    event: Event::Dialogue,
+                    script,
+                    initial: Local::new(
+                        effective.appearance.dialog_local_flags.unwrap_or_default(),
+                        effective
+                            .appearance
+                            .dialog_local_counters
+                            .unwrap_or_default(),
+                    ),
+                },
                 follows_player,
                 npc_flags,
                 hour: world.cache.hour,
             },
         };
-        let conversation = Conversation::open(&mut self.vfs, &context)?;
+        let script = Script::load(&mut self.vfs, script)?;
+        let mut staged = world.cache.scripts.clone();
+        let invocation = context.entry.invocation(0);
+        let execution = script.execute(&invocation, &mut staged).map_err(|fault| {
+            format!(
+                "{} from {}: {fault}",
+                script.source.virtual_path, script.source
+            )
+        })?;
+        let Outcome::Dialogue { line } = execution.outcome else {
+            world.cache.scripts = staged;
+            world.dialogue_status = Some(json!({
+                "status":"script_returned","target":context.target,"attachment":invocation.attachment,
+                "triggerer":Actor::Player,"script":script.source.virtual_path,
+                "script_mount":script.source.to_string(),"execution":execution
+            }));
+            return Ok(());
+        };
+        let conversation = Conversation::open(
+            &mut self.vfs,
+            &context,
+            script,
+            execution.statement,
+            line,
+            &mut staged,
+        )?;
         let index = world
             .cache
             .ordered
@@ -301,6 +348,7 @@ impl super::inventory::InventoryReader {
             .unwrap()
             .set_facing(player_facing);
         world.cache.speaking_pose = Some((key, asset));
+        world.cache.scripts = staged;
         world.dialogue = Some(conversation);
         world.dialogue_status = None;
         Ok(())
@@ -312,7 +360,14 @@ impl super::inventory::InventoryReader {
         let Some(session) = &mut world.dialogue else {
             return false;
         };
-        match session.choose(&mut self.vfs, index, &stats, gold) {
+        match session.choose(
+            &mut self.vfs,
+            index,
+            &stats,
+            gold,
+            &mut world.cache.scripts,
+            world.cache.hour,
+        ) {
             Ok(true) => {
                 world.dialogue_status = None;
                 true

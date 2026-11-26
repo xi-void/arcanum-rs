@@ -29,7 +29,7 @@ Each slot is a single `.ars` file. Its name is an engine-generated identifier.
 | Header | Five little-endian unsigned 32-bit words for version, metadata byte count, preview byte count, state byte count and CRC-32 |
 | Metadata | UTF-8 JSON with `name`, `location`, total game `hours` and `saved_at_ms` (Unix epoch milliseconds). Additional metadata fields may be added. |
 | Preview | A 468 × 300 opaque RGB8 image, top-to-bottom row order, captured through the Vulkan world compositor. A zero-length preview is accepted by the format. |
-| State | UTF-8 JSON with map directory, committed tile and facing, total game hours and elapsed milliseconds within the current hour, character data, item transactions, door changes, discovered area IDs and explored town-map pixels |
+| State | UTF-8 JSON with map directory, committed tile and facing, total game hours and elapsed milliseconds within the current hour, character data, item transactions, door changes, script state, discovered area IDs and explored town-map pixels |
 | CRC-32 | IEEE CRC-32 over the three sections, stored in the header |
 
 Object state carries changed item IDs, original-record or prototype references,
@@ -37,6 +37,12 @@ owners, grid slots, equipment slots, stack quantities, drop positions and
 merged-stack links. Generated IDs retain the allocator state. Door IDs use
 the original map directory, sector and record index. The engine rebuilds
 sector caches and GPU resources from the installed data during restoration.
+
+The optional `scripts` field stores committed global flags and variables and
+local state keyed by original object identity and attachment point. Earlier
+version 1 files lack this field and initialize globals to zero and locals from
+their original attachments. Active conversations and interpreter temporaries
+are transient.
 
 Writes sync a complete temporary file in the save directory before publishing
 it atomically. Loads validate the header, checksum and saved state, rebuild
