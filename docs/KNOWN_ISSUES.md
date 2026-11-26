@@ -1,6 +1,6 @@
 # Arcanum-RS — Known Issues
 
-Baseline: Milestone 70-R (Classic UI typography). Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
+Baseline: Milestone 72-R (Quest state and Classic quest logbook). Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
 
 ## Triage
 
@@ -20,12 +20,29 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
   handlers, and alternate dialogue overrides still need their original
   gameplay dependencies. The Bates house guards use equipment and combat
   checks and floating lines.
-- Quest, reputation, skill, encounter and party checks remain unresolved.
+- Direct quest state conditions are implemented. Generated quest responses,
+  reputation, skill, encounter and party checks remain unresolved.
   Initial reaction uses the original base and available character modifiers.
   Persistent reaction and meeting history and live AI changes are pending.
 - Some greetings and response directives need class-, race-, quest- or
   service-specific dialogue. Talk-triggered scripts, trade and companion
   recruitment are deferred. Scriptless NPCs have no conversation panel.
+
+### QUEST-001 — Quest rewards and broader logbook coverage
+
+- **Priority:** P2 | **Status:** Deferred
+- The Classic book exposes Quests. Other sections depend on their gameplay
+  systems. The original logbook notification highlight is pending.
+- Completion records persist. XP, alignment, NPC reaction changes and the
+  completion sound still need their original transactions. Floating-line
+  responses and unbotching are deferred.
+- In the randomized waterfront riddler, the wrong-answer responses in
+  `dlg/01034riddler1.dlg` combine botching quest 1009 with `fl 33` (an
+  authored floating line). The unresolved DLG action disables those
+  responses and their quest writes. The correct-answer route reaches Completed.
+  Its prize remains blocked at `dlg/01036riddler3.dlg` line 16 by the mixed
+  `in -5700, gf2730 1, rp 1071` effect, which needs DLG inventory transfer and
+  reputation support.
 
 ### DLG-002 — Generated greetings and talk eligibility
 
@@ -37,6 +54,33 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 - Talk eligibility uses available object, stat and flag data. Temporary
   effects, hostility scripts, and scripted or autonomous NPC behavior need
   their respective runtime systems.
+
+### SH-001 — Shrouded Hills interaction follow-up
+
+- **Priority:** P2 | **Status:** Deferred
+- Native clicks now open Doc Roberts's initial and repeat greetings. His
+  authored recruitment continuation in `scr/01280docroberts.scr` starts at
+  statement 16 and requires `SAT_CRITTER_FOLLOW` (action 21) at statement 17.
+  Dialogue does not implement recruitment or the bank fight.
+- The Wise Woman now renders and receives clicks. Her `03055sh_identify_lady`
+  and Black Root's `01815herbalist` both stop at statement 0,
+  `SAT_GET_REACTION` (action 29). Statement 1 reads magick/tech aptitude
+  with `SAT_GET_STAT` (action 33). Their later checks use spell state and
+  bad associates, and their services need trade or item identification.
+- The freestanding bridge gate now renders and takes Use input. Its original
+  lock and local collision still apply. Use attachment 30019 requires
+  `SCT_SECTOR_IS_BLOCKED` (condition 45) and
+  `SAT_TOGGLE_SECTOR_BLOCKED` (action 106) at statement 0 for overland
+  travel. Lukan's key handoff uses DLG `in -4402`, which needs the original
+  item transfer and key handling. See the
+  [installed-data reproduction](AGENT_WORKFLOW.md#shrouded-hills-interaction-check).
+- The original NPC event scheduler remains deferred. Doc's first heartbeat
+  `01302docfirst_heartbeat.scr` can change his day standpoint and remove the
+  attachment. His `01759docroberts_heartbeat1.scr` and the bridge copy's
+  `02770docbridgehb.scr` use reputation 1050 and state toggles.
+  Lukan's `02774bridgethugshb.scr` also checks reputation 1050 and can kill
+  its attachee. The bridge copy starts with `OF_OFF`. The Wise Woman and
+  Black Root Herbalist have no First Heartbeat or Heartbeat attachment.
 
 ### MAP-003 — Void Islands town-map resource rejected
 

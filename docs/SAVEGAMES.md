@@ -41,8 +41,14 @@ sector caches and GPU resources from the installed data during restoration.
 The optional `scripts` field stores committed global flags and variables and
 local state keyed by original object identity and attachment point. Earlier
 version 1 files lack this field and initialize globals to zero and locals from
-their original attachments. Active conversations and interpreter temporaries
-are transient.
+their original attachments. The script state includes the local PC’s quest
+records, their timestamps and last-write provenance, and global quest
+resolution. The optional `scripts.random` field stores the committed SCR
+random stream. Loading resumes the next draw, and older saves without the
+field initialize a fresh stream. Rejected transitions leave the committed
+stream unchanged. Earlier version 1 files without the quest field retain
+their script flags and initialize quests to their new-game defaults. Active
+conversations and interpreter temporaries are transient.
 
 Writes sync a complete temporary file in the save directory before publishing
 it atomically. Loads validate the header, checksum and saved state, rebuild
@@ -51,8 +57,8 @@ before replacing the running session. The destination uses the saved committed
 tile. Routes, in-progress animations, camera settings and UI panels are
 transient. Door changes restore to their settled open or closed state.
 
-The format is native to Arcanum-RS. Portrait, level and quest summary fields are
-intentionally empty while their gameplay systems are pending.
+The format is native to Arcanum-RS. The save list does not display portraits,
+levels or quest summaries.
 
 
 The Classic package uses CE's `mainmenu_ui.c` in-play button positions,

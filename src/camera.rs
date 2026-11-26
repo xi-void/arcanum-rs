@@ -2,7 +2,7 @@
 
 use crate::{
     art::SpriteFrame,
-    compositor::{SpriteDraw, sprite_origin},
+    compositor::{SpriteDraw, scaled_sprite_rect},
 };
 use std::collections::BTreeSet;
 
@@ -195,13 +195,14 @@ pub(crate) struct RasterBounds {
 
 impl RasterBounds {
     pub(crate) fn new(draw: SpriteDraw<'_>) -> Self {
-        let (x, y) = sprite_origin(draw.frame, draw.anchor);
+        Self::scaled(draw, 100)
+    }
+
+    pub(crate) fn scaled(draw: SpriteDraw<'_>, percent: u32) -> Self {
+        let ((x, y), (w, h)) = scaled_sprite_rect(draw, percent);
         Self {
             min: (x, y),
-            max: (
-                x + i64::from(draw.frame.width),
-                y + i64::from(draw.frame.height),
-            ),
+            max: (x + w, y + h),
         }
     }
 }
@@ -224,6 +225,8 @@ impl Viewport {
         let (right, bottom) = self.0.max;
         left != right
             && top != bottom
+            && bounds.min.0 < bounds.max.0
+            && bounds.min.1 < bounds.max.1
             && bounds.min.0 < right
             && bounds.max.0 > left
             && bounds.min.1 < bottom

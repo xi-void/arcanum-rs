@@ -4,7 +4,7 @@ use super::{
     Source,
     character::CharacterStatistics,
     load_mes, read_bounded,
-    script::{Actor, Attachment, Invocation, Outcome, Script, Slot, State},
+    script::{Actor, Attachment, Fault, Invocation, Outcome, Script, Slot, State},
 };
 use crate::{mes, resource_path, vfs::Vfs};
 use serde::Serialize;
@@ -97,6 +97,8 @@ pub(crate) struct EntryContext {
     pub attachment: Attachment,
     pub follows_player: Option<bool>,
     pub npc_flags: Option<u32>,
+    pub locations: [(u32, u32); 2],
+    pub met: bool,
     pub hour: u8,
 }
 
@@ -109,6 +111,8 @@ impl EntryContext {
             hour: self.hour,
             follows_player: self.follows_player,
             npc_flags: self.npc_flags,
+            locations: self.locations.map(Some),
+            met: Some(self.met),
         }
     }
 }
@@ -148,6 +152,7 @@ pub struct Conversation {
     pub tile: (u32, u32),
     pub facing: u8,
     pub turn: Turn,
+    pub response_feedback: Option<String>,
     dialogue: Dialogue,
     script: Script,
     context: EntryContext,
@@ -165,6 +170,38 @@ pub struct Conversation {
     generic: Option<mes::Mes>,
     voice_map: Option<mes::Mes>,
     voice_map_error: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) enum ResponseRejection {
+    Selection,
+    Condition,
+    Effect(String),
+    InvalidContinuation,
+    Script(Fault),
+    Destination(String),
+}
+
+impl ResponseRejection {
+    fn stage(&self) -> &'static str {
+        match self {
+            Self::Selection => "selection",
+            Self::Condition => "condition",
+            Self::Effect(_) => "effect",
+            Self::InvalidContinuation | Self::Script(_) => "script_continuation",
+            Self::Destination(_) => "destination",
+        }
+    }
+
+    fn reason(&self) -> String {
+        match self {
+            Self::Selection => "response unavailable".into(),
+            Self::Condition => "response conditions no longer pass".into(),
+            Self::InvalidContinuation => "invalid script continuation".into(),
+            Self::Script(fault) => fault.to_string(),
+            Self::Effect(error) | Self::Destination(error) => error.clone(),
+        }
+    }
 }
 
 pub(crate) struct Context {
@@ -236,6 +273,7 @@ impl Conversation {
                 speech_id: None,
                 conditions: Conditions::default(),
             },
+            response_feedback: None,
             dialogue,
             script,
             context: context.entry.clone(),
@@ -271,13 +309,13 @@ impl Conversation {
         gold: u64,
         scripts: &mut State,
         hour: u8,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, ResponseRejection> {
         let response = self
             .turn
             .responses
             .get(index)
             .filter(|r| r.available)
-            .ok_or("response unavailable")?;
+            .ok_or(ResponseRejection::Selection)?;
         let attachment = &self.context.attachment;
         if !conditions(
             &response.condition,
@@ -289,13 +327,14 @@ impl Conversation {
         )
         .0
         {
-            return Err("response conditions no longer pass".into());
+            return Err(ResponseRejection::Condition);
         }
         let mut staged = scripts.clone();
         let previous = self.state.clone();
         match effects(&response.effect) {
             Some(effects) => {
-                apply_effects(&effects, &mut staged, attachment)?;
+                self.apply_effects(&effects, &mut staged, response.id.unwrap_or(self.turn.line))
+                    .map_err(ResponseRejection::Effect)?;
                 self.state
                     .unresolved
                     .retain(|slot| !effects.iter().any(|(written, _)| written == slot));
@@ -303,7 +342,11 @@ impl Conversation {
             None if legacy_reaction(&response.effect) && response.next >= 0 => {
                 self.state.reaction = None
             }
-            None => return Err("unresolved response effect".into()),
+            None => {
+                return Err(ResponseRejection::Effect(
+                    "unresolved response effect".into(),
+                ));
+            }
         }
         let destination = response.next;
         let result = (|| {
@@ -311,18 +354,14 @@ impl Conversation {
             let next = match destination {
                 ..0 => {
                     let mut context = self.context.invocation(
-                        continuation_position(destination).ok_or("invalid script continuation")?,
+                        continuation_position(destination)
+                            .ok_or(ResponseRejection::InvalidContinuation)?,
                     );
                     context.hour = hour;
-                    let execution =
-                        self.script
-                            .execute(&context, &mut staged)
-                            .map_err(|error| {
-                                format!(
-                                    "{} from {}: {error}",
-                                    self.script.source.virtual_path, self.script.source
-                                )
-                            })?;
+                    let execution = self
+                        .script
+                        .execute(&context, &mut staged)
+                        .map_err(ResponseRejection::Script)?;
                     let line = match execution.outcome {
                         Outcome::Return { .. } => 0,
                         Outcome::Dialogue { line } => line,
@@ -335,13 +374,17 @@ impl Conversation {
             let turn = if next == 0 {
                 None
             } else {
-                Some(self.build_turn(vfs, next, stats, gold, &mut staged)?)
+                Some(
+                    self.build_turn(vfs, next, stats, gold, &mut staged)
+                        .map_err(ResponseRejection::Destination)?,
+                )
             };
             self.continuation = continuation;
             Ok(turn)
         })();
         match result {
             Ok(Some(turn)) => {
+                self.response_feedback = None;
                 self.state = turn.conditions.clone();
                 self.turn = turn;
                 *scripts = staged;
@@ -358,6 +401,37 @@ impl Conversation {
         }
     }
 
+    pub(crate) fn record_rejection(
+        &mut self,
+        index: usize,
+        reject: ResponseRejection,
+    ) -> serde_json::Value {
+        let response = self.turn.responses.get(index);
+        let fault = match &reject {
+            ResponseRejection::Script(fault) => Some(fault),
+            _ => None,
+        };
+        let reason = reject.reason();
+        self.response_feedback = Some(format!("Dialogue blocked: {reason}."));
+        let error = if fault.is_some() {
+            format!(
+                "{} from {}: {reason}",
+                self.script.source.virtual_path, self.script.source
+            )
+        } else {
+            reason
+        };
+        serde_json::json!({
+            "status": "response_rejected", "stage": reject.stage(), "error": error,
+            "target": self.target, "turn": self.turn.line, "response_index": index,
+            "response": response.and_then(|response| response.id),
+            "destination": response.map(|response| response.next),
+            "effect": response.map(|response| &response.effect), "writes_committed": false,
+            "script_fault": fault, "resource": self.dialogue.source.virtual_path,
+            "script": self.script.source.virtual_path, "script_mount": self.script.source.to_string()
+        })
+    }
+
     pub fn diagnostic(&self) -> serde_json::Value {
         serde_json::json!({"target":self.target,"speaker":self.speaker,"tile":self.tile,"facing":self.facing,
             "npc_gender":self.npc_gender,"reaction":self.state.reaction,"met_before":self.state.met,"override_script":self.override_script,"turn":self.turn,"script_id":self.context.attachment.script,
@@ -365,6 +439,34 @@ impl Conversation {
             "script":self.script.source.virtual_path,"script_mount":self.script.source.to_string(),"entry_statement":self.entry_statement,
             "entry_line":self.entry_line,"exit_script":"unsupported","resource":self.dialogue.source.virtual_path,
             "mount":self.dialogue.source.to_string()})
+    }
+
+    fn apply_effects(
+        &self,
+        writes: &[(Slot, i32)],
+        scripts: &mut State,
+        line: i32,
+    ) -> Result<(), String> {
+        let attachment = &self.context.attachment;
+        let source = &self.dialogue.source;
+        for &(slot, value) in writes {
+            let applied = if let Slot::Quest(id) = slot {
+                super::quest::Status::decode(value).and_then(|status| {
+                    scripts
+                        .quests
+                        .set_player(id, status, scripts.game_minute, || super::quest::Origin {
+                            resource: source.virtual_path.clone(),
+                            mount: source.to_string(),
+                            line: line as usize,
+                            object: attachment.owner.clone(),
+                        })
+                })
+            } else {
+                scripts.write(attachment, slot, value)
+            };
+            applied.ok_or("invalid dialogue state write")?;
+        }
+        Ok(())
     }
 
     fn build_turn(
@@ -386,7 +488,7 @@ impl Conversation {
         let mut block_progression = false;
         let speaker_effects = effects(&line.effect);
         if let Some(effects) = &speaker_effects {
-            apply_effects(effects, scripts, attachment)?;
+            self.apply_effects(effects, scripts, id)?;
             condition_state
                 .unresolved
                 .retain(|slot| !effects.iter().any(|(written, _)| written == slot));
@@ -400,13 +502,13 @@ impl Conversation {
                 .filter(|s| !s.is_empty())
             {
                 match effect.get(..2).map(str::to_ascii_lowercase).as_deref() {
-                    Some("gf" | "gv" | "lf" | "lc") => {
+                    Some("gf" | "gv" | "lf" | "lc" | "qu") => {
                         if let Some(slot) = state_slot(effect).map(|(slot, _)| slot) {
                             condition_state.unresolved.push(slot);
                         }
                     }
                     Some("re") => condition_state.reaction = None,
-                    Some("qu" | "ru" | "rq" | "in" | "mm") => {}
+                    Some("ru" | "rq" | "in" | "mm") => {}
                     _ => block_progression = true,
                 }
             }
@@ -719,8 +821,12 @@ fn continuation_position(next: i32) -> Option<usize> {
 
 fn state_slot(raw: &str) -> Option<(Slot, i32)> {
     let code = raw.get(..2)?.to_ascii_lowercase();
-    let mut args = raw[2..].split_ascii_whitespace();
-    let slot = Slot::dlg(&code, args.next()?.parse().ok()?)?;
+    state_operands(&code, &raw[2..])
+}
+
+fn state_operands(code: &str, raw: &str) -> Option<(Slot, i32)> {
+    let mut args = raw.split_ascii_whitespace();
+    let slot = Slot::dlg(code, args.next()?.parse().ok()?)?;
     let value = args.next()?.parse().ok()?;
     args.next().is_none().then_some((slot, value))
 }
@@ -735,19 +841,6 @@ fn effects(raw: &str) -> Option<Vec<(Slot, i32)>> {
             slot.accepts(value).then_some((slot, value))
         })
         .collect()
-}
-
-fn apply_effects(
-    writes: &[(Slot, i32)],
-    scripts: &mut State,
-    attachment: &Attachment,
-) -> Result<(), String> {
-    for &(slot, value) in writes {
-        scripts
-            .write(attachment, slot, value)
-            .ok_or("invalid dialogue state write")?;
-    }
-    Ok(())
 }
 
 fn legacy_reaction(raw: &str) -> bool {
@@ -782,17 +875,32 @@ fn conditions(
         let raw = rest[..end].trim_end_matches(|ch: char| ch == ',' || ch.is_ascii_whitespace());
         let code = code.to_ascii_lowercase();
         let args = raw[2..].trim();
-        let result = if matches!(code.as_str(), "gf" | "gv" | "lf" | "lc") {
-            state_slot(raw)
+        let result = if matches!(
+            code.as_str(),
+            "gf" | "gv" | "lf" | "lc" | "qu" | "qa" | "qb"
+        ) {
+            let quest_test = matches!(code.as_str(), "qa" | "qb");
+            let operands = if quest_test {
+                state_operands("qu", args)
+            } else {
+                state_operands(&code, args)
+            };
+            operands
                 .filter(|(slot, expected)| {
-                    (!matches!(slot, Slot::GlobalFlag(_) | Slot::LocalFlag(_))
-                        || slot.accepts(*expected))
+                    (!matches!(
+                        slot,
+                        Slot::GlobalFlag(_) | Slot::LocalFlag(_) | Slot::Quest(_)
+                    ) || slot.accepts(*expected))
                         && !state.unresolved.contains(slot)
                 })
                 .and_then(|(slot, expected)| {
                     scripts
                         .read_dialogue(attachment, slot)
-                        .map(|actual| actual == expected)
+                        .map(|actual| match code.as_str() {
+                            "qa" => actual >= expected,
+                            "qb" => actual <= expected,
+                            _ => actual == expected,
+                        })
                 })
         } else {
             args.parse::<i32>().ok().and_then(|n| {
@@ -878,9 +986,9 @@ mod tests {
         for directory in ["scr", "dlg"] {
             fs::create_dir_all(root.join(directory)).unwrap();
         }
-        let mut bytes = vec![0; 64 + 3 * 132];
+        let mut bytes = vec![0; 64 + 4 * 132];
         for (at, value) in [
-            (52, 3u32),
+            (52, 4u32),
             (108, 4),
             (112, 3),
             (120, 10), // entry: DLG 10
@@ -892,7 +1000,12 @@ mod tests {
             (244, 3),
             (252, 20), // DLG 20
             (284, 2),  // otherwise return with default enabled
-            (372, 23), // unsupported action at statement 2
+            (372, 37), // roll 1..=5 into global variable 8
+            (376, 0x010303),
+            (384, 1),
+            (388, 5),
+            (392, 8),
+            (504, 23), // deferred SAT_FLOAT_LINE after the draw
         ] {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
         }
@@ -900,15 +1013,15 @@ mod tests {
         fs::write(
             root.join("dlg/00001fixture.dlg"),
             concat!(
-                "{10}{Hello}{Hello}{}{}{}{lf2 1}
+                "{10}{Hello}{Hello}{}{}{}{lf2 1, qu1010 1}
 ",
-                "{11}{Invalid continuation}{}{1}{lf2 1}{-2}{gv3 90}
+                "{11}{Invalid continuation}{}{1}{lf2 1}{-2}{gv3 90, qu1010 2}
 ",
-                "{12}{Continue}{}{1}{lf2 1}{-1}{gf7 1}
+                "{12}{Continue}{}{1}{qu1010 1}{-1}{gf7 1, qu1010 2}
 ",
                 "{20}{Continue again}{Continue again}{}{}{}{gv3 10}
 ",
-                "{21}{Done}{}{1}{gv3 10, gf7 1}{}{lf2 0}
+                "{21}{Done}{}{1}{gv3 10, gf7 1, qu1010 2, qa1010 2, qb1010 2}{}{lf2 0}
 "
             ),
         )
@@ -940,6 +1053,8 @@ mod tests {
                 },
                 follows_player: None,
                 npc_flags: None,
+                locations: [(0, 0); 2],
+                met: false,
                 hour: 12,
             },
         };
@@ -959,21 +1074,40 @@ mod tests {
         .unwrap();
         let local = &context.entry.attachment;
         assert_eq!(scripts.read(local, Slot::LocalFlag(2)), Some(1));
+        assert_eq!(scripts.read(local, Slot::Quest(1010)), Some(1));
         assert_eq!(conversation.turn.responses[0].id, Some(11));
+        scripts.initialize_random();
+        let before = scripts.clone();
+        let reject = conversation
+            .choose(&mut vfs, 0, &context.stats, 0, &mut scripts, 12)
+            .unwrap_err();
+        let diagnostic = conversation.record_rejection(0, reject);
+        assert_eq!(diagnostic["stage"], "script_continuation");
+        assert_eq!(diagnostic["response"], 11);
+        assert_eq!(diagnostic["destination"], -2);
+        assert_eq!(diagnostic["effect"], "gv3 90, qu1010 2");
+        assert_eq!(diagnostic["script_fault"]["statement"], 3);
+        assert_eq!(diagnostic["script_fault"]["opcode"], 23);
+        assert_eq!(scripts, before); // Includes the RNG stream and staged global 8.
+        assert_eq!(diagnostic["writes_committed"], false);
         assert!(
             conversation
-                .choose(&mut vfs, 0, &context.stats, 0, &mut scripts, 12)
-                .unwrap_err()
-                .contains("statement 2")
+                .response_feedback
+                .as_ref()
+                .unwrap()
+                .contains("unresolved script action 23")
         );
         assert_eq!(conversation.turn.line, 10);
         assert_eq!(scripts.read(local, Slot::GlobalVariable(3)), Some(0));
+        assert_eq!(scripts.read(local, Slot::Quest(1010)), Some(1));
         assert!(
             conversation
                 .choose(&mut vfs, 1, &context.stats, 0, &mut scripts, 12)
                 .unwrap()
         );
         assert_eq!(conversation.turn.line, 20);
+        assert!(conversation.response_feedback.is_none());
+        assert_eq!(scripts.read(local, Slot::Quest(1010)), Some(2));
         assert_eq!(conversation.turn.responses[0].id, Some(21));
         assert!(
             !conversation
@@ -1003,17 +1137,21 @@ mod tests {
             |text, scripts: &State| conditions(text, &stats, 5, &state, scripts, &attachment);
         assert_eq!(check("ch8, pe -9 ra1 $$5 re-61", &scripts), (true, vec![]));
         assert_eq!(check("ch9, pe -9, $$5", &scripts), (false, vec![]));
-        assert_eq!(
-            check("ch8gf2010 0, qu1020 2", &scripts),
-            (false, vec!["qu1020 2".into()])
-        );
+        assert_eq!(check("ch8gf2010 0, qu1020 2", &scripts), (false, vec![]));
         let writes = effects("GF2010 1, lf3 0, lf3 1, gv4 -5, lc2 3").unwrap();
-        apply_effects(&writes, &mut scripts, &attachment).unwrap();
+        for (slot, value) in writes {
+            scripts.write(&attachment, slot, value).unwrap();
+        }
         assert_eq!(
             check("gf2010 1 lf3 1 gv4 -5 lc2 3", &scripts),
             (true, vec![])
         );
-        assert!(effects("gf2010 0, qu1020 2, lf3 0").is_none());
+        assert!(effects("gf2010 0, qu1020 2, lf3 0").is_some());
+        assert!(effects("gf2010 0, qu1020 7, lf3 0").is_none());
+        assert_eq!(
+            check("qa1020 7", &scripts),
+            (false, vec!["qa1020 7".into()])
+        );
         assert!(effects("gv2000 -5").is_none());
     }
 }

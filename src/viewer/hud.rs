@@ -1,6 +1,7 @@
 //! Declarative HUD layout, assets and hit testing, in physical window pixels.
 mod dialogue;
 mod inventory;
+mod journal;
 use super::ThemeSource;
 use arcanum_rs::{
     art::{DecodedFrame, SpriteFrame},
@@ -25,6 +26,10 @@ pub(super) enum Action {
     ResetZoom,
     OpenMap,
     ToggleInventory,
+    ToggleJournal,
+    JournalQuests,
+    JournalPrevious,
+    JournalNext,
     InventoryScrollUp,
     InventoryScrollDown,
     InventoryTakeAll,
@@ -71,6 +76,7 @@ struct Theme {
     fit_viewport: Option<[u32; 2]>,
     route_color: Option<Color>,
     selected_route_color: Option<Color>,
+    journal: Option<journal::Style>,
     #[serde(default)]
     fonts: BTreeMap<String, Font>,
     #[serde(default)]
@@ -117,6 +123,13 @@ pub(super) enum Binding {
     ContainerGrid,
     ContainerThumb,
     InventoryLens,
+    JournalLens,
+    JournalLeft,
+    JournalRight,
+    JournalLeftHeader,
+    JournalRightHeader,
+    JournalLeftFooter,
+    JournalRightFooter,
     InventoryHover,
     NpcContext,
     DialogueText,
@@ -145,6 +158,12 @@ impl Binding {
                 | Self::NpcContext
                 | Self::DialogueText
                 | Self::DialogueResponse
+                | Self::JournalLeft
+                | Self::JournalRight
+                | Self::JournalLeftHeader
+                | Self::JournalRightHeader
+                | Self::JournalLeftFooter
+                | Self::JournalRightFooter
                 | Self::InventoryHover
                 | Self::InventoryGold
                 | Self::InventoryArrows
@@ -198,6 +217,8 @@ struct Element {
     travel_available: Option<bool>,
     #[serde(default)]
     inventory_panel: bool,
+    #[serde(default)]
+    journal_panel: bool,
     #[serde(default)]
     dialogue_only: bool,
     response: Option<usize>,
@@ -604,6 +625,8 @@ pub(crate) struct Hud {
     external_panel: Option<[u32; 2]>,
     shared_band: Option<(Rect, u32)>,
     inventory: InventoryPanel,
+    journal: journal::Journal,
+    journal_style: Option<journal::Style>,
     dialogue_open: bool,
     dialogue_layout: dialogue::DialogueLayout,
     dialogue_available: [bool; 5],
@@ -899,6 +922,8 @@ impl Hud {
             external_panel: None,
             shared_band: None,
             inventory: InventoryPanel::default(),
+            journal: journal::Journal::default(),
+            journal_style: theme.journal,
             dialogue_open: false,
             dialogue_layout: dialogue::DialogueLayout::default(),
             dialogue_available: [false; 5],
@@ -981,6 +1006,13 @@ impl Hud {
                 widest = widest.max(e.size[0]);
                 continue;
             }
+            if e.journal_panel {
+                if self.journal.open {
+                    middle = middle.max(e.size[1]);
+                    widest = widest.max(e.size[0]);
+                }
+                continue;
+            }
             widest = widest.max(e.size[0]);
             match e.anchor {
                 Anchor::Top | Anchor::TopLeft | Anchor::TopRight => {
@@ -1022,7 +1054,9 @@ impl Hud {
         for component in &self.components {
             let parent = component.parent.map_or_else(
                 || {
-                    let area = if component.config.inventory_panel || component.config.dialogue_only
+                    let area = if component.config.inventory_panel
+                        || component.config.dialogue_only
+                        || component.config.journal_panel
                     {
                         band
                     } else {
@@ -1038,6 +1072,7 @@ impl Hud {
                         && !component.config.map_views.contains(&mode)
                 }) || component.config.hidden
                     || (component.config.dialogue_only && !self.dialogue_open)
+                    || (component.config.journal_panel && !self.journal.open)
                     || (component.config.binding == Some(Binding::NpcContext) && panel.is_some())
                     || (self.dialogue_open
                         && component.config.binding == Some(Binding::InventoryHover))
@@ -1089,7 +1124,7 @@ impl Hud {
             let p = p.as_ref()?.rect;
             Some(serde_json::json!({"index":index,"bounds":[p.x,p.y,p.w,p.h],"available":self.dialogue_available[index]}))
         }).collect();
-        serde_json::json!({"context_message":label(Binding::InventoryHover),
+        serde_json::json!({"journal":self.journal_diagnostic(),"context_message":label(Binding::InventoryHover),
             "npc_context":label(Binding::NpcContext),"dialogue_responses":responses,"dialogue_scroll":self.dialogue_layout.diagnostics(),
             "map_status":label(Binding::MapStatus),"scale_percent":self.scale,"effective_scale_percent":self.effective_scale,"inventory":self.inventory_diagnostics(),"fonts":self.font_profiles,"image_references":images,
             "focused":control(self.focus),"hovered":control(self.hover),"pressed":control(self.pressed)})
@@ -1419,6 +1454,16 @@ impl Hud {
             !config.disabled
                 && Some(*action) != self.unavailable_action
                 && (*action != Action::ToggleInventory || self.has_inventory())
+                && (!self.journal.open
+                    || matches!(
+                        action,
+                        Action::ToggleJournal
+                            | Action::JournalQuests
+                            | Action::JournalPrevious
+                            | Action::JournalNext
+                    ))
+                && (*action != Action::ToggleJournal || self.has_journal())
+                && self.journal_action_visible(*action)
         })
     }
 
@@ -1436,6 +1481,13 @@ impl Hud {
                 {
                     return None;
                 }
+                if component
+                    .config
+                    .action
+                    .is_some_and(|action| !self.journal_action_visible(action))
+                {
+                    return None;
+                }
                 if component.config.binding == Some(Binding::ContainerThumb)
                     || (p.live_asset.is_none()
                         && component.config.image.is_none()
@@ -1445,7 +1497,10 @@ impl Hud {
                             .text
                             .as_ref()
                             .is_none_or(|text| text.glyphs.is_empty())
-                        && component.config.binding != Some(Binding::MapCanvas))
+                        && !matches!(
+                            component.config.binding,
+                            Some(Binding::MapCanvas | Binding::JournalLeft | Binding::JournalRight)
+                        ))
                     || component.config.cell.is_some()
                 {
                     return None;
@@ -1460,9 +1515,13 @@ impl Hud {
                 let selected = (action.is_some()
                     && (action == self.selected_action
                         || action == self.active_action
-                        || (action == Some(Action::ToggleInventory) && self.inventory_open())))
-                .then_some(component.state_art[2].as_ref())
-                .flatten();
+                        || (action == Some(Action::ToggleInventory) && self.inventory_open())
+                        || (matches!(
+                            action,
+                            Some(Action::ToggleJournal | Action::JournalQuests)
+                        ) && self.journal.open)))
+                    .then_some(component.state_art[2].as_ref())
+                    .flatten();
                 let highlighted = (hot
                     || self.focus == Some(index)
                     || (running && action == Some(Action::ToggleRun)))
@@ -1520,7 +1579,8 @@ fn parse(source: &str) -> Result<Theme, Box<dyn Error>> {
             })
             || e.cell.is_some()
                 != matches!(e.binding, Some(Binding::Backpack | Binding::ContainerGrid))
-            || (e.inventory_panel
+            || (e.inventory_panel && e.journal_panel)
+            || ((e.inventory_panel || e.journal_panel)
                 && (e.parent.is_some()
                     || !matches!(e.anchor, Anchor::Center)
                     || e.offset != [0, 0]
@@ -1547,8 +1607,9 @@ fn parse(source: &str) -> Result<Theme, Box<dyn Error>> {
                 * (1 + variants + u32::from(hover_fill && e.hover_frame.is_none()));
         }
     }
-    if pixels > 1024 * 1024
+    if pixels > 2 * 1024 * 1024
         || theme.hud.iter().filter(|e| e.inventory_panel).count() > 1
+        || theme.hud.iter().filter(|e| e.journal_panel).count() > 1
         || theme.fonts.values().any(|font| {
             (font.size != 0 && !(5..=64).contains(&font.size))
                 || font.line_gap > 32
@@ -2127,7 +2188,15 @@ mod tests {
             }
             assert_eq!(hud.hit((left - 1, 5)), Hit::World);
             hud.advance_focus(false);
+            assert_eq!(hud.focused_action(), Some(Action::ToggleJournal));
+            hud.advance_focus(false);
             assert_eq!(hud.focused_action(), Some(Action::OpenMap));
+            assert!(hud.bounds(Binding::JournalLeft).is_none());
+            hud.toggle_journal();
+            hud.layout((1920, 1080));
+            let (page, _) = hud.bounds(Binding::JournalLeft).unwrap();
+            assert_eq!(hud.hit((page.x as u32, page.y as u32)), Hit::Panel);
+            assert!(hud.draws(false).count() > 33);
         }
     }
 

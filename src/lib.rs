@@ -16,6 +16,7 @@ pub mod mes;
 mod mod_id;
 pub mod mods;
 pub mod prototype;
+pub mod random;
 pub mod resource_path;
 pub mod runtime;
 pub mod sector;

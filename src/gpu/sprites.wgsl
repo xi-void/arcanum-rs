@@ -19,6 +19,7 @@ struct Output {
     @location(3) @interpolate(flat) nodes_b: vec4<u32>,
     @location(4) @interpolate(flat) scale: f32,
     @location(5) @interpolate(flat) overlay_extent: vec2<f32>,
+    @location(6) @interpolate(flat) object_scale: f32,
 }
 
 @vertex
@@ -36,6 +37,7 @@ fn vs(instance: Instance, @builtin(vertex_index) vertex: u32) -> Output {
     out.origin = instance.rect.xy;
     out.scale = scale;
     out.overlay_extent = select(vec2(0.), extent, overlay);
+    out.object_scale = select(instance.clip.x, 100., overlay);
     out.shade = instance.shade;
     out.nodes_a = instance.nodes_a;
     out.nodes_b = instance.nodes_b;
@@ -57,6 +59,8 @@ fn fs(input: Output) -> @location(0) vec4<f32> {
     var local = input.position.xy / input.scale - input.origin;
     if input.overlay_extent.x > 0. {
         local *= vec2<f32>(textureDimensions(sprite)) / input.overlay_extent;
+    } else if input.object_scale > 0. && input.object_scale != 100. {
+        local = floor(local) * 100. / input.object_scale;
     }
     let p = vec2<u32>(local);
     // Integer texel coordinates mean nearest sampling with no interpolation,

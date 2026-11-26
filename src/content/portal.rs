@@ -180,7 +180,7 @@ pub struct ImportedPortal {
     pub appearance: PortalAppearance,
     pub placement: Placement,
     /// The same-tile wall that precedes this leaf in the supported room pass.
-    pub paired_wall_index: usize,
+    pub paired_wall_index: Option<usize>,
     pub(super) use_script: i32,
     pub(super) unlock_script: i32,
     pub(super) unlock_local: super::script::Local,
@@ -197,7 +197,7 @@ impl ImportedPortal {
             x,
             i64::from(depth),
             i64::from(across),
-            self.paired_wall_index,
+            self.paired_wall_index.unwrap_or(self.record.index),
             Some(self.record.index),
         )
     }
@@ -228,7 +228,7 @@ impl PortalImport {
         frames: &mut art::FrameCache,
         sector: Coordinates,
         record: StaticRecord,
-        paired_wall_index: usize,
+        paired_wall_index: Option<usize>,
     ) -> Result<ImportedPortal, Box<dyn Error>> {
         if record.category != StaticCategory::Portal {
             return Err("expected a portal record".into());

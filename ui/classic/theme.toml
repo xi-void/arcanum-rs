@@ -19,6 +19,19 @@ source = "vfs:art/interface/flare14font.art"
 color = [255, 255, 255, 255]
 line_gap = 2
 
+[journal]
+active = [0, 0, 150, 255]
+completed = [0, 120, 0, 255]
+failed = [150, 0, 0, 255]
+
+[fonts.journal]
+source = "vfs:art/interface/flare12font.art"
+color = [0, 0, 0, 255]
+
+[fonts.journal-heading]
+source = "vfs:art/interface/morph15font.art"
+color = [0, 0, 0, 255]
+
 [[hud]]
 id = "top"
 anchor = "top"
@@ -47,7 +60,10 @@ parent = "top"
 offset = [41, 2]
 size = [34, 34]
 image = "vfs:art/interface/log_but.art"
-disabled = true
+hover_frame = 2
+pressed_frame = 1
+selected_frame = 1
+action = "toggle-journal"
 
 [[hud]]
 id = "local-map"
@@ -763,3 +779,168 @@ font = "responses"
 hover_text_color = [255, 255, 0, 255]
 disabled_text_color = [150, 150, 150, 255]
 text_shadow = [0, 0, 0, 255]
+
+[[hud]]
+id = "journal-panel"
+anchor = "center"
+size = [800, 400]
+journal_panel = true
+capture = true
+
+[[hud]]
+id = "journal-side"
+parent = "journal-panel"
+size = [165, 400]
+image = "vfs:art/interface/logbooks_side.art"
+
+[[hud]]
+id = "journal-lens"
+parent = "journal-panel"
+offset = [25, 24]
+size = [89, 89]
+binding = "journal-lens"
+
+[[hud]]
+id = "journal-lens-cover"
+parent = "journal-panel"
+offset = [25, 24]
+size = [89, 89]
+image = "vfs:art/interface/pcwincvr.art"
+
+[[hud]]
+id = "journal-book"
+parent = "journal-panel"
+offset = [165, 0]
+size = [635, 400]
+image = "vfs:art/interface/book_main.art"
+
+[[hud]]
+id = "journal-quest-paper"
+parent = "journal-panel"
+offset = [172, 23]
+size = [561, 355]
+image = "vfs:art/interface/book_quests.art"
+
+[[hud]]
+id = "journal-left-header"
+parent = "journal-panel"
+offset = [236, 43]
+size = [187, 19]
+binding = "journal-left-header"
+font = "journal-heading"
+align = "center"
+
+[[hud]]
+id = "journal-left"
+parent = "journal-panel"
+# Keep the first lines clear of the original page-turn arrows.
+offset = [231, 72]
+size = [206, 270]
+binding = "journal-left"
+font = "journal"
+
+[[hud]]
+id = "journal-left-footer"
+parent = "journal-panel"
+offset = [222, 346]
+size = [215, 15]
+binding = "journal-left-footer"
+font = "journal"
+align = "center"
+
+[[hud]]
+id = "journal-right-header"
+parent = "journal-panel"
+offset = [482, 43]
+size = [187, 19]
+binding = "journal-right-header"
+font = "journal-heading"
+align = "center"
+
+[[hud]]
+id = "journal-right"
+parent = "journal-panel"
+offset = [468, 72]
+size = [206, 270]
+binding = "journal-right"
+font = "journal"
+
+[[hud]]
+id = "journal-right-footer"
+parent = "journal-panel"
+offset = [468, 346]
+size = [215, 15]
+binding = "journal-right-footer"
+font = "journal"
+align = "center"
+
+[[hud]]
+id = "journal-notes"
+parent = "journal-panel"
+offset = [696, 83]
+size = [46, 41]
+image = "vfs:art/interface/tab_note.art"
+
+[[hud]]
+id = "journal-quests"
+parent = "journal-panel"
+offset = [696, 129]
+size = [46, 41]
+image = "vfs:art/interface/tab_quest.art"
+selected_frame = 1
+action = "journal-quests"
+
+[[hud]]
+id = "journal-reputations"
+parent = "journal-panel"
+offset = [696, 175]
+size = [46, 41]
+image = "vfs:art/interface/tab_rep.art"
+
+[[hud]]
+id = "journal-blessings"
+parent = "journal-panel"
+offset = [695, 221]
+size = [46, 41]
+image = "vfs:art/interface/tab_blesscurse.art"
+
+[[hud]]
+id = "journal-kills"
+parent = "journal-panel"
+offset = [696, 267]
+size = [46, 41]
+image = "vfs:art/interface/tab_egoinjure.art"
+
+[[hud]]
+id = "journal-background"
+parent = "journal-panel"
+offset = [696, 313]
+size = [46, 41]
+image = "vfs:art/interface/tab_backgrnd.art"
+
+[[hud]]
+id = "journal-keys"
+parent = "journal-panel"
+offset = [696, 359]
+size = [46, 41]
+image = "vfs:art/interface/tab_keys.art"
+
+[[hud]]
+id = "journal-previous"
+parent = "journal-panel"
+offset = [213, 77]
+size = [18, 22]
+image = "vfs:art/interface/pageturn_l.art"
+hover_frame = 2
+pressed_frame = 1
+action = "journal-previous"
+
+[[hud]]
+id = "journal-next"
+parent = "journal-panel"
+offset = [675, 77]
+size = [18, 22]
+image = "vfs:art/interface/pageturn_r.art"
+hover_frame = 2
+pressed_frame = 1
+action = "journal-next"

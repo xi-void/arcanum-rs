@@ -330,10 +330,22 @@ mod tests {
             initial: Default::default(),
         };
         let mut scripts = crate::content::script::State::default();
+        scripts.initialize_random();
         scripts.write(&attachment, Slot::LocalFlag(7), 1).unwrap();
         scripts.write(&attachment, Slot::GlobalFlag(4), 1).unwrap();
         scripts
             .write(&attachment, Slot::GlobalVariable(5), -19)
+            .unwrap();
+        scripts
+            .quests
+            .set_player(1009, crate::content::quest::Status::Completed, 1683, || {
+                crate::content::quest::Origin {
+                    resource: "dlg/fixture.dlg".into(),
+                    mount: "fixture".into(),
+                    line: 10,
+                    object: attachment.owner.clone(),
+                }
+            })
             .unwrap();
         let state = State {
             map: "fixture".into(),
@@ -364,6 +376,15 @@ mod tests {
         let loaded = store.load(&id).unwrap();
         assert_eq!(loaded.scripts, state.scripts);
         let mut legacy = serde_json::to_value(&state).unwrap();
+        let scripts = legacy["scripts"].as_object_mut().unwrap();
+        assert!(scripts.remove("random").is_some());
+        scripts.remove("quests");
+        let prior: State = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(prior.scripts.quests, Default::default());
+        assert_eq!(
+            prior.scripts.read(&attachment, Slot::GlobalFlag(4)),
+            Some(1)
+        );
         legacy.as_object_mut().unwrap().remove("scripts");
         let legacy: State = serde_json::from_value(legacy).unwrap();
         assert_eq!(legacy.scripts, crate::content::script::State::default());

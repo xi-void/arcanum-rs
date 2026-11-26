@@ -1081,10 +1081,10 @@ fn open_portal_uses_frame_three_and_rejects_a_shorter_replacement() {
     let mut importer = portal::PortalImport::new(&mut vfs).unwrap();
     let mut frames = art::FrameCache::default();
     let door = importer
-        .resolve(&mut vfs, &mut frames, sector, make_record(1), 0)
+        .resolve(&mut vfs, &mut frames, sector, make_record(1), Some(0))
         .unwrap();
     let another = importer
-        .resolve(&mut vfs, &mut frames, sector, make_record(3), 2)
+        .resolve(&mut vfs, &mut frames, sector, make_record(3), Some(2))
         .unwrap();
     assert_eq!(door.state, portal::PortalState::Open);
     assert_eq!(door.record.art_id, 0x3178_ec00);
@@ -1102,7 +1102,7 @@ fn open_portal_uses_frame_three_and_rejects_a_shorter_replacement() {
     let mut importer = portal::PortalImport::new(&mut vfs).unwrap();
     let mut frames = art::FrameCache::default();
     let err = importer
-        .resolve(&mut vfs, &mut frames, sector, make_record(1), 0)
+        .resolve(&mut vfs, &mut frames, sector, make_record(1), Some(0))
         .err()
         .unwrap();
     assert!(

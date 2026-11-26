@@ -587,6 +587,7 @@ impl Viewer<'_> {
             camera,
             last_presented,
             waiting,
+            inventory_reader,
             ..
         } = &mut self.content
         else {
@@ -697,6 +698,8 @@ impl Viewer<'_> {
                         "selected":dev.selected.map(InteractiveWorld::debug_selection_id)},
                     "dialogue":world.dialogue_diagnostic(),
                     "scripts":world.script_state(),
+                    "quests":inventory_reader.as_ref().map(|reader| reader.quest_catalog.diagnostic(
+                        &world.script_state().quests, world.character_statistics().attributes[4])),
                     "audio":self.audio.as_ref().map(|audio| audio.diagnostic(self.settings.audio)),
                     "renderer":{"stats":self.view.as_ref().and_then(|view|view.renderer.stats.as_ref()),
                         "frames_presented":self.view.as_ref().map(|view|view.submitted_frames),

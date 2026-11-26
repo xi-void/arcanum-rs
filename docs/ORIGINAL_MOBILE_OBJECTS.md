@@ -63,7 +63,9 @@ remain future input sources.
 ## Rendering and collision
 
 Stationary supported critter poses enter the Vulkan scene with their
-original tile, palette, offsets and verified shadow rules. Container frames
+original tile, palette, offsets, blit scale and verified shadow rules.
+The blit scale adjusts the sprite extent and hotspot for rendering and
+alpha picking while reusing the original decoded ART. Container frames
 use CE's `name.c` container table. Ground item names use the original
 number/type/subtype and armour coverage rule in
 `a_name.c::a_name_item_aid_to_fname`. Item, container, and supported
@@ -73,7 +75,7 @@ effective object flags. Collision preparation and appearance preparation
 remain separate. Some correctly placed bodies retain collision while their
 appearance is unresolved. The existing rabbit animation remains a diagnostic.
 
-Unsupported scale, animation and equipment states, lights attached to
+Unsupported blend, animation and equipment states, lights attached to
 mobiles, and gameplay interactions remain explicit limitations. Container, item,
 and actor classification gives later systems a common object foundation.
 It leaves dialogue, loot, equipment management, combat, and scripting
@@ -99,8 +101,8 @@ rpc objects original 2:445b953294385445b9cbc122298325c2
 These examples inspect the Bates kitchen NPC, contained armour and a
 world-placed chest, then an overworld NPC using inherited ART
 (`art/monster/ape/apeuwxaa.art`, prototype 28413). Prototype 28416 is
-another verified inheritance case whose 110% scale remains outside the
-supported draw range. Look at `effective.current_art.origin`, `prototype_source`,
+another inheritance case that the earlier 100% scale check rejected.
+Look at `effective.current_art.origin`, `prototype_source`,
 `placement`, `parent`, `inventory`, `rendering`, and
 `collision_registered` together. Read-only queries leave the simulation
 and redraw schedule alone.
@@ -169,8 +171,8 @@ captures are under `target/visual-checks/milestone-61-population/`.
 
 All eight previously missing probe objects prepared a raster in the
 Vulkan session. Tulla Interior went from 1 to 31 prepared NPCs out of 34
-placed. Two scaled creatures and one orc with a nonzero blit flag remain
-unprepared. The full scan increased prepared NPC rasters from 887 to
+placed. In that scan two scaled creatures and one orc with a nonzero blit
+flag were unprepared. The full scan increased prepared NPC rasters from 887 to
 1,526. Decode, placement, containment and collision totals were stable.
 The scan took 26.9 seconds end to end with 132.6 MiB peak RSS. See the
 [compatibility history](WORLD_COMPATIBILITY_BASELINES.json) for counts.
