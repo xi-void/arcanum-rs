@@ -242,7 +242,7 @@ const COMMANDS: &[Command] = &[
     ),
     simple!(
         "unlock",
-        "Unlock the selected ordinary door for this session.",
+        "Unlock the selected ordinary door or container for this session.",
         Unlock
     ),
     command!(

@@ -806,6 +806,7 @@ impl MapUi {
         size: Point,
         cursor: Option<Point>,
         band: Option<(Rect, u32)>,
+        gameplay_hud: Option<&mut Hud>,
     ) -> &mut Hud {
         self.hud.set_unavailable_action(
             (!self.travelling() && (!self.can_travel || self.arrival_waypoint().is_none()))
@@ -846,16 +847,20 @@ impl MapUi {
         let (x, y) = format_world_readout(self.world.size().0, self.readout, self.atlas.offset);
         self.hud.set_label(Binding::MapWest, &x);
         self.hud.set_label(Binding::MapSouth, &y);
-        let hover = cursor.and_then(|point| self.pick(point));
-        let status = hover.and_then(|id| self.atlas.areas.get(&id)).map_or_else(
-            || {
-                self.town_error
-                    .as_deref()
-                    .or(self.world_error.as_deref())
-                    .unwrap_or("")
-            },
-            |area| &area.description,
-        );
+        let hovered_area = cursor
+            .and_then(|point| self.pick(point))
+            .and_then(|id| self.atlas.areas.get(&id));
+        if let Some(hud) = gameplay_hud {
+            hud.set_label(
+                Binding::InventoryHover,
+                hovered_area.map_or("", |area| area.description.as_str()),
+            );
+        }
+        let data_error = if hovered_area.is_none() {
+            self.town_error.as_deref().or(self.world_error.as_deref())
+        } else {
+            None
+        };
         let arrival_status = (!self.waypoints.is_empty() && self.arrival_waypoint().is_none())
             .then_some("No on-foot terrain is available at the final waypoint.");
         self.hud.set_label(
@@ -863,7 +868,8 @@ impl MapUi {
             self.travel_message
                 .as_deref()
                 .or(arrival_status)
-                .unwrap_or(status),
+                .or(data_error)
+                .unwrap_or(""),
         );
         &mut self.hud
     }

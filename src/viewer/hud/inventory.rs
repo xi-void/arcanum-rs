@@ -1,5 +1,7 @@
 use super::*;
-use arcanum_rs::content::world::{InteractiveWorld, InventoryContents, InventoryReader};
+use arcanum_rs::content::world::{
+    InteractiveWorld, InventoryContents, InventoryEntry, InventoryReader,
+};
 use serde_json::{Value, json};
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, serde::Serialize)]
@@ -19,11 +21,22 @@ pub(super) struct InventoryPanel {
     scroll: [usize; 2],
     hovered: Option<String>,
     error: Option<String>,
+    vertical: bool,
+    drag: Option<Drag>,
+    pointer: Option<(u32, u32)>,
 }
 
 impl InventoryPanel {
     pub(super) fn view(&self) -> Option<InventoryView> {
         self.view
+    }
+
+    fn owner(&self, index: usize) -> Option<&str> {
+        if index == 0 {
+            Some("player")
+        } else {
+            self.target.as_deref()
+        }
     }
 
     fn contents(&self, index: usize) -> Option<&InventoryContents> {
@@ -33,6 +46,22 @@ impl InventoryPanel {
             self.container.as_ref()
         }
     }
+}
+
+struct Drag {
+    id: String,
+    source: usize,
+    grab_cell: [i32; 2],
+    grab_pixels: [i32; 2],
+    scale: u32,
+}
+
+struct PlacementPreview {
+    component: usize,
+    rect: Rect,
+    clip: Rect,
+    valid: bool,
+    slot: Option<(usize, usize)>,
 }
 
 const GRIDS: [Binding; 2] = [Binding::Backpack, Binding::ContainerGrid];
@@ -47,22 +76,32 @@ struct GridView {
 }
 
 impl GridView {
-    fn area(&self, col: usize, row: i32, cells: [usize; 2]) -> Rect {
-        let edge = |at: i32| at * self.cell as i32 * self.scale as i32 / 100;
+    fn area(&self, col: i32, row: i32, cells: [usize; 2]) -> Rect {
+        let edge = |at: i32| (at * self.cell as i32 * self.scale as i32).div_euclid(100);
         // Euclidean rounding keeps a partially scrolled multi-cell item aligned
         // with the same cell boundaries as the visible rows.
         let y = |at: i32| (at * self.cell as i32 * self.scale as i32).div_euclid(100);
         Rect {
-            x: self.full.x + edge(col as i32),
+            x: self.full.x + edge(col),
             y: self.full.y + y(row),
-            w: (edge((col + cells[0]) as i32) - edge(col as i32)) as u32,
+            w: (edge(col + cells[0] as i32) - edge(col)) as u32,
             h: (y(row + cells[1] as i32) - y(row)) as u32,
         }
     }
 
+    fn cell_at(&self, point: (u32, u32)) -> Option<[i32; 2]> {
+        self.clip.contains(point).then(|| {
+            let axis = |pixel: u32, origin: i32| {
+                ((i64::from(pixel) - i64::from(origin) + 1) * 100 - 1)
+                    .div_euclid(i64::from(self.cell * self.scale)) as i32
+            };
+            [axis(point.0, self.full.x), axis(point.1, self.full.y)]
+        })
+    }
+
     fn item_area(&self, slot: usize, columns: usize, cells: [usize; 2]) -> Rect {
         self.area(
-            slot % columns,
+            (slot % columns) as i32,
             (slot / columns) as i32 - self.offset as i32,
             cells,
         )
@@ -159,9 +198,15 @@ impl Hud {
             return;
         }
         let scroll = self.inventory.scroll;
+        let vertical = self.inventory.vertical;
+        let error = self.inventory.error.take();
         let target = self.inventory.target.clone();
         match self.open_inventory(reader, world, target) {
-            Ok(()) => self.inventory.scroll = scroll,
+            Ok(()) => {
+                self.inventory.scroll = scroll;
+                self.inventory.vertical = vertical;
+                self.inventory.error = error;
+            }
             Err(error) => {
                 self.close_inventory();
                 self.inventory.error = Some(error);
@@ -233,39 +278,209 @@ impl Hud {
         true
     }
 
+    fn grid_item(&self, point: (u32, u32)) -> Option<(usize, GridView, &InventoryEntry)> {
+        (0..GRIDS.len()).find_map(|index| {
+            let (grid, contents) = self.grid(index)?;
+            if !grid.clip.contains(point) {
+                return None;
+            }
+            let item = contents.entries.iter().find(|item| {
+                grid.item_area(item.slot, contents.columns, item.cells)
+                    .contains(point)
+            })?;
+            Some((index, grid, item))
+        })
+    }
+
+    pub(in crate::viewer) fn begin_inventory_drag(&mut self, point: (u32, u32)) -> bool {
+        let Some((source, grid, item)) = self.grid_item(point) else {
+            return false;
+        };
+        let columns = self
+            .inventory
+            .contents(source)
+            .expect("visible grid")
+            .columns;
+        let [col, row] = grid.cell_at(point).expect("point over grid");
+        let rect = grid.item_area(item.slot, columns, item.cells);
+        self.inventory.drag = Some(Drag {
+            id: item.id.clone(),
+            source,
+            grab_cell: [
+                col - (item.slot % columns) as i32,
+                row + grid.offset as i32 - (item.slot / columns) as i32,
+            ],
+            grab_pixels: [point.0 as i32 - rect.x, point.1 as i32 - rect.y],
+            scale: grid.scale,
+        });
+        self.inventory.pointer = Some(point);
+        self.inventory.error = None;
+        true
+    }
+
+    pub(in crate::viewer) fn dragging_inventory(&self) -> bool {
+        self.inventory.drag.is_some()
+    }
+
+    pub(in crate::viewer) fn cancel_inventory_drag(&mut self) -> bool {
+        self.inventory.drag.take().is_some()
+    }
+
+    fn dragged_item(&self, drag: &Drag) -> Option<&InventoryEntry> {
+        self.inventory
+            .contents(drag.source)?
+            .entries
+            .iter()
+            .find(|item| item.id == drag.id)
+    }
+
+    fn preview(&self, drag: &Drag, point: (u32, u32)) -> Option<PlacementPreview> {
+        let item = self.dragged_item(drag)?;
+        for (index, binding) in GRIDS.into_iter().enumerate() {
+            let Some((grid, contents)) = self.grid(index) else {
+                continue;
+            };
+            let Some([col, row]) = grid.cell_at(point) else {
+                continue;
+            };
+            let x = col - drag.grab_cell[0];
+            let y = row - drag.grab_cell[1];
+            let absolute_row = y + grid.offset as i32;
+            let slot = (x >= 0 && absolute_row >= 0)
+                .then(|| absolute_row as usize * contents.columns + x as usize);
+            return Some(PlacementPreview {
+                component: self.placed_bound(binding)?,
+                rect: grid.area(x, y, item.cells),
+                clip: grid.clip,
+                valid: item.movable
+                    && (drag.source == index || item.removable)
+                    && slot.is_some_and(|slot| contents.fits(item, slot)),
+                slot: slot.map(|slot| (index, slot)),
+            });
+        }
+        let component = self.placed_bound(Binding::InventoryDrop)?;
+        let placement = self.placed[component].as_ref()?;
+        placement.rect.contains(point).then_some(PlacementPreview {
+            component,
+            rect: placement.full,
+            clip: placement.rect,
+            valid: drag.source == 0 && item.movable && item.removable,
+            slot: None,
+        })
+    }
+
+    pub(in crate::viewer) fn finish_inventory_drag(
+        &mut self,
+        reader: &mut InventoryReader,
+        world: &mut InteractiveWorld,
+        point: Option<(u32, u32)>,
+    ) {
+        let Some(drag) = self.inventory.drag.take() else {
+            return;
+        };
+        let Some(preview) = point.and_then(|point| self.preview(&drag, point)) else {
+            return;
+        };
+        if !preview.valid {
+            self.inventory.error = Some("Item cannot be placed at this destination".into());
+            return;
+        }
+        let result = if let Some((index, slot)) = preview.slot {
+            if index == drag.source
+                && self
+                    .dragged_item(&drag)
+                    .is_some_and(|item| item.slot == slot)
+            {
+                return;
+            }
+            reader.transfer(
+                world,
+                &drag.id,
+                self.inventory.owner(drag.source).expect("drag source"),
+                self.inventory.owner(index).expect("drag destination"),
+                Some(slot),
+            )
+        } else {
+            reader.drop_item(world, &drag.id)
+        };
+        self.inventory.error = result.err();
+    }
+
+    pub(in crate::viewer) fn quick_inventory_transfer(
+        &mut self,
+        reader: &mut InventoryReader,
+        world: &mut InteractiveWorld,
+        point: (u32, u32),
+    ) {
+        if let Some((index, _, item)) = self.grid_item(point)
+            && let (Some(from), Some(to)) =
+                (self.inventory.owner(index), self.inventory.owner(1 - index))
+        {
+            self.inventory.error = reader.transfer(world, &item.id, from, to, None).err();
+        }
+    }
+
+    pub(in crate::viewer) fn inventory_action(
+        &mut self,
+        reader: &mut InventoryReader,
+        world: &mut InteractiveWorld,
+        action: Action,
+    ) {
+        self.inventory.error = match action {
+            Action::InventoryTakeAll => self
+                .inventory
+                .target
+                .as_deref()
+                .and_then(|target| reader.take_all(world, target).err()),
+            Action::InventoryArrange => {
+                let result = reader.arrange(
+                    world,
+                    self.inventory.target.as_deref(),
+                    self.inventory.vertical,
+                );
+                if result.is_ok() {
+                    self.inventory.vertical = !self.inventory.vertical;
+                    self.inventory.scroll = [0; 2];
+                }
+                result.err()
+            }
+            _ => return,
+        };
+    }
+
     pub(super) fn inventory_hover(&mut self, point: Option<(u32, u32)>) -> bool {
         if !self.inventory_open() {
             return false;
         }
-        let mut id = None;
-        let message = point
-            .and_then(|point| {
-                for index in 0..GRIDS.len() {
-                    if let Some((grid, contents)) = self.grid(index)
-                        && grid.clip.contains(point)
-                        && let Some(item) = contents.entries.iter().find(|item| {
-                            grid.item_area(item.slot, contents.columns, item.cells)
+        let moved = std::mem::replace(&mut self.inventory.pointer, point) != point;
+        let item = if let Some(drag) = &self.inventory.drag {
+            self.dragged_item(drag)
+        } else {
+            point.and_then(|point| self.grid_item(point).map(|(_, _, item)| item))
+        };
+        let id = item.map(|item| item.id.clone());
+        let message = if let Some(error) = &self.inventory.error {
+            error.clone()
+        } else if let Some(item) = item {
+            item.name.clone()
+        } else {
+            point
+                .and_then(|point| {
+                    self.placed
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .find_map(|(index, placement)| {
+                            placement
+                                .as_ref()?
+                                .rect
                                 .contains(point)
+                                .then(|| self.components[index].config.hover_message.clone())
+                                .flatten()
                         })
-                    {
-                        id = Some(item.id.clone());
-                        return Some(item.name.clone());
-                    }
-                }
-                self.placed
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find_map(|(index, placement)| {
-                        placement
-                            .as_ref()?
-                            .rect
-                            .contains(point)
-                            .then(|| self.components[index].config.hover_message.clone())
-                            .flatten()
-                    })
-            })
-            .unwrap_or_default();
+                })
+                .unwrap_or_default()
+        };
         let item_changed = self.inventory.hovered != id;
         self.inventory.hovered = id;
         let changed = self
@@ -275,7 +490,7 @@ impl Hud {
         if changed {
             self.set_label(Binding::InventoryHover, &message);
         }
-        changed || item_changed
+        changed || item_changed || (moved && self.inventory.drag.is_some())
     }
 
     pub(super) fn inventory_draws(&self) -> impl Iterator<Item = OverlayDraw<'_>> {
@@ -283,6 +498,14 @@ impl Hud {
             .filter_map(|index| self.grid(index))
             .flat_map(move |(grid, contents)| {
                 contents.entries.iter().filter_map(move |item| {
+                    if self
+                        .inventory
+                        .drag
+                        .as_ref()
+                        .is_some_and(|drag| drag.id == item.id)
+                    {
+                        return None;
+                    }
                     let footprint = grid.item_area(item.slot, contents.columns, item.cells);
                     let asset = item.icon.as_ref().ok()?;
                     let rect = grid.icon_area(
@@ -299,6 +522,9 @@ impl Hud {
                 })
             });
         let highlight = (0..GRIDS.len()).find_map(|index| {
+            if self.inventory.drag.is_some() {
+                return None;
+            }
             let hot = self.inventory.hovered.as_ref()?;
             let asset = self.components[self.placed_bound(GRIDS[index])?].state_art[0].as_ref()?;
             let (grid, contents) = self.grid(index)?;
@@ -322,7 +548,49 @@ impl Hud {
             };
             Some(overlay(asset, rect, rect.intersect(placement.rect)?))
         });
-        highlight.into_iter().chain(icons).chain(thumb)
+        let placement = self.inventory.drag.as_ref().and_then(|drag| {
+            let preview = self.preview(drag, self.inventory.pointer?)?;
+            let asset = self.components[preview.component].state_art
+                [if preview.valid { 1 } else { 2 }]
+            .as_ref()?;
+            Some(overlay(
+                asset,
+                preview.rect,
+                preview.rect.intersect(preview.clip)?,
+            ))
+        });
+        let ghost = self.inventory.drag.as_ref().and_then(|drag| {
+            let point = self.inventory.pointer?;
+            let item = self.dragged_item(drag)?;
+            let (grid, contents) = self.grid(drag.source)?;
+            let asset = item.icon.as_ref().ok()?;
+            let origin = grid.item_area(item.slot, contents.columns, item.cells);
+            let mut rect = grid.icon_area(
+                item.slot,
+                contents.columns,
+                item.cells,
+                &asset.decoded.frame,
+            );
+            rect.x += point.0 as i32
+                - origin.x
+                - drag.grab_pixels[0] * grid.scale as i32 / drag.scale as i32;
+            rect.y += point.1 as i32
+                - origin.y
+                - drag.grab_pixels[1] * grid.scale as i32 / drag.scale as i32;
+            let viewport = Rect {
+                x: 0,
+                y: 0,
+                w: self.size.0,
+                h: self.size.1,
+            };
+            Some(overlay(asset, rect, rect.intersect(viewport)?))
+        });
+        highlight
+            .into_iter()
+            .chain(icons)
+            .chain(thumb)
+            .chain(placement)
+            .chain(ghost)
     }
 
     pub(super) fn inventory_diagnostics(&self) -> Value {
@@ -346,10 +614,36 @@ impl Hud {
             .iter()
             .position(|c| c.config.inventory_panel)
             .and_then(|index| self.placed.get(index)?.as_ref().map(|p| rect(p.rect)));
+        let drag = self.inventory.drag.as_ref().map(|drag| {
+            let preview = self.inventory.pointer.and_then(|point| self.preview(drag, point));
+            json!({"id":drag.id,"source":self.inventory.owner(drag.source),"preview":preview.map(|preview| {
+                json!({"bounds":rect(preview.rect),"valid":preview.valid,
+                    "owner":preview.slot.and_then(|(index, _)| self.inventory.owner(index)),
+                    "slot":preview.slot.map(|(_, slot)| slot)})
+            })})
+        });
+        let controls = self
+            .placed
+            .iter()
+            .enumerate()
+            .filter_map(|(index, placement)| {
+                let component = &self.components[index].config;
+                (matches!(
+                    component.action,
+                    Some(
+                        Action::InventoryTakeAll
+                            | Action::InventoryArrange
+                            | Action::InventoryScrollUp
+                            | Action::InventoryScrollDown
+                    )
+                ) || component.binding == Some(Binding::InventoryDrop))
+                .then_some((component.id.as_str(), rect(placement.as_ref()?.rect)))
+            })
+            .collect::<BTreeMap<_, _>>();
         json!({"mode":self.inventory.view,"container_id":self.inventory.target,
             "panel_bounds":panel_bounds,"lens_bounds":component_bounds(Binding::InventoryLens),
             "backpack":owner(0),"container":owner(1),"hovered_item":self.inventory.hovered,
-            "error":self.inventory.error})
+            "error":self.inventory.error,"drag":drag,"controls":controls})
     }
 }
 
@@ -383,6 +677,14 @@ mod tests {
             assert!(!visible.contains((full.x as u32, below.y as u32)));
             let icon = grid.icon_area(0, 10, [2, 2], &sprite([64, 64], [255; 4]));
             assert_eq!(icon.intersect(full), Some(visible));
+            for col in 0..10 {
+                let area = grid.area(col, 0, [1, 1]);
+                assert_eq!(grid.cell_at((area.x as u32, area.y as u32)), Some([col, 0]));
+                assert_eq!(
+                    grid.cell_at(((area.x + area.w as i32 - 1) as u32, area.y as u32)),
+                    Some([col, 0])
+                );
+            }
         }
     }
 

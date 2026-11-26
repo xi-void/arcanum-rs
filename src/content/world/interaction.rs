@@ -10,6 +10,7 @@ pub(super) enum Action {
     Travel(Destination),
     Door(Door),
     Container(crate::sector::objects::OriginalId),
+    Pickup(crate::sector::objects::OriginalId),
     Unsupported(String),
 }
 
@@ -367,6 +368,9 @@ impl SectorCache {
         (change.started + 2 * door.period).checked_sub(tick)
     }
     pub(super) fn target(&self, key: WorldOrder) -> Option<&Target> {
+        if let Some(target) = self.dropped_targets.get(&key) {
+            return Some(target);
+        }
         let tile = (key.1.2, key.1.1);
         self.entries
             .get(&tile_sector_id(tile))?
@@ -429,7 +433,9 @@ impl SectorCache {
             .rev()
             .filter(|raster| {
                 raster.key.0
-                    && (inspect || !raster.click_through)
+                    // CE sub_43D9F0 skips walls with OWAF_TRANS_LEFT or
+                    // OWAF_TRANS_RIGHT during object hit testing.
+                    && (inspect || (!raster.click_through && !self.faded_walls.contains_key(&raster.key)))
                     && !matches!(raster.object_light, ObjectLight::Roof)
                     && self.raster_revealed(raster)
             })
@@ -450,17 +456,21 @@ impl SectorCache {
             Action::Container(_) => &[0, 1, 2, 3, 4, 5, 6, 7],
             _ => &[1, 3, 5, 7],
         };
-        let container = matches!(target.action, Action::Container(_));
         let entries = &self.entries;
         let states = &self.door_states;
         let cell = |tile| Self::player_cell(entries, states, tile);
+        let reachable = |from| match &target.action {
+            Action::Container(_) => collision::can_reach_container(from, tile, cell),
+            Action::Pickup(_) => Self::can_reach_item(from, tile, cell),
+            _ => true,
+        };
         let candidates: Vec<_> = std::iter::once(tile)
             .chain(
                 directions
                     .iter()
                     .filter_map(|&direction| neighbor(tile, direction)),
             )
-            .filter(|&from| !container || collision::can_reach_container(from, tile, cell))
+            .filter(|&from| reachable(from))
             .collect();
         let player = self.player.as_mut()?;
         player.destination_near(&candidates, run, cell)
@@ -471,15 +481,14 @@ impl SectorCache {
         key: WorldOrder,
         tick: Duration,
     ) -> Option<Result<Option<Destination>, String>> {
-        let target = self.target(key)?;
+        let (sector, _) = self.entries.get(&tile_sector_id((key.1.2, key.1.1)))?;
+        let target = sector.interactions.get(&key)?;
         let player = self.player.as_ref()?;
         if player.moving() {
             return None;
         }
         let tile = player.tile();
         let facing = player.facing();
-        let (sector, _) = self.entries.get(&tile_sector_id(target.tile))?;
-        let target = &sector.interactions[&key];
         let near = match &target.action {
             Action::Door(door) => {
                 target.tile == tile || neighbor(target.tile, door.direction) == Some(tile)
@@ -511,7 +520,7 @@ impl SectorCache {
                 Some(Ok(Some(*dst)))
             }
             Action::Unsupported(reason) => Some(Err(reason.clone())),
-            Action::Container(_) => None,
+            Action::Container(_) | Action::Pickup(_) => None,
         }
     }
 

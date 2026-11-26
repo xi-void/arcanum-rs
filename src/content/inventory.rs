@@ -160,6 +160,17 @@ impl Grid {
         rows: usize,
         requested: Option<usize>,
     ) -> Option<usize> {
+        self.fit_ordered(id, [w, h], rows, requested, false)
+    }
+
+    pub fn fit_ordered(
+        &self,
+        id: OriginalId,
+        [w, h]: [usize; 2],
+        rows: usize,
+        requested: Option<usize>,
+        vertical: bool,
+    ) -> Option<usize> {
         if w == 0 || h == 0 || w > COLUMNS || h > rows {
             return None;
         }
@@ -174,7 +185,15 @@ impl Grid {
         };
         match requested {
             Some(slot) => free(slot).then_some(slot),
-            None => (0..rows * COLUMNS).find(|&slot| free(slot)),
+            None => (0..rows * COLUMNS)
+                .map(|index| {
+                    if vertical {
+                        index % rows * COLUMNS + index / rows
+                    } else {
+                        index
+                    }
+                })
+                .find(|&slot| free(slot)),
         }
     }
 }
@@ -252,6 +271,7 @@ mod tests {
         assert_eq!(grid.fit(id(1), [2, 2], rows, Some(110)), None);
         assert_eq!(grid.fit(id(1), [2, 2], rows, Some(108)), Some(108));
         grid.items.insert(id(1), (0, [2, 2]));
+        assert_eq!(grid.fit_ordered(id(2), [2, 2], rows, None, true), Some(20));
         assert_eq!(grid.fit(id(2), [1, 1], rows, Some(11)), None);
         assert_eq!(grid.fit(id(2), [2, 2], rows, None), Some(2));
         assert_eq!(grid.fit(id(1), [2, 2], rows, Some(1)), Some(1));

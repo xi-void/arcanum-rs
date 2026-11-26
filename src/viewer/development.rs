@@ -368,6 +368,7 @@ impl Viewer<'_> {
                     world.cancel_player_route();
                     if let Some(hud) = hud {
                         hud.cancel_press();
+                        hud.cancel_inventory_drag();
                     }
                     view.window.request_redraw();
                     self.update_control_flow(event_loop);
@@ -875,12 +876,12 @@ impl Viewer<'_> {
                 data
             }
             Request::Unlock => {
-                let selected = dev.selected.ok_or("Select a door first")?;
+                let selected = dev.selected.ok_or("Select a door or container first")?;
                 let changed = world
-                    .debug_unlock(selected)
+                    .debug_unlock(&mut dev.vfs, selected)
                     .map_err(|err| Failure::new("unsupported_operation", err))?;
                 json!({"unlocked":true,"changed":changed,"id":InteractiveWorld::debug_selection_id(selected),
-                    "message":"Use the door normally to open it."})
+                    "message":"Click the object normally to open it."})
             }
             Request::SetTime(hour) => {
                 let clock = self.clock.as_mut().ok_or("Game clock unavailable")?;

@@ -614,6 +614,9 @@ impl Viewer<'_> {
             world.cancel_player_route();
             *shift = false;
         }
+        if let ViewContent::Stream { hud: Some(hud), .. } = &mut self.content {
+            hud.cancel_inventory_drag();
+        }
         self.navigation = Navigation::default();
         self.player_deadline = None;
         self.animation_deadline = None;
@@ -638,6 +641,17 @@ impl Viewer<'_> {
                     && let Err(error) = hud.open_inventory(reader, world, None)
                 {
                     eprintln!("Inventory: {error}");
+                }
+            }
+            hud::Action::InventoryTakeAll | hud::Action::InventoryArrange => {
+                if let ViewContent::Stream {
+                    hud: Some(hud),
+                    inventory_reader: Some(reader),
+                    world,
+                    ..
+                } = &mut self.content
+                {
+                    hud.inventory_action(reader, world, action);
                 }
             }
             hud::Action::InventoryScrollUp | hud::Action::InventoryScrollDown => {
@@ -719,10 +733,14 @@ impl Viewer<'_> {
         if let ViewContent::Stream {
             map_ui: Some(map),
             world,
+            hud,
             ..
         } = &mut self.content
         {
             map.close();
+            if let Some(hud) = hud {
+                hud.set_label(hud::Binding::InventoryHover, "");
+            }
             self.paused_for += self.map_since.take().expect("open map timestamp").elapsed();
             self.player_deadline = world.player_moving().then(Instant::now);
             if let Some(view) = &mut self.view {
@@ -769,7 +787,7 @@ impl Viewer<'_> {
                         }
                         hud.layout_with_panel(viewport, map.panel_size())
                     });
-                    let map = map.prepare(viewport, self.cursor, band);
+                    let map = map.prepare(viewport, self.cursor, band, hud.as_deref_mut());
                     let camera = last_presented.as_ref().unwrap_or(camera);
                     if let Some([w, h]) = map.lens_size()
                         && let Some((rect, _)) = map.bounds(hud::Binding::PlayerLens)
@@ -1131,6 +1149,15 @@ impl ApplicationHandler for Viewer<'_> {
                             }
                             redraw = true;
                         }
+                        if let Some(item) = world.take_pickup_request()
+                            && let Some(reader) = inventory_reader
+                        {
+                            if let Err(error) = reader.pickup(world, &item) {
+                                eprintln!("Pickup: {error}");
+                                view.window.set_title(&format!("Arcanum-RS | {error}"));
+                            }
+                            redraw = true;
+                        }
                         transition = world.take_transition();
                         if transition.is_some() {
                             world.cancel_player_route();
@@ -1251,7 +1278,7 @@ impl ApplicationHandler for Viewer<'_> {
                         let command = menu.back();
                         self.menu_action(command, event_loop);
                     } else if let ViewContent::Stream { hud: Some(hud), .. } = &mut self.content
-                        && hud.close_inventory()
+                        && (hud.cancel_inventory_drag() || hud.close_inventory())
                     {
                         self.view.as_ref().unwrap().window.request_redraw();
                     } else {
@@ -1348,11 +1375,16 @@ impl ApplicationHandler for Viewer<'_> {
         if let ViewContent::Stream {
             hud: Some(hud),
             shift,
+            inventory_reader,
+            world,
             ..
         } = &mut self.content
         {
             let view = self.view.as_ref().unwrap();
             let size = view.window.inner_size();
+            if let Some(reader) = inventory_reader {
+                hud.refresh_inventory(reader, world);
+            }
             hud.layout((size.width, size.height));
             if let WindowEvent::KeyboardInput {
                 event: key,
@@ -1397,8 +1429,50 @@ impl ApplicationHandler for Viewer<'_> {
                 view.window.request_redraw();
             }
             let hit = self.cursor.map_or(hud::Hit::World, |point| hud.hit(point));
-            if matches!(event, WindowEvent::Focused(false)) && hud.cancel_press() {
-                view.window.request_redraw();
+            if matches!(
+                event,
+                WindowEvent::Focused(false) | WindowEvent::CursorLeft { .. }
+            ) {
+                let cancelled = hud.cancel_inventory_drag();
+                if cancelled | hud.cancel_press() {
+                    view.window.request_redraw();
+                }
+            }
+            if let WindowEvent::MouseInput { button, state, .. } = event
+                && let Some(reader) = inventory_reader
+                && hud.inventory_open()
+            {
+                if hud.dragging_inventory() {
+                    if !state.is_pressed() {
+                        match button {
+                            MouseButton::Left => {
+                                hud.finish_inventory_drag(reader, world, self.cursor)
+                            }
+                            MouseButton::Right => {
+                                hud.cancel_inventory_drag();
+                            }
+                            _ => {}
+                        }
+                        view.window.request_redraw();
+                    }
+                    return;
+                }
+                if let Some(point) = self.cursor {
+                    match (button, state) {
+                        (MouseButton::Left, ElementState::Pressed)
+                            if hud.begin_inventory_drag(point) =>
+                        {
+                            view.window.request_redraw();
+                            return;
+                        }
+                        (MouseButton::Right, ElementState::Released) => {
+                            hud.quick_inventory_transfer(reader, world, point);
+                            view.window.request_redraw();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
             }
             if matches!(
                 event,
@@ -1431,6 +1505,8 @@ impl ApplicationHandler for Viewer<'_> {
                                 hud::Action::ToggleInventory
                                     | hud::Action::InventoryScrollUp
                                     | hud::Action::InventoryScrollDown
+                                    | hud::Action::InventoryArrange
+                                    | hud::Action::InventoryTakeAll
                             ) {
                                 hud.press(self.cursor.unwrap());
                                 view.window.request_redraw();
@@ -1458,7 +1534,11 @@ impl ApplicationHandler for Viewer<'_> {
                     _ => {}
                 }
             }
-            if hud.inventory_open() && matches!(event, WindowEvent::MouseInput { .. }) {
+            if hud.inventory_open()
+                && (matches!(event, WindowEvent::MouseInput { .. })
+                    || (hud.dragging_inventory()
+                        && matches!(event, WindowEvent::MouseWheel { .. })))
+            {
                 return;
             }
         }

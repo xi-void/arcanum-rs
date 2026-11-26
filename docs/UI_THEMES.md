@@ -88,10 +88,17 @@ launch with the existing executable and `--ui path/to/copy`.
 
 Click the Classic bag button or press **I** to open or close the inventory.
 Click an accessible original container in the world to approach and open its
-loot panel. **Escape** closes the active panel. The mouse wheel and original
-arrow buttons scroll the container grid. Point to an item to see its footprint
-and name in the HUD. Dragging, equipment transactions, statistics, arrange,
-use, drop, and take-all are outside this interface milestone.
+loot panel. The mouse wheel and arrow buttons scroll the container grid.
+Point to an item to see its footprint and name in the HUD. Drag items within
+or between the grids, or right-click an item in the loot panel to transfer
+it to the opposite grid's first available space. **Take All** moves items
+that fit in the backpack. **Arrange** packs open grids by footprint,
+alternating between rows and columns.
+
+Drag a backpack item to the Drop box to place it at the player's feet.
+Click a ground item to approach and pick it up. **Escape** cancels the
+active drag, then closes the panel on a second press. Use and equipment
+controls are inactive.
 
 A package can opt in with a center-anchored root using
 `inventory_panel = true`, zero offset, and `capture = true`. The root is
@@ -102,10 +109,14 @@ where a component is placed. Add `action = "toggle-inventory"` to a HUD button.
 - Use `binding = "backpack"` or `"container-grid"` with `cell` in theme
   pixels. The width must match the runtime's ten columns. Grid height
   determines visible rows. `hover_fill` supplies the item footprint tint.
+  Set `valid_drop_fill` and `invalid_drop_fill` to customize placement feedback.
+- Use `inventory-arrange` and `inventory-take-all` actions for Arrange and
+  Take All. Use `binding = "inventory-drop"` for the Drop target.
 - Use `binding = "inventory-lens"` below the inset border ART. This
   component receives the live scene from the shared Vulkan compositor.
 - Use `binding = "inventory-hover"` with a font for item names and
-  optional component `hover_message` values.
+  optional component `hover_message` values. This bottom HUD label also
+  displays hovered atlas location descriptions while the map is open.
 - Place `inventory-scroll-up` and `inventory-scroll-down` actions next to a
   `container-thumb` binding covering the track. Bind the thumb's ART and
   top cap height with `image` and `thumb_height`. Optional `thumb_middle`
