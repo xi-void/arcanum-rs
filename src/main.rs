@@ -1535,6 +1535,18 @@ fn show_world(
         } else {
             None
         };
+        let audio = if playing {
+            let vfs = inspection_vfs(game, mount_options, policy)?;
+            match viewer::Audio::start(vfs, config.audio.normalized()) {
+                Ok(audio) => Some(audio),
+                Err(error) => {
+                    eprintln!("Cannot start native audio worker: {error}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let travel: Option<viewer::TravelLoader<'_>> = if playing {
             Some(Box::new(
                 move |current, previous, dst, facing, viewport, current_hour, mode| {
@@ -1629,9 +1641,11 @@ fn show_world(
                         lighting: config.display.lighting,
                         shadows: config.display.shadows,
                         run: config.input.run,
+                        audio: config.audio.normalized(),
                     },
                     preferences,
                     pause_theme,
+                    audio,
                     ui_scale: ui_scale.unwrap_or(100),
                 },
             },

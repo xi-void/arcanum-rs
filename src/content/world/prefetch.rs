@@ -240,6 +240,12 @@ pub enum DeveloperAction {
     ToggleCollision,
 }
 
+/// Sound cues emitted by committed gameplay actions.
+pub enum SoundEvent {
+    Effect(i32),
+    Footstep { surface: u8, armor: u8 },
+}
+
 /// Owns prepared raster resources on the presentation thread.
 pub struct InteractiveWorld {
     pub(super) map: String,
@@ -260,6 +266,8 @@ pub struct InteractiveWorld {
     view_hold: Duration,
     trace: bool,
     player_started: bool,
+    gait_frame: Option<usize>,
+    sounds: std::collections::VecDeque<SoundEvent>,
     transition: Option<(Destination, u8)>,
     pending_use: Option<WorldOrder>,
     container_request: Option<crate::sector::objects::OriginalId>,
@@ -312,6 +320,8 @@ impl InteractiveWorld {
             view_hold: Duration::ZERO,
             trace,
             player_started: false,
+            gait_frame: None,
+            sounds: Default::default(),
             transition: None,
             pending_use: None,
             container_request: None,
@@ -573,6 +583,23 @@ impl InteractiveWorld {
         Some((tile, sector.townmap))
     }
 
+    pub fn sound_location(&self) -> Option<(&str, Option<[i32; 2]>, u8)> {
+        let player = self.cache.player.as_ref()?;
+        let (sector, _) = self.cache.entries.get(&tile_sector_id(player.tile()))?;
+        let schemes = (sector.sound_schemes != [0; 2]).then_some(sector.sound_schemes);
+        Some((&self.map, schemes, self.cache.hour))
+    }
+
+    pub(super) fn queue_sound(&mut self, sound: SoundEvent) {
+        if self.sounds.len() < 64 {
+            self.sounds.push_back(sound);
+        }
+    }
+
+    pub fn take_sounds(&mut self) -> impl Iterator<Item = SoundEvent> + '_ {
+        self.sounds.drain(..)
+    }
+
     pub fn player_moving(&self) -> bool {
         self.pending_use.is_some()
             || self.wait_for_door.is_some()
@@ -792,6 +819,23 @@ impl InteractiveWorld {
         let player = self.cache.player.as_ref().unwrap();
         let facing_now = player.facing();
         let moving = player.moving();
+        let gait_frame = pose.gait_frame;
+        let (x, y) = pose.tile;
+        let footstep = if self.gait_frame != gait_frame && matches!(gait_frame, Some(3 | 8)) {
+            let surface = self
+                .cache
+                .entries
+                .get(&tile_sector_id(pose.tile))
+                .and_then(|(sector, _)| sector.sound_surfaces.as_ref())
+                .map_or(0, |tiles| tiles[((y & 63) * 64 + (x & 63)) as usize]);
+            Some(SoundEvent::Footstep {
+                surface,
+                armor: ((player.appearance.art >> 20) & 15) as u8,
+            })
+        } else {
+            None
+        };
+        self.gait_frame = gait_frame;
         if let Some((_, _, tile, facing)) = before
             && tile != player.tile()
         {
@@ -812,6 +856,9 @@ impl InteractiveWorld {
             }
             self.cache.refresh_roofs();
         }
+        if let Some(footstep) = footstep {
+            self.queue_sound(footstep);
+        }
         if self.transition.is_none()
             && !moving
             && let Some(key) = self.pending_use.take()
@@ -828,7 +875,12 @@ impl InteractiveWorld {
                 _ => {}
             }
             let facing = facing_now;
-            match self.cache.use_target(key, now) {
+            let mut sound = None;
+            let result = self.cache.use_target(key, now, &mut sound);
+            if let Some(id) = sound {
+                self.queue_sound(SoundEvent::Effect(id));
+            }
+            match result {
                 Some(Ok(Some(dst))) => self.transition = Some((dst, facing)),
                 Some(Err(error)) => {
                     self.notice = Some(error);

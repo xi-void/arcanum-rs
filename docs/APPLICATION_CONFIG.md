@@ -1,6 +1,6 @@
 # Application configuration
 
-Build with `cargo build --locked --release --features windowed`. Copy the
+On Linux, the windowed build requires ALSA development headers (`libasound2-dev` on Debian and Ubuntu, `alsa-lib` on Arch). Build with `cargo build --locked --release --features windowed`. Copy the
 [example configuration](config.example.toml) to
 `$XDG_CONFIG_HOME/arcanum-rs/config.toml`, or to
 `~/.config/arcanum-rs/config.toml` when `XDG_CONFIG_HOME` is empty, unset or
@@ -23,6 +23,7 @@ arguments and work independently of the play configuration.
 | Root | `game_data` | Positional installation directory |
 | `window` | `width`, `height` in physical pixels, `fullscreen` (borderless) | `--window-size WIDTH HEIGHT`, `--fullscreen`, `--windowed` |
 | `display` | `lighting`, `shadows` | `--lighting-on`, `--lighting-off`, `--shadows`, `--no-shadows` |
+| `audio` | `effects`, `voice`, `music` (0–10, with 0 muted) | |
 | `ui` | `hud`, `map`, `pause`, `scale` | `--ui classic\|off\|PATH`, `--map-ui PATH`, `--ui-scale PERCENT` |
 | `camera` | `zoom`, `follow` | `--zoom 1\|2\|3`, `--follow`, `--no-follow` |
 | `input` | `run` | `--run`, `--walk-by-default` |
@@ -46,7 +47,10 @@ when `ui.scale` is absent.
 
 The engine saves changed preferences on clean exit. This includes shared UI
 scale from the HUD, inventory, pause menu or maps, camera zoom, lighting, shadows and the
-default movement gait. The saved UI value is the requested percentage, so a
+default movement gait. **Escape → Options** opens the Classic Game, Video
+and Sound categories. **Done** saves changed preferences and returns to the pause
+menu. Sound controls take effect immediately. Effects also adjusts the ambient
+channel. Voice preferences apply independently of music and effects. The saved UI value is the requested percentage, so a
 temporary viewport constraint does not reduce the saved preference. Window
 resizing affects the current session. CLI overrides and diagnostic snapshot
 restoration are session-local. If you subsequently change an overridden value

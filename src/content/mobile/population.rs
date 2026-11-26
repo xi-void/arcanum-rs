@@ -331,6 +331,8 @@ impl Effective {
             critter_flags: explicit.critter_flags.or(defaults.critter_flags),
             critter_flags2: explicit.critter_flags2.or(defaults.critter_flags2),
             spell_flags: explicit.spell_flags.or(defaults.spell_flags),
+            material: explicit.material.or(defaults.material),
+            sound_effect: explicit.sound_effect.or(defaults.sound_effect),
             use_script: explicit.use_script.or(defaults.use_script),
             unlock_script: explicit.unlock_script.or(defaults.unlock_script),
         };

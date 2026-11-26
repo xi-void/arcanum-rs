@@ -450,6 +450,7 @@ pub struct RoomOverview {
     pub object_list_failed: bool,
     pub(super) townmap: u32,
     pub(super) aptitude: i32,
+    pub(super) sound_schemes: [i32; 2],
     pub(super) roof_words: Vec<(usize, u32)>,
     pub(super) collision: Option<super::collision::Collision>,
 }
@@ -692,8 +693,11 @@ fn load_overview_timed(
     } else {
         0
     };
-    let (townmap, aptitude) =
-        crate::sector::objects::townmap_and_aptitude(&bytes, floor.tile_offset).unwrap_or_default();
+    let crate::sector::objects::SectorProperties {
+        townmap,
+        aptitude,
+        sound_schemes,
+    } = crate::sector::objects::sector_properties(&bytes, floor.tile_offset).unwrap_or_default();
     let aptitude = if source.virtual_path.starts_with("terrain/") {
         0
     } else {
@@ -783,6 +787,7 @@ fn load_overview_timed(
                 object_list_failed: true,
                 townmap,
                 aptitude,
+                sound_schemes,
                 roof_words,
                 collision: None,
             });
@@ -1012,6 +1017,7 @@ fn load_overview_timed(
         object_list_failed: false,
         townmap,
         aptitude,
+        sound_schemes,
         roof_words,
         collision,
         traps: objects.traps,

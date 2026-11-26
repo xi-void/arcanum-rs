@@ -193,6 +193,24 @@ is exposed in `pos.result.ui.save_directory`. For isolated tests, set
 With tracing enabled, `events` can report `save_written`, `save_loaded`,
 `save_deleted` and `save_operation_failed`. See [Native savegames](SAVEGAMES.md).
 
+## Native audio and Options
+
+Open **Escape → Options** with native input and use
+`pos.result.ui.pause_menu.controls` for physical click bounds. The active
+category is in `pos.result.ui.pause_menu.category`. Use `[` or `]` to exercise
+the shared scale. The Sound controls have arrow buttons and clickable,
+draggable bar fills, with ten steps and zero for mute.
+
+`pos.result.audio` shows configured volumes and mixer gains. The output
+reports the audio stream configuration, applied map and scheme IDs, current
+hour, active loop paths, and the last 32 started clips with winning VFS
+mounts. It also reports the last startup or resource error and read/cache
+counters. Audio is reconstructed from the saved location and game hour.
+A save does not contain the current playback offset or mixer preferences.
+Use an OS audio monitor or listen to the output when confirming samples reach
+the device. For location tests, check the output again after
+`coc` or a native load and after `settime` changes the game hour.
+
 ## Diagnostic snapshots
 
 ```sh

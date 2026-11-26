@@ -1,5 +1,6 @@
 //! Classic in-play menu and the shared save/load shell.
 use super::{ThemeSource, hud, menu};
+mod options;
 use arcanum_rs::{
     art::SpriteFrame,
     content::{
@@ -66,6 +67,7 @@ struct Layout {
     thumb_bottom: Button,
     yes: Button,
     no: Button,
+    options: Option<options::OptionsLayout>,
 }
 
 #[derive(Deserialize)]
@@ -111,6 +113,7 @@ impl Layout {
 pub(crate) struct Classic {
     pub(super) source: ThemeSource,
     layout: Layout,
+    options: options::Theme,
     strings: Mes,
     art: [Asset; 7],
     buttons: BTreeMap<Control, Vec<Asset>>,
@@ -126,11 +129,19 @@ enum Style {
     Selected,
     Pause,
     PauseHover,
+    OptionHeading,
+    OptionInactive,
+    OptionInactiveValue,
+    OptionValue,
+    OptionNav,
+    OptionNavHover,
+    OptionNavShadow,
+    OptionNavHighlight,
 }
 
 impl Classic {
     pub(crate) fn load(source: &ThemeSource, vfs: &mut Vfs) -> Result<Self, Box<dyn Error>> {
-        let layout: Layout = toml::from_str(&source.read(64 * 1024)?)?;
+        let mut layout: Layout = toml::from_str(&source.read(64 * 1024)?)?;
         if layout.canvas.iter().any(|&d| !(1..=4096).contains(&d))
             || !(1..=256).contains(&layout.row_height)
             || layout.list[3] < layout.row_height
@@ -186,7 +197,21 @@ impl Classic {
         let strings = load_mes(vfs, &layout.strings)?.mes;
         let font = hud::console_font(vfs, source, &layout.font)?;
         let menu_font = hud::console_font(vfs, source, &layout.menu_font)?;
+        let options = match layout.options.take() {
+            Some(layout) => options::Theme::load(layout, source, vfs, &mut files)?,
+            None => {
+                let classic = ThemeSource::embedded_pause();
+                let mut fallback: Layout = toml::from_str(&classic.read(64 * 1024)?)?;
+                options::Theme::load(
+                    fallback.options.take().expect("built-in Options layout"),
+                    &classic,
+                    vfs,
+                    &mut Vfs::new(Policy::Ordered),
+                )?
+            }
+        };
         Ok(Self {
+            options,
             source: source.clone(),
             layout,
             strings,
@@ -204,17 +229,11 @@ impl Classic {
     }
 
     fn transform(&self, size: Point, scale: u16) -> Transform {
-        let [w, h] = self.layout.canvas.map(|n| n as f32);
-        let factor = (f32::from(scale) / 100.)
-            .min(size[0] as f32 / w)
-            .min(size[1] as f32 / h);
-        Transform {
-            factor,
-            anchor: [
-                (size[0] as f32 - w * factor) / 2.,
-                (size[1] as f32 - h * factor) / 2.,
-            ],
-        }
+        Transform::fit(self.layout.canvas, size, scale)
+    }
+
+    fn options_transform(&self, size: Point, scale: u16) -> Transform {
+        Transform::fit(self.options.canvas(), size, scale)
     }
 
     fn rect(&self, control: Control) -> Rect {
@@ -263,6 +282,24 @@ impl Classic {
                     Style::Selected => (&self.font, self.layout.selected_color),
                     Style::Pause => (&self.menu_font, self.layout.menu_color),
                     Style::PauseHover => (&self.menu_font, self.layout.menu_hover_color),
+                    Style::OptionHeading => (
+                        &self.options.heading_font,
+                        self.options.layout.heading_color,
+                    ),
+                    Style::OptionInactive => (
+                        &self.options.heading_font,
+                        self.options.layout.inactive_color,
+                    ),
+                    Style::OptionInactiveValue => (&self.font, self.options.layout.inactive_color),
+                    Style::OptionValue => (&self.font, self.options.layout.value_color),
+                    Style::OptionNav => (&self.menu_font, self.options.layout.nav_color),
+                    Style::OptionNavHover => (&self.menu_font, self.options.layout.nav_hover_color),
+                    Style::OptionNavShadow => {
+                        (&self.menu_font, self.options.layout.nav_shadow_color)
+                    }
+                    Style::OptionNavHighlight => {
+                        (&self.menu_font, self.options.layout.nav_highlight_color)
+                    }
                 };
                 let (width, height, pixels) = text_pixels(font, text, *max_width, color);
                 frame("pause/text", (width, height), pixels)
@@ -349,24 +386,16 @@ impl Classic {
         let mut out = Frame {
             transform: self.transform(size, scale),
             parts: Vec::new(),
+            options_lens: None,
+            backdrop: None,
         };
         if let Some(options) = &menu.options {
-            let asset = options.frame(settings, "VULKAN");
-            let w = asset.decoded.frame.width * u32::from(settings.zoom);
-            let h = asset.decoded.frame.height * u32::from(settings.zoom);
-            out.transform = Transform {
-                factor: 1.,
-                anchor: [0., 0.],
-            };
-            out.push(
-                &asset,
-                [
-                    size[0].saturating_sub(w) / 2,
-                    size[1].saturating_sub(h) / 2,
-                    w,
-                    h,
-                ],
-            );
+            out.transform = self.options_transform(size, scale);
+            out.backdrop = Some((
+                Arc::clone(&self.black),
+                [0., 0., size[0] as f32, size[1] as f32],
+            ));
+            self.render_options(&mut out, options, settings);
             return out;
         }
         if let Some(screen) = menu.slots_screen {
@@ -586,6 +615,20 @@ struct Transform {
 }
 
 impl Transform {
+    fn fit(canvas: Point, size: Point, scale: u16) -> Self {
+        let [w, h] = canvas.map(|n| n as f32);
+        let factor = (f32::from(scale) / 100.)
+            .min(size[0] as f32 / w)
+            .min(size[1] as f32 / h);
+        Transform {
+            factor,
+            anchor: [
+                (size[0] as f32 - w * factor) / 2.,
+                (size[1] as f32 - h * factor) / 2.,
+            ],
+        }
+    }
+
     fn rect(self, [x, y, w, h]: Rect) -> [f32; 4] {
         let [left, top] = self.anchor;
         let s = self.factor;
@@ -606,6 +649,8 @@ impl Transform {
 pub(super) struct Frame {
     transform: Transform,
     parts: Vec<(Asset, Rect, Rect)>,
+    options_lens: Option<(Rect, Asset)>,
+    backdrop: Option<(Asset, [f32; 4])>,
 }
 
 impl Frame {
@@ -617,12 +662,39 @@ impl Frame {
         self.parts.push((Arc::clone(asset), rect, clip));
     }
 
-    pub(super) fn draws(&self) -> impl Iterator<Item = OverlayDraw<'_>> {
-        self.parts.iter().map(|(asset, rect, clip)| OverlayDraw {
-            asset,
-            rect: self.transform.rect(*rect),
-            clip: self.transform.rect(*clip),
+    pub(super) fn lens_size(&self) -> Option<(u32, u32)> {
+        self.options_lens.as_ref().map(|([_, _, w, h], _)| (*w, *h))
+    }
+
+    pub(super) fn lens_draws<'a>(
+        &'a self,
+        inset: Option<&'a Asset>,
+    ) -> impl Iterator<Item = OverlayDraw<'a>> {
+        self.options_lens.iter().flat_map(move |(rect, frame)| {
+            inset
+                .into_iter()
+                .chain(std::iter::once(frame))
+                .map(move |asset| OverlayDraw {
+                    asset,
+                    rect: self.transform.rect(*rect),
+                    clip: self.transform.rect(*rect),
+                })
         })
+    }
+
+    pub(super) fn draws(&self) -> impl Iterator<Item = OverlayDraw<'_>> {
+        self.backdrop
+            .iter()
+            .map(|(asset, rect)| OverlayDraw {
+                asset,
+                rect: *rect,
+                clip: *rect,
+            })
+            .chain(self.parts.iter().map(|(asset, rect, clip)| OverlayDraw {
+                asset,
+                rect: self.transform.rect(*rect),
+                clip: self.transform.rect(*clip),
+            }))
     }
 }
 
@@ -668,7 +740,7 @@ pub(super) enum Command {
 #[derive(Default)]
 pub(super) struct Menu {
     slots_screen: Option<SlotScreen>,
-    pub(super) options: Option<menu::Menu>,
+    pub(super) options: Option<options::Options>,
     confirm: Option<Confirm>,
     focus: Option<usize>,
     hover: Option<Control>,
@@ -775,7 +847,7 @@ impl Menu {
                 self.refresh(store, theme);
                 self.hover = None;
             }
-            Control::Pause(2) => self.options = Some(menu::Menu::new()),
+            Control::Pause(2) => self.options = Some(options::Options::default()),
             Control::Pause(3) => self.confirm = Some(Confirm::Quit),
             Control::Pause(4) => return Command::Continue,
             Control::Row(row) => self.select(Some(row + self.top), theme, store.ok()),
@@ -963,6 +1035,10 @@ impl Menu {
         Command::Stay
     }
 
+    pub(super) fn has_hover(&self) -> bool {
+        self.hover.is_some()
+    }
+
     pub(super) fn editing(&self) -> bool {
         self.slots_screen == Some(SlotScreen::Save)
             && self.selected == Some(0)
@@ -970,14 +1046,13 @@ impl Menu {
     }
 
     pub(super) fn diagnostic(&self, theme: &Classic, size: Point, scale: u16) -> serde_json::Value {
-        let screen = if self.options.is_some() {
-            "options"
-        } else {
-            match self.slots_screen {
-                Some(SlotScreen::Save) => "save",
-                Some(SlotScreen::Load) => "load",
-                None => "pause",
-            }
+        if let Some(options) = &self.options {
+            return options.diagnostic(theme, size, scale);
+        }
+        let screen = match self.slots_screen {
+            Some(SlotScreen::Save) => "save",
+            Some(SlotScreen::Load) => "load",
+            None => "pause",
         };
         let transform = theme.transform(size, scale);
         let controls: BTreeMap<_, _> = [

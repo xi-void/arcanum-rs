@@ -13,6 +13,7 @@ pub(crate) struct Config {
     pub game_data: Option<PathBuf>,
     pub window: Window,
     pub display: Display,
+    pub audio: Audio,
     pub ui: Ui,
     pub camera: Camera,
     pub input: Input,
@@ -50,6 +51,34 @@ impl Default for Display {
         Self {
             lighting: true,
             shadows: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, serde::Serialize)]
+#[serde(default)]
+pub(crate) struct Audio {
+    pub effects: u8,
+    pub voice: u8,
+    pub music: u8,
+}
+
+impl Default for Audio {
+    fn default() -> Self {
+        Self {
+            effects: 5,
+            voice: 5,
+            music: 5,
+        }
+    }
+}
+
+impl Audio {
+    pub(crate) fn normalized(self) -> Self {
+        Self {
+            effects: self.effects.min(10),
+            voice: self.voice.min(10),
+            music: self.music.min(10),
         }
     }
 }
@@ -151,6 +180,12 @@ impl ConfigFile {
             .insert(key.into(), value.into());
     }
 
+    pub(crate) fn flush(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.save()?;
+        self.changes.clear();
+        Ok(())
+    }
+
     pub(crate) fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
         if self.changes.is_empty() {
             return Ok(());
@@ -232,8 +267,23 @@ mod tests {
         assert_eq!(merged.ui.scale, Some(150));
         assert_eq!(merged.ui.hud_scale, Some(125));
         assert_eq!(merged.camera.zoom, 2);
+        second.set("audio", "effects", 0_i64);
+        second.set("audio", "voice", 7_i64);
+        second.flush().unwrap();
+        let (_, audio) = ConfigFile::load(path.clone()).unwrap();
+        assert_eq!(
+            audio.audio,
+            Audio {
+                effects: 0,
+                voice: 7,
+                music: 5
+            }
+        );
+        assert!(second.changes.is_empty());
         fs::write(&path, "invalid = [").unwrap();
-        assert!(second.save().is_err());
+        second.set("audio", "music", 8_i64);
+        assert!(second.flush().is_err());
+        assert!(!second.changes.is_empty());
         assert_eq!(fs::read_to_string(path).unwrap(), "invalid = [");
         fs::remove_dir_all(dir).unwrap();
     }

@@ -183,6 +183,7 @@ pub struct ImportedPortal {
     pub paired_wall_index: usize,
     pub(super) use_script: i32,
     pub(super) unlock_script: i32,
+    pub(super) sound_effect: Option<i32>,
 }
 
 impl ImportedPortal {
@@ -264,6 +265,10 @@ impl PortalImport {
             pixel_offset: appearance.offset,
         };
         Ok(ImportedPortal {
+            sound_effect: record
+                .fields
+                .sound_effect
+                .or(prototype.appearance.sound_effect),
             unlock_script: record
                 .fields
                 .unlock_script

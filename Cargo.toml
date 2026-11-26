@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-windowed = ["dep:winit", "dep:wgpu", "dep:pollster", "dep:bytemuck", "dep:png"]
+windowed = ["dep:winit", "dep:wgpu", "dep:pollster", "dep:bytemuck", "dep:png", "dep:rodio"]
 
 [dependencies]
 cap-fs-ext = "4.0.3"
@@ -20,6 +20,7 @@ pollster = { version = "0.4.0", optional = true }
 bytemuck = { version = "1.24", optional = true, features = ["derive"] }
 serde_json = "1"
 png = { version = "0.18", optional = true }
+rodio = { version = "0.21", default-features = false, features = ["playback", "symphonia-mp3", "symphonia-wav", "symphonia-adpcm", "symphonia-pcm"], optional = true }
 
 [[bench]]
 name = "baseline"

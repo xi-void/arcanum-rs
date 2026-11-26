@@ -24,6 +24,7 @@ pub(super) struct Door {
     pub originally_open: bool,
     pub direction: u8,
     pub(super) flags: u32,
+    sound_effect: Option<i32>,
     unlock_script: i32,
     unlock: Result<(), String>,
     frames: [(Arc<LoadedFrame>, (i32, i32)); 4],
@@ -268,6 +269,7 @@ pub(super) fn prepare(
                     direction: art.rotation | 1,
                     originally_open: art.frame != 0,
                     flags: portal.appearance.portal_flags,
+                    sound_effect: portal.sound_effect,
                     unlock_script: portal.unlock_script,
                     unlock: if portal.unlock_script > 0 {
                         super::super::jumps::unlock_for_new_game(vfs, portal.unlock_script)
@@ -538,6 +540,7 @@ impl SectorCache {
         &mut self,
         key: WorldOrder,
         tick: Duration,
+        sound: &mut Option<i32>,
     ) -> Option<Result<Option<Destination>, String>> {
         let (sector, _) = self.entries.get(&tile_sector_id((key.1.2, key.1.1)))?;
         let target = sector.interactions.get(&key)?;
@@ -559,6 +562,23 @@ impl SectorCache {
         match &target.action {
             Action::Door(door) => {
                 let result = self.door_states.change(door, tick, self.hour);
+                let offset = match &result {
+                    Ok(true) => Some(0),
+                    Ok(false) => Some(1),
+                    Err(_)
+                        if door
+                            .may_open(self.hour, self.door_states.1.contains(&door.id))
+                            .is_err() =>
+                    {
+                        Some(2)
+                    }
+                    Err(_) => None,
+                };
+                *sound = door
+                    .sound_effect
+                    .filter(|&id| id > 0)
+                    .zip(offset)
+                    .and_then(|(id, offset)| id.checked_add(offset));
                 Some(result.map(|open| {
                     eprintln!(
                         "Door {:?} record {} at {:?} {}",
@@ -682,6 +702,7 @@ mod tests {
 
         // Unlock changes permission, while the original door stays solid until opened.
         let mut ordinary = Door {
+            sound_effect: None,
             id: door.id,
             originally_open: false,
             direction: door.direction,

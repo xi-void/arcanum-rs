@@ -35,6 +35,8 @@ pub struct AppearanceFields {
     pub critter_flags: Option<u32>,
     pub critter_flags2: Option<u32>,
     pub spell_flags: Option<u32>,
+    pub material: Option<u32>,
+    pub sound_effect: Option<i32>,
     pub use_script: Option<i32>,
     pub unlock_script: Option<i32>,
 }
@@ -250,16 +252,25 @@ pub(crate) fn roof_words(input: &[u8], tile_offset: usize) -> Result<&[[u8; 4]],
 }
 
 /// Authored town map association and sector aptitude, independent of object-list validity.
-pub(crate) fn townmap_and_aptitude(input: &[u8], tile_offset: usize) -> Result<(u32, i32), Error> {
+pub(crate) fn sector_properties(
+    input: &[u8],
+    tile_offset: usize,
+) -> Result<SectorProperties, Error> {
     let mut reader = Reader {
         input: &input[..input.len().saturating_sub(4)],
         offset: tile_offset + SIDE * SIDE * 4,
     };
-    let (_, townmap, aptitude) = metadata(&mut reader)?;
-    Ok((townmap, aptitude))
+    metadata(&mut reader).map(|(_, properties)| properties)
 }
 
-fn metadata(reader: &mut Reader<'_>) -> Result<(u32, u32, i32), Error> {
+#[derive(Default)]
+pub(crate) struct SectorProperties {
+    pub townmap: u32,
+    pub aptitude: i32,
+    pub sound_schemes: [i32; 2],
+}
+
+fn metadata(reader: &mut Reader<'_>) -> Result<(u32, SectorProperties), Error> {
     reader.roof_words()?;
     let marker = reader.u32("sector metadata marker")?;
     if !(0xaa0000..=0xaa0004).contains(&marker) {
@@ -272,15 +283,17 @@ fn metadata(reader: &mut Reader<'_>) -> Result<(u32, u32, i32), Error> {
     if marker >= 0xaa0002 {
         reader.take(12, "sector script record")?;
     }
-    let (townmap, aptitude) = if marker >= 0xaa0003 {
-        let id = reader.u32("townmap ID")?;
-        let aptitude = reader.u32("sector aptitude adjustment")? as i32;
-        reader.take(16, "light scheme and sound fields")?;
-        (id, aptitude)
-    } else {
-        (0, 0)
-    };
-    Ok((marker, townmap, aptitude))
+    let mut properties = SectorProperties::default();
+    if marker >= 0xaa0003 {
+        properties.townmap = reader.u32("townmap ID")?;
+        properties.aptitude = reader.u32("sector aptitude adjustment")? as i32;
+        reader.take(8, "light scheme and sound flags")?;
+        properties.sound_schemes = [
+            reader.u32("sector music scheme")? as i32,
+            reader.u32("sector ambient scheme")? as i32,
+        ];
+    }
+    Ok((marker, properties))
 }
 
 pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
@@ -346,7 +359,7 @@ fn decode_list(input: &[u8], evidence: &mut ListEvidence) -> Result<ObjectList, 
         input: &input[..count_offset],
         offset: start,
     };
-    let (marker, _, _) =
+    let (marker, _) =
         metadata(&mut reader).map_err(|error| error.classified("sector_metadata_decode_failed"))?;
     evidence.metadata_marker = Some(marker);
     let tile_blocks = if marker >= 0xaa0004 {
@@ -627,6 +640,8 @@ impl Fields {
             14 => self.appearance.light_color = Some(value),
             18 => self.appearance.flags = Some(value),
             19 => self.appearance.spell_flags = Some(value),
+            29 => self.appearance.material = Some(value),
+            32 => self.appearance.sound_effect = Some(value as i32),
             64 if matches!(category, 15 | NPC) => self.appearance.critter_flags = Some(value),
             65 if matches!(category, 15 | NPC) => self.appearance.critter_flags2 = Some(value),
             64 if category == WALL => self.appearance.wall_flags = Some(value),
