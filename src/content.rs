@@ -15,6 +15,7 @@ pub mod maps;
 mod mobile;
 mod player;
 pub mod portal;
+pub mod quest;
 mod roof;
 pub mod save;
 pub mod scenery;

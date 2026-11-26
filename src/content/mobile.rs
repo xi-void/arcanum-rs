@@ -163,6 +163,7 @@ pub(super) struct MobileFrame {
     pub caster: Caster,
     pub offset: (i32, i32),
     pub asset: Arc<LoadedFrame>,
+    pub scale: u32,
     pub diagnostic: String,
     pub casts_shadow: bool,
     pub fidget: Option<Arc<DirectionalFidget>>,
@@ -479,12 +480,13 @@ fn load_critter(
     let f = effective.appearance;
     let flags = f.flags.ok_or("unresolved critter flags")?;
     let critter = f.critter_flags.ok_or("unresolved critter subtype flags")?;
+    let scale = f
+        .scale
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|&n| n != 0)
+        .ok_or("invalid critter blit scale")?;
     const UNSUPPORTED: u32 = 0x301f_93c7;
-    if flags & UNSUPPORTED != 0
-        || critter & 1 != 0
-        || f.scale != Some(100)
-        || f.blit_flags != Some(0)
-    {
+    if flags & UNSUPPORTED != 0 || critter & 1 != 0 || f.blit_flags != Some(0) {
         return Err(format!("unsupported mobile appearance (flags {flags:#x}, critter {critter:#x}, scale {:?}, blit {:?})", f.scale, f.blit_flags).into());
     }
     let shadow_id = f.shadow_art.unwrap_or(u32::MAX);
@@ -512,7 +514,7 @@ fn load_critter(
     let pose = cache.resolve(|| Pose::decode(art, names))?;
     let asset = pose.load(vfs, cache, pose.frame)?;
     let diagnostic = format!(
-        "mobile at {:?} ART {:#010x}: {}, direction {} (stored {}), frame {}, palette {}, hotspot {:?}, offset {offset:?}, shadow {shadow_id:#010x} ({shadow_note}); prepared in {:?}",
+        "mobile at {:?} ART {:#010x}: {}, direction {} (stored {}), frame {}, palette {}, hotspot {:?}, offset {offset:?}, scale {scale}%, shadow {shadow_id:#010x} ({shadow_note}); prepared in {:?}",
         tile,
         art,
         pose.path,
@@ -600,6 +602,7 @@ fn load_critter(
         caster,
         offset,
         asset,
+        scale,
         diagnostic,
         casts_shadow,
         fidget,
@@ -703,6 +706,7 @@ pub(super) fn load_prop(
         caster: Caster { tile, anchor },
         offset,
         asset,
+        scale: 100,
         diagnostic: format!("placed mobile prop {path} at {tile:?}"),
         casts_shadow: false,
         fidget: None,

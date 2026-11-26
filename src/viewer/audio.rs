@@ -4,6 +4,7 @@ use crate::app_config::Audio as Volumes;
 use arcanum_rs::{
     content::{self, load_mes, read_bounded},
     mes::Mes,
+    random::Random,
     vfs::Vfs,
 };
 use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink, Source, source::ChannelVolume};
@@ -441,7 +442,7 @@ struct Mixer<'a> {
     clips: Vec<Clip>,
     failed: BTreeSet<String>,
     cached: VecDeque<(String, String, CachedEffect)>,
-    random: u64,
+    random: Random,
 }
 
 impl Mixer<'_> {
@@ -470,9 +471,7 @@ impl Mixer<'_> {
             clips: Vec::new(),
             cached: VecDeque::new(),
             failed: BTreeSet::new(),
-            random: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(1, |time| time.as_nanos() as u64 | 1),
+            random: Random::fresh(),
         };
         let mut next_tick = Instant::now() + SCHEME_TICK;
         while !stop.load(Ordering::Relaxed) {
@@ -654,7 +653,7 @@ impl Mixer<'_> {
         }
         if !self.paused && self.levels.effects > 0 {
             let mut seed = self.random;
-            let mut random = |limit| roll(&mut seed, limit);
+            let mut random = |limit| seed.below(limit);
             let mut cues = Vec::new();
             for id in self.schemes {
                 for entry in self.tables.schemes.get(&id).into_iter().flatten() {
@@ -686,7 +685,7 @@ impl Mixer<'_> {
     }
 
     fn roll(&mut self, limit: u64) -> u64 {
-        roll(&mut self.random, limit)
+        self.random.below(limit)
     }
 
     fn effect(&mut self, id: i32, world: bool) {
@@ -858,13 +857,6 @@ struct Request {
     mode: Mode,
     world: bool,
     id: Option<i32>,
-}
-
-fn roll(seed: &mut u64, limit: u64) -> u64 {
-    *seed ^= *seed << 13;
-    *seed ^= *seed >> 7;
-    *seed ^= *seed << 17;
-    *seed % limit
 }
 
 #[cfg(test)]

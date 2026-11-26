@@ -225,6 +225,22 @@ pub fn sprite_origin(frame: &SpriteFrame, anchor: (i32, i32)) -> (i64, i64) {
     )
 }
 
+/// Original object blit scale applies to both the hotspot and the extent.
+pub(crate) fn scaled_sprite_rect(draw: SpriteDraw<'_>, percent: u32) -> ((i64, i64), (i64, i64)) {
+    let scale = |n: i64| n * i64::from(percent) / 100;
+    let frame = draw.frame;
+    (
+        (
+            i64::from(draw.anchor.0) - scale(i64::from(frame.hotspot.0)),
+            i64::from(draw.anchor.1) - scale(i64::from(frame.hotspot.1)),
+        ),
+        (
+            scale(i64::from(frame.width)),
+            scale(i64::from(frame.height)),
+        ),
+    )
+}
+
 /// Composite one sprite at a signed top-left position over initialized RGB8.
 /// Stride and dimensions count pixels. Row padding is left intact.
 pub fn blit(

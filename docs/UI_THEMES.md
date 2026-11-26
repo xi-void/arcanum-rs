@@ -187,7 +187,8 @@ The HUD, atlas and Classic menus use the same glyph measurement and
 rasterizer. Vulkan draws the prepared UI after the world pass. Theme
 packages own the layout and assets. Gameplay owns settings and actions.
 
-Classic’s map icon opens the atlas, and the bag opens the inventory. The other original buttons and action slots are decorative. Alpha controls remain on the keyboard and in
+Classic’s map icon opens the atlas, the bag opens the inventory, and the
+logbook opens Quests. The other original buttons and action slots are decorative. Alpha controls remain on the keyboard and in
 the Escape menu. Health, fatigue, poison, currency, fate values,
 party portraits, and recent-action or item overlays require
 gameplay state that the HUD does not expose. The original day/night
@@ -195,8 +196,18 @@ clock (entries 207–215) samples the game calendar and is also deferred.
 The Classic status display contains no fabricated numbers, colored
 fills, or hotbar assignments. The inventory paper doll has a character
 summary, and inventory inspection uses the bottom HUD for item details.
-The standalone character sheet, journal and document reader have no
-active screens.
+The standalone character sheet and document reader have no active screens.
+
+Set `journal_panel = true` on a centered gameplay-panel root to add the quest
+spread. Use `toggle-journal` on the HUD button, `journal-quests` for the selected
+tab, and `journal-previous` and `journal-next` for the page arrows. Bind
+`journal-left` and `journal-right` to the page bodies and give them equal size
+and the same font. Use the corresponding `-header` and `-footer` bindings for
+titles and page numbers. The optional `journal-lens` displays the player inset.
+The `[journal]` table defines the `active`, `completed`, and `failed` RGBA text
+colors. The body font supplies the default text color. Classic uses the
+original artwork, type, and book geometry. The text columns leave clearance
+for the original page-turn arrows. [Quest logbook](QUESTS.md)
 
 The atlas is an independent package. See [Map UI](MAP_UI.md) for its
 data bindings, map-specific actions and the `--map-ui` option.

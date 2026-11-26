@@ -97,6 +97,10 @@ impl Clock {
         play.as_millis() + u128::from(self.phase_ms)
     }
 
+    pub fn minute(&self, play: Duration) -> u64 {
+        (self.elapsed_ms(play) % u128::from(REAL_HOUR)) as u64 * 60 / REAL_HOUR
+    }
+
     pub fn for_save(&self, play: Duration) -> (u64, u64) {
         (
             self.hours(play),

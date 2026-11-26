@@ -1,6 +1,10 @@
 //! Original SCR framing, execution and persistent attachment state.
-use super::{Source, read_bounded};
-use crate::vfs::Vfs;
+use super::{
+    Source,
+    quest::{self, Ledger, Origin, Status},
+    read_bounded,
+};
+use crate::{random::Random, vfs::Vfs};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt};
 
@@ -46,6 +50,12 @@ pub struct State {
     flags: BTreeMap<i32, bool>,
     variables: BTreeMap<i32, i32>,
     attachments: BTreeMap<String, BTreeMap<Event, Local>>,
+    #[serde(default)]
+    pub quests: Ledger,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    random: Option<Random>,
+    #[serde(skip)]
+    pub(super) game_minute: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -59,6 +69,7 @@ pub(crate) struct Attachment {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Slot {
+    Quest(i32),
     GlobalFlag(i32),
     GlobalVariable(i32),
     LocalFlag(i32),
@@ -68,6 +79,7 @@ pub(crate) enum Slot {
 impl Slot {
     pub(crate) fn dlg(code: &str, index: i32) -> Option<Self> {
         Some(match code {
+            "qu" if quest::valid_id(index) => Self::Quest(index),
             "gf" if (0..GLOBAL_FLAGS).contains(&index) => Self::GlobalFlag(index),
             "gv" if (0..GLOBAL_VARIABLES).contains(&index) => Self::GlobalVariable(index),
             "lf" if (0..32).contains(&index) => Self::LocalFlag(index),
@@ -79,6 +91,7 @@ impl Slot {
     pub(crate) fn accepts(self, value: i32) -> bool {
         match self {
             Self::GlobalFlag(_) | Self::LocalFlag(_) => matches!(value, 0 | 1),
+            Self::Quest(_) => Status::decode(value).is_some(),
             Self::Counter(_) => (0..=255).contains(&value),
             Self::GlobalVariable(_) => true,
         }
@@ -86,6 +99,10 @@ impl Slot {
 }
 
 impl State {
+    pub(super) fn initialize_random(&mut self) {
+        self.random.get_or_insert_with(Random::fresh);
+    }
+
     fn local(&self, attachment: &Attachment) -> Local {
         self.attachments
             .get(&attachment.owner)
@@ -96,6 +113,7 @@ impl State {
 
     pub(crate) fn read(&self, attachment: &Attachment, slot: Slot) -> Option<i32> {
         match slot {
+            Slot::Quest(id) => self.quests.status(id, false).map(|status| status as i32),
             Slot::GlobalFlag(index) if (0..GLOBAL_FLAGS).contains(&index) => {
                 Some(i32::from(self.flags.get(&index).copied().unwrap_or(false)))
             }
@@ -124,6 +142,7 @@ impl State {
             return None;
         }
         match slot {
+            Slot::Quest(_) => return None,
             Slot::GlobalFlag(index) => {
                 if value == 0 {
                     self.flags.remove(&index);
@@ -153,6 +172,35 @@ impl State {
         Some(())
     }
 
+    fn write_scr(&mut self, attachment: &Attachment, slot: Slot, value: i32) -> Option<()> {
+        // CE's SCR setter replaces the addressed field and ORs the shifted,
+        // unmasked value into its containing word.
+        match slot {
+            Slot::Counter(index) if (0..4).contains(&index) => {
+                let mut local = self.local(attachment);
+                let shift = 8 * index;
+                local.counters = (local.counters & !(255 << shift)) | ((value as u32) << shift);
+                self.set_local(attachment, local);
+                Some(())
+            }
+            Slot::GlobalFlag(index) if (0..GLOBAL_FLAGS).contains(&index) => {
+                let bits = (value as u32) << (index % 32);
+                self.write(attachment, slot, value & 1)?;
+                // The rest of the word retains old flags and gains any bits
+                // set by the value. Bits outside the word are discarded.
+                let base = index / 32 * 32;
+                let mut extra = bits & !(1u32 << (index % 32));
+                while extra != 0 {
+                    self.flags
+                        .insert(base + extra.trailing_zeros() as i32, true);
+                    extra &= extra - 1;
+                }
+                Some(())
+            }
+            _ => self.write(attachment, slot, value),
+        }
+    }
+
     fn set_local(&mut self, attachment: &Attachment, local: Local) {
         self.attachments
             .entry(attachment.owner.clone())
@@ -169,7 +217,7 @@ impl State {
         {
             return Err("Invalid saved script global index".into());
         }
-        Ok(())
+        self.quests.validate()
     }
 }
 
@@ -180,6 +228,18 @@ pub(crate) struct Invocation<'a> {
     pub hour: u8,
     pub follows_player: Option<bool>,
     pub npc_flags: Option<u32>,
+    pub locations: [Option<(u32, u32)>; 2],
+    pub met: Option<bool>,
+}
+
+impl Invocation<'_> {
+    fn location(&self, focus: u8) -> Option<(u32, u32)> {
+        match focus {
+            0 | 21 => self.locations[0],
+            1 => self.locations[1],
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -201,10 +261,19 @@ pub(crate) struct Execution {
     pub outcome: Outcome,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub(crate) struct Fault {
     pub statement: Option<usize>,
     pub reason: String,
+    #[serde(flatten)]
+    operation: Option<OperationFault>,
+}
+
+#[derive(Debug, Serialize)]
+struct OperationFault {
+    opcode: u32,
+    operation: &'static str,
+    name: Option<&'static str>,
 }
 
 impl fmt::Display for Fault {
@@ -304,6 +373,7 @@ impl Code {
         if self.flags != 0 {
             return Err(Fault {
                 statement: None,
+                operation: None,
                 reason: format!("unsupported script flags {:#x}", self.flags),
             });
         }
@@ -356,7 +426,8 @@ impl Script {
         invocation: &Invocation<'_>,
         state: &mut State,
     ) -> Result<Execution, Fault> {
-        self.code.run(invocation, View::Writable(state))
+        self.code
+            .run(invocation, View::Writable(state), &self.source)
     }
 
     pub(crate) fn inspect(
@@ -364,7 +435,8 @@ impl Script {
         invocation: &Invocation<'_>,
         state: &State,
     ) -> Result<Execution, Fault> {
-        self.code.run(invocation, View::ReadOnly(state))
+        self.code
+            .run(invocation, View::ReadOnly(state), &self.source)
     }
 }
 
@@ -387,6 +459,33 @@ impl View<'_> {
             Self::ReadOnly(_) => None,
         }
     }
+    fn assign(
+        &mut self,
+        attachment: &Attachment,
+        target: Operand,
+        value: i32,
+        temporaries: &mut [i32; 10],
+    ) -> Option<()> {
+        match target {
+            Operand::State(slot) => match self {
+                Self::Writable(state) => state.write_scr(attachment, slot, value),
+                Self::ReadOnly(_) => None,
+            },
+            Operand::Temporary(index) => {
+                temporaries[index] = value;
+                Some(())
+            }
+            // CE ignores writes to an immediate operand.
+            Operand::Literal(_) => Some(()),
+        }
+    }
+
+    fn draw_below(&mut self, limit: u64) -> Option<u64> {
+        match self {
+            Self::Writable(state) => Some(state.random.as_mut()?.below(limit)),
+            Self::ReadOnly(_) => None,
+        }
+    }
 }
 
 fn read(
@@ -403,7 +502,12 @@ fn read(
 }
 
 impl Code {
-    fn run(&self, input: &Invocation<'_>, mut view: View<'_>) -> Result<Execution, Fault> {
+    fn run(
+        &self,
+        input: &Invocation<'_>,
+        mut view: View<'_>,
+        source: &Source,
+    ) -> Result<Execution, Fault> {
         self.check_flags()?;
         let mut pc = input.position;
         let attachment = input.attachment;
@@ -411,7 +515,19 @@ impl Code {
         for _ in 0..STEP_BUDGET {
             let fault = |reason| Fault {
                 statement: Some(pc),
+                operation: None,
                 reason,
+            };
+            let operation_fault = |operation, opcode, name| Fault {
+                operation: Some(OperationFault {
+                    opcode,
+                    operation,
+                    name,
+                }),
+                ..fault(match name {
+                    Some(name) => format!("unsupported SCR {operation} {name} (opcode {opcode})"),
+                    None => format!("unresolved script {operation} {opcode}"),
+                })
             };
             let row = self
                 .statements
@@ -429,16 +545,61 @@ impl Code {
                 4 | 5 => value(cond, 0)
                     .zip(value(cond, 1))
                     .map(|(a, b)| if cond.opcode == 4 { a == b } else { a <= b }),
+                6 if matches!(cond.focus(0), 0 | 1 | 21) => {
+                    // Every currently supported event is triggered by the local PC.
+                    let global = cond.focus(0) == 1;
+                    value(cond, 1)
+                        .zip(value(cond, 2))
+                        .and_then(|(id, expected)| {
+                            view.state()
+                                .quests
+                                .status(id, global)
+                                .map(|status| status as i32 == expected)
+                        })
+                }
+                7 => value(cond, 0)
+                    .zip(value(cond, 1))
+                    .and_then(|(id, expected)| {
+                        view.state()
+                            .quests
+                            .status(id, true)
+                            .map(|status| status as i32 == expected)
+                    }),
+                10 if cond.focus(0) == 1 && matches!(cond.focus(1), 0 | 21) => input.met,
                 18 if [cond.focus(0), cond.focus(1)] == [1, 0] => input.follows_player,
+                34 => input
+                    .location(cond.focus(0))
+                    .zip(value(cond, 1))
+                    .zip(value(cond, 2).zip(value(cond, 3)))
+                    .map(|(((obj_x, obj_y), range), (x, y))| {
+                        let dx = (i64::from(obj_x) - i64::from(x)).abs();
+                        let dy = (i64::from(obj_y) - i64::from(y)).abs();
+                        dx.max(dy) <= i64::from(range)
+                    }),
                 39 if cond.focus(0) == 1 => input.npc_flags.map(|flags| flags & 0x20 != 0),
                 43 => value(cond, 0)
                     .and_then(|index| view.state().read(attachment, Slot::GlobalFlag(index)))
                     .map(|v| v != 0),
                 _ => None,
             }
-            .ok_or_else(|| fault(format!("unresolved script condition {}", cond.opcode)))?;
+            .ok_or_else(|| {
+                let name = match cond.opcode {
+                    10 => Some("SCT_OBJ_MET_PC_BEFORE"),
+                    34 => Some("SCT_OBJ_WITHIN_RANGE"),
+                    _ => None,
+                };
+                operation_fault("condition", cond.opcode, name)
+            })?;
             let action = if test { &row.action } else { &row.otherwise };
-            let unresolved = || fault(format!("unresolved script action {}", action.opcode));
+            let unresolved = || {
+                let name = match action.opcode {
+                    21 => Some("SAT_CRITTER_FOLLOW"),
+                    29 => Some("SAT_GET_REACTION"),
+                    33 => Some("SAT_GET_STAT"),
+                    _ => None,
+                };
+                operation_fault("action", action.opcode, name)
+            };
             let outcome = match action.opcode {
                 0 => None,
                 1 | 2 => Some(Outcome::Return {
@@ -477,13 +638,66 @@ impl Code {
                         12 => rhs.wrapping_sub(value(action, 2).ok_or_else(unresolved)?),
                         _ => rhs,
                     };
-                    match action.operand(0).ok_or_else(unresolved)? {
-                        Operand::State(slot) => view
-                            .write(attachment, slot, assigned)
-                            .ok_or_else(unresolved)?,
-                        Operand::Temporary(index) => temporaries[index] = assigned,
-                        Operand::Literal(_) => return Err(unresolved()),
+                    let target = action.operand(0).ok_or_else(unresolved)?;
+                    view.assign(attachment, target, assigned, &mut temporaries)
+                        .ok_or_else(unresolved)?;
+                    None
+                }
+                16 | 17 => {
+                    let pc_quest = action.opcode == 16;
+                    if pc_quest && !matches!(action.focus(0), 0 | 21) {
+                        return Err(unresolved());
                     }
+                    let i = usize::from(pc_quest);
+                    let id = value(action, i)
+                        .filter(|&id| quest::valid_id(id))
+                        .ok_or_else(unresolved)?;
+                    let status = value(action, i + 1)
+                        .and_then(Status::decode)
+                        .ok_or_else(unresolved)?;
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    if pc_quest {
+                        state
+                            .quests
+                            .set_player(id, status, state.game_minute, || Origin {
+                                resource: source.virtual_path.clone(),
+                                mount: source.to_string(),
+                                line: pc,
+                                object: attachment.owner.clone(),
+                            });
+                    } else {
+                        state.quests.set_global(id, status);
+                    }
+                    None
+                }
+                37 => {
+                    let random_fault = |reason: &str| Fault {
+                        reason: format!("SAT_RANDOM (opcode 37): {reason}"),
+                        ..operation_fault("action", action.opcode, Some("SAT_RANDOM"))
+                    };
+                    let a = value(action, 0).ok_or_else(|| random_fault("invalid first bound"))?;
+                    let b = value(action, 1).ok_or_else(|| random_fault("invalid second bound"))?;
+                    let target = action
+                        .operand(2)
+                        .ok_or_else(|| random_fault("unsupported destination operand"))?;
+                    // CE accepts either order and skips the draw for a singleton.
+                    let low = i64::from(a.min(b));
+                    let span = i64::from(a.max(b)) - low + 1;
+                    let offset = if span == 1 {
+                        0
+                    } else {
+                        view.draw_below(span as u64)
+                            .ok_or_else(|| random_fault("no writable script random stream"))?
+                    };
+                    view.assign(
+                        attachment,
+                        target,
+                        (low + offset as i64) as i32,
+                        &mut temporaries,
+                    )
+                    .ok_or_else(|| random_fault("unwritable destination"))?;
                     None
                 }
                 _ => return Err(unresolved()),
@@ -504,6 +718,7 @@ impl Code {
         }
         Err(Fault {
             statement: Some(pc),
+            operation: None,
             reason: "script execution budget exhausted".into(),
         })
     }
@@ -512,6 +727,110 @@ impl Code {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dialogue_conditions_use_invocation_locations_and_meeting_history() {
+        let bytes = original_rows(
+            2,
+            &[
+                (64, 34),
+                (68, 0x03030301),
+                (80, 2),
+                (84, 102),
+                (88, 102),
+                (152, 1), // Outside the attachee's range: return immediately.
+                (196, 10),
+                (200, 0x1501),
+                (240, 4),
+                (244, 3),
+                (252, 205),
+                (284, 4),
+                (288, 3),
+                (296, 1),
+            ],
+        );
+        let code = Code::decode(&bytes).unwrap();
+        let attachment = attachment("npc", Event::Dialogue);
+        let mut input = invocation(&attachment);
+        input.locations = [Some((104, 104)), Some((100, 100))];
+        let state = State::default();
+        let run = |input: &Invocation<'_>| code.run(input, View::ReadOnly(&state), &source());
+        input.met = Some(false);
+        assert_eq!(run(&input).unwrap().outcome, Outcome::Dialogue { line: 1 });
+        input.met = Some(true);
+        assert_eq!(
+            run(&input).unwrap().outcome,
+            Outcome::Dialogue { line: 205 }
+        );
+        input.locations[1] = Some((99, 100));
+        assert_eq!(
+            run(&input).unwrap().outcome,
+            Outcome::Return { run_default: false }
+        );
+        input.locations[1] = None;
+        assert_eq!(run(&input).unwrap_err().statement, Some(0));
+    }
+
+    #[test]
+    fn original_quest_opcodes_use_distinct_pc_and_global_state() {
+        let attachment = attachment("npc", Event::Dialogue);
+        let input = Invocation {
+            attachment: &attachment,
+            triggerer: Actor::Player,
+            position: 0,
+            hour: 12,
+            follows_player: None,
+            npc_flags: None,
+            locations: [None; 2],
+            met: None,
+        };
+        let mut state = State::default();
+        // Write PC Accepted, then test it on the triggerer and set global
+        // Botched. A subsequent write resolves to Botched for the PC.
+        let bytes = original_rows(
+            3,
+            &[
+                (108, 16),
+                (112, 0x030300),
+                (124, 1009),
+                (128, 2),
+                (196, 6),
+                (200, 0x030300),
+                (212, 1009),
+                (216, 2),
+                (240, 17),
+                (244, 0x0303),
+                (252, 1009),
+                (256, 6),
+                (328, 7),
+                (332, 0x0303),
+                (340, 1009),
+                (344, 6),
+                (372, 16),
+                (376, 0x030315),
+                (388, 1009),
+                (392, 3),
+            ],
+        );
+        Code::decode(&bytes)
+            .unwrap()
+            .run(&input, View::Writable(&mut state), &source())
+            .unwrap();
+        assert_eq!(state.quests.status(1009, false), Some(Status::Botched));
+        assert_eq!(state.quests.status(1009, true), Some(Status::Botched));
+        assert_eq!(state.read(&attachment, Slot::GlobalFlag(1009)), Some(0));
+    }
+
+    fn source() -> Source {
+        Source {
+            virtual_path: "scr/fixture.scr".into(),
+            mount_id: crate::vfs::MountId::GENERATED,
+            mount_path: "test".into(),
+            loose_path: None,
+            storage: crate::vfs::Storage::Loose,
+            mod_id: None,
+        }
+    }
 
     fn original_rows(count: usize, fields: &[(usize, u32)]) -> Vec<u8> {
         let mut bytes = vec![0; 64 + count * 132];
@@ -539,6 +858,8 @@ mod tests {
             hour: 12,
             follows_player: None,
             npc_flags: None,
+            locations: [None; 2],
+            met: None,
         }
     }
 
@@ -562,7 +883,11 @@ mod tests {
         let attachment = attachment("fixture", Event::Unlock);
         let input = invocation(&attachment);
         let mut live = State::default();
-        let run = |state: &State| script.run(&input, View::ReadOnly(state)).unwrap();
+        let run = |state: &State| {
+            script
+                .run(&input, View::ReadOnly(state), &source())
+                .unwrap()
+        };
         let before = run(&live);
         assert_eq!(before.statement, 2);
         assert_eq!(before.outcome, Outcome::Return { run_default: true });
@@ -609,7 +934,7 @@ mod tests {
         let other_slot = attachment("first", Event::Unlock);
         let mut state = State::default();
         let execution = script
-            .run(&invocation(&first), View::Writable(&mut state))
+            .run(&invocation(&first), View::Writable(&mut state), &source())
             .unwrap();
         assert_eq!(execution.statement, 4);
         assert_eq!(execution.outcome, Outcome::Dialogue { line: 42 });
@@ -622,6 +947,117 @@ mod tests {
     }
 
     #[test]
+    fn random_reads_operands_and_assigns_through_temporary_and_persistent_slots() {
+        let attachment = attachment("fixture", Event::Dialogue);
+        let input = invocation(&attachment);
+        let bytes = original_rows(
+            2,
+            &[
+                (108, 37),
+                (112, 0x020301),
+                (120, 7),
+                (124, 2), // roll gv7, 2 into temp 0
+                (240, 10),
+                (244, 0x0201),
+                (252, 8), // copy temp 0 into gv8
+            ],
+        );
+        let code = Code::decode(&bytes).unwrap();
+        let mut state = State {
+            random: serde_json::from_value(1.into()).unwrap(),
+            ..State::default()
+        };
+        state
+            .write(&attachment, Slot::GlobalVariable(7), -2)
+            .unwrap();
+        let mut restored: State =
+            serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        for expected in [-1, -2, 0, -2, 1, 2] {
+            code.run(&input, View::Writable(&mut state), &source())
+                .unwrap();
+            code.run(&input, View::Writable(&mut restored), &source())
+                .unwrap();
+            assert_eq!(state, restored);
+            let result = state.read(&attachment, Slot::GlobalVariable(8)).unwrap();
+            assert_eq!(result, expected);
+        }
+        let error = code
+            .run(&input, View::ReadOnly(&state), &source())
+            .unwrap_err();
+        assert!(error.reason.contains("no writable script random stream"));
+    }
+
+    #[test]
+    fn random_handles_reversed_singleton_and_full_signed_ranges() {
+        let owner = attachment("fixture", Event::Dialogue);
+        let input = invocation(&owner);
+        let mut initial = State::default();
+        initial.initialize_random();
+        let roll = |a: i32, b: i32| {
+            let bytes = original_rows(
+                1,
+                &[
+                    (108, 37),
+                    (112, 0x010303),
+                    (120, a as u32),
+                    (124, b as u32),
+                    (128, 10),
+                ],
+            );
+            let mut state = initial.clone();
+            Code::decode(&bytes)
+                .unwrap()
+                .run(&input, View::Writable(&mut state), &source())
+                .unwrap();
+            state
+        };
+        assert_eq!(roll(5, -9), roll(-9, 5));
+        let equal = roll(i32::MIN, i32::MIN);
+        assert_eq!(equal.read(&owner, Slot::GlobalVariable(10)), Some(i32::MIN));
+        assert_eq!(equal.random, initial.random);
+        assert_eq!(roll(i32::MIN, i32::MAX), roll(i32::MAX, i32::MIN));
+        assert_ne!(roll(i32::MIN, i32::MAX).random, initial.random);
+    }
+
+    #[test]
+    fn random_assigns_counter_and_flag_words_and_ignores_immediate_destination() {
+        let attachment = attachment("fixture", Event::Dialogue);
+        let input = invocation(&attachment);
+        let bytes = original_rows(
+            3,
+            &[
+                (108, 37),
+                (112, 0x000303),
+                (120, 0x1002),
+                (124, 0x1002),
+                (128, 1),
+                (240, 37),
+                (244, 0x040303),
+                (252, 6),
+                (256, 6),
+                (260, 3),
+                (372, 37),
+                (376, 0x030303),
+                (384, 1),
+                (388, 1),
+                (392, 50),
+            ],
+        );
+        let mut state = State::default();
+        state.write(&attachment, Slot::GlobalFlag(3), 1).unwrap();
+        Code::decode(&bytes)
+            .unwrap()
+            .run(&input, View::Writable(&mut state), &source())
+            .unwrap();
+        assert_eq!(state.read(&attachment, Slot::Counter(1)), Some(2));
+        assert_eq!(state.read(&attachment, Slot::Counter(2)), Some(31));
+        assert_eq!(state.read(&attachment, Slot::GlobalFlag(3)), Some(0));
+        assert_eq!(state.read(&attachment, Slot::GlobalFlag(4)), Some(1));
+        assert_eq!(state.read(&attachment, Slot::GlobalFlag(5)), Some(1));
+        assert_eq!(state.random, None);
+    }
+
+    #[test]
     fn malformed_scripts_report_flags_branches_and_budget() {
         let attachment = attachment("fixture", Event::Dialogue);
         let input = invocation(&attachment);
@@ -629,7 +1065,7 @@ mod tests {
         let run = |bytes: &[u8]| {
             Code::decode(bytes)
                 .unwrap()
-                .run(&input, View::ReadOnly(&state))
+                .run(&input, View::ReadOnly(&state), &source())
                 .unwrap_err()
         };
         let branch = [(108, 3), (112, 3)];

@@ -638,6 +638,7 @@ impl Viewer<'_> {
         **world = next;
         if let Some(hud) = hud {
             hud.close_inventory();
+            hud.close_journal();
         }
         self.sounding_container = None;
         self.reset_audio |= restoring;
@@ -768,6 +769,27 @@ impl Viewer<'_> {
             hud::Action::ToggleRun => self.settings.run = !self.settings.run,
             hud::Action::ResetZoom => self.settings.zoom = 1,
             hud::Action::OpenMap => self.open_map(event_loop),
+            hud::Action::ToggleJournal => {
+                if let ViewContent::Stream {
+                    world,
+                    hud: Some(hud),
+                    shift,
+                    ..
+                } = &mut self.content
+                    && hud.has_journal()
+                {
+                    hud.toggle_journal();
+                    world.cancel_player_route();
+                    self.player_deadline = None;
+                    self.navigation = Navigation::default();
+                    *shift = false;
+                }
+            }
+            hud::Action::JournalPrevious | hud::Action::JournalNext => {
+                if let ViewContent::Stream { hud: Some(hud), .. } = &mut self.content {
+                    hud.turn_journal(action == hud::Action::JournalPrevious);
+                }
+            }
             hud::Action::ToggleInventory => {
                 if let ViewContent::Stream {
                     world,
@@ -1685,6 +1707,7 @@ impl ApplicationHandler for Viewer<'_> {
             {
                 if let Some(clock) = &self.clock {
                     redraw |= world.set_game_hour(clock.hour(game_elapsed));
+                    world.set_quest_time(clock.hours(game_elapsed), clock.minute(game_elapsed));
                     if let Some(hud) = hud.as_mut() {
                         redraw |= hud.set_game_time(clock.hours(game_elapsed));
                     }
@@ -1889,6 +1912,17 @@ impl ApplicationHandler for Viewer<'_> {
             return;
         }
         let playing = matches!(&self.content, ViewContent::Stream { world, .. } if world.playing());
+        if matches!(
+            event,
+            WindowEvent::KeyboardInput { .. } | WindowEvent::MouseInput { .. }
+        ) {
+            let play = self.game_elapsed(Instant::now());
+            if let (Some(clock), ViewContent::Stream { world, .. }) =
+                (&self.clock, &mut self.content)
+            {
+                world.set_quest_time(clock.hours(play), clock.minute(play));
+            }
+        }
         if self.dialogue_event(&event) {
             return;
         }
@@ -1906,7 +1940,7 @@ impl ApplicationHandler for Viewer<'_> {
             self.quick_save_or_load(named, event_loop);
             return;
         }
-        if self.map_event(event_loop, &event) {
+        if self.map_event(event_loop, &event) || self.journal_event(event_loop, &event) {
             return;
         }
         let elapsed = self.play_elapsed(Instant::now());
@@ -2046,25 +2080,19 @@ impl ApplicationHandler for Viewer<'_> {
                     self.hud_action(action, event_loop);
                     return;
                 }
+                if matches!(&key.logical_key, Key::Character(ch) if ch.eq_ignore_ascii_case("l"))
+                    && hud.has_journal()
+                {
+                    self.hud_action(hud::Action::ToggleJournal, event_loop);
+                    return;
+                }
                 if matches!(&key.logical_key, Key::Character(ch) if ch.eq_ignore_ascii_case("i"))
                     && hud.has_inventory()
                 {
                     self.hud_action(hud::Action::ToggleInventory, event_loop);
                     return;
                 }
-                let step = match &key.logical_key {
-                    Key::Character(ch) if ch == "[" => -25,
-                    Key::Character(ch) if ch == "]" => 25,
-                    _ => 0,
-                };
-                if step != 0 {
-                    let previous = hud.scale();
-                    hud.adjust_scale(step);
-                    if hud.scale() != previous
-                        && let Some(preferences) = &mut self.preferences
-                    {
-                        preferences.set("ui", "scale", i64::from(hud.scale()));
-                    }
+                if adjust_hud_scale(hud, &mut self.preferences, &key.logical_key) {
                     hud.hover(self.cursor);
                     view.window.request_redraw();
                     return;
@@ -2151,6 +2179,7 @@ impl ApplicationHandler for Viewer<'_> {
                             if matches!(
                                 action,
                                 hud::Action::ToggleInventory
+                                    | hud::Action::ToggleJournal
                                     | hud::Action::InventoryScrollUp
                                     | hud::Action::InventoryScrollDown
                                     | hud::Action::InventoryArrange
@@ -2195,6 +2224,101 @@ impl ApplicationHandler for Viewer<'_> {
 }
 
 impl Viewer<'_> {
+    fn journal_event(&mut self, event_loop: &ActiveEventLoop, event: &WindowEvent) -> bool {
+        let ViewContent::Stream {
+            hud: Some(hud),
+            shift,
+            ..
+        } = &mut self.content
+        else {
+            return false;
+        };
+        if !hud.journal_open() {
+            return false;
+        }
+        let view = self.view.as_ref().unwrap();
+        let size = view.window.inner_size();
+        hud.layout((size.width, size.height));
+        let mut action = None;
+        match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = (position.x >= 0. && position.y >= 0.)
+                    .then_some((position.x as u32, position.y as u32));
+                if hud.hover(self.cursor) {
+                    view.window.request_redraw();
+                }
+                return true;
+            }
+            WindowEvent::CursorLeft { .. } | WindowEvent::Focused(false) => {
+                self.cursor = None;
+                *shift = false;
+                hud.cancel_press();
+                hud.hover(None);
+                view.window.request_redraw();
+            }
+            WindowEvent::KeyboardInput {
+                event: key,
+                is_synthetic: false,
+                ..
+            } => {
+                if matches!(key.logical_key, Key::Named(NamedKey::Shift)) {
+                    *shift = key.state.is_pressed();
+                }
+                if !key.state.is_pressed() || key.repeat {
+                    return true;
+                }
+                match &key.logical_key {
+                    Key::Named(NamedKey::Escape) => action = Some(hud::Action::ToggleJournal),
+                    Key::Character(ch) if ch.eq_ignore_ascii_case("l") => {
+                        action = Some(hud::Action::ToggleJournal)
+                    }
+                    Key::Named(NamedKey::Tab) => hud.advance_focus(*shift),
+                    Key::Named(NamedKey::Enter | NamedKey::Space) => action = hud.focused_action(),
+                    Key::Named(NamedKey::PageUp | NamedKey::ArrowLeft) => hud.turn_journal(true),
+                    Key::Named(NamedKey::PageDown | NamedKey::ArrowRight) => {
+                        hud.turn_journal(false)
+                    }
+                    key => {
+                        adjust_hud_scale(hud, &mut self.preferences, key);
+                    }
+                }
+            }
+            WindowEvent::MouseInput {
+                button: MouseButton::Left,
+                state,
+                ..
+            } => {
+                if let Some(point) = self.cursor {
+                    if state.is_pressed() {
+                        hud.press(point);
+                    } else {
+                        action = hud.release(point);
+                    }
+                } else {
+                    hud.cancel_press();
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let vertical = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
+                    MouseScrollDelta::PixelDelta(point) => point.y,
+                };
+                if vertical != 0. {
+                    hud.journal_scroll(self.cursor, vertical > 0.);
+                }
+            }
+            WindowEvent::KeyboardInput { .. } | WindowEvent::MouseInput { .. } => return true,
+            _ => return false,
+        }
+        if let Some(action) = action {
+            self.hud_action(action, event_loop);
+        } else {
+            view.window.request_redraw();
+        }
+        // Focus loss also needs the base window handler.
+        !matches!(event, WindowEvent::Focused(false))
+    }
+
     fn dialogue_event(&mut self, event: &WindowEvent) -> bool {
         let ViewContent::Stream {
             world,
@@ -2322,8 +2446,9 @@ impl Viewer<'_> {
                     && world.update_hover(
                         self.cursor
                             .filter(|&point| {
-                                hud.as_ref()
-                                    .is_none_or(|hud| hud.hit(point) == hud::Hit::World)
+                                hud.as_ref().is_none_or(|hud| {
+                                    !hud.journal_open() && hud.hit(point) == hud::Hit::World
+                                })
                             })
                             .map(|(x, y)| (x / u32::from(*last_zoom), y / u32::from(*last_zoom))),
                         logical_size(view.window.inner_size(), *last_zoom),
@@ -2702,6 +2827,7 @@ impl Viewer<'_> {
 fn unlit(asset: &Arc<LoadedFrame>, anchor: (i32, i32)) -> WorldDraw<'_> {
     WorldDraw {
         asset,
+        scale: 100,
         sprite: SpriteDraw {
             frame: &asset.decoded.frame,
             anchor,
@@ -2753,6 +2879,22 @@ fn inventory_inset(width: u32, height: u32) -> Arc<LoadedFrame> {
             pixels: Vec::new(),
         },
     )
+}
+
+fn adjust_hud_scale(hud: &mut Hud, preferences: &mut Option<ConfigFile>, key: &Key) -> bool {
+    let step = match key {
+        Key::Character(ch) if ch == "[" => -25,
+        Key::Character(ch) if ch == "]" => 25,
+        _ => return false,
+    };
+    let previous = hud.scale();
+    hud.adjust_scale(step);
+    if hud.scale() != previous
+        && let Some(preferences) = preferences
+    {
+        preferences.set("ui", "scale", i64::from(hud.scale()));
+    }
+    true
 }
 
 struct FrameOptions<'a> {
@@ -2813,11 +2955,14 @@ impl WindowSurface {
                 )
             });
             hud.set_dialogue(world.conversation(), npc_at, (size.width, size.height));
+            if let Some(reader) = inventory_reader {
+                hud.refresh_journal(&reader.quest_catalog, world);
+            }
             hud.hover(cursor);
         }
         let cursor = cursor.filter(|&point| {
             hud.as_ref()
-                .is_none_or(|hud| hud.hit(point) == hud::Hit::World)
+                .is_none_or(|hud| !hud.journal_open() && hud.hit(point) == hud::Hit::World)
         });
         if world.playing() {
             let scale = u32::from(zoom);
@@ -2865,7 +3010,10 @@ impl WindowSurface {
             None
         };
         if let Some(hud) = hud.as_deref_mut()
-            && let Some([w, h]) = hud.native_size(hud::Binding::InventoryLens)
+            && let Some(binding) = [hud::Binding::InventoryLens, hud::Binding::JournalLens]
+                .into_iter()
+                .find(|&binding| hud.native_size(binding).is_some())
+            && let Some([w, h]) = hud.native_size(binding)
         {
             let inset = self
                 .inventory_inset
@@ -2874,13 +3022,17 @@ impl WindowSurface {
                 *inset = inventory_inset(w, h);
             }
             let source = (w * 2, h * 2);
+            let mut focused = camera.clone();
+            if binding == hud::Binding::JournalLens {
+                world.follow_player(elapsed, &mut focused);
+            }
             self.renderer.render_inset(
                 inset,
                 0.5,
                 background,
-                scene_draws(world, camera, source, elapsed, settings),
+                scene_draws(world, &focused, source, elapsed, settings),
             )?;
-            hud.set_lens_asset(hud::Binding::InventoryLens, Arc::clone(inset));
+            hud.set_lens_asset(binding, Arc::clone(inset));
         }
         let hud = hud.as_deref();
         let scale = hud.map(|hud| hud.scale());

@@ -461,6 +461,7 @@ pub struct InventoryReader {
     pub(super) vfs: Vfs,
     pub(super) frames: FrameCache,
     pub(super) descriptions: Vec<super::super::LoadedMes>,
+    pub quest_catalog: super::super::quest::Catalog,
 }
 
 impl InventoryReader {
@@ -469,10 +470,12 @@ impl InventoryReader {
             .into_iter()
             .filter_map(|path| super::super::load_mes(&mut vfs, path).ok())
             .collect();
+        let quest_catalog = super::super::quest::Catalog::load(&mut vfs);
         Self {
             vfs,
             frames: FrameCache::default(),
             descriptions,
+            quest_catalog,
         }
     }
 

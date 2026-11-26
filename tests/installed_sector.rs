@@ -880,7 +880,7 @@ fn bates_world_preserves_original_portal_states_geometry_and_wall_order() {
     let wall = room
         .walls
         .iter()
-        .find(|w| w.record.index == leaf.paired_wall_index)
+        .find(|w| Some(w.record.index) == leaf.paired_wall_index)
         .unwrap();
     let wall_draw = wall.draw(room.floor.center).unwrap();
     let draws = room.draws().unwrap().collect::<Vec<_>>();
@@ -916,7 +916,7 @@ fn bates_world_preserves_original_portal_states_geometry_and_wall_order() {
         assert_eq!(open.record.index, id);
         assert_eq!(open.record.art_id, raw);
         assert_eq!(open.state, PortalState::Open);
-        assert_eq!(open.paired_wall_index, wall);
+        assert_eq!(open.paired_wall_index, Some(wall));
         assert_eq!(open.placement.tile, tile);
         assert_eq!(
             (

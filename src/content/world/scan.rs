@@ -504,6 +504,7 @@ pub fn compatibility_scan(
         ..Coverage::default()
     };
     let map_source = super::super::diagnostics::source(&catalog.source);
+    let quest_resources = super::super::quest::Catalog::load(&mut vfs).coverage();
     let mut groups = BTreeMap::new();
     let mut mobile_headers = MobileHeaders::default();
     let mut prepared_mobile_kinds = BTreeMap::<&str, BTreeMap<&str, usize>>::new();
@@ -873,7 +874,7 @@ pub fn compatibility_scan(
     let (reads, art) = loader.stats();
     Ok(
         json!({"version":3,"map_catalog":map_source,"maps":scanned_maps,"coverage":coverage,"issues":issues,
-        "research":{"mobile_headers":mobile_headers,"explicit_locations":locations,
+        "research":{"quest_resources":quest_resources,"mobile_headers":mobile_headers,"explicit_locations":locations,
             "prepared_mobile_kinds":prepared_mobile_kinds,"prepared_mobile_examples":prepared_mobile_examples,
             "coverage_model":{"discovery":"counted_in_selected_vfs_scope","structural_decode":"partial",
                 "semantic_interpretation":"partial","prototype_and_art_resolution":"partial",

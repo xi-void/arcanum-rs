@@ -1,7 +1,7 @@
 //! Experimental sprite compositor using wgpu and the existing ordered world draws.
 
 use crate::{
-    compositor::{Modulation, sprite_origin},
+    compositor::{Modulation, scaled_sprite_rect, sprite_origin},
     content::{art::LoadedFrame, world::WorldDraw},
 };
 use bytemuck::{Pod, Zeroable, bytes_of, cast_slice};
@@ -721,9 +721,10 @@ fn instance_data(draw: &WorldDraw<'_>, columns: &mut Vec<u32>) -> Result<Instanc
     if !std::ptr::eq(frame, &draw.asset.decoded.frame) {
         return Err("GPU sprite identity does not match its decoded frame".into());
     }
-    let (x, y) = sprite_origin(frame, draw.sprite.anchor);
+    let ((x, y), (width, height)) = scaled_sprite_rect(draw.sprite, draw.scale);
     let mut data = InstanceData {
-        rect: [x as f32, y as f32, frame.width as f32, frame.height as f32],
+        rect: [x as f32, y as f32, width as f32, height as f32],
+        clip: [draw.scale as f32, 0.0, 0.0, 0.0],
         ..InstanceData::zeroed()
     };
     let pack = |[r, g, b]: [u8; 3]| u32::from_le_bytes([r, g, b, 0]);

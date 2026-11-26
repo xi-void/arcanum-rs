@@ -218,6 +218,7 @@ fn overlaps(a: RasterBounds, b: RasterBounds) -> bool {
 pub struct WorldDraw<'a> {
     pub asset: &'a Arc<LoadedFrame>,
     pub sprite: SpriteDraw<'a>,
+    pub scale: u32,
     pub modulation: Modulation<'a>,
 }
 
@@ -239,6 +240,7 @@ struct Raster {
     frame: Arc<LoadedFrame>,
     anchor: (i32, i32),
     bounds: RasterBounds,
+    scale: u32,
     object_light: ObjectLight,
     animation: Option<RasterAnimation>,
     click_through: bool,
@@ -249,26 +251,38 @@ pub(super) const OBJECT_RENDER_DESCRIPTOR_BYTES: usize =
 
 impl Raster {
     fn new(key: WorldOrder, frame: &Arc<LoadedFrame>, anchor: (i32, i32)) -> Self {
+        Self::scaled(key, frame, anchor, 100)
+    }
+
+    fn scaled(key: WorldOrder, frame: &Arc<LoadedFrame>, anchor: (i32, i32), scale: u32) -> Self {
         Self {
             key,
             frame: Arc::clone(frame),
             anchor,
+            scale,
             object_light: ObjectLight::Unlit,
             animation: None,
             click_through: false,
-            bounds: RasterBounds::new(SpriteDraw {
-                frame: &frame.decoded.frame,
-                anchor,
-            }),
+            bounds: RasterBounds::scaled(
+                SpriteDraw {
+                    frame: &frame.decoded.frame,
+                    anchor,
+                },
+                scale,
+            ),
         }
     }
 
     fn include_frame(&mut self, asset: &LoadedFrame) {
-        let frame = RasterBounds::new(self.frame_draw(asset));
+        let frame = self.frame_bounds(asset);
         self.bounds.min.0 = self.bounds.min.0.min(frame.min.0);
         self.bounds.min.1 = self.bounds.min.1.min(frame.min.1);
         self.bounds.max.0 = self.bounds.max.0.max(frame.max.0);
         self.bounds.max.1 = self.bounds.max.1.max(frame.max.1);
+    }
+
+    fn frame_bounds(&self, frame: &LoadedFrame) -> RasterBounds {
+        RasterBounds::scaled(self.frame_draw(frame), self.scale)
     }
 
     fn set_animation(&mut self, clip: &Arc<FrameLoop>, initial: usize) {
@@ -321,7 +335,7 @@ impl Raster {
                 return None;
             }
             let asset = self.asset_at(elapsed, playback);
-            (asset, RasterBounds::new(self.frame_draw(asset)))
+            (asset, self.frame_bounds(asset))
         } else {
             (&self.frame, self.bounds)
         };
@@ -360,9 +374,7 @@ impl Raster {
                 )
             }
         };
-        let visible = |index: usize| {
-            viewport.intersects(RasterBounds::new(self.frame_draw(&clip.frames[index])))
-        };
+        let visible = |index: usize| viewport.intersects(self.frame_bounds(&clip.frames[index]));
         if visible(current) {
             return Some(wait.saturating_add(clip.delay(relative, 1)));
         }
@@ -703,7 +715,8 @@ impl CachedSector {
             let index = mobile.object_index;
             let record = mobile_draw_slot(index);
             let key = super::scenery::order(caster.tile, mobile.offset, mobile.flat, record);
-            let mut raster = Raster::new((true, key), &mobile.asset, caster.anchor);
+            let mut raster =
+                Raster::scaled((true, key), &mobile.asset, caster.anchor, mobile.scale);
             if let Some(fidget) = mobile.fidget {
                 raster.set_fidget(fidget);
             }
@@ -725,10 +738,13 @@ impl CachedSector {
                 let fits = walk.steps.iter().all(|&step| {
                     let asset = walk.asset(step).unwrap_or(&mobile.asset);
                     let bounds = if step.frame.is_some() {
-                        RasterBounds::new(SpriteDraw {
-                            frame: &asset.decoded.frame,
-                            anchor: step.anchor,
-                        })
+                        RasterBounds::scaled(
+                            SpriteDraw {
+                                frame: &asset.decoded.frame,
+                                anchor: step.anchor,
+                            },
+                            mobile.scale,
+                        )
                     } else {
                         let (dx, dy) = (
                             i64::from(step.anchor.0) - i64::from(caster.anchor.0),
@@ -1215,7 +1231,7 @@ impl SectorCache {
             super::scenery::order(sample.tile, sample.offset, false, original.key.1.5),
         );
         let asset = walk.asset(sample).unwrap_or(&original.frame);
-        let mut raster = Raster::new(key, asset, sample.anchor);
+        let mut raster = Raster::scaled(key, asset, sample.anchor, original.scale);
         if sample.frame.is_none()
             && let Some(RasterAnimation::Fidget(poses)) = &original.animation
         {
@@ -1734,7 +1750,10 @@ impl SectorCache {
             let raster = &self.ordered[index];
             let (asset, sprite) =
                 if let Some((asset, draw)) = self.interaction_frame(raster, elapsed) {
-                    (asset, viewport.place(draw, RasterBounds::new(draw))?)
+                    (
+                        asset,
+                        viewport.place(draw, RasterBounds::scaled(draw, raster.scale))?,
+                    )
                 } else {
                     raster.visible_at(&viewport, elapsed, self.fidget)?
                 };
@@ -1766,6 +1785,7 @@ impl SectorCache {
             Some(WorldDraw {
                 asset,
                 sprite,
+                scale: raster.scale,
                 modulation,
             })
         })
@@ -1803,6 +1823,7 @@ impl SectorCache {
             WorldDraw {
                 asset: pose.asset,
                 sprite,
+                scale: 100,
                 modulation,
             },
         ))
@@ -1904,6 +1925,7 @@ impl SectorCache {
                 Some(WorldDraw {
                     asset,
                     sprite: viewport.place(sprite, RasterBounds::new(sprite))?,
+                    scale: 100,
                     modulation: mask.modulation(),
                 })
             })
@@ -1958,6 +1980,7 @@ impl SectorCache {
             Some(WorldDraw {
                 asset,
                 sprite,
+                scale: moving.raster.scale,
                 modulation: moving.shade.modulation(),
             })
         });
@@ -1970,6 +1993,7 @@ impl SectorCache {
                 Some(WorldDraw {
                     asset: &draw.frame,
                     sprite: viewport.place(sprite, RasterBounds::new(sprite))?,
+                    scale: 100,
                     modulation: draw.mask.modulation(),
                 })
             }))
@@ -2338,10 +2362,11 @@ impl WorldStream {
     }
 
     pub fn into_interactive(
-        self,
+        mut self,
         wake: impl Fn() + Send + 'static,
         trace: bool,
     ) -> std::io::Result<InteractiveWorld> {
+        self.cache.scripts.initialize_random();
         prefetch::InteractiveWorld::new(self, wake, trace)
     }
 

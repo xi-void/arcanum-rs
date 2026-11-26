@@ -22,8 +22,10 @@ The effective object script array supplies the Dialogue attachment
 its numbered `scr/*.scr` resource in the VFS and uses the matching
 `dlg/*.dlg` stem. SCR begins at statement zero. The shared interpreter
 supports equality, signed less-than-or-equal, local and global flag tests,
-the existing daytime and NPC tests, assignment, addition and subtraction,
-flag writes, branches, both return modes, and dialogue entry. It reads
+daytime and NPC tests, the attachee's meeting history with the local PC,
+tile-distance checks for the triggerer and attachee, player and global quest conditions,
+assignment, addition, subtraction and random ranges,
+flag and quest writes, branches, both return modes, and dialogue entry. It reads
 literals, global state, attachment counters, and invocation-local temporary
 variables. It reports unsupported instructions, invalid branches, and
 execution beyond 1,000 statements with the failing statement and SCR source.
@@ -36,6 +38,21 @@ movement triggers require their original event behavior. The existing literal
 Use teleport decoder shares this framing. Unlock checks evaluate read-only
 handlers against the current world script state. Static worlds initialize that
 state to new-game defaults.
+
+SCR action 37, `SAT_RANDOM`, reads its first two operands as numeric
+bounds and assigns the inclusive result through the third operand. CE's
+`random_between` accepts either bound order and consumes no draw for equal
+bounds. The shared SCR setter handles invocation temporaries, global
+variables and flags, and attachment counters. It follows CE's packed-word
+writes and ignores immediate destinations. Per-PC variable and flag operands
+remain deferred. Read-only unlock checks reject rolls that need to advance
+the random stream.
+
+The SCR stream uses the engine's xorshift generator independently of audio.
+A successful transition commits its draws together with its other script
+state. A rejected transition discards the staged draws and writes. Native
+save/load resumes the committed stream. Saves from before this field was
+introduced start a fresh stream. See [Native saves](SAVEGAMES.md).
 
 A DLG record contains seven brace-delimited fields in CE order.
 
@@ -56,7 +73,8 @@ aptitude, race, level, gold, initial reaction, whether the actors have met in
 this session, and shared script state. The `gf`, `gv`, `lf`, and `lc` tests
 compare the addressed global flag, global variable, attachment flag, and
 attachment counter to the specified value. The same opcodes can write state
-in a speaker or response effect list.
+in a speaker or response effect list. See [Quests](QUESTS.md) for the
+`qu`, `qa` and `qb` conditions and the `qu` effect.
 
 Response effects run in source order before the destination. Speaker effects
 run when entering the line, before building its choices. A zero destination
@@ -64,7 +82,11 @@ closes the conversation after applying the response effects. A negative
 destination executes the Dialogue attachment at the absolute statement index.
 An explicit continuation can return or open another dialogue line. Effects
 from a rejected transition are discarded together with its staged script
-writes. The implicit exit handler and the default floating reply on an
+writes. Runtime rejections leave the current conversation open and show the
+reason in the NPC context area. Themes without that binding display the reason
+with the speaker text. `dialogue.last_result` records the attempted response,
+destination, effect, rejection stage and the SCR fault when applicable.
+The implicit exit handler and the default floating reply on an
 entry return remain deferred. Diagnostics retain the original return mode.
 
 Unresolved conditions hide the associated responses and identify their line

@@ -2267,7 +2267,7 @@ fn report_room(out: &mut impl Write, room: &content::scenery::Room) -> Result<()
             .ok_or("portal anchor exceeds the drawable range")?;
         writeln!(
             out,
-            "Record {} {:?} (Portal type 1) bytes {:?}, tile {:?}, wall {}, prototype {} ART {:#010x} from {}, stored ART {:#010x}: {} from {}, frame {}, rotation {}, palette {}, mirror {}, state {:?}, offset {:?}, scale {}%, flags {:#x}, portal flags {:#x}, hotspot {:?}, pivot {:?}, relative raster origin {:?}",
+            "Record {} {:?} (Portal type 1) bytes {:?}, tile {:?}, wall {:?}, prototype {} ART {:#010x} from {}, stored ART {:#010x}: {} from {}, frame {}, rotation {}, palette {}, mirror {}, state {:?}, offset {:?}, scale {}%, flags {:#x}, portal flags {:#x}, hotspot {:?}, pivot {:?}, relative raster origin {:?}",
             portal.record.index,
             portal.art.kind,
             portal.record.span,

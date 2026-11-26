@@ -73,7 +73,12 @@ impl InteractiveWorld {
         &self.cache.scripts
     }
 
-    pub fn restore_script_state(&mut self, state: State) {
+    pub fn set_quest_time(&mut self, hours: u64, minute: u64) {
+        self.cache.scripts.game_minute = hours.saturating_mul(60).saturating_add(minute);
+    }
+
+    pub fn restore_script_state(&mut self, mut state: State) {
+        state.initialize_random();
         self.cache.scripts = state;
     }
 
@@ -84,7 +89,7 @@ impl InteractiveWorld {
             .ordered
             .binary_search_by_key(key, |raster| raster.key)
             .ok()?;
-        let bounds = RasterBounds::new(self.cache.ordered[index].frame_draw(asset));
+        let bounds = self.cache.ordered[index].frame_bounds(asset);
         Some((
             i32::try_from((bounds.min.0 + bounds.max.0) / 2).ok()?,
             i32::try_from(bounds.min.1).ok()?,
@@ -155,7 +160,9 @@ impl super::inventory::InventoryReader {
     ) -> Option<Result<(), String>> {
         let key = world.npc_request.take()?;
         let result = self.open_npc_dialogue(world, key);
-        if let Err(error) = &result {
+        if let Err(error) = &result
+            && world.dialogue_status.is_none()
+        {
             world.dialogue_status = Some(
                 json!({"status":"rejected","target":world.cache.npc(key).map(|(npc, _)| npc.id.key()),"error":error}),
             );
@@ -298,6 +305,8 @@ impl super::inventory::InventoryReader {
                 },
                 follows_player,
                 npc_flags,
+                locations: [player.tile(), tile],
+                met,
                 hour: world.cache.hour,
             },
         };
@@ -305,10 +314,16 @@ impl super::inventory::InventoryReader {
         let mut staged = world.cache.scripts.clone();
         let invocation = context.entry.invocation(0);
         let execution = script.execute(&invocation, &mut staged).map_err(|fault| {
-            format!(
+            let error = format!(
                 "{} from {}: {fault}",
                 script.source.virtual_path, script.source
-            )
+            );
+            world.dialogue_status = Some(json!({
+                "status":"rejected","target":context.target,"attachment":invocation.attachment,
+                "triggerer":Actor::Player,"script":script.source.virtual_path,
+                "script_mount":script.source.to_string(),"error":error,"script_fault":fault
+            }));
+            error
         })?;
         let Outcome::Dialogue { line } = execution.outcome else {
             world.cache.scripts = staged;
@@ -377,7 +392,7 @@ impl super::inventory::InventoryReader {
                 true
             }
             Err(error) => {
-                world.dialogue_status = Some(json!({"status":"response_rejected","error":error}));
+                world.dialogue_status = Some(session.record_rejection(index, error));
                 false
             }
         }

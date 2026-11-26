@@ -64,8 +64,23 @@ impl Hud {
                 ..Default::default()
             };
         }
-        self.set_label(Binding::NpcContext, &session.speaker);
-        self.set_label(Binding::DialogueText, &session.turn.text);
+        if let Some(feedback) = &session.response_feedback {
+            if self.placed_bound(Binding::NpcContext).is_some() {
+                self.set_label(
+                    Binding::NpcContext,
+                    &format!("{}\n{feedback}", session.speaker),
+                );
+                self.set_label(Binding::DialogueText, &session.turn.text);
+            } else {
+                self.set_label(
+                    Binding::DialogueText,
+                    &format!("{feedback}\n\n{}", session.turn.text),
+                );
+            }
+        } else {
+            self.set_label(Binding::NpcContext, &session.speaker);
+            self.set_label(Binding::DialogueText, &session.turn.text);
+        }
         self.dialogue_available =
             std::array::from_fn(|row| session.turn.responses.get(row).is_some_and(|r| r.available));
         let mut rows = Vec::new();

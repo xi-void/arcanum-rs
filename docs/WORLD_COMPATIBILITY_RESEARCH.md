@@ -171,7 +171,13 @@ particular hour.
 
 ## Portal association
 
-Rust's `matched_opening` requires exactly one same-tile wall, a supported wall ART piece in 21–33, and matching rotation before it invokes `PortalImport::resolve`. CE's `src/game/sector_object_list.c::sub_4F20A0` uses neighboring wall and portal nodes in **draw order**. It can insert a portal with no matching wall and does not check piece or rotation in that comparison. CE also distinguishes doors and windows in `src/game/a_name.c::a_name_portal_aid_from_wall_aid`: doors use pieces 22, 25, 26, 29–32 and windows use 10, 13, 14, 17–19. That function derives a portal ID from a wall. It is separate from loading a serialized portal's existing ID and resolving it through `a_name_portal_aid_to_fname`.
+The original Rust baseline required exactly one same-tile wall, a supported wall ART piece in 21–33, and matching rotation before invoking `PortalImport::resolve`. CE's `src/game/sector_object_list.c::sub_4F20A0` uses neighboring wall and portal nodes in **draw order**. It can insert a portal with no matching wall and does not check piece or rotation in that comparison. CE also distinguishes doors and windows in `src/game/a_name.c::a_name_portal_aid_from_wall_aid`. Doors use pieces 22, 25, 26, 29–32 and windows use 10, 13, 14, 17–19. That function derives a portal ID from a wall. It is separate from loading a serialized portal's existing ID and resolving it through `a_name_portal_aid_to_fname`.
+
+The Shrouded Hills gate follow-up allows door ART to resolve without a
+same-tile wall. The targeted scan of sector `88248157567` recovered one
+portal raster and one door target. Native clicks reached the original lock
+and on-foot movement still stopped at the gate. See the
+[installed-data reproduction](AGENT_WORKFLOW.md#shrouded-hills-interaction-check).
 
 CE's `src/game/portal.c::portal_is_open` checks current ART frame. `src/game/object.c::object_locked_get` evaluates authored lock flags and time conditions independently. The scanner's association failures come before these runtime decisions. It does not identify a legitimately locked door as a mismatch because it is locked. The collision layer in `src/content/collision.rs` consumes decoded wall/portal records independently of scene association, so a missing portal raster can coexist with a collision edge. Door interaction preparation depends on the imported portal. Changing the render gate alone would leave separate collision and interaction semantics to test.
 

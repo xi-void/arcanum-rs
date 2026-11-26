@@ -218,6 +218,8 @@ Use `rpc objects category npc` to locate original NPCs and see their effective
 sprite. The navigation state reports `hovered_npc` and any pending approach.
 `dialogue.active` reports the active turn and script provenance.
 `dialogue.last_result` reports a rejected entry, rejected response or closure.
+For response failures compare `turn`, `response`, `destination`, `effect`,
+`stage` and `script_fault` with the active turn and its source.
 Use `ui.hud.dialogue_responses` for physical mouse coordinates. Inspect
 `audio.output.active_voice` and the winning VFS source in
 `audio.output.recent` while a line plays. Use an isolated sound monitor for
@@ -235,6 +237,49 @@ global flag 2342. Close dialogue before using F7, then use F8 and confirm the
 response is still absent. This also distinguishes a saved script consequence
 from the session-only meeting condition on the opening reply.
 
+### Shrouded Hills interaction check
+
+Launch `target/release/arcanum-rs` with the normal installed configuration and
+developer RPC enabled. Use `coc` to position the player for each check and use
+the real mouse for hover, approach and Use. Inspect `rpc pos` before and
+after the click.
+
+| Object | Reproduction arrival on map 5000 | Original identity and expected input result |
+| --- | --- | --- |
+| Doc Roberts | `rpc coc 5000 90213 84148` | `2:0341df77fe12d4118f1d00e02920220c`. Click him to approach and reach line 1. Close with Escape and click again for line 205 in the same session. |
+| Constable Owens | `rpc coc 5000 90227 84175` | `2:eb7aed152e8d974391af827b51dcd1ea`. Clicking reaches line 1. |
+| Jongle Dunne | `rpc coc 5000 90271 84171` | `2:ddaf30288e52d4118f1d00a0cc6511c6`. Clicking reaches line 1. |
+| Wise Woman | `rpc coc 5000 90155 84179` | `2:837d39d717782a41bba337a11146b014`. Hover reports her GUID in `rpc pos`. Clicking records a SCR action 29 rejection. |
+| Herbalist, Black Root | `rpc coc 5000 70179 92088` | `2:5ce5e69a89ff8f4cb6e02aadf2f4cbf4`. Hover reports this separate Herbalist's GUID. Clicking records the same SCR action 29 rejection. |
+| Lukan's bridge gate | `rpc coc 5000 90100 84189` | `88248157567:54`. Click its leaf to get `door is locked` in the window title. Click the ground toward `(90096,84189)` to check that the player cannot cross the closed gate. |
+
+The gate record is at `(90099,84189)`. Its sector and the original
+`map.sbf` come from module `Arcanum.dat`. Its prototype 2030 comes from
+loose `data/proto`. `Arcanum2.dat` supplies `art/portal/portal.mes`,
+`art/portal/xxxe3au0.art` and `scr/30019unblockshroudedhills.scr`.
+`rpc objects id 88248157567:54` reports frame 0, a direction-5 collision
+edge, and the separate lock and Use attachment. The sector is also
+authored blocked for overland travel in `map.sbf`.
+
+For NPCs, `rpc objects original GUID` reports the original instance,
+effective placement and flags, loaded ART, blit scale and interaction target.
+These NPC instances come from module `Arcanum.dat` and their prototypes
+from loose `data/proto`. Their visible ART comes from `Arcanum1.dat`.
+Doc's SCR and DLG both come from `Arcanum5.dat`. The other four SCR files
+come from `Arcanum2.dat`. Their DLG files come from `Arcanum5.dat` except
+the Wise Woman's `03055sh_identify_lady.dlg`, which comes from `Arcanum3.dat`.
+The Shrouded Hills placement is the Wise Woman at `(90157,84179)`.
+The original NPCs named Herbalist with attachment 1815 are placed elsewhere
+on the main map.
+
+
+## Quest logbook
+
+Use the original riddler interactions described in [Quests](QUESTS.md).
+`pos.result.quests` reports the resolved journal text, mounting source,
+and exact quest state. `pos.result.ui.hud.journal` reports page and control
+bounds. Use a Vulkan capture to check the visible spread. `world-scan` reports
+quest metadata and text resource coverage without running dialogue.
 
 ## Diagnostic snapshots
 

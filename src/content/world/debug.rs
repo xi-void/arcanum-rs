@@ -159,8 +159,8 @@ impl InteractiveWorld {
                 (asset, raster.frame_draw(asset))
             });
         let visible = self.cache.raster_revealed(raster);
-        let intersects =
-            Viewport::new(camera.position(), size).intersects(RasterBounds::new(sprite));
+        let intersects = Viewport::new(camera.position(), size)
+            .intersects(RasterBounds::scaled(sprite, raster.scale));
         let active = self.cache.active.contains(&id);
         let frame = match &raster.animation {
             Some(RasterAnimation::Loop(clip, initial)) => Some(clip.index(*initial, now)),
@@ -184,7 +184,7 @@ impl InteractiveWorld {
         result["rendering"] = json!({"state": if !active {"inactive_sector"} else if !visible {"roof_or_wall_hidden"}
                 else if !intersects {"outside_viewport"} else {"eligible_for_scene_submission"},
             "asset":super::super::diagnostics::source(&asset.source),"frame":frame,"stored_rotation":asset.decoded.stored_rotation,
-            "palette":asset.decoded.stored_palette,"anchor":sprite.anchor});
+            "palette":asset.decoded.stored_palette,"anchor":sprite.anchor,"scale":raster.scale});
         if let Some(target) = sector.interactions.get(&key) {
             result["interaction"] = match &target.action {
                 interaction::Action::Npc(id) => json!({"kind":"npc", "id":id.key()}),

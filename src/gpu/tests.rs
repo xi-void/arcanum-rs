@@ -44,6 +44,7 @@ fn draw<'a>(
 ) -> WorldDraw<'a> {
     WorldDraw {
         asset,
+        scale: 100,
         sprite: SpriteDraw {
             frame: &asset.decoded.frame,
             anchor,

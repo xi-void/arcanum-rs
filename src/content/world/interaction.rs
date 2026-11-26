@@ -2,7 +2,7 @@
 
 use super::super::script::{Actor, Attachment, Event, Invocation, Outcome, Script, State};
 use super::*;
-use crate::compositor::sprite_origin;
+use crate::compositor::scaled_sprite_rect;
 
 type Tile = (u32, u32);
 type Id = (u64, usize);
@@ -23,12 +23,15 @@ pub(super) struct Target {
 
 pub(super) struct Door {
     pub id: Id,
+    tile: Tile,
     pub originally_open: bool,
     pub direction: u8,
     pub(super) flags: u32,
     sound_effect: Option<i32>,
     unlock_script: i32,
     unlock: Option<Result<Box<(Attachment, Script)>, String>>,
+    use_script: i32,
+    use_issue: Option<String>,
     frames: [(Arc<LoadedFrame>, (i32, i32)); 4],
     period: Duration,
 }
@@ -107,7 +110,8 @@ impl DoorStates {
         serde_json::json!({"kind":"door","open":open,"flags":door.flags,
             "locked":!self.1.contains(&door.id)&&locked(door.flags,hour),
             "developer_unlock":self.1.contains(&door.id),"unlock_script":door.unlock_script,
-            "unlock_check":door.check_unlock(hour, scripts).err()})
+            "unlock_check":door.check_unlock(hour, scripts).err(),
+            "use_script":door.use_script,"use_issue":door.use_issue})
     }
 
     pub(super) fn unlock(&mut self, door: &Door) -> Result<bool, String> {
@@ -157,6 +161,8 @@ impl DoorStates {
             .map_or(door.originally_open, |change| change.open);
         if open {
             door.may_open(hour, self.1.contains(&door.id), scripts)?;
+        } else if let Some(issue) = &door.use_issue {
+            return Err(issue.clone());
         }
         self.0.insert(
             door.id,
@@ -192,6 +198,8 @@ impl Door {
             hour,
             follows_player: None,
             npc_flags: None,
+            locations: [None, Some(self.tile)],
+            met: None,
         };
         let result = script.inspect(&input, scripts).map_err(|fault| {
             format!(
@@ -218,6 +226,9 @@ impl Door {
         }
         if !unlocked && locked(self.flags, hour) {
             return Err("door is locked".into());
+        }
+        if let Some(issue) = &self.use_issue {
+            return Err(issue.clone());
         }
         Ok(())
     }
@@ -273,10 +284,25 @@ pub(super) fn prepare(
             continue;
         }
         let tile = portal.placement.tile;
-        let action = if portal.use_script > 0 {
-            use_action(vfs, portal.use_script)
+        let use_issue = if portal.use_script > 0 {
+            match super::super::jumps::use_destination(vfs, portal.use_script) {
+                Ok(destination) => {
+                    targets.insert(
+                        (true, portal.order()),
+                        Target {
+                            tile,
+                            action: Action::Travel(destination),
+                        },
+                    );
+                    continue;
+                }
+                Err(error) => Some(format!("Use script {}: {error}", portal.use_script)),
+            }
         } else {
-            let mut build = || -> Result<_, Box<dyn std::error::Error>> {
+            None
+        };
+        let action = {
+            let build = || -> Result<_, Box<dyn std::error::Error>> {
                 let art = portal.art;
                 let first = usize::from(art.first_opening_frame());
                 let mut sequence = Vec::with_capacity(4);
@@ -303,6 +329,7 @@ pub(super) fn prepare(
                 let period = Duration::from_millis((1000 / fps.max(1)).clamp(16, 800) as u64);
                 Ok(Door {
                     id: (sector, portal.record.index),
+                    tile,
                     direction: art.rotation | 1,
                     originally_open: art.frame != 0,
                     flags: portal.appearance.portal_flags,
@@ -318,6 +345,8 @@ pub(super) fn prepare(
                         };
                         Ok(Box::new((attachment, script)))
                     }),
+                    use_script: portal.use_script,
+                    use_issue,
                     frames: sequence.try_into().expect("four door poses"),
                     period,
                 })
@@ -560,7 +589,7 @@ impl SectorCache {
                     || raster.frame_draw(raster.asset_at(elapsed, self.fidget)),
                     |(_, sprite)| sprite,
                 );
-                hits(sprite, point).then_some(raster.key)
+                hits_scaled(sprite, point, raster.scale).then_some(raster.key)
             })
     }
 
@@ -691,16 +720,17 @@ impl SectorCache {
 }
 
 pub(super) fn hits(sprite: SpriteDraw<'_>, point: (i64, i64)) -> bool {
-    let origin = sprite_origin(sprite.frame, sprite.anchor);
-    let (Ok(x), Ok(y)) = (
-        u32::try_from(point.0 - origin.0),
-        u32::try_from(point.1 - origin.1),
-    ) else {
+    hits_scaled(sprite, point, 100)
+}
+
+fn hits_scaled(sprite: SpriteDraw<'_>, point: (i64, i64), scale: u32) -> bool {
+    let ((left, top), (width, height)) = scaled_sprite_rect(sprite, scale);
+    let (x, y) = (point.0 - left, point.1 - top);
+    if !(0..width).contains(&x) || !(0..height).contains(&y) {
         return false;
-    };
-    x < sprite.frame.width
-        && y < sprite.frame.height
-        && sprite.frame.pixels[(y * sprite.frame.width + x) as usize][3] != 0
+    }
+    let source = |offset| (offset * 100 / i64::from(scale)) as usize;
+    sprite.frame.pixels[source(y) * sprite.frame.width as usize + source(x)][3] != 0
 }
 
 fn neighbor((x, y): Tile, direction: u8) -> Option<Tile> {
@@ -711,6 +741,27 @@ fn neighbor((x, y): Tile, direction: u8) -> Option<Tile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scaled_sprite_bounds_and_hit_use_the_same_hotspot_and_texels() {
+        let mut frame = crate::art::SpriteFrame {
+            width: 4,
+            height: 4,
+            hotspot: (2, -2),
+            offset: (0, 0),
+            pixels: vec![[0; 4]; 16],
+        };
+        frame.pixels[2] = [255; 4];
+        let sprite = SpriteDraw {
+            frame: &frame,
+            anchor: (0, 0),
+        };
+        let bounds = RasterBounds::scaled(sprite, 50);
+        assert_eq!((bounds.min, bounds.max), ((-1, 1), (1, 3)));
+        assert!(hits_scaled(sprite, (0, 1), 50));
+        assert!(!hits_scaled(sprite, (-1, 1), 50)); // Transparent texel inside the quad.
+        assert!(!hits_scaled(sprite, (1, 1), 50)); // Clipped right edge.
+    }
 
     #[test]
     #[ignore = "requires installed original data"]
@@ -778,11 +829,14 @@ mod tests {
         let mut ordinary = Door {
             sound_effect: None,
             id: door.id,
+            tile: door.tile,
             originally_open: false,
             direction: door.direction,
             flags: 1,
             unlock_script: 0,
             unlock: None,
+            use_script: 0,
+            use_issue: None,
             frames: door.frames.clone(),
             period: door.period,
         };

@@ -1070,8 +1070,14 @@ impl Error for OpeningRejection {}
 fn matched_opening(
     wall: Option<(usize, usize, u32)>,
     raw_portal: u32,
-) -> Result<usize, Box<dyn Error>> {
+) -> Result<Option<usize>, Box<dyn Error>> {
     let (count, index, raw_wall) = wall.unwrap_or_default();
+    let portal_art = portal::PortalArt::decode(raw_portal)?;
+    // CE registers doors as objects in their own right. A paired wall is
+    // useful for ordering built-in doors, but free-standing doors have none.
+    if count == 0 && portal_art.kind == portal::Kind::Door {
+        return Ok(None);
+    }
     let mut evidence = OpeningRejection {
         code: if count == 0 {
             "portal_without_same_tile_wall"
@@ -1089,7 +1095,6 @@ fn matched_opening(
         return Err(Box::new(evidence));
     }
     let wall_art = WallArtId(raw_wall).fields()?;
-    let portal_art = portal::PortalArt::decode(raw_portal)?;
     let piece_matches = (21..=33).contains(&wall_art.piece);
     let rotation_matches = wall_art.rotation == portal_art.rotation;
     if !piece_matches || !rotation_matches {
@@ -1104,7 +1109,7 @@ fn matched_opening(
         evidence.portal_rotation = Some(portal_art.rotation);
         return Err(Box::new(evidence));
     }
-    Ok(index)
+    Ok(Some(index))
 }
 
 pub(super) type DrawOrder = (bool, u32, u32, i64, i64, usize, Option<usize>);
@@ -1287,6 +1292,14 @@ mod tests {
         assert_eq!(dense.scenery.len(), 2_000);
         assert!(object_preparation_bytes(&dense, true) < OBJECT_PREPARATION_BUDGET);
         assert!(object_preparation_bytes(&list(25_000), false) > OBJECT_PREPARATION_BUDGET);
+    }
+
+    #[test]
+    fn standalone_doors_skip_wall_association_but_windows_still_require_it() {
+        assert_eq!(matched_opening(None, 0x32a8_2c00).unwrap(), None);
+        let error = matched_opening(None, 928524288).unwrap_err();
+        let evidence = error.downcast_ref::<OpeningRejection>().unwrap();
+        assert_eq!(evidence.code, "portal_without_same_tile_wall");
     }
 
     #[test]
