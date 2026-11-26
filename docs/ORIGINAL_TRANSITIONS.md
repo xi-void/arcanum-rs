@@ -81,9 +81,10 @@ With CE's new-game global flags clear, row 0 jumps to row 3 and
 row 3 returns `SAT_RETURN_AND_RUN_DEFAULT`. Flag 1024 instead takes
 the handler-removal branch. With 2117 set and 1024 clear, the
 handler can toggle the door, play sounds, and schedule a later
-close. This engine supports the clear-flags path. The other
-branches require state, sound and timed script execution. The base
-record has portal flags `0x11` (`LOCKED | ALWAYS_LOCKED`), so
+close. The engine checks the live global flags on each use or
+route check. The clear-flags path runs the default lock check.
+The other branches require attachment removal, portal actions,
+sound and timed script execution. The base record has portal flags `0x11` (`LOCKED | ALWAYS_LOCKED`), so
 ordinary use reaches the lock check and leaves the gate closed.
 The lock difficulty is 64 and key ID is 6438. The current alpha
 has no keys or lockpicking. The separate mansion entrance

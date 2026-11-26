@@ -35,6 +35,8 @@ pub struct State {
     pub facing: u8,
     pub clock: (u64, u64),
     pub objects: Objects,
+    #[serde(default)]
+    pub scripts: super::script::State,
     pub doors: BTreeMap<String, SavedDoors>,
     pub discovered: BTreeSet<i32>,
     pub explored: BTreeMap<u32, BTreeSet<u32>>,
@@ -163,6 +165,7 @@ impl Store {
         if state.facing >= 8 || !super::travel::Clock::valid_phase(state.clock.1) {
             return Err("Invalid saved facing or clock phase".into());
         }
+        state.scripts.validate()?;
         Ok(state)
     }
 
@@ -319,11 +322,25 @@ mod tests {
             std::process::id(),
             now().as_nanos()
         )));
+        use crate::content::script::{Attachment, Event, Slot};
+        let attachment = Attachment {
+            owner: "fixture".into(),
+            event: Event::Dialogue,
+            script: 1,
+            initial: Default::default(),
+        };
+        let mut scripts = crate::content::script::State::default();
+        scripts.write(&attachment, Slot::LocalFlag(7), 1).unwrap();
+        scripts.write(&attachment, Slot::GlobalFlag(4), 1).unwrap();
+        scripts
+            .write(&attachment, Slot::GlobalVariable(5), -19)
+            .unwrap();
         let state = State {
             map: "fixture".into(),
             tile: (32, 32),
             facing: 4,
             clock: (29, 3_000),
+            scripts,
             objects: serde_json::from_value(serde_json::json!({
                 "character":Character::default(),"next_generated":0,"items":[],"unlocked":{},
             }))
@@ -345,6 +362,11 @@ mod tests {
             .unwrap();
         let id = store.recent().unwrap();
         let loaded = store.load(&id).unwrap();
+        assert_eq!(loaded.scripts, state.scripts);
+        let mut legacy = serde_json::to_value(&state).unwrap();
+        legacy.as_object_mut().unwrap().remove("scripts");
+        let legacy: State = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.scripts, crate::content::script::State::default());
         assert_eq!(loaded.discovered, state.discovered);
         assert_eq!(loaded.explored, state.explored);
         assert_eq!(loaded.clock, state.clock);

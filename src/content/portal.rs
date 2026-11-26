@@ -183,6 +183,7 @@ pub struct ImportedPortal {
     pub paired_wall_index: usize,
     pub(super) use_script: i32,
     pub(super) unlock_script: i32,
+    pub(super) unlock_local: super::script::Local,
     pub(super) sound_effect: Option<i32>,
 }
 
@@ -274,6 +275,11 @@ impl PortalImport {
                 .unlock_script
                 .or(prototype.appearance.unlock_script)
                 .unwrap_or(0),
+            unlock_local: record
+                .fields
+                .unlock_local
+                .or(prototype.appearance.unlock_local)
+                .unwrap_or_default(),
             use_script: record
                 .fields
                 .use_script

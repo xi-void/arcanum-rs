@@ -593,6 +593,10 @@ impl Viewer<'_> {
             return Err("World transition is unavailable".into());
         };
         let size = view.window.inner_size();
+        let saved_scripts = match &mode {
+            LocationMode::Save { state, .. } => Some(&state.scripts),
+            LocationMode::Travel { .. } => None,
+        };
         let (map, next, next_camera) = (travel.loader)(
             map_hint.unwrap_or(&travel.map),
             world,
@@ -611,7 +615,9 @@ impl Viewer<'_> {
                 *trace,
             )
             .map_err(|err| err.to_string())?;
-        if !restoring {
+        if let Some(scripts) = saved_scripts {
+            next.restore_script_state(scripts.clone());
+        } else {
             travel
                 .doors
                 .insert(travel.map.clone(), world.take_door_states());
@@ -959,6 +965,7 @@ impl Viewer<'_> {
             facing,
             clock,
             objects: world.save_objects(),
+            scripts: world.script_state().clone(),
             doors,
             discovered: Default::default(),
             explored: Default::default(),
@@ -1699,6 +1706,7 @@ impl ApplicationHandler for Viewer<'_> {
                             && let Some(result) = reader.start_npc_interaction(world)
                         {
                             match result {
+                                Ok(()) if world.conversation().is_none() => {}
                                 Ok(())
                                     if hud.as_ref().is_some_and(|hud| hud.supports_dialogue()) =>
                                 {

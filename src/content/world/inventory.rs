@@ -1103,6 +1103,7 @@ impl InteractiveWorld {
     pub fn inherit_object_state(&mut self, previous: &mut Self) {
         self.met_npcs = std::mem::take(&mut previous.met_npcs);
         self.cache.inventory = std::mem::take(&mut previous.cache.inventory);
+        self.cache.scripts = std::mem::take(&mut previous.cache.scripts);
         if let (Some(player), Some(old)) = (&mut self.cache.player, &previous.cache.player) {
             player.appearance = Arc::clone(&old.appearance);
         }

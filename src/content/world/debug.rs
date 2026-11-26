@@ -189,7 +189,9 @@ impl InteractiveWorld {
             result["interaction"] = match &target.action {
                 interaction::Action::Npc(id) => json!({"kind":"npc", "id":id.key()}),
                 interaction::Action::Door(door) => {
-                    self.cache.door_states.diagnostic(door, self.cache.hour)
+                    self.cache
+                        .door_states
+                        .diagnostic(door, self.cache.hour, &self.cache.scripts)
                 }
                 interaction::Action::Travel(dst) => json!({"kind":"transition","destination":dst}),
                 interaction::Action::Container(id) => json!({

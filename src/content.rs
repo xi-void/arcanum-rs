@@ -19,6 +19,7 @@ mod roof;
 pub mod save;
 pub mod scenery;
 pub mod schematics;
+pub mod script;
 pub mod sector;
 pub mod shadow;
 mod terrain;

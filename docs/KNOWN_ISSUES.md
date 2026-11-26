@@ -15,14 +15,14 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 ### DLG-001 — Dialogue requires unimplemented script and game state
 
 - **Priority:** P2 | **Status:** Deferred
-- Full entry handlers, dialogue effects, negative destinations, alternate
-  dialogue overrides and script continuations require the original script
-  interpreter and its gameplay dependencies. For example, the Bates house
-  guards use a script with equipment and combat checks and floating lines.
-- Quest, global script variables, local counters, reputation, skill, encounter and
-  party checks remain unresolved. Initial reaction uses the original base
-  and available character modifiers. Persistent reaction history and live AI changes
-  are outside the current runtime.
+- The initial SCR instruction subset and DLG script-state effects are
+  implemented. Unsupported instructions, mixed effects, implicit exit
+  handlers, and alternate dialogue overrides still need their original
+  gameplay dependencies. The Bates house guards use equipment and combat
+  checks and floating lines.
+- Quest, reputation, skill, encounter and party checks remain unresolved.
+  Initial reaction uses the original base and available character modifiers.
+  Persistent reaction and meeting history and live AI changes are pending.
 - Some greetings and response directives need class-, race-, quest- or
   service-specific dialogue. Talk-triggered scripts, trade and companion
   recruitment are deferred. Scriptless NPCs have no conversation panel.

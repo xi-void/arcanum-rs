@@ -73,6 +73,10 @@ pub fn resource(
                 json!({"status":"failed","code":"dialogue_decode_failed","message":error})
             }
         },
+        (true, Some("scr"), None) => match super::script::Script::load_path(vfs, &path) {
+            Ok(script) => script.structure(),
+            Err(error) => json!({"status":"failed","code":"script_decode_failed","message":error}),
+        },
         (false, _, _) => json!({"status":"missing"}),
         (_, _, Some(_)) => json!({"status":"unsupported","code":"frame_requires_art"}),
         _ => json!({"status":"untested"}),
