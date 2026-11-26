@@ -73,43 +73,21 @@ quit` closes the session cleanly.
 ## State and capture
 
 - `inventory [OWNER]` reports the grid and items for `player` or a container
-  GUID on the active map. `itemowner ORIGINAL_ID` reports an item's authored
-  and current placement, cell footprint and resource provenance. Modified
-  items remain inspectable across sector eviction and map transitions.
-- `pickup ORIGINAL_ID [SLOT]`, `drop ORIGINAL_ID` and
-  `transfer ORIGINAL_ID FROM TO [SLOT]` apply session transactions. `FROM` and
-  `TO` take `player` or a container GUID. Successful results include the item
-  ID, source, destination, footprint and resulting slot. Inventory inspection
-  failures return `inventory_unavailable`. Rejected moves return
-  `inventory_rejected` with the reason in `error.message`.
-- `unlock` clears an ordinary selected door or container lock for the running
-  session. Select the object by clicking it with the developer console open.
-  Container inspection exposes the override as `developer_unlock`.
-  Scripted, jammed, and magical restrictions still apply.
-- `pos` combines player, camera, travel, renderer, streaming and UI state.
-  `camera.view_ready` reports whether the current location has presented
-  its view. `coc` and `teleport` validate and prepare the destination in
-  the shared loader before replacing the active world. The window redraw
-  follows. Poll `pos` when an operation requires the presented view.
-- `sectors` reports cached, required and speculative sectors, their source
-  kind, record coverage, collision availability and bounded issues.
-- `objects` combines optional `near X Y RADIUS`, `id SECTOR:RECORD`,
-  `original 2:GUIDHEX`, `category CATEGORY` and `prototype ID` filters. Results are limited to
-  128 decoded records and 128 issues from cached sectors. Raster state is
-  evaluated against the active scene and viewport. Whole object lists
-  rejected by the format reader are represented as sector issues.
-- `resource PATH [FRAME]` reports winning VFS provenance and alternatives
-  in precedence order. ART frame decode and prototype-header decode are
-  explicit. Other resources report the lookup and its untested decode
-  status. No asset payload is returned.
-- `trace on` enables a 128-entry event history. `events [CATEGORY]`
-  returns it and the dropped-event count. Categories include command,
-  map load, sector completion, game time, UI reload and snapshot restore.
-  Request IDs correlate events generated synchronously during dispatch.
-- Frame timings reflect the existing host acquire, preparation, encode,
-  submit and present stages. GPU duration is available when timing is
-  enabled and supported. Texture and raster memory fields are cache
-  estimates. Queries do not request continuous rendering.
+  GUID. Player results include `equipment`, `character` and `counters`.
+  Counters follow gold, arrows, bullets, charges and fuel.
+- `itemowner ITEM_ID` reports current placement, quantity, equipment fields
+  and original resource provenance. Item IDs can be original GUIDs or
+  generated session IDs.
+- `pickup ITEM_ID [SLOT]`, `drop ITEM_ID`, and
+  `transfer ITEM_ID FROM TO [SLOT]` apply session transactions. `FROM` and
+  `TO` are `player` or eligible container GUIDs. Grid slots are zero-based
+  row-major. `transferqty ITEM_ID FROM TO QUANTITY [SLOT]` also supports
+  `ground` as a destination for partial drops.
+- `equip EQUIPMENT_SLOT ITEM_ID` and `unequip EQUIPMENT_SLOT [SLOT]`
+  change player equipment. Inspect `pos.result.player.appearance` for the
+  resolved standing critter ART ID and `statistics` for current values.
+  Report lookup failures return `inventory_unavailable`. Rejected actions
+  return `inventory_rejected` with the reason in `error.message`.
 
 Capture saves the actual presented Vulkan surface, with its current world
 and UI. Set `--diagnostics` to an existing directory. Use a fresh simple

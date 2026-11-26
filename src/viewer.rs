@@ -1359,6 +1359,33 @@ impl ApplicationHandler for Viewer<'_> {
             view.window.request_redraw();
             return;
         }
+        if let ViewContent::Stream {
+            hud: Some(hud),
+            inventory_reader: Some(reader),
+            world,
+            ..
+        } = &mut self.content
+            && hud.choosing_quantity()
+        {
+            if let WindowEvent::KeyboardInput {
+                event: key,
+                is_synthetic: false,
+                ..
+            } = &event
+                && key.state.is_pressed()
+            {
+                hud.inventory_quantity_key(reader, world, &key.logical_key);
+                self.view.as_ref().unwrap().window.request_redraw();
+            }
+            if matches!(
+                event,
+                WindowEvent::KeyboardInput { .. }
+                    | WindowEvent::MouseInput { .. }
+                    | WindowEvent::MouseWheel { .. }
+            ) {
+                return;
+            }
+        }
         if playing
             && let WindowEvent::KeyboardInput {
                 event: key,

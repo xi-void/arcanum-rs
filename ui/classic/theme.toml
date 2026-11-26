@@ -365,6 +365,7 @@ image = "vfs:art/interface/containericon.art"
 
 [[hud]]
 id = "equipment-helmet"
+equipment_slot = "helmet"
 parent = "inventory-panel"
 inventory_views = ["inventory"]
 offset = [151, 107]
@@ -374,6 +375,7 @@ hover_message = "Helmet"
 
 [[hud]]
 id = "equipment-ring1"
+equipment_slot = "ring1"
 parent = "inventory-panel"
 inventory_views = ["inventory"]
 offset = [247, 107]
@@ -383,6 +385,7 @@ hover_message = "Left ring"
 
 [[hud]]
 id = "equipment-ring2"
+equipment_slot = "ring2"
 parent = "inventory-panel"
 inventory_views = ["inventory"]
 offset = [279, 107]
@@ -392,6 +395,7 @@ hover_message = "Right ring"
 
 [[hud]]
 id = "equipment-medalion"
+equipment_slot = "medallion"
 parent = "inventory-panel"
 inventory_views = ["inventory"]
 offset = [247, 139]
@@ -401,6 +405,7 @@ hover_message = "Medallion"
 
 [[hud]]
 id = "equipment-weapon"
+equipment_slot = "weapon"
 parent = "inventory-panel"
 inventory_views = ["inventory"]
 offset = [23, 170]
@@ -410,6 +415,7 @@ hover_message = "Weapon"
 
 [[hud]]
 id = "equipment-shield"
+equipment_slot = "shield"
 parent = "inventory-panel"
 inventory_views = ["inventory"]
 offset = [247, 171]
@@ -419,6 +425,7 @@ hover_message = "Shield"
 
 [[hud]]
 id = "equipment-armor"
+equipment_slot = "armor"
 parent = "inventory-panel"
 inventory_views = ["inventory"]
 offset = [119, 171]
@@ -428,6 +435,7 @@ hover_message = "Armor"
 
 [[hud]]
 id = "equipment-gauntlet"
+equipment_slot = "gauntlet"
 parent = "inventory-panel"
 inventory_views = ["inventory"]
 offset = [55, 107]
@@ -437,6 +445,7 @@ hover_message = "Gauntlet"
 
 [[hud]]
 id = "equipment-boot"
+equipment_slot = "boots"
 parent = "inventory-panel"
 inventory_views = ["inventory"]
 offset = [150, 331]
@@ -572,3 +581,79 @@ binding = "container-thumb"
 thumb_height = 5
 thumb_middle = "vfs:art/interface/scrllslidem1.art"
 thumb_bottom = "vfs:art/interface/scrllslideb.art"
+
+[[hud]]
+id = "inventory-gold"
+parent = "inventory-panel"
+offset = [729, 70]
+size = [58, 20]
+binding = "inventory-gold"
+font = "inventory"
+
+[[hud]]
+id = "inventory-arrows"
+parent = "inventory-panel"
+offset = [729, 93]
+size = [58, 20]
+binding = "inventory-arrows"
+font = "inventory"
+
+[[hud]]
+id = "inventory-bullets"
+parent = "inventory-panel"
+offset = [729, 116]
+size = [58, 20]
+binding = "inventory-bullets"
+font = "inventory"
+
+[[hud]]
+id = "inventory-charges"
+parent = "inventory-panel"
+offset = [729, 139]
+size = [58, 20]
+binding = "inventory-charges"
+font = "inventory"
+
+[[hud]]
+id = "inventory-fuel"
+parent = "inventory-panel"
+offset = [729, 162]
+size = [58, 20]
+binding = "inventory-fuel"
+font = "inventory"
+
+[[hud]]
+id = "inventory-weight"
+parent = "inventory-panel"
+inventory_views = ["inventory"]
+offset = [145, 29]
+size = [185, 15]
+binding = "inventory-weight"
+font = "inventory"
+
+[[hud]]
+id = "inventory-burden"
+parent = "inventory-panel"
+inventory_views = ["inventory"]
+offset = [145, 44]
+size = [185, 15]
+binding = "inventory-burden"
+font = "inventory"
+
+[[hud]]
+id = "inventory-speed"
+parent = "inventory-panel"
+inventory_views = ["inventory"]
+offset = [145, 59]
+size = [185, 15]
+binding = "inventory-speed"
+font = "inventory"
+
+[[hud]]
+id = "inventory-defense"
+parent = "inventory-panel"
+inventory_views = ["inventory"]
+offset = [261, 358]
+size = [23, 35]
+binding = "inventory-defense"
+font = "inventory"

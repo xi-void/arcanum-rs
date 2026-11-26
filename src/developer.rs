@@ -26,6 +26,12 @@ pub enum Request {
     Pickup(String, Option<usize>),
     DropItem(String),
     Transfer(String, String, String, Option<usize>),
+    TransferQuantity(String, String, String, Option<usize>, u32),
+    Equipment(
+        crate::content::character::EquipmentSlot,
+        Option<String>,
+        Option<usize>,
+    ),
     Resource(String, Option<usize>),
     Snapshot,
     Restore(String),
@@ -310,7 +316,7 @@ const COMMANDS: &[Command] = &[
     ),
     query!(
         "itemowner",
-        "itemowner ORIGINAL_ID",
+        "itemowner ITEM_ID",
         "Inspect an original item's current placement and provenance.",
         |a| match a {
             [id] => Some(Request::ItemOwner(id.clone())),
@@ -319,7 +325,7 @@ const COMMANDS: &[Command] = &[
     ),
     command!(
         "pickup",
-        "pickup ORIGINAL_ID [SLOT]",
+        "pickup ITEM_ID [SLOT]",
         "Pick up a nearby ground item.",
         |a| match a {
             [id] => Some(Request::Pickup(id.clone(), None)),
@@ -329,7 +335,7 @@ const COMMANDS: &[Command] = &[
     ),
     command!(
         "drop",
-        "drop ORIGINAL_ID",
+        "drop ITEM_ID",
         "Drop a player-owned item at the player tile.",
         |a| match a {
             [id] => Some(Request::DropItem(id.clone())),
@@ -338,7 +344,7 @@ const COMMANDS: &[Command] = &[
     ),
     command!(
         "transfer",
-        "transfer ORIGINAL_ID FROM TO [SLOT]",
+        "transfer ITEM_ID FROM TO [SLOT]",
         "Move a whole item between owners or reposition it in its current grid.",
         |a| match a {
             [id, from, to] => Some(Request::Transfer(
@@ -352,6 +358,59 @@ const COMMANDS: &[Command] = &[
                 from.clone(),
                 to.clone(),
                 Some(slot.parse().ok()?)
+            )),
+            _ => None,
+        }
+    ),
+    command!(
+        "transferqty",
+        "transferqty ITEM_ID FROM TO QUANTITY [SLOT]",
+        "Transfer part or all of a gold or ammunition stack. Use ground as the destination to drop it.",
+        |a| match a {
+            [id, from, to, quantity] => Some(Request::TransferQuantity(
+                id.clone(),
+                from.clone(),
+                to.clone(),
+                None,
+                quantity.parse().ok()?
+            )),
+            [id, from, to, quantity, slot] => Some(Request::TransferQuantity(
+                id.clone(),
+                from.clone(),
+                to.clone(),
+                Some(slot.parse().ok()?),
+                quantity.parse().ok()?
+            )),
+            _ => None,
+        }
+    ),
+    command!(
+        "equip",
+        "equip EQUIPMENT_SLOT ITEM_ID",
+        "Equip a backpack item, returning any displaced item to the backpack.",
+        |a| match a {
+            [slot, id] => Some(Request::Equipment(
+                crate::content::character::EquipmentSlot::parse(slot)?,
+                Some(id.clone()),
+                None
+            )),
+            _ => None,
+        }
+    ),
+    command!(
+        "unequip",
+        "unequip EQUIPMENT_SLOT [SLOT]",
+        "Move equipped gear into the backpack.",
+        |a| match a {
+            [slot] => Some(Request::Equipment(
+                crate::content::character::EquipmentSlot::parse(slot)?,
+                None,
+                None
+            )),
+            [slot, cell] => Some(Request::Equipment(
+                crate::content::character::EquipmentSlot::parse(slot)?,
+                None,
+                Some(cell.parse().ok()?)
             )),
             _ => None,
         }
@@ -490,6 +549,9 @@ impl Command {
                     "ID" | "SECTOR:RECORD" => ("string", "sector:record"),
                     "ORIGINAL_ID" => ("string", "2: followed by 32 hexadecimal digits in serialized GUID-byte order"),
                     "OWNER" | "FROM" | "TO" => ("string", "player or an original container ID"),
+                    "ITEM_ID" => ("string", "original GUID (2:) or generated session ID (65535:)"),
+                    "QUANTITY" => ("integer", "positive stack quantity"),
+                    "EQUIPMENT_SLOT" => ("enum", "helmet, ring1, ring2, medallion, weapon, shield, armor, gauntlet, boots"),
                     "SLOT" => ("integer", "zero-based row-major grid slot"),
                     "CATEGORY" if self.name == "objects" => {
                         ("string", "mobile or a canonical category such as npc, container, armor, or wall")
@@ -512,7 +574,16 @@ impl Command {
             ],
             "sectors" => &["bounds", "cached", "required", "speculative", "stats"],
             "objects" | "inspect" => &["map", "objects", "issues", "truncated"],
-            "inventory" => &["owner", "columns", "rows", "container", "items"],
+            "inventory" => &[
+                "owner",
+                "columns",
+                "rows",
+                "container",
+                "items",
+                "equipment",
+                "character",
+                "counters",
+            ],
             "itemowner" => &[
                 "id",
                 "prototype",
@@ -523,7 +594,10 @@ impl Command {
                 "instance_source",
                 "prototype_source",
             ],
-            "pickup" | "drop" | "transfer" => &["id", "from", "to", "slot", "footprint"],
+            "pickup" | "drop" | "transfer" | "transferqty" => {
+                &["id", "from", "to", "slot", "quantity", "merged_into"]
+            }
+            "equip" | "unequip" => &["slot", "equipped", "unequipped", "statistics"],
             "maps" => &["maps", "areas"],
             "resource" => &["path", "winner", "candidates", "decode"],
             "capture" | "operation" => &["token", "path", "viewport"],

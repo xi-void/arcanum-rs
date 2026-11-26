@@ -374,6 +374,7 @@ impl Raster {
 struct CachedSector {
     mobiles: Vec<mobile::population::Resident>,
     townmap: u32,
+    aptitude: i32,
     report: SectorReport,
     draws: Vec<Raster>,
     lights: LightGrid,
@@ -407,6 +408,7 @@ impl CachedSector {
     fn missing(id: u64, error: String) -> Self {
         Self {
             townmap: 0,
+            aptitude: 0,
             mobiles: Vec::new(),
             report: SectorReport {
                 id,
@@ -643,6 +645,7 @@ impl CachedSector {
         report.diagnostics.extend(lights.issues);
         Self {
             townmap: world.townmap,
+            aptitude: world.aptitude,
             mobiles: Vec::new(),
             report,
             draws,
@@ -1845,7 +1848,9 @@ impl SectorCache {
                 })
             }
         });
-        Some(player.sample(now).anchor)
+        let anchor = player.sample(now).anchor;
+        self.update_character_sector();
+        Some(anchor)
     }
 
     fn visible_player_shadows(
@@ -2012,13 +2017,35 @@ impl WorldStream {
     }
 
     /// Spawn the first-playable character at the resolved original map entry.
-    pub fn with_player(mut self) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn with_player(self) -> Result<Self, Box<dyn std::error::Error>> {
+        self.prepare_player(None)
+    }
+
+    pub fn with_arriving_player(
+        self,
+        previous: &InteractiveWorld,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        self.prepare_player(previous.cache.player.as_ref())
+    }
+
+    fn prepare_player(
+        mut self,
+        previous: Option<&Player>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         if self.loader.walking || !self.cache.entries.is_empty() {
             return Err("player mode must be selected before loading sectors and without the rabbit preview".into());
         }
         self.cache.jumps = super::jumps::load(&mut self.loader.vfs, &self.loader.map)?;
         let reference = self.loader.reference;
-        let player = Player::load(&mut self.loader.vfs, &mut self.loader.frames, reference)?;
+        if let Some(previous) = previous {
+            self.cache.player = Some(Player::new(Arc::clone(&previous.appearance), reference));
+        } else {
+            self.cache.initialize_character(
+                &mut self.loader.vfs,
+                &mut self.loader.frames,
+                reference,
+            )?;
+        }
         if self.loader.lighting.is_some() {
             self.cache.light_schedule =
                 Some(Ambient::schedule(&mut self.loader.vfs, &self.loader.map)?);
@@ -2031,7 +2058,6 @@ impl WorldStream {
             )?);
         }
         self.loader.frames.finish_sector();
-        self.cache.player = Some(player);
         self.loader.playing = true;
         self.loader.roofs = true;
         self.cache.roof_state = Some(roof::State::default());
@@ -3119,7 +3145,7 @@ mod tests {
         let still = world.cache.player.as_ref().unwrap().sample(Duration::ZERO);
         assert_eq!(
             still.asset.source.virtual_path,
-            "art/critter/hmm/hmmv1xaa.art"
+            "art/critter/hmm/hmmcdxaa.art"
         );
         assert_eq!(still.anchor, (0, 0));
         world.cache.plan_route((384, 928), false).unwrap();
@@ -3137,7 +3163,7 @@ mod tests {
             .sample(Duration::from_millis(60));
         assert_eq!(
             stepping.asset.source.virtual_path,
-            "art/critter/hmm/hmmv1xab.art"
+            "art/critter/hmm/hmmcdxab.art"
         );
         let destination = world.cache.update_player(Duration::from_secs(2)).unwrap();
         assert_eq!(destination, (-40, 20));
@@ -3157,7 +3183,7 @@ mod tests {
             .sample(Duration::from_millis(3050));
         assert_eq!(
             running.asset.source.virtual_path,
-            "art/critter/hmm/hmmv1xag.art"
+            "art/critter/hmm/hmmcdxag.art"
         );
         assert_ne!(running.anchor, destination);
         world.cache.plan_route((384, 928), false).unwrap();
@@ -3170,7 +3196,7 @@ mod tests {
             .sample(Duration::from_millis(5050));
         assert_eq!(
             resumed.asset.source.virtual_path,
-            "art/critter/hmm/hmmv1xab.art"
+            "art/critter/hmm/hmmcdxab.art"
         );
     }
 

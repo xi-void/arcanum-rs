@@ -102,14 +102,14 @@ rpc inventory "$chest"
 rpc itemowner "$item"
 rpc transfer "$item" "$chest" player 9  # Expected inventory_rejected for the multi-cell item
 rpc itemowner "$item"                    # Still in the chest at its previous slot
-rpc transfer "$item" "$chest" player 0
+rpc transfer "$item" "$chest" player 2
 rpc inventory
 rpc coc 5078 2087 2018
 rpc itemowner "$item"                    # Same GUID and player slot on the new map
 rpc coc 5011 80 102
 rpc drop "$item"
 rpc itemowner "$item"                    # World placement at the player's tile
-rpc pickup "$item" 0
+rpc pickup "$item" 2
 rpc transfer "$item" player "$chest" 0
 rpc inventory "$chest"
 ```
@@ -119,9 +119,23 @@ placement, the instance and prototype sources, and the ART used to determine
 the footprint. Grid slots are zero-based in row-major order. Pickups and
 transfers without an explicit slot use the first fit. The source and
 destination containers must be nearby and accessible for a transfer. A failed
-transaction preserves prior ownership and placement. Inventory transactions
-operate on whole original objects. Stack merging, generated loot, item decay,
-and scripted inventory interactions are outside the supported subset.
+transaction preserves prior ownership and placement.
+
+Player inventory reports list equipment, gold and the four ammunition
+counters in Classic order, and derived statistics. Use `equip armor ITEM_ID`
+and `unequip armor [SLOT]` to exercise the equipment transaction. Use
+`transferqty ITEM_ID FROM TO QUANTITY [SLOT]` to split or transfer a stack.
+The destination can be `ground` for partial drops. Generated items use
+session IDs beginning with `65535:`. A merged source reports `current.kind`
+as `merged` and `current.into` as the surviving item ID. The counter and
+quantity of the surviving live item include the merged units.
+
+For an original ammunition fixture, the crates at (2084, 2014) and
+(2070, 1998) in Crash Site Cave (5078) contain 15 arrows and 15 bullets
+respectively. Drag to the backpack, enter a quantity, and right-click the
+remainder to exercise merging. Inspect the quantity, ownership and counters
+after each step. Equipped items, generated IDs and stack changes survive
+in-session map transitions.
 
 With Classic active, click the bag button and click the authored chest in the
 world to exercise the production paths. After each interaction, inspect

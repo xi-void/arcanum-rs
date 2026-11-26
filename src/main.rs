@@ -1414,7 +1414,9 @@ fn show_world(
                         if let Some(hour) = hour {
                             world = world.with_lighting(current_hour.unwrap_or(hour))?;
                         }
-                        world = world.with_player()?.with_collision_bypass(bypass);
+                        world = world
+                            .with_arriving_player(previous)?
+                            .with_collision_bypass(bypass);
                         world.reuse_mobile_discovery(previous);
                         if debug {
                             world = world.with_object_audit();

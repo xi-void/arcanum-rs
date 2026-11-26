@@ -1,8 +1,10 @@
 use super::*;
+use arcanum_rs::content::character::EquipmentSlot;
 use arcanum_rs::content::world::{
     InteractiveWorld, InventoryContents, InventoryEntry, InventoryReader,
 };
 use serde_json::{Value, json};
+use winit::keyboard::{Key, NamedKey};
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -24,6 +26,7 @@ pub(super) struct InventoryPanel {
     vertical: bool,
     drag: Option<Drag>,
     pointer: Option<(u32, u32)>,
+    quantity: Option<Quantity>,
 }
 
 impl InventoryPanel {
@@ -48,9 +51,20 @@ impl InventoryPanel {
     }
 }
 
+struct Quantity {
+    id: String,
+    from: String,
+    to: String,
+    slot: Option<usize>,
+    max: u32,
+    input: String,
+    replace: bool,
+}
+
 struct Drag {
     id: String,
     source: usize,
+    equipped: Option<EquipmentSlot>,
     grab_cell: [i32; 2],
     grab_pixels: [i32; 2],
     scale: u32,
@@ -184,6 +198,7 @@ impl Hud {
             revision: world.inventory_revision(),
             ..InventoryPanel::default()
         };
+        self.update_inventory_labels(world);
         self.clear_layout();
         Ok(())
     }
@@ -212,6 +227,64 @@ impl Hud {
                 self.inventory.error = Some(error);
             }
         }
+    }
+
+    fn update_inventory_labels(&mut self, world: &InteractiveWorld) {
+        let counts = world.inventory_counters();
+        for (binding, value) in [
+            Binding::InventoryGold,
+            Binding::InventoryArrows,
+            Binding::InventoryBullets,
+            Binding::InventoryCharges,
+            Binding::InventoryFuel,
+        ]
+        .into_iter()
+        .zip(counts)
+        {
+            self.set_label(binding, &value.to_string());
+        }
+        let stats = world.character_statistics();
+        self.set_label(
+            Binding::InventoryWeight,
+            &format!("Weight: {} st", stats.weight.unwrap_or_default()),
+        );
+        self.set_label(
+            Binding::InventoryBurden,
+            &format!(
+                "Encumbrance: {} ({})",
+                stats.encumbrance.map_or("", |tier| tier.name()),
+                stats
+                    .encumbrance
+                    .map_or(0, |tier| tier.threshold(stats.carry_capacity))
+            ),
+        );
+        self.set_label(
+            Binding::InventorySpeed,
+            &stats
+                .speed
+                .map_or_else(String::new, |speed| format!("Speed: {speed}")),
+        );
+        self.set_label(Binding::InventoryDefense, &stats.defense.to_string());
+    }
+
+    fn equipment_at(&self, point: (u32, u32)) -> Option<(EquipmentSlot, &Placement)> {
+        self.placed
+            .iter()
+            .enumerate()
+            .find_map(|(index, placement)| {
+                let placement = placement.as_ref()?;
+                let slot = self.components[index].config.equipment_slot?;
+                placement.rect.contains(point).then_some((slot, placement))
+            })
+    }
+
+    pub(super) fn equipped(&self, slot: EquipmentSlot) -> Option<&InventoryEntry> {
+        self.inventory
+            .backpack
+            .as_ref()?
+            .equipment
+            .iter()
+            .find(|item| item.equipment == Some(slot))
     }
 
     fn grid(&self, index: usize) -> Option<(GridView, &InventoryContents)> {
@@ -293,6 +366,24 @@ impl Hud {
     }
 
     pub(in crate::viewer) fn begin_inventory_drag(&mut self, point: (u32, u32)) -> bool {
+        if let Some((slot, placement)) = self.equipment_at(point)
+            && let Some(item) = self.equipped(slot)
+        {
+            self.inventory.drag = Some(Drag {
+                id: item.id.clone(),
+                source: 0,
+                equipped: Some(slot),
+                grab_cell: [0, 0],
+                grab_pixels: [
+                    point.0 as i32 - placement.full.x,
+                    point.1 as i32 - placement.full.y,
+                ],
+                scale: placement.scale,
+            });
+            self.inventory.pointer = Some(point);
+            self.inventory.error = None;
+            return true;
+        }
         let Some((source, grid, item)) = self.grid_item(point) else {
             return false;
         };
@@ -306,6 +397,7 @@ impl Hud {
         self.inventory.drag = Some(Drag {
             id: item.id.clone(),
             source,
+            equipped: None,
             grab_cell: [
                 col - (item.slot % columns) as i32,
                 row + grid.offset as i32 - (item.slot / columns) as i32,
@@ -323,10 +415,64 @@ impl Hud {
     }
 
     pub(in crate::viewer) fn cancel_inventory_drag(&mut self) -> bool {
-        self.inventory.drag.take().is_some()
+        self.inventory.drag.take().is_some() | self.inventory.quantity.take().is_some()
+    }
+
+    pub(in crate::viewer) fn choosing_quantity(&self) -> bool {
+        self.inventory.quantity.is_some()
+    }
+
+    pub(in crate::viewer) fn inventory_quantity_key(
+        &mut self,
+        reader: &mut InventoryReader,
+        world: &mut InteractiveWorld,
+        key: &Key,
+    ) {
+        let Some(quantity) = &mut self.inventory.quantity else {
+            return;
+        };
+        match key {
+            Key::Named(NamedKey::Enter) => {
+                if let Some(value) = quantity
+                    .input
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|value| (1..=quantity.max).contains(value))
+                {
+                    let quantity = self.inventory.quantity.take().expect("pending quantity");
+                    self.inventory.error = reader
+                        .transfer_quantity(
+                            world,
+                            &quantity.id,
+                            (&quantity.from, &quantity.to),
+                            quantity.slot,
+                            value,
+                        )
+                        .err();
+                }
+            }
+            Key::Named(NamedKey::Backspace) => {
+                quantity.input.pop();
+                quantity.replace = false;
+            }
+            Key::Character(key) if key.len() == 1 && key.as_bytes()[0].is_ascii_digit() => {
+                if quantity.replace {
+                    quantity.input.clear();
+                    quantity.replace = false;
+                }
+                if quantity.input.len() < 10 {
+                    quantity.input.push_str(key);
+                }
+            }
+            _ => {}
+        }
+        self.inventory_hover(self.inventory.pointer);
     }
 
     fn dragged_item(&self, drag: &Drag) -> Option<&InventoryEntry> {
+        if let Some(slot) = drag.equipped {
+            return self.equipped(slot);
+        }
         self.inventory
             .contents(drag.source)?
             .entries
@@ -353,8 +499,9 @@ impl Hud {
                 rect: grid.area(x, y, item.cells),
                 clip: grid.clip,
                 valid: item.movable
+                    && (drag.equipped.is_none() || index == 0 && item.removable)
                     && (drag.source == index || item.removable)
-                    && slot.is_some_and(|slot| contents.fits(item, slot)),
+                    && slot.is_some_and(|slot| contents.fits(item, slot, drag.source == index)),
                 slot: slot.map(|slot| (index, slot)),
             });
         }
@@ -364,7 +511,7 @@ impl Hud {
             component,
             rect: placement.full,
             clip: placement.rect,
-            valid: drag.source == 0 && item.movable && item.removable,
+            valid: drag.source == 0 && drag.equipped.is_none() && item.movable && item.removable,
             slot: None,
         })
     }
@@ -378,11 +525,48 @@ impl Hud {
         let Some(drag) = self.inventory.drag.take() else {
             return;
         };
+        if let Some((slot, _)) = point.and_then(|point| self.equipment_at(point)) {
+            if drag.source == 0 && drag.equipped.is_none() {
+                self.inventory.error = reader
+                    .change_equipment(world, slot, Some(&drag.id), None)
+                    .err();
+            }
+            return;
+        }
         let Some(preview) = point.and_then(|point| self.preview(&drag, point)) else {
             return;
         };
         if !preview.valid {
             self.inventory.error = Some("Item cannot be placed at this destination".into());
+            return;
+        }
+        if let Some(slot) = drag.equipped {
+            if let Some((0, cell)) = preview.slot {
+                self.inventory.error = reader.change_equipment(world, slot, None, Some(cell)).err();
+            }
+            return;
+        }
+        let from = self.inventory.owner(drag.source).expect("drag source");
+        let to = preview
+            .slot
+            .and_then(|(index, _)| self.inventory.owner(index))
+            .unwrap_or("ground");
+        if from != to
+            && let Some(max) = self
+                .dragged_item(&drag)
+                .and_then(|item| item.quantity)
+                .filter(|&n| n > 1)
+        {
+            self.inventory.quantity = Some(Quantity {
+                id: drag.id,
+                from: from.into(),
+                to: to.into(),
+                slot: preview.slot.map(|(_, cell)| cell),
+                max,
+                input: max.to_string(),
+                replace: true,
+            });
+            self.inventory_hover(point);
             return;
         }
         let result = if let Some((index, slot)) = preview.slot {
@@ -412,7 +596,11 @@ impl Hud {
         world: &mut InteractiveWorld,
         point: (u32, u32),
     ) {
-        if let Some((index, _, item)) = self.grid_item(point)
+        if let Some((slot, _)) = self.equipment_at(point) {
+            if self.equipped(slot).is_some() {
+                self.inventory.error = reader.change_equipment(world, slot, None, None).err();
+            }
+        } else if let Some((index, _, item)) = self.grid_item(point)
             && let (Some(from), Some(to)) =
                 (self.inventory.owner(index), self.inventory.owner(1 - index))
         {
@@ -456,13 +644,23 @@ impl Hud {
         let item = if let Some(drag) = &self.inventory.drag {
             self.dragged_item(drag)
         } else {
-            point.and_then(|point| self.grid_item(point).map(|(_, _, item)| item))
+            point.and_then(|point| {
+                self.grid_item(point).map(|(_, _, item)| item).or_else(|| {
+                    self.equipment_at(point)
+                        .and_then(|(slot, _)| self.equipped(slot))
+                })
+            })
         };
         let id = item.map(|item| item.id.clone());
-        let message = if let Some(error) = &self.inventory.error {
+        let message = if let Some(quantity) = &self.inventory.quantity {
+            format!(
+                "Quantity (1–{}): {}   Enter to move, Esc to cancel",
+                quantity.max, quantity.input
+            )
+        } else if let Some(error) = &self.inventory.error {
             error.clone()
         } else if let Some(item) = item {
-            item.name.clone()
+            format!("{}\n{}", item.name, item.detail)
         } else {
             point
                 .and_then(|point| {
@@ -521,6 +719,26 @@ impl Hud {
                     ))
                 })
             });
+        let equipped = self
+            .placed
+            .iter()
+            .enumerate()
+            .filter_map(|(index, placement)| {
+                let p = placement.as_ref()?;
+                let slot = self.components[index].config.equipment_slot?;
+                let item = self.equipped(slot)?;
+                if self
+                    .inventory
+                    .drag
+                    .as_ref()
+                    .is_some_and(|drag| drag.id == item.id)
+                {
+                    return None;
+                }
+                let asset = item.icon.as_ref().ok()?;
+                let rect = equipment_icon(p, asset);
+                Some(overlay(asset, rect, rect.intersect(p.rect)?))
+            });
         let highlight = (0..GRIDS.len()).find_map(|index| {
             if self.inventory.drag.is_some() {
                 return None;
@@ -562,21 +780,31 @@ impl Hud {
         let ghost = self.inventory.drag.as_ref().and_then(|drag| {
             let point = self.inventory.pointer?;
             let item = self.dragged_item(drag)?;
-            let (grid, contents) = self.grid(drag.source)?;
             let asset = item.icon.as_ref().ok()?;
-            let origin = grid.item_area(item.slot, contents.columns, item.cells);
-            let mut rect = grid.icon_area(
-                item.slot,
-                contents.columns,
-                item.cells,
-                &asset.decoded.frame,
-            );
-            rect.x += point.0 as i32
-                - origin.x
-                - drag.grab_pixels[0] * grid.scale as i32 / drag.scale as i32;
-            rect.y += point.1 as i32
-                - origin.y
-                - drag.grab_pixels[1] * grid.scale as i32 / drag.scale as i32;
+            let (mut rect, origin, scale) = if let Some(slot) = drag.equipped {
+                let component = self
+                    .components
+                    .iter()
+                    .position(|component| component.config.equipment_slot == Some(slot))?;
+                let p = self.placed[component].as_ref()?;
+                (equipment_icon(p, asset), p.full, p.scale)
+            } else {
+                let (grid, contents) = self.grid(drag.source)?;
+                (
+                    grid.icon_area(
+                        item.slot,
+                        contents.columns,
+                        item.cells,
+                        &asset.decoded.frame,
+                    ),
+                    grid.item_area(item.slot, contents.columns, item.cells),
+                    grid.scale,
+                )
+            };
+            rect.x +=
+                point.0 as i32 - origin.x - drag.grab_pixels[0] * scale as i32 / drag.scale as i32;
+            rect.y +=
+                point.1 as i32 - origin.y - drag.grab_pixels[1] * scale as i32 / drag.scale as i32;
             let viewport = Rect {
                 x: 0,
                 y: 0,
@@ -588,6 +816,7 @@ impl Hud {
         highlight
             .into_iter()
             .chain(icons)
+            .chain(equipped)
             .chain(thumb)
             .chain(placement)
             .chain(ghost)
@@ -603,7 +832,7 @@ impl Hud {
                 "items":contents.entries.iter().map(|item| {
                     let footprint = grid.item_area(item.slot, contents.columns, item.cells);
                     json!({"id":item.id,"name":item.name,"slot":item.slot,"cells":item.cells,
-                        "visible_bounds":footprint.intersect(grid.clip).map(rect),
+                        "visible_bounds":footprint.intersect(grid.clip).map(rect),"quantity":item.quantity,
                         "art":item.icon.as_ref().ok().map(|a|&a.source.virtual_path),
                         "art_error":item.icon.as_ref().err()})
                 }).collect::<Vec<_>>()})
@@ -640,10 +869,36 @@ impl Hud {
                 .then_some((component.id.as_str(), rect(placement.as_ref()?.rect)))
             })
             .collect::<BTreeMap<_, _>>();
-        json!({"mode":self.inventory.view,"container_id":self.inventory.target,
+        let equipment: BTreeMap<_, _> = self.placed.iter().enumerate().filter_map(|(index, placement)| {
+            let slot = self.components[index].config.equipment_slot?;
+            let item = self.equipped(slot);
+            Some((slot.name(), json!({"bounds":rect(placement.as_ref()?.rect),
+                "item":item.map(|item| &item.id), "name":item.map(|item| &item.name),
+                "art":item.and_then(|item| item.icon.as_ref().ok()).map(|art|&art.source.virtual_path)})))
+        }).collect();
+        json!({"mode":self.inventory.view,"equipment":equipment,"quantity":self.inventory.quantity.as_ref()
+            .map(|quantity| json!({"max":quantity.max,"input":quantity.input})),"container_id":self.inventory.target,
             "panel_bounds":panel_bounds,"lens_bounds":component_bounds(Binding::InventoryLens),
             "backpack":owner(0),"container":owner(1),"hovered_item":self.inventory.hovered,
             "error":self.inventory.error,"drag":drag,"controls":controls})
+    }
+}
+
+fn equipment_icon(placement: &Placement, asset: &LoadedFrame) -> Rect {
+    let frame = &asset.decoded.frame;
+    let scale = placement
+        .scale
+        .min(placement.full.w * 100 / frame.width)
+        .min(placement.full.h * 100 / frame.height);
+    let (w, h) = (
+        (frame.width * scale / 100).max(1),
+        (frame.height * scale / 100).max(1),
+    );
+    Rect {
+        x: placement.full.x + ((placement.full.w - w) / 2) as i32,
+        y: placement.full.y + ((placement.full.h - h) / 2) as i32,
+        w,
+        h,
     }
 }
 

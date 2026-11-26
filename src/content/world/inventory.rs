@@ -1,6 +1,11 @@
 //! Connect session inventory to original map records and world presentation.
+use super::super::character::{Character, CharacterStatistics, Encumbrance, EquipmentSlot, Rules};
 use super::super::inventory::{COLUMNS, Footprint, Grid, Item, Owner, Place, State, Tile};
+use super::super::player::Appearance;
 use super::super::read_bounded;
+use crate::sector::objects::ItemStats;
+
+mod equipment;
 use super::*;
 use crate::prototype::MAX_PROTOTYPE_BYTES;
 use crate::sector::objects::{self, FieldValue, OriginalId};
@@ -17,6 +22,8 @@ const CLICK_THROUGH: u32 = 0x800;
 pub(super) struct Session {
     state: State,
     revision: u64,
+    character: Character,
+    rules: Rules,
     ground: BTreeMap<OriginalId, GroundArt>,
     unlocked: BTreeMap<String, BTreeSet<OriginalId>>,
 }
@@ -176,6 +183,8 @@ impl Records<'_> {
         let inventory_art = field(70).or(proto.defaults.inventory_art);
         Ok(Item {
             id,
+            stats: ItemStats::resolve(&object, proto.defaults.item.as_deref()),
+            generated: false,
             category: object.category,
             description: field(22).or(proto.defaults.description),
             prototype: object.prototype.0,
@@ -385,7 +394,9 @@ struct Layout {
 }
 
 fn parse_id(key: &str) -> Result<OriginalId, String> {
-    OriginalId::parse_key(key).ok_or_else(|| "Expected a serialized item or container GUID".into())
+    OriginalId::parse_key(key)
+        .or_else(|| OriginalId::parse_with_kind(key, u16::MAX))
+        .ok_or_else(|| "Expected an original GUID or a session item ID".into())
 }
 
 /// Read-only presentation data projected from the same owner layout as inventory RPC.
@@ -393,11 +404,26 @@ pub struct InventoryContents {
     pub columns: usize,
     pub rows: usize,
     pub entries: Vec<InventoryEntry>,
+    pub equipment: Vec<InventoryEntry>,
     grid: Grid,
 }
 
 impl InventoryContents {
-    pub fn fits(&self, item: &InventoryEntry, slot: usize) -> bool {
+    pub fn fits(&self, item: &InventoryEntry, slot: usize, same_owner: bool) -> bool {
+        if item.quantity.is_some()
+            && self.entries.iter().any(|other| {
+                other.id != item.id
+                    && other.prototype == item.prototype
+                    && other.category == item.category
+                    && other.ammo_type == item.ammo_type
+                    && other.movable
+                    && other.quantity.is_some()
+                    && (!same_owner
+                        || parse_id(&other.id).is_ok_and(|id| self.grid.contains_cell(id, slot)))
+            })
+        {
+            return true;
+        }
         parse_id(&item.id).is_ok_and(|id| {
             self.grid
                 .fit(id, item.cells, self.rows, Some(slot))
@@ -408,6 +434,12 @@ impl InventoryContents {
 
 pub struct InventoryEntry {
     pub id: String,
+    pub equipment: Option<EquipmentSlot>,
+    pub quantity: Option<u32>,
+    pub detail: String,
+    pub category: u32,
+    pub ammo_type: Option<u32>,
+    pub prototype: u32,
     pub slot: usize,
     pub cells: [usize; 2],
     pub name: String,
@@ -481,8 +513,25 @@ impl InventoryReader {
         }
         let layout = records.layout(&world.cache.inventory.state, &owner, container.as_ref())?;
         let mut entries = Vec::new();
-        for (&id, &(slot, cells)) in &layout.grid.items {
-            let item = &layout.items[&id];
+        let mut equipment = Vec::new();
+        let grid_items = layout
+            .grid
+            .items
+            .iter()
+            .map(|(&id, &(slot, cells))| (&layout.items[&id], slot, cells, None));
+        let state = &world.cache.inventory.state;
+        let equipped_items = state.changes.values().filter_map(|change| {
+            let Place::Equipped(slot) = change.place else {
+                return None;
+            };
+            (owner == Owner::Player).then_some((
+                &change.item,
+                0,
+                change.item.footprint.cells,
+                Some(slot),
+            ))
+        });
+        for (item, slot, cells, equipped) in grid_items.chain(equipped_items) {
             if !item_visible(item) {
                 continue;
             }
@@ -499,24 +548,39 @@ impl InventoryReader {
             let icon = super::super::inventory::inventory_frame(
                 &mut self.vfs,
                 &mut self.frames,
-                item.inventory_art,
+                equipped
+                    .and(item.stats.paper_doll_art)
+                    .filter(|n| n >> 28 == 6)
+                    .or(item.inventory_art),
             )
             .map_err(|error| error.to_string());
-            entries.push(InventoryEntry {
-                id: id.key(),
+            let entry = InventoryEntry {
+                id: item.id.key(),
+                equipment: equipped,
+                quantity: item.stats.quantity,
+                detail: item.detail(world.cache.inventory.aptitude()),
+                category: item.category,
+                ammo_type: item.stats.ammo_type,
+                prototype: item.prototype,
                 slot,
                 cells,
                 name,
                 movable: check_item(item).is_ok(),
                 removable: item.flags & ITEM_NO_DROP == 0,
                 icon,
-            });
+            };
+            if equipped.is_some() {
+                equipment.push(entry);
+            } else {
+                entries.push(entry);
+            }
         }
         self.frames.finish_sector();
         Ok(InventoryContents {
             columns: COLUMNS,
             rows: owner.rows(),
             entries,
+            equipment,
             grid: layout.grid,
         })
     }
@@ -576,6 +640,12 @@ impl InteractiveWorld {
                 }
                 report
             }),
+            "character":(owner == Owner::Player).then(|| self.character_statistics()),
+            "counters":(owner == Owner::Player).then(|| self.inventory_counters()),
+            "equipment":(owner == Owner::Player).then(|| EquipmentSlot::ALL.map(|slot| {
+                state.changes.values().find(|change| change.place == Place::Equipped(slot))
+                    .map(|change| change.item.report(&change.place, None))
+            })),
             "items":items.into_iter().map(|item| item.report(&place, layout.grid.items.get(&item.id).map(|entry| entry.0))).collect::<Vec<_>>() }),
         )
     }
@@ -628,11 +698,11 @@ impl InteractiveWorld {
         key: &str,
         slot: Option<usize>,
     ) -> Result<Value, String> {
-        self.move_item(vfs, key, Move::Pickup(slot), 0)
+        self.move_item(vfs, key, Move::Pickup(slot), 0, None)
     }
 
     pub fn drop_item(&mut self, vfs: &mut Vfs, key: &str) -> Result<Value, String> {
-        self.move_item(vfs, key, Move::Drop, 0)
+        self.move_item(vfs, key, Move::Drop, 0, None)
     }
 
     pub fn transfer_item(
@@ -651,7 +721,29 @@ impl InteractiveWorld {
             key,
             Move::Transfer(from, to, slot),
             hour.unwrap_or(self.cache.hour),
+            None,
         )
+    }
+
+    pub fn transfer_quantity(
+        &mut self,
+        vfs: &mut Vfs,
+        key: &str,
+        from: &str,
+        to: &str,
+        slot: Option<usize>,
+        quantity: u32,
+    ) -> Result<Value, String> {
+        let from = self.inventory_owner(from)?;
+        let movement = if to == "ground" {
+            if from != Owner::Player {
+                return Err("Only player-owned items can be dropped".into());
+            }
+            Move::Drop
+        } else {
+            Move::Transfer(from, self.inventory_owner(to)?, slot)
+        };
+        self.move_item(vfs, key, movement, self.cache.hour, Some(quantity))
     }
 
     fn move_item(
@@ -660,16 +752,32 @@ impl InteractiveWorld {
         key: &str,
         action: Move,
         hour: u8,
+        quantity: Option<u32>,
     ) -> Result<Value, String> {
         let id = parse_id(key)?;
         let mut records = self.records(vfs);
         let state = &self.cache.inventory.state;
-        let item = records.item(id, state)?;
-        let current = state.place(&item);
+        let mut item = records.item(id, state)?;
+        let current = state.place(&item).clone();
         let flags = check_item(&item)?;
+        let mut remainder = None;
+        if let Some(quantity) = quantity {
+            let total = item.stats.quantity.ok_or("Item is not a divisible stack")?;
+            if quantity == 0 || quantity > total {
+                return Err("Quantity must be between 1 and the current stack size".into());
+            }
+            if quantity < total {
+                let mut rest = item.clone();
+                rest.stats.quantity = Some(total - quantity);
+                item.id = state.generated_id();
+                item.generated = true;
+                item.stats.quantity = Some(quantity);
+                remainder = Some(rest);
+            }
+        }
         let (destination, requested) = match action {
             Move::Pickup(slot) => {
-                let Place::Ground(map, tile) = current else {
+                let Place::Ground(map, tile) = &current else {
                     return Err("Item is not on the ground".into());
                 };
                 if map != &self.map || flags & CLICK_THROUGH != 0 {
@@ -678,7 +786,7 @@ impl InteractiveWorld {
                 self.check_inventory_reach(*tile)?;
                 (Place::Owned(Owner::Player), slot)
             }
-            Move::Drop if *current == Place::Owned(Owner::Player) => {
+            Move::Drop if current == Place::Owned(Owner::Player) => {
                 let player = self
                     .cache
                     .player
@@ -697,19 +805,37 @@ impl InteractiveWorld {
             }
             Move::Drop => return Err("Only player-owned items can be dropped".into()),
             Move::Transfer(from, to, slot) => {
-                if *current != Place::Owned(from) {
+                if current != Place::Owned(from) {
                     return Err("Item does not belong to the specified source".into());
                 }
                 (Place::Owned(to), slot)
             }
         };
-        if current != &destination && matches!(current, Place::Owned(_)) {
+        if remainder.is_some() && current == destination {
+            return Err("Split a stack by moving units to another owner or dropping them".into());
+        }
+        if current != destination && matches!(current, Place::Owned(_)) {
             check_removal(&item)?;
         }
-        if let Place::Owned(Owner::Container(_, source)) = current {
+        if let Place::Owned(Owner::Container(_, source)) = &current {
             records
                 .container(*source)?
                 .check_access(self, *source, hour)?;
+        }
+        if destination == Place::Owned(Owner::Player) && current != destination {
+            let inventory = &self.cache.inventory;
+            if inventory.character.background == 72
+                && item.stats.complexity.is_some_and(|value| value < 0)
+            {
+                return Err("Technophobia prevents picking up technological items".into());
+            }
+            if inventory
+                .weight()
+                .saturating_add(item.weight(inventory.aptitude()))
+                > i64::from(inventory.statistics().carry_capacity)
+            {
+                return Err("Item exceeds the character's carry capacity".into());
+            }
         }
         let mut ground = None;
         let layout = match &destination {
@@ -729,20 +855,106 @@ impl InteractiveWorld {
                 ground = Some(records.ground_art(&item, *tile, self.reference)?);
                 None
             }
+            Place::Equipped(_) | Place::Merged(_) => {
+                return Err("Invalid transfer destination".into());
+            }
         };
+        let remainder_ground = match (&remainder, &current) {
+            (Some(rest), Place::Ground(_, tile))
+                if !self.cache.inventory.ground.contains_key(&id) =>
+            {
+                Some(records.ground_art(rest, *tile, self.reference)?)
+            }
+            _ => None,
+        };
+        let source_slot = if let Some(change) = state.changes.get(&id) {
+            change.slot
+        } else if remainder.is_some() {
+            match &current {
+                Place::Owned(owner @ Owner::Container(_, source)) => {
+                    let container = records.container(*source)?;
+                    records
+                        .layout(state, owner, Some(&container))?
+                        .grid
+                        .items
+                        .get(&id)
+                        .map(|entry| entry.0)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let merge = layout.as_ref().and_then(|layout| {
+            // CE merges on insertion into another owner. An explicit move inside
+            // a grid only merges when it is aimed at a different matching stack.
+            layout
+                .items
+                .values()
+                .filter(|candidate| {
+                    candidate.id != id
+                        && item.same_stack(candidate)
+                        && item_visible(candidate)
+                        && !candidate.scripted
+                        && layout.grid.items.contains_key(&candidate.id)
+                        && (current != destination
+                            || requested
+                                .is_some_and(|slot| layout.grid.contains_cell(candidate.id, slot)))
+                })
+                .min_by_key(|candidate| {
+                    (
+                        layout.grid.items.get(&candidate.id).map(|pair| pair.0),
+                        candidate.id,
+                    )
+                })
+                .cloned()
+        });
         let world_changed = matches!(current, Place::Ground(..)) || ground.is_some();
         let session = &mut self.cache.inventory;
-        let result = session.state.relocate(
-            item,
-            destination,
-            layout.as_ref().map(|l| (&l.grid, requested)),
-        )?;
-        session.revision += 1;
-        if let Some(art) = ground {
-            session.ground.insert(id, art);
+        let moved_id = item.id;
+        let mut result = if let Some(mut target) = merge {
+            let quantity = item.stats.quantity.expect("matching stack");
+            let total = target
+                .stats
+                .quantity
+                .expect("matching stack")
+                .checked_add(quantity)
+                .filter(|&n| n <= i32::MAX as u32)
+                .ok_or("Merged stack exceeds the original quantity range")?;
+            target.stats.quantity = Some(total);
+            let target_id = target.id;
+            let slot = layout
+                .as_ref()
+                .and_then(|layout| layout.grid.items.get(&target_id))
+                .map(|entry| entry.0);
+            session.state.put(target, destination.clone(), slot);
+            session.state.put(item, Place::Merged(target_id), None);
+            json!({"id":moved_id.key(),"source_id":id.key(),"merged_into":target_id.key(),
+                "quantity":quantity,"total":total,"from":current.report(),"to":destination.report(),"slot":slot})
+        } else {
+            session.state.relocate(
+                item,
+                destination,
+                layout.as_ref().map(|l| (&l.grid, requested)),
+            )?
+        };
+        if let Some(rest) = remainder {
+            result["from"] = current.report();
+            result["source_id"] = json!(id.key());
+            result["remaining_quantity"] = json!(rest.stats.quantity);
+            session.state.put(rest, current, source_slot);
+            session.state.next_generated += 1;
         } else {
             session.ground.remove(&id);
         }
+        if let Some(art) = ground {
+            session.ground.insert(moved_id, art);
+        }
+        if let Some(art) = remainder_ground {
+            session.ground.insert(id, art);
+        }
+        session.revision += 1;
+        self.cache.update_character_movement();
         if world_changed {
             self.cache.activate(&self.cache.active.clone());
         }
@@ -752,41 +964,25 @@ impl InteractiveWorld {
     fn take_all(&mut self, vfs: &mut Vfs, target: &str) -> Result<(), String> {
         let id = parse_id(target)?;
         let source = Owner::Container(self.map.clone(), id);
-        let owner = Owner::Player;
-        let destination = Place::Owned(owner.clone());
         let mut records = self.records(vfs);
         let container = records.container(id)?;
         container.check_access(self, id, self.cache.hour)?;
-        let state = &self.cache.inventory.state;
-        let mut loot = records.layout(state, &source, Some(&container))?;
-        let mut backpack = records.layout(state, &owner, None)?.grid;
+        let loot = records.layout(&self.cache.inventory.state, &source, Some(&container))?;
         let mut slots: Vec<_> = loot.grid.items.into_iter().collect();
         slots.sort_unstable_by_key(|(_, (slot, _))| *slot);
-        let session = &mut self.cache.inventory;
         let mut remaining = 0;
         let mut reason = None;
         for (id, _) in slots {
-            let item = loot.items.remove(&id).expect("layout item");
-            if !item_visible(&item) {
+            if !item_visible(&loot.items[&id]) {
                 continue;
             }
-            let cells = item.footprint.cells;
-            let moved = check_item(&item)
-                .and_then(|_| check_removal(&item))
-                .and_then(|()| {
-                    let slot = backpack
-                        .fit(id, cells, owner.rows(), None)
-                        .ok_or("Item does not fit in the requested destination")?;
-                    session.state.relocate(
-                        item,
-                        destination.clone(),
-                        Some((&backpack, Some(slot))),
-                    )?;
-                    backpack.items.insert(id, (slot, cells));
-                    session.revision += 1;
-                    Ok(())
-                });
-            if let Err(error) = moved {
+            if let Err(error) = self.move_item(
+                vfs,
+                &id.key(),
+                Move::Transfer(source.clone(), Owner::Player, None),
+                self.cache.hour,
+                None,
+            ) {
                 reason.get_or_insert(error);
                 remaining += 1;
             }
@@ -890,6 +1086,11 @@ impl InteractiveWorld {
 
     pub fn inherit_object_state(&mut self, previous: &mut Self) {
         self.cache.inventory = std::mem::take(&mut previous.cache.inventory);
+        if let (Some(player), Some(old)) = (&mut self.cache.player, &previous.cache.player) {
+            player.appearance = Arc::clone(&old.appearance);
+        }
+        self.cache.update_character_sector();
+        self.cache.update_character_movement();
         if !self.cache.active.is_empty() {
             self.cache.activate(&self.cache.active.clone());
         }
@@ -984,7 +1185,7 @@ mod tests {
         assert_eq!(world.inspect_item_owner(&mut data, id).unwrap(), *item);
         assert!(world.pickup_item(&mut data, id, None).is_err());
         world
-            .transfer_item(&mut data, id, chest, "player", Some(0), None)
+            .transfer_item(&mut data, id, chest, "player", Some(2), None)
             .unwrap();
         assert!(
             world
@@ -1024,7 +1225,7 @@ mod tests {
                         && room.cache.pick(point, room.reference, Duration::ZERO) == Some(key)
                 })
         );
-        room.pickup_item(&mut data, id, Some(0)).unwrap();
+        room.pickup_item(&mut data, id, Some(2)).unwrap();
         world.inherit_object_state(&mut room);
 
         let (mut away, _) = make_world("5078", (2087, 2018));
@@ -1073,7 +1274,7 @@ mod tests {
         assert!(away.pickup_item(&mut data, id, None).is_err());
         world.inherit_object_state(&mut away);
         assert_eq!(rendered_count(&world), 1);
-        world.pickup_item(&mut data, id, Some(0)).unwrap();
+        world.pickup_item(&mut data, id, Some(2)).unwrap();
         assert_eq!(rendered_count(&world), 0);
         world
             .transfer_item(

@@ -6,8 +6,8 @@ use std::{fmt, ops::Range};
 
 mod instances;
 pub(crate) use instances::{
-    FieldValue, Instance, OriginalId, PrototypeDefaults, decode_instance, has_inventory_scripts,
-    prototype_defaults,
+    FieldValue, Instance, ItemStats, OriginalId, PrototypeDefaults, decode_instance,
+    has_inventory_scripts, prototype_defaults,
 };
 
 const WALL: u32 = 0;
@@ -249,16 +249,17 @@ pub(crate) fn roof_words(input: &[u8], tile_offset: usize) -> Result<&[[u8; 4]],
     reader.roof_words()
 }
 
-/// Authored town map association, independent of object-list validity.
-pub(crate) fn townmap(input: &[u8], tile_offset: usize) -> Result<u32, Error> {
+/// Authored town map association and sector aptitude, independent of object-list validity.
+pub(crate) fn townmap_and_aptitude(input: &[u8], tile_offset: usize) -> Result<(u32, i32), Error> {
     let mut reader = Reader {
         input: &input[..input.len().saturating_sub(4)],
         offset: tile_offset + SIDE * SIDE * 4,
     };
-    Ok(metadata(&mut reader)?.1)
+    let (_, townmap, aptitude) = metadata(&mut reader)?;
+    Ok((townmap, aptitude))
 }
 
-fn metadata(reader: &mut Reader<'_>) -> Result<(u32, u32), Error> {
+fn metadata(reader: &mut Reader<'_>) -> Result<(u32, u32, i32), Error> {
     reader.roof_words()?;
     let marker = reader.u32("sector metadata marker")?;
     if !(0xaa0000..=0xaa0004).contains(&marker) {
@@ -271,14 +272,15 @@ fn metadata(reader: &mut Reader<'_>) -> Result<(u32, u32), Error> {
     if marker >= 0xaa0002 {
         reader.take(12, "sector script record")?;
     }
-    let townmap = if marker >= 0xaa0003 {
+    let (townmap, aptitude) = if marker >= 0xaa0003 {
         let id = reader.u32("townmap ID")?;
-        reader.take(20, "aptitude, light scheme and sound fields")?;
-        id
+        let aptitude = reader.u32("sector aptitude adjustment")? as i32;
+        reader.take(16, "light scheme and sound fields")?;
+        (id, aptitude)
     } else {
-        0
+        (0, 0)
     };
-    Ok((marker, townmap))
+    Ok((marker, townmap, aptitude))
 }
 
 pub fn decode(input: &[u8]) -> Result<ObjectList, Error> {
@@ -344,7 +346,7 @@ fn decode_list(input: &[u8], evidence: &mut ListEvidence) -> Result<ObjectList, 
         input: &input[..count_offset],
         offset: start,
     };
-    let (marker, _) =
+    let (marker, _, _) =
         metadata(&mut reader).map_err(|error| error.classified("sector_metadata_decode_failed"))?;
     evidence.metadata_marker = Some(marker);
     let tile_blocks = if marker >= 0xaa0004 {
