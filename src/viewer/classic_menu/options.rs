@@ -12,6 +12,11 @@ pub(super) struct OptionsLayout {
     increase: String,
     gauge: String,
     heading_font: String,
+    #[serde(default)]
+    heading_font_size: u32,
+    value_font: Option<String>,
+    #[serde(default)]
+    value_font_size: u32,
     strings: String,
     lens_at: Point,
     nav_center: u32,
@@ -159,7 +164,8 @@ pub(in crate::viewer) struct Options {
 pub(super) struct Theme {
     pub(super) layout: OptionsLayout,
     strings: Mes,
-    pub(super) heading_font: BTreeMap<char, SpriteFrame>,
+    pub(super) heading_font: hud::MenuFont,
+    pub(super) value_font: hud::MenuFont,
     background: Asset,
     lens: Asset,
     choice: Asset,
@@ -176,6 +182,7 @@ impl Theme {
         source: &ThemeSource,
         vfs: &mut Vfs,
         files: &mut Vfs,
+        fallback_value_font: &str,
     ) -> Result<Self, Box<dyn Error>> {
         if layout.nav_width == 0
             || layout.nav_center < layout.nav_width / 2
@@ -203,7 +210,18 @@ impl Theme {
         let arrows = [arrows(&layout.decrease)?, arrows(&layout.increase)?];
         Ok(Self {
             strings: load_mes(vfs, &layout.strings)?.mes,
-            heading_font: hud::console_font(vfs, source, &layout.heading_font)?,
+            heading_font: hud::MenuFont::load(
+                vfs,
+                source,
+                &layout.heading_font,
+                layout.heading_font_size,
+            )?,
+            value_font: hud::MenuFont::load(
+                vfs,
+                source,
+                layout.value_font.as_deref().unwrap_or(fallback_value_font),
+                layout.value_font_size,
+            )?,
             layout,
             background,
             lens,
@@ -332,7 +350,15 @@ impl Classic {
                 .to_owned();
             self.draw_text(
                 out,
-                [x, y + 2, base_rect[2], 19],
+                [
+                    x,
+                    y + 2,
+                    base_rect[2],
+                    self.options
+                        .heading_font
+                        .line_height()
+                        .min(self.options.layout.arrow_y.saturating_sub(2)),
+                ],
                 title,
                 if row.enabled() {
                     Style::OptionHeading

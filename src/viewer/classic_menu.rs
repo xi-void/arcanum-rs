@@ -32,6 +32,10 @@ struct Layout {
     dialog: String,
     font: String,
     menu_font: String,
+    #[serde(default)]
+    font_size: u32,
+    #[serde(default)]
+    menu_font_size: u32,
     strings: String,
     text_color: [u8; 4],
     selected_color: [u8; 4],
@@ -117,15 +121,17 @@ pub(crate) struct Classic {
     strings: Mes,
     art: [Asset; 7],
     buttons: BTreeMap<Control, Vec<Asset>>,
-    font: BTreeMap<char, SpriteFrame>,
-    menu_font: BTreeMap<char, SpriteFrame>,
-    text: BTreeMap<(String, u32, Style), Asset>,
+    font: hud::MenuFont,
+    menu_font: hud::MenuFont,
+    text: BTreeMap<(String, [u32; 2], Style), Asset>,
     black: Asset,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Style {
     Normal,
+    Message,
+    Wrapped,
     Selected,
     Pause,
     PauseHover,
@@ -195,10 +201,11 @@ impl Classic {
             );
         }
         let strings = load_mes(vfs, &layout.strings)?.mes;
-        let font = hud::console_font(vfs, source, &layout.font)?;
-        let menu_font = hud::console_font(vfs, source, &layout.menu_font)?;
+        let font = hud::MenuFont::load(vfs, source, &layout.font, layout.font_size)?;
+        let menu_font = hud::MenuFont::load(vfs, source, &layout.menu_font, layout.menu_font_size)?;
+        let layout_font = &layout.font;
         let options = match layout.options.take() {
-            Some(layout) => options::Theme::load(layout, source, vfs, &mut files)?,
+            Some(layout) => options::Theme::load(layout, source, vfs, &mut files, layout_font)?,
             None => {
                 let classic = ThemeSource::embedded_pause();
                 let mut fallback: Layout = toml::from_str(&classic.read(64 * 1024)?)?;
@@ -207,6 +214,7 @@ impl Classic {
                     &classic,
                     vfs,
                     &mut Vfs::new(Policy::Ordered),
+                    &fallback.font,
                 )?
             }
         };
@@ -242,20 +250,27 @@ impl Classic {
                 self.layout.pause_center - self.layout.pause_hit_width / 2,
                 self.layout.pause_y[index],
                 self.layout.pause_hit_width,
-                35,
+                self.menu_font.line_height() + 2,
             ],
             Control::Row(row) => {
-                let [x, y, w, h] = self.layout.list;
-                let offset = row as u32 * self.layout.row_height;
-                [x, y + offset, w, self.layout.row_height.min(h - offset)]
+                let [x, y, w, _] = self.layout.list;
+                let height = self.row_height();
+                [x, y + row as u32 * height, w, height]
             }
             Control::Track => self.layout.scroll,
             _ => asset_rect(self.layout.button(control).at, &self.buttons[&control][0]),
         }
     }
 
+    fn row_height(&self) -> u32 {
+        self.layout
+            .row_height
+            .max(self.font.line_height())
+            .min(self.layout.list[3])
+    }
+
     fn visible_rows(&self) -> usize {
-        self.layout.list[3].div_ceil(self.layout.row_height) as usize
+        (self.layout.list[3] / self.row_height()) as usize
     }
 
     fn draw_text(
@@ -272,13 +287,15 @@ impl Classic {
         if self.text.len() >= 256 {
             self.text.clear();
         }
-        let key = (text, rect[2], style);
+        let key = (text, [rect[2], rect[3]], style);
         let asset = self
             .text
             .entry(key)
-            .or_insert_with_key(|(text, max_width, style)| {
+            .or_insert_with_key(|(text, bounds, style)| {
                 let (font, color) = match style {
-                    Style::Normal => (&self.font, self.layout.text_color),
+                    Style::Normal | Style::Message | Style::Wrapped => {
+                        (&self.font, self.layout.text_color)
+                    }
                     Style::Selected => (&self.font, self.layout.selected_color),
                     Style::Pause => (&self.menu_font, self.layout.menu_color),
                     Style::PauseHover => (&self.menu_font, self.layout.menu_hover_color),
@@ -290,8 +307,12 @@ impl Classic {
                         &self.options.heading_font,
                         self.options.layout.inactive_color,
                     ),
-                    Style::OptionInactiveValue => (&self.font, self.options.layout.inactive_color),
-                    Style::OptionValue => (&self.font, self.options.layout.value_color),
+                    Style::OptionInactiveValue => {
+                        (&self.options.value_font, self.options.layout.inactive_color)
+                    }
+                    Style::OptionValue => {
+                        (&self.options.value_font, self.options.layout.value_color)
+                    }
                     Style::OptionNav => (&self.menu_font, self.options.layout.nav_color),
                     Style::OptionNavHover => (&self.menu_font, self.options.layout.nav_hover_color),
                     Style::OptionNavShadow => {
@@ -301,8 +322,15 @@ impl Classic {
                         (&self.menu_font, self.options.layout.nav_highlight_color)
                     }
                 };
-                let (width, height, pixels) = text_pixels(font, text, *max_width, color);
-                frame("pause/text", (width, height), pixels)
+                hud::generated_frame(
+                    "pause/text",
+                    font.render(
+                        text,
+                        *bounds,
+                        color,
+                        matches!(style, Style::Message | Style::Wrapped),
+                    ),
+                )
             });
         let sprite = &asset.decoded.frame;
         let x = rect[0]
@@ -311,33 +339,16 @@ impl Classic {
             } else {
                 0
             };
-        let y = rect[1] + rect[3].saturating_sub(sprite.height) / 2;
+        let y = if matches!(style, Style::Message) {
+            rect[1]
+        } else {
+            rect[1] + rect[3].saturating_sub(sprite.height) / 2
+        };
         out.push_clipped(asset, [x, y, sprite.width, sprite.height], rect);
     }
 
     fn draw_message(&mut self, out: &mut Frame, rect: Rect, message: &str) {
-        let mut lines = Vec::new();
-        let mut line = String::new();
-        let max = rect[2] as usize / 8;
-        for word in message.split_whitespace() {
-            if !line.is_empty() && line.chars().count() + word.chars().count() >= max {
-                lines.push(std::mem::take(&mut line));
-            }
-            if !line.is_empty() {
-                line.push(' ');
-            }
-            line.push_str(word);
-        }
-        lines.push(line);
-        for (row, text) in lines.into_iter().take((rect[3] / 16) as usize).enumerate() {
-            self.draw_text(
-                out,
-                [rect[0], rect[1] + row as u32 * 16, rect[2], 16],
-                text,
-                Style::Normal,
-                true,
-            );
-        }
+        self.draw_text(out, rect, message.to_owned(), Style::Message, true);
     }
 
     fn button_frame(&self, out: &mut Frame, menu: &Menu, control: Control) {
@@ -477,7 +488,7 @@ impl Classic {
                         out,
                         self.layout.name,
                         metadata.name.clone(),
-                        Style::Normal,
+                        Style::Wrapped,
                         true,
                     );
                     self.draw_text(
@@ -490,6 +501,15 @@ impl Classic {
                 }
                 Err(error) => self.draw_message(out, self.layout.name, error),
             }
+        }
+        if menu.editing() && !menu.name.is_empty() {
+            self.draw_text(
+                out,
+                self.layout.name,
+                menu.name.clone(),
+                Style::Wrapped,
+                true,
+            );
         }
         out.push(
             &self.art[5],
@@ -512,7 +532,10 @@ impl Classic {
             };
             let name = if screen == SlotScreen::Save && index == 0 {
                 if selected && !menu.name.is_empty() {
-                    format!("{}_", menu.name)
+                    let editor = format!("{}_", menu.name);
+                    self.font
+                        .visible_suffix(&editor, self.layout.list[2])
+                        .to_owned()
                 } else {
                     self.label(5055, "New")
                 }
@@ -554,41 +577,6 @@ fn slot_name(slot: &Slot) -> String {
         .as_ref()
         .map(|m| m.name.clone())
         .unwrap_or_else(|_| "Unreadable save".into())
-}
-
-fn text_pixels(
-    font: &BTreeMap<char, SpriteFrame>,
-    text: &str,
-    max_width: u32,
-    color: [u8; 4],
-) -> (u32, u32, Vec<[u8; 4]>) {
-    let mut width = 1;
-    let mut height = 1;
-    let mut x = 0;
-    let mut glyphs = Vec::new();
-    for ch in text.chars() {
-        let Some(glyph) = font.get(&ch).or_else(|| font.get(&'?')) else {
-            continue;
-        };
-        if x >= max_width {
-            break;
-        }
-        width = width.max((x + glyph.width).min(max_width));
-        height = height.max(glyph.height);
-        glyphs.push((x, glyph));
-        x += glyph.hotspot.0.max(1) as u32;
-    }
-    let mut pixels = vec![[0; 4]; (width * height) as usize];
-    for (x, glyph) in glyphs {
-        for (index, pixel) in glyph.pixels.iter().enumerate() {
-            let gx = index as u32 % glyph.width + x;
-            let gy = index as u32 / glyph.width;
-            if gx < width {
-                hud::blend_glyph(&mut pixels[(gx + gy * width) as usize], color, pixel[3]);
-            }
-        }
-    }
-    (width, height, pixels)
 }
 
 fn frame(name: &str, (width, height): (u32, u32), pixels: Vec<[u8; 4]>) -> Asset {

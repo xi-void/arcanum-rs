@@ -35,7 +35,7 @@ interface.
 | Section | Keys |
 | --- | --- |
 | Package | `name` is required. `author` is optional. `scale` is the initial UI percentage, from 50 to 300, and defaults to 100. `--ui-scale` overrides it. |
-| `[fonts.<profile>]` | `source`, `size` in base pixels, and `color` as RGBA bytes are required. `bold` adds a one-pixel stroke. `line_gap` adds pixels between lines. `fallback` optionally names another profile's glyph source. |
+| `[fonts.<profile>]` | `source` and `color` as RGBA bytes are required. Omit `size` for the native ART height, or specify a height of 5–64 base pixels. `bold` adds a one-pixel stroke. `line_gap` adds pixels between lines. `fallback` optionally names another profile's glyph source. |
 | `[[hud]]` layout | `id` must be unique. `size = [width, height]` is required. `offset = [x, y]` defaults to zero. `parent` can name a preceding component. `anchor` is `top-left` (default), `top`, `top-right`, `left`, `center`, `right`, `bottom-left`, `bottom` or `bottom-right`. |
 | `[[hud]]` appearance | `fill` and `hover_fill` are RGBA byte arrays. `image` is an ART reference with an optional zero-based `frame`. Use `source_rect = [x, y, width, height]` to crop within that frame before scaling. A label uses `text`, a named `font`, optional `align` of `left`, `center` or `right`, and optional `wrap = true`. |
 | `[[hud]]` behavior | `action` can be `pause`, `toggle-run` or `reset-zoom`. `capture = true` reserves the component bounds for UI clicks and scrolling. An action reserves its own bounds. `disabled = true` makes an action inactive. `hidden = true` removes the component and its children from layout, drawing and input. |
@@ -67,15 +67,22 @@ Camera zoom is independent.
 - `bitmap` uses a distributable engine 5×7 alphabet. Its current glyph
   set is A–Z, 0–9, space and the punctuation `.:-/?`, with lowercase
   folded to uppercase.
-- ART fonts use one glyph per frame, with the original byte code minus
-  31 as the frame number. `file:` can point to independently authored
-  ART fonts in the same format. Source palette red supplies coverage for
-  non-key pixels, and `hot_x` is the horizontal advance. The stored space
-  height supplies the line metric when present. Text uses the configured
-  color and size, with cumulative glyph positions rounded in theme pixels. Wrapping and clipping are supported. Platform font
-  discovery, OpenType shaping, font scrolling and typographic features
-  beyond ART spacing and the simple bitmap profile are outside this
-  foundation.
+- ART fonts use the Windows-1252 byte minus 31 as the frame index.
+  Source palette red supplies coverage for non-key pixels. Frame width
+  and height determine the drawable rectangle, and `hot_x` advances the
+  pen. The space frame supplies the native line-height minimum. A taller
+  glyph increases the height of its line. `line_gap` adds base pixels
+  between lines. Cumulative advances are rounded only when placing a
+  glyph. Explicit reductions average source coverage so fine strokes
+  survive rasterization. The Vulkan compositor scales the prepared labels
+  with the rest of the interface.
+- Classic uses native Flare12 (15-pixel frames) for item details,
+  inventory summaries, and HUD context, Cloister18 (18 pixels) for
+  counters, and Flare14 (16 pixels) for dialogue. The atlas uses NewTimes16
+  (21 pixels). Asset names identify the faces and their nominal sizes.
+  The developer console uses Courier10 at 17 pixels in fixed-width cells
+  sized for the chosen face. Platform font discovery and OpenType shaping
+  are outside the ART format.
 
 Unknown fields, invalid parents, bounds and missing referenced assets
 produce startup errors. If a font has an explicit fallback, a failed glyph
@@ -166,22 +173,19 @@ state-dependent fills or poison coloration. CE uses `Cloister18Font.ART`
 (entry 171) for numeric counters. These assets are present in the game
 data and await gameplay bindings.
 
-CE's gameplay font `morph15font.art` (entry 27) stores 19-pixel-high
-glyphs with varying advances and a grayscale edge palette.
-TIG `font.c` uses the byte-minus-31 frame and stored horizontal advance.
-Its source-alpha text blit in `art.c` uses `tig_color_alpha`, which
-returns palette red in `color.h`. Labels keep the palette coverage
-when prepared at the theme's native size. The compositor scales the
-label with the rest of the layout.
+Installed `interface.mes` maps entries 327, 27, 229, 230 and 171 to
+Morph30, Morph15, Flare12, Flare14 and Cloister18. CE's
+`src/ui/mainmenu_ui.c` initializes the Morph menu fonts, and
+`src/game/tb.c` and `tc.c` use Flare12 for speech and responses. Classic
+uses the slightly larger Flare14 face for those two roles, with shadow
+and separate response colors for normal, hovered and disabled states.
+TIG `font.c` distinguishes the glyph rectangle from the horizontal
+advance. Its source-alpha blit in `art.c` reads palette red through
+`tig_color_alpha` in `color.h`.
 
-Before this change, gameplay's only UI was a procedurally painted pause
-and options sprite. Its controls and bitmap font were local to the
-viewer, and its layout followed world zoom. The pause menu remains on
-its existing path, which supplies the existing gameplay settings
-actions. The HUD reuses the ART loader, VFS precedence, compositor
-and bitmap alphabet. Gameplay owns settings and routes. The HUD reads
-run preference for feedback and emits typed actions. Layout,
-coordinates and artwork live in the package. Vulkan draws the unlit overlay after the world pass.
+The HUD, atlas and Classic menus use the same glyph measurement and
+rasterizer. Vulkan draws the prepared UI after the world pass. Theme
+packages own the layout and assets. Gameplay owns settings and actions.
 
 Classic’s map icon opens the atlas, and the bag opens the inventory. The other original buttons and action slots are decorative. Alpha controls remain on the keyboard and in
 the Escape menu. Health, fatigue, poison, currency, fate values,
@@ -189,9 +193,10 @@ party portraits, and recent-action or item overlays require
 gameplay state that the HUD does not expose. The original day/night
 clock (entries 207–215) samples the game calendar and is also deferred.
 The Classic status display contains no fabricated numbers, colored
-fills, or hotbar assignments. Character and dialogue remain future interfaces. The HUD foundation currently covers
-panels, labels, buttons, layout and focus. Tooltips, general theme
-modals and arbitrary gameplay-state binding remain future work.
+fills, or hotbar assignments. The inventory paper doll has a character
+summary, and inventory inspection uses the bottom HUD for item details.
+The standalone character sheet, journal and document reader have no
+active screens.
 
 The atlas is an independent package. See [Map UI](MAP_UI.md) for its
 data bindings, map-specific actions and the `--map-ui` option.
@@ -222,12 +227,19 @@ table, control placement and clipping rectangles. ART sources use the same
 `vfs:` and package-relative `file:` prefixes as HUD assets. The menu uses
 the shared requested UI scale and fits inside the physical viewport, with
 identical coordinates for input and Vulkan composition. Gameplay and slot
-operations are independent of the package.
-
+operations are independent of the package. `font` and `menu_font` take
+native glyph metrics by default. Set `font_size` or `menu_font_size` to
+specify a different base height. Save-list row height is at least the
+font's line height, and only complete rows participate in slot selection.
+The save preview wraps the full slot name, and the editor keeps the end of
+the name visible in the list.
 
 The pause package's optional `[options]` table supplies the Options
-background, lens, cyclic controls, arrow and gauge ART, heading font,
-colors and positions. Coordinates are in the background ART's canvas. Older
+background, lens, cyclic controls, arrow and gauge ART, colors and
+positions. Classic uses Morph30 (33 pixels) for navigation, Morph15
+(19 pixels) for headings, and Flare12 for values. Use `heading_font`,
+`value_font`, `heading_font_size`, and `value_font_size` to customize those
+roles. Coordinates are in the background ART's canvas. Older
 pause packages use the bundled Classic Options layout. Control actions use
 the active gameplay settings and the shared pause-menu scale.
 
