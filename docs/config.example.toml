@@ -1,0 +1,37 @@
+# Copy to ${XDG_CONFIG_HOME:-$HOME/.config}/arcanum-rs/config.toml.
+# Set the directory containing your Arcanum installation.
+# Relative paths in this file are relative to config.toml.
+game_data = "/path/to/Arcanum"
+
+[window]
+width = 1280
+height = 720
+fullscreen = false  # Borderless fullscreen on the current monitor.
+
+[display]
+lighting = true
+shadows = true
+
+[ui]
+hud = "classic"  # "classic", "off", package directory or theme.toml.
+# map = "themes/my-map"  # Package directory or theme.toml.
+# scale = 100  # Shared requested scale, 50–300 percent. Omit for package default.
+
+[camera]
+zoom = 1  # 1, 2 or 3.
+follow = true  # When false, Home recenters on the player.
+
+[input]
+run = false
+
+[developer]
+enabled = false
+rpc = false  # Requires enabled = true. The engine prints the socket path.
+map_reveal = false
+discover_all = false
+# console_ui = "themes/console.toml"
+# diagnostics = "captures"  # Create this directory before launching.
+
+[mods]
+# directory = "mods"
+enabled = []  # IDs to load with their dependencies, using the existing mod VFS.

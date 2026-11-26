@@ -6,6 +6,11 @@ for the protocol, socket limits, and command conventions.
 
 ## Quick start
 
+For configured developer launches, set `enabled = true` and `rpc = true`
+in `[developer]` and run the executable directly. Use the socket path printed
+at startup. See [Application configuration](APPLICATION_CONFIG.md) for
+path precedence and cleanup.
+
 Run from the repository in a Wayland session with Vulkan available. Use a fresh
 private socket directory for each debug instance.
 

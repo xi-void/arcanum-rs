@@ -973,7 +973,12 @@ inventory_panel = true
 "#,
         )
         .unwrap();
-        let mut hud = Hud::load(&manifest, &mut game, Some(300)).unwrap();
+        let mut hud = Hud::load(
+            &ThemeSource::external(manifest.clone()),
+            &mut game,
+            Some(300),
+        )
+        .unwrap();
         std::fs::remove_file(manifest).unwrap();
         std::fs::remove_dir(package).unwrap();
         hud.inventory.view = Some(InventoryView::Inventory);

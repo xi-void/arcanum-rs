@@ -6,7 +6,7 @@ use std::{
     fs,
     io::{self, BufRead, BufReader, Write},
     os::unix::{
-        fs::{MetadataExt, PermissionsExt},
+        fs::{DirBuilderExt, MetadataExt, PermissionsExt},
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
@@ -98,6 +98,7 @@ pub struct Server {
     thread: Option<JoinHandle<()>>,
     path: PathBuf,
     identity: (u64, u64),
+    automatic_directory: Option<PathBuf>,
 }
 
 fn frame(stream: &UnixStream, limit: usize, timeout: Duration) -> io::Result<Vec<u8>> {
@@ -152,6 +153,41 @@ fn parse(bytes: &[u8]) -> Result<Call, Failure> {
 }
 
 impl Server {
+    pub fn bind_automatic(wake: impl Fn() + Send + 'static) -> io::Result<Self> {
+        let uid = fs::metadata("/proc/self")?.uid();
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .filter(|path| {
+                fs::symlink_metadata(path).is_ok_and(|meta| {
+                    meta.is_dir() && meta.uid() == uid && meta.mode() & 0o077 == 0
+                })
+            });
+        let base = runtime.as_deref().unwrap_or(Path::new("/tmp"));
+        // A fresh private directory prevents collisions with other instances and
+        // stale filesystem entries. The timestamp distinguishes reused PIDs.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = base.join(format!("arcanum-rpc-{}-{stamp:x}", std::process::id()));
+        fs::DirBuilder::new().mode(0o700).create(&directory)?;
+        match Self::bind(&directory.join("engine.sock"), wake) {
+            Ok(mut server) => {
+                server.automatic_directory = Some(directory);
+                Ok(server)
+            }
+            Err(error) => {
+                let _ = fs::remove_dir(directory);
+                Err(error)
+            }
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn bind(path: &Path, wake: impl Fn() + Send + 'static) -> io::Result<Self> {
         let parent = path
             .parent()
@@ -184,6 +220,7 @@ impl Server {
             thread: None,
             path,
             identity,
+            automatic_directory: None,
         };
         fs::set_permissions(&server.path, fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
@@ -251,6 +288,9 @@ impl Drop for Server {
             .is_ok_and(|meta| (meta.dev(), meta.ino()) == self.identity)
         {
             let _ = fs::remove_file(&self.path);
+        }
+        if let Some(directory) = &self.automatic_directory {
+            let _ = fs::remove_dir(directory);
         }
     }
 }

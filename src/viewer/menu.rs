@@ -16,8 +16,9 @@ pub(super) enum Page {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct Settings {
+pub(crate) struct Settings {
     pub zoom: u8,
+    pub follow: bool,
     pub lighting: bool,
     pub shadows: bool,
     pub run: bool,
@@ -27,6 +28,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             zoom: 1,
+            follow: true,
             lighting: true,
             shadows: true,
             run: false,
