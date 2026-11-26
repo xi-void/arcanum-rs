@@ -307,7 +307,7 @@ const COMMANDS: &[Command] = &[
     query!(
         "inventory",
         "inventory [OWNER]",
-        "Inspect player, NPC or container items, slots and currency.",
+        "Inspect items, equipment, currency and character abilities.",
         |a| match a {
             [] => Some(Request::Inventory("player".into())),
             [owner] => Some(Request::Inventory(owner.clone())),
@@ -582,6 +582,7 @@ impl Command {
                 "items",
                 "equipment",
                 "character",
+                "abilities",
                 "counters",
             ],
             "itemowner" => &[

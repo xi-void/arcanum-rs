@@ -9,6 +9,7 @@ mod equipment;
 mod save;
 mod stock;
 pub(super) mod trade;
+pub(super) mod use_action;
 use super::*;
 use crate::prototype::MAX_PROTOTYPE_BYTES;
 use crate::sector::objects::{self, FieldValue, OriginalId};
@@ -24,9 +25,11 @@ const CLICK_THROUGH: u32 = 0x800;
 
 #[derive(Default)]
 pub(super) struct Session {
+    skill_random: crate::random::Random,
+    recharges: BTreeMap<String, use_action::Recharge>,
     state: State,
     revision: u64,
-    character: Character,
+    pub(super) character: Character,
     rules: Rules,
     accounts: trade::Accounts,
     restocks: stock::Events,
@@ -282,6 +285,12 @@ impl Records<'_> {
                 .appearance
                 .lock_key_id
                 .ok_or("Missing container key field")?,
+            notify: effective.appearance.lock_notify.unwrap_or_default(),
+            difficulty: effective
+                .appearance
+                .lock_difficulty
+                .ok_or("Missing container difficulty")?,
+            prototype: object.prototype.0,
             subtype_flags: subtype(64, proto.defaults.subtype_flags)
                 .ok_or("Unresolved container flags")?,
             inventory_source: subtype(69, proto.defaults.inventory_source),
@@ -396,6 +405,9 @@ impl Records<'_> {
 struct Container {
     tile: Tile,
     flags: u32,
+    notify: i32,
+    difficulty: i32,
+    prototype: u32,
     subtype_flags: u32,
     key_id: i32,
     unlock: interaction::Handler,
@@ -438,7 +450,10 @@ impl Container {
             )?;
             interaction::check_lock(
                 "Container",
-                self.subtype_flags,
+                world
+                    .cache
+                    .door_states
+                    .flags(abilities::LockId::Container(id), self.subtype_flags),
                 hour,
                 world.container_unlocked(id)
                     || world.cache.inventory.matching_key(self.key_id).is_some(),
@@ -532,6 +547,8 @@ pub struct InventoryReader {
     pub(super) frames: FrameCache,
     pub(super) descriptions: Vec<super::super::LoadedMes>,
     key_descriptions: Option<super::super::LoadedMes>,
+    cantrip: Result<abilities::Spell, String>,
+    spell_fx: [Result<Option<spell_fx::Definition>, String>; 2],
     pub quest_catalog: super::super::quest::Catalog,
 }
 
@@ -542,6 +559,24 @@ impl InventoryReader {
             .filter_map(|path| super::super::load_mes(&mut vfs, path).ok())
             .collect();
         let key_descriptions = super::super::load_mes(&mut vfs, "mes/gamekey.mes").ok();
+        let cantrip = abilities::Spell::load(&mut vfs);
+        let spell_fx = [
+            Some(10),
+            cantrip
+                .as_ref()
+                .ok()
+                .and_then(|spell| spell.target_effect)
+                .map(|component| 10 + component),
+        ]
+        .map(|index| {
+            index
+                .map(|id| {
+                    spell_fx::Definition::load(&mut vfs, id)
+                        .map_err(|err| format!("SpellEyeCandy {id}: {err}"))
+                })
+                .transpose()
+                .map(Option::flatten)
+        });
         let quest_catalog = super::super::quest::Catalog::load(&mut vfs);
         Self {
             vfs,
@@ -549,6 +584,8 @@ impl InventoryReader {
             descriptions,
             key_descriptions,
             quest_catalog,
+            cantrip,
+            spell_fx,
         }
     }
 
@@ -772,19 +809,24 @@ impl InteractiveWorld {
             "container":container.as_ref().map(|container| {
                 let mut report = container.report();
                 if let Owner::Container(_, id) = owner {
+                    let lock_id = abilities::LockId::Container(id);
+                    report["difficulty"]=json!(container.difficulty);
+                    report["effective_flags"]=json!(self.cache.door_states.flags(lock_id,container.subtype_flags));
+                    report["lock_change"]=json!(self.cache.door_states.locks.get(&lock_id));
                     report["access_error"] = json!(container.check_access(self, id, self.cache.hour).err());
                     report["matching_key"] = json!(self.cache.inventory.matching_key(container.key_id).map(OriginalId::key));
                     report["developer_unlock"] = json!(self.container_unlocked(id));
                 }
                 report
             }),
+            "abilities":(owner == Owner::Player).then(||self.ability_character()),
             "character":(owner == Owner::Player).then(|| self.character_statistics()),
             "counters":(owner == Owner::Player).then(|| self.inventory_counters()),
             "equipment":(owner == Owner::Player).then(|| EquipmentSlot::ALL.map(|slot| {
                 state.changes.values().find(|change| change.place == Place::Equipped(slot))
-                    .map(|change| change.item.report(&change.place, None))
+                    .map(|change| self.cache.inventory.item_report(&change.item, &change.place, None))
             })),
-            "items":items.into_iter().map(|item| item.report(&place, layout.grid.items.get(&item.id).map(|entry| entry.0))).collect::<Vec<_>>() }),
+            "items":items.into_iter().map(|item| self.cache.inventory.item_report(item, &place, layout.grid.items.get(&item.id).map(|entry| entry.0))).collect::<Vec<_>>() }),
         )
     }
 
@@ -807,7 +849,7 @@ impl InteractiveWorld {
         } else {
             None
         };
-        let mut report = item.report(place, slot);
+        let mut report = self.cache.inventory.item_report(&item, place, slot);
         if let Some(ground) = self.cache.inventory.ground.get(&id) {
             report["ground_art_source"] = super::super::diagnostics::source(&ground.asset.source);
         }
@@ -1239,14 +1281,26 @@ impl InteractiveWorld {
         if container.scripted
             || container.unlock.is_some()
             || container.on_use.is_some()
-            || container.subtype_flags & 6 != 0
+            || self
+                .cache
+                .door_states
+                .flags(abilities::LockId::Container(id), container.subtype_flags)
+                & 6
+                != 0
         {
             return Err("Container has a scripted, jammed or magical restriction".into());
         }
         if container.flags & (UNAVAILABLE | CLICK_THROUGH | 0x1000) != 0 {
             return Err("Container is unavailable".into());
         }
-        if container.subtype_flags & 1 == 0 || container.subtype_flags & (8 | 0x80) != 0 {
+        if self
+            .cache
+            .door_states
+            .flags(abilities::LockId::Container(id), container.subtype_flags)
+            & 1
+            == 0
+            || container.subtype_flags & (8 | 0x80) != 0
+        {
             return Ok(false);
         }
         let session = &mut self.cache.inventory;

@@ -1,6 +1,6 @@
 # Arcanum-RS — Known Issues
 
-Baseline: Milestone 74-R (authored keys and matching locks). Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
+Baseline: Milestone 75-R (lockpicking and Unlocking Cantrip). Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
 
 ## Triage
 
@@ -74,7 +74,9 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 ### LOCK-001 — Remaining access dependencies
 
 - **Priority:** P2 | **Status:** Deferred
-- Key checks read carried keys and authored key-ring entries. Automatic collection into rings, follower key sharing, lockpicking and forced entry remain outside the playable subset.
+- Key checks read carried keys and authored key-ring entries. Automatic collection into rings, follower key sharing and forced entry remain outside the playable subset.
+- Pick Locks and Unlocking Cantrip change the original lock bit. Ordinary use still checks jam, magical hold and original Unlock and Use scripts. A successful Cantrip on a jammed lock leaves it jammed.
+- Lock attempts expose the authored guard notification, loudness and outcome. NPC sight, hearing, Catching Thief scripts and combat reactions still require the AI system. Fate-point spending, difficulty settings beyond Normal, timed equipment enchantments and party-assisted skill use are deferred. The pick delay represents the original work interval. Lockpicking still lacks a dedicated character pose. Cantrip uses its original caster and target EyeCandy. Other spells, character progression screens and combat remain outside this milestone.
 - Unsupported script operations still refuse access. Bates Mansion's pedestrian gate has key ID 64 and Unlock script 1151. With global flag 1024 set, the script requests attachment removal at statement 1. The engine reports that dependency even with the right key. Its timed gate-control branch also needs the event scheduler. Container Use and Unlock checks support read-only predicates.
 
 ### TRADE-001 — Merchant service and equipment dependencies
@@ -235,7 +237,7 @@ These are planned capabilities, not regressions. Implement in their own mileston
 - **M64-R:** interactive inventory rearrangement, transfers, Take All, Arrange, ground pickup/drop and drag cancellation; developer unlocking of ordinary locked containers (verify existing command behavior first).
 - **Inventory extensions:** generated loot, consumption, decay and scripted inventory behavior as their dependencies become available.
 - **Later systems:** dialogue, scripting, combat, magick, technology, crafting and progression.
-- **Use action:** remains inactive until the relevant gameplay mechanics exist.
+- **Use action:** the inventory Use box accepts original lockpicks. Other targeted items need their own gameplay mechanics.
 
 ## Regression watchlist — previously corrected
 

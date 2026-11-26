@@ -128,6 +128,18 @@ impl Clock {
         Duration::from_millis((minute * REAL_HOUR).div_ceil(60).saturating_sub(phase))
     }
 
+    pub fn game_second(&self, play: Duration) -> u64 {
+        let (hour, phase) = self.for_save(play);
+        hour.saturating_mul(3600)
+            .saturating_add(phase * 3600 / REAL_HOUR)
+    }
+
+    pub fn until_second(&self, target: u64, play: Duration) -> Duration {
+        let (hour, phase) = self.for_save(play);
+        let seconds = target.saturating_sub(hour.saturating_mul(3600)).min(3600);
+        Duration::from_millis((seconds * REAL_HOUR).div_ceil(3600).saturating_sub(phase))
+    }
+
     pub fn until_next_hour(&self, play: Duration) -> Duration {
         Duration::from_millis(REAL_HOUR - self.for_save(play).1)
     }

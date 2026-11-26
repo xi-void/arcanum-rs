@@ -73,8 +73,10 @@ quit` closes the session cleanly.
 ## State and capture
 
 - `inventory [OWNER]` reports the grid and items for `player` or a container
-  GUID. Player results include `equipment`, `character` and `counters`.
+  GUID. Player results include `equipment`, `character`, `abilities` and `counters`.
+  `abilities` reports effective Pick Locks, signed aptitude, college levels, mastery, current fatigue and recovery. Equipped mana stores report current charge and recharge time.
   Counters follow gold, arrows, bullets, charges and fuel.
+- `pos.result.player.navigation.ability` reports targeting, pending work and the last resolution. `spell_effects` alongside it reports active caster and target ART layers, frames and placement.
 - `itemowner ITEM_ID` reports current placement, quantity, equipment fields
   and original resource provenance. Item IDs can be original GUIDs or
   generated session IDs.

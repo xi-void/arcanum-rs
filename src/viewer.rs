@@ -639,6 +639,7 @@ impl Viewer<'_> {
         if let Some(hud) = hud {
             hud.close_inventory();
             hud.close_journal();
+            hud.reset_character();
         }
         self.sounding_container = None;
         self.reset_audio |= restoring;
@@ -797,7 +798,32 @@ impl Viewer<'_> {
         if let Some(audio) = &self.audio {
             audio.effect(3000, false);
         }
+        if let ViewContent::Stream {
+            world,
+            hud: Some(hud),
+            ..
+        } = &mut self.content
+        {
+            if action != hud::Action::ToggleSpells {
+                hud.close_spells();
+            }
+            world.cancel_ability();
+        }
         match action {
+            hud::Action::ToggleSpells | hud::Action::CastCantrip => {
+                if let ViewContent::Stream {
+                    world,
+                    hud: Some(hud),
+                    ..
+                } = &mut self.content
+                {
+                    if action == hud::Action::ToggleSpells {
+                        hud.toggle_spells();
+                    } else {
+                        world.select_cantrip();
+                    }
+                }
+            }
             hud::Action::Pause => self.pause_game(event_loop),
             hud::Action::ToggleRun => self.settings.run = !self.settings.run,
             hud::Action::ResetZoom => self.settings.zoom = 1,
@@ -1565,6 +1591,16 @@ impl Viewer<'_> {
                 .map(|minute| real_now + clock.until_minute(minute, self.game_elapsed(real_now))),
             _ => None,
         };
+        let ability_deadline = match (&self.clock, &self.content) {
+            (Some(clock), ViewContent::Stream { world, .. })
+                if self.pause.is_none() && self.map_since.is_none() =>
+            {
+                world
+                    .next_ability_second()
+                    .map(|due| real_now + clock.until_second(due, self.game_elapsed(real_now)))
+            }
+            _ => None,
+        };
         let next = self
             .animation_deadline
             .into_iter()
@@ -1572,6 +1608,7 @@ impl Viewer<'_> {
             .chain(self.player_deadline)
             .chain(clock)
             .chain(stock)
+            .chain(ability_deadline)
             .chain(travel)
             .chain(
                 self.view
@@ -1754,12 +1791,14 @@ impl ApplicationHandler for Viewer<'_> {
             {
                 if let Some(clock) = &self.clock {
                     redraw |= world.set_game_hour(clock.hour(game_elapsed));
+                    redraw |= world.update_ability_time(clock.game_second(game_elapsed));
                     world.set_quest_time(clock.hours(game_elapsed), clock.minute(game_elapsed));
                     if let Some(hud) = hud.as_mut() {
                         redraw |= hud.set_game_time(clock.hours(game_elapsed));
                     }
                 }
                 if world.playing() {
+                    redraw |= world.advance_effects(elapsed);
                     if self.player_deadline.is_some_and(|deadline| now >= deadline) {
                         if !*waiting && !view.occluded {
                             let before = camera.position();
@@ -1771,6 +1810,9 @@ impl ApplicationHandler for Viewer<'_> {
                             if before != after {
                                 *direction = (after.0 - before.0, after.1 - before.1);
                             }
+                        }
+                        if let Some(reader) = inventory_reader.as_mut() {
+                            redraw |= reader.resolve_targeted_action(world, elapsed);
                         }
                         if let Some(reader) = inventory_reader.as_mut()
                             && let Some(result) = reader.start_npc_interaction(world)
@@ -1834,8 +1876,8 @@ impl ApplicationHandler for Viewer<'_> {
                             eprintln!("{message}");
                             view.window.set_title(&format!("Arcanum-RS | {message}"));
                         }
-                        self.player_deadline =
-                            (!view.occluded && world.player_moving()).then_some(now + CAMERA_TICK);
+                        self.player_deadline = (!view.occluded && world.player_moving())
+                            .then(|| now + world.player_wait(elapsed).unwrap_or(CAMERA_TICK));
                     }
                 } else if self
                     .navigation
@@ -1993,6 +2035,7 @@ impl ApplicationHandler for Viewer<'_> {
             if let (Some(clock), ViewContent::Stream { world, .. }) =
                 (&self.clock, &mut self.content)
             {
+                world.update_ability_time(clock.game_second(play));
                 world.set_quest_time(clock.hours(play), clock.minute(play));
             }
         }
@@ -2038,7 +2081,12 @@ impl ApplicationHandler for Viewer<'_> {
                     && event.logical_key == Key::Named(NamedKey::Escape)
                     && self.pause.is_none() =>
                 {
-                    if self.dismiss_inventory(true) {
+                    if let ViewContent::Stream { world, hud, .. } = &mut self.content
+                        && (world.cancel_ability()
+                            || hud.as_mut().is_some_and(|h| h.close_spells()))
+                    {
+                        self.view.as_ref().unwrap().window.request_redraw();
+                    } else if self.dismiss_inventory(true) {
                         self.view.as_ref().unwrap().window.request_redraw();
                     } else {
                         self.pause_game(event_loop);
@@ -2576,6 +2624,17 @@ impl Viewer<'_> {
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                if let ViewContent::Stream { world, .. } = &mut self.content
+                    && world.cancel_ability()
+                {
+                    view.window.request_redraw();
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
             } => {
@@ -3036,6 +3095,8 @@ impl WindowSurface {
                     (y - cy) * zoom + size.height as i32 / 2,
                 )
             });
+            hud.update_fatigue(world);
+            hud.set_spell_level(world.conveyance_level());
             hud.set_dialogue(world.conversation(), npc_at, (size.width, size.height));
             if let Some(reader) = inventory_reader {
                 hud.refresh_journal(&reader.quest_catalog, world);
@@ -3061,7 +3122,14 @@ impl WindowSurface {
             && let Some(hud) = hud.as_deref_mut()
         {
             let context = inventory_reader.and_then(|reader| reader.npc_context(world));
-            hud.set_label(hud::Binding::NpcContext, context.as_deref().unwrap_or(""));
+            hud.set_label(
+                hud::Binding::NpcContext,
+                if world.ability_message().is_empty() {
+                    context.as_deref().unwrap_or("")
+                } else {
+                    world.ability_message()
+                },
+            );
         }
         let start = trace.then(Instant::now);
         let pose = world.update_walk(elapsed);

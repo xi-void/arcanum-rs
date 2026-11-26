@@ -270,6 +270,8 @@ pub struct InteractiveWorld {
     pub(super) sounds: std::collections::VecDeque<SoundEvent>,
     transition: Option<(Destination, u8)>,
     pending_use: Option<WorldOrder>,
+    pub(super) ability: abilities::UseState,
+    pub(super) game_second: u64,
     pub(super) npc_request: Option<WorldOrder>,
     pub(super) trade: Option<super::inventory::trade::Merchant>,
     pub(super) dialogue: Option<super::super::dialogue::Conversation>,
@@ -329,6 +331,8 @@ impl InteractiveWorld {
             sounds: Default::default(),
             transition: None,
             pending_use: None,
+            ability: Default::default(),
+            game_second: 0,
             npc_request: None,
             trade: None,
             dialogue: None,
@@ -610,8 +614,16 @@ impl InteractiveWorld {
         self.sounds.drain(..)
     }
 
+    pub fn player_wait(&self, now: Duration) -> Option<Duration> {
+        self.ability
+            .finish_at
+            .or(self.ability.casting.map(|(_, due)| due))
+            .map(|due| due.saturating_sub(now))
+    }
+
     pub fn player_moving(&self) -> bool {
         self.pending_use.is_some()
+            || self.ability.casting.is_some()
             || self.wait_for_door.is_some()
             || self.cache.player.as_ref().is_some_and(Player::moving)
     }
@@ -648,7 +660,34 @@ impl InteractiveWorld {
             i64::from(x) + i64::from(screen.0) - i64::from(size.0 / 2),
             i64::from(y) + i64::from(screen.1) - i64::from(size.1 / 2),
         );
+        let selection = self.ability.selected.take();
         self.cancel_player_route();
+        if let Some(method) = selection {
+            if self.unconscious() {
+                self.ability.reject(method, "Unconscious from fatigue");
+                return;
+            }
+            let valid = self
+                .cache
+                .pick_raster(point, self.reference, elapsed, false)
+                .filter(|&key| self.lock_id(key).is_some());
+            let Some(key) = valid else {
+                self.ability.reject(method, "Select a portal or container");
+                return;
+            };
+            if method.is_skill() && self.cache.approach(key, run).is_none() {
+                self.ability.reject(method, "Cannot reach the lock");
+            } else {
+                self.pending_use = Some(key);
+                self.ability.pending = Some(method);
+            }
+            return;
+        }
+        if self.unconscious() {
+            self.notice = Some("Unconscious from fatigue".into());
+            return;
+        }
+        self.ability.clear_feedback();
         if !self.cache.collision_disabled
             && let Some(key) = self.cache.pick(point, self.reference, elapsed)
         {
@@ -689,6 +728,12 @@ impl InteractiveWorld {
                     i64::from(cx) + i64::from(x) - i64::from(viewport.0 / 2),
                     i64::from(cy) + i64::from(y) - i64::from(viewport.1 / 2),
                 );
+                if self.ability.selected.is_some() {
+                    return self
+                        .cache
+                        .pick_raster(point, self.reference, elapsed, false)
+                        .filter(|&key| self.lock_id(key).is_some());
+                }
                 let key = self.cache.pick(point, self.reference, elapsed)?;
                 (!matches!(
                     self.cache.target(key)?.action,
@@ -717,6 +762,8 @@ impl InteractiveWorld {
     }
 
     pub fn cancel_player_route(&mut self) {
+        self.cache.remove_cast_overlay();
+        self.ability.cancel();
         self.pending_use = None;
         self.npc_request = None;
         self.route_goal = None;
@@ -763,6 +810,9 @@ impl InteractiveWorld {
                 _ => None,
             });
         serde_json::json!({
+            "ability": self.ability.diagnostic(),
+            "spell_effects":self.cache.effect_report(),
+            "hovered_lock":self.cache.hover.and_then(|k| self.lock_id(k)).map(|id|id.label()),
             "hovered_item":hovered_item,
             "hovered_npc":self.hovered_npc(),
             "moving":self.player_moving(),
@@ -881,6 +931,23 @@ impl InteractiveWorld {
             && !moving
             && let Some(key) = self.pending_use.take()
         {
+            if self.ability.pending.is_some_and(|m| m.is_skill()) {
+                let training = (self.cache.inventory.character.tech_skills[2] >> 6) & 3;
+                let started = self.ability.finish_at.is_none();
+                let due = self.ability.finish_at.get_or_insert_with(|| {
+                    now + Duration::from_secs(if training > 0 { 5 } else { 10 })
+                });
+                if now < *due {
+                    self.ability.message = "Picking lock…".into();
+                    self.pending_use = Some(key);
+                    return started || changed;
+                }
+            }
+            self.ability.finish_at = None;
+            if let Some(method) = self.ability.pending.take() {
+                self.ability.request = Some((key, method));
+                return true;
+            }
             match self.cache.target(key).map(|target| &target.action) {
                 Some(interaction::Action::Npc(_)) => {
                     self.npc_request = Some(key);

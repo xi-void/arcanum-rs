@@ -193,6 +193,15 @@ impl InteractiveWorld {
                         json!(door.art_frame(&self.cache.door_states, now));
                     self.cache.door_states.diagnostic(door, &self.cache)
                 }
+                interaction::Action::Window {
+                    id,
+                    flags,
+                    difficulty,
+                    notify,
+                    ..
+                } => {
+                    json!({"kind":"window","difficulty":difficulty,"flags":flags,"notify_npc":notify,"effective_flags":self.cache.door_states.flags(abilities::LockId::Door(*id), *flags),"lock_change":self.cache.door_states.locks.get(&abilities::LockId::Door(*id))})
+                }
                 interaction::Action::Travel(dst) => json!({"kind":"transition","destination":dst}),
                 interaction::Action::Container(id) => json!({
                     "kind":"container","id":id.key(),"developer_unlock":self.container_unlocked(*id),

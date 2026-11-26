@@ -1,7 +1,10 @@
 use super::*;
 
 impl Session {
-    fn equipped(&self, slot: EquipmentSlot) -> Option<&super::super::super::inventory::Change> {
+    pub(super) fn equipped(
+        &self,
+        slot: EquipmentSlot,
+    ) -> Option<&super::super::super::inventory::Change> {
         self.state
             .changes
             .values()
@@ -174,7 +177,21 @@ impl Session {
                     .ok()
             })
         };
+        let mut terrain_flags: [Vec<(bool, bool)>; 4] = Default::default();
+        if matches!(self.character.background, 65 | 67) {
+            for (id, value) in load_mes(vfs, "art/tile/tilename.mes")?.mes.entries() {
+                if (0..400).contains(&id) {
+                    let flags = value
+                        .split_once('/')
+                        .and_then(|(_, tail)| tail.split_ascii_whitespace().next())
+                        .unwrap_or("");
+                    terrain_flags[id as usize / 100]
+                        .push((flags.contains('n'), flags.contains('s')));
+                }
+            }
+        }
         self.rules = Rules {
+            terrain_flags,
             race: self.character.race_effect().and_then(effect),
             gender: (self.character.gender() == 0)
                 .then(|| effect(330))
@@ -259,7 +276,51 @@ impl SectorCache {
             .entries
             .get(&tile_sector_id(player.tile()))
             .map_or(0, |(sector, _)| sector.aptitude);
-        if self.inventory.character.sector_aptitude != aptitude {
+        let environment = (62..=68)
+            .contains(&self.inventory.character.background)
+            .then(|| {
+                let tile = player.tile();
+                let encoded = self
+                    .entries
+                    .get(&tile_sector_id(tile))?
+                    .0
+                    .sound_surfaces
+                    .as_ref()?[((tile.1 & 63) * 64 + (tile.0 & 63)) as usize];
+                let (natural, sinkable) = self.inventory.rules.terrain_flags
+                    [usize::from(encoded / 64)]
+                .get(usize::from(encoded % 64))
+                .copied()
+                .unwrap_or_default();
+                let outdoors = self.outdoor_at(tile)?;
+                let dark = if self.inventory.character.background == 68 {
+                    let (ambient, reference) = self.ambient?;
+                    let point = project_world_tile(tile, reference)?;
+                    let rgb = lighting::point(
+                        self.light_emitters(),
+                        point,
+                        if outdoors {
+                            ambient.outdoor
+                        } else {
+                            ambient.indoor
+                        },
+                    );
+                    crate::shadow::grayscale(rgb) < 128
+                } else {
+                    false
+                };
+                Some(crate::content::character::Environment {
+                    daylight: (6..18).contains(&self.hour),
+                    outdoors,
+                    natural,
+                    sinkable,
+                    dark,
+                })
+            })
+            .flatten();
+        if self.inventory.character.sector_aptitude != aptitude
+            || self.inventory.character.environment != environment
+        {
+            self.inventory.character.environment = environment;
             self.inventory.character.sector_aptitude = aptitude;
             self.inventory.revision += 1;
             self.update_character_movement();
@@ -296,6 +357,14 @@ impl SectorCache {
                 }
             }
             inventory.character.spell_flags = defaults.appearance.spell_flags.unwrap_or_default();
+            inventory.character.tech_skills = defaults.tech_skills;
+            inventory.character.colleges = defaults.colleges;
+            inventory.character.mastery = defaults.mastery;
+            inventory.character.fatigue_damage = defaults.fatigue_damage;
+            inventory.character.critter_flags =
+                defaults.appearance.critter_flags.unwrap_or_default();
+            inventory.character.critter_flags2 =
+                defaults.appearance.critter_flags2.unwrap_or_default();
             inventory.character.haggle = defaults.haggle;
             inventory.character.background = defaults.background.unwrap_or_default();
             inventory.character.original_palette =
@@ -330,6 +399,24 @@ impl SectorCache {
                 Place::Owned(Owner::Player),
                 Some((&Grid::default(), None)),
             )?;
+        }
+        if inventory.character.tech_skills[2] & 63 != 0 {
+            // CE item_generate_inventory gives trained starting PCs crude lockpicks.
+            let item = inventory.create_starting_item(vfs, frames, 15178 + 20, 14)?;
+            let grid = Grid {
+                items: inventory
+                    .state
+                    .changes
+                    .values()
+                    .filter(|change| change.place == Place::Owned(Owner::Player))
+                    .filter_map(|change| {
+                        Some((change.item.id, (change.slot?, change.item.footprint.cells)))
+                    })
+                    .collect(),
+            };
+            inventory
+                .state
+                .relocate(item, Place::Owned(Owner::Player), Some((&grid, None)))?;
         }
         let size = inventory
             .character

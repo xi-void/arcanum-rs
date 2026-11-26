@@ -9,6 +9,10 @@ pub struct Objects {
     accounts: trade::Accounts,
     #[serde(default)]
     restocks: stock::Events,
+    #[serde(default)]
+    skill_random: crate::random::Random,
+    #[serde(default)]
+    recharges: BTreeMap<String, use_action::Recharge>,
     character: Character,
     next_generated: u64,
     items: Vec<SavedItem>,
@@ -37,6 +41,8 @@ impl InteractiveWorld {
             accounts: session.accounts.clone(),
             restocks: session.restocks.clone(),
             character: session.character.clone(),
+            skill_random: session.skill_random,
+            recharges: session.recharges.clone(),
             next_generated: session.state.next_generated,
             items: session
                 .state
@@ -91,6 +97,12 @@ impl Objects {
         let mut session = Session::default();
         session.state.next_generated = self.next_generated;
         session.character = self.character.clone();
+        if session.character.fatigue_damage < 0
+            || session.character.colleges.iter().any(|&level| level > 5)
+            || session.character.mastery.is_some_and(|n| n >= 16)
+        {
+            return Err("Invalid saved character ability state".into());
+        }
         session.character.sector_aptitude = 0;
         let backgrounds = load_mes(vfs, "rules/backgrnd.mes")?;
         session.load_rules(vfs, &backgrounds)?;
@@ -189,6 +201,20 @@ impl Objects {
             );
         }
 
+        session.skill_random = self.skill_random;
+        for (key, event) in &self.recharges {
+            let id = parse_id(key)?;
+            if event.spent <= 0
+                || session
+                    .state
+                    .changes
+                    .get(&id)
+                    .is_none_or(|c| c.item.stats.mana_store < event.spent)
+            {
+                return Err("Invalid saved item mana expenditure".into());
+            }
+        }
+        session.recharges = self.recharges.clone();
         for (&slot, id) in &equipment {
             session.check_equipment(&session.state.changes[id].item, slot)?;
         }

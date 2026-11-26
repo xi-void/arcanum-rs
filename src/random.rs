@@ -10,6 +10,12 @@ use std::{
 #[serde(transparent)]
 pub struct Random(NonZeroU64);
 
+impl Default for Random {
+    fn default() -> Self {
+        Self::fresh()
+    }
+}
+
 impl Random {
     pub fn fresh() -> Self {
         let seed = SystemTime::now()

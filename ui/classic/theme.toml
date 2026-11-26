@@ -274,6 +274,22 @@ source_rect = [0, 0, 28, 88]
 disabled = true
 
 [[hud]]
+id = "fatigue-fill"
+parent = "fatigue-vial"
+size = [28,96]
+image = "vfs:art/interface/bluvial.art"
+binding = "fatigue-fill"
+
+[[hud]]
+id = "fatigue-value"
+parent = "bottom"
+offset = [755,137]
+size = [27,15]
+binding = "fatigue-value"
+font = "counters"
+align = "center"
+
+[[hud]]
 id = "combat"
 parent = "bottom"
 offset = [86, 16]
@@ -295,7 +311,46 @@ parent = "bottom"
 offset = [649, 53]
 size = [39, 39]
 image = "vfs:art/interface/spells_button.art"
+action = "toggle-spells"
+hover_message = "Spells"
+
+[[hud]]
+id = "conveyance-panel"
+parent = "bottom"
+offset = [196, 51]
+size = [410, 107]
+image = "vfs:art/interface/spell_ro.art"
+spell_panel = true
+capture = true
+
+[[hud]]
+id = "conveyance"
+parent = "conveyance-panel"
+offset = [5, 5]
+size = [24,24]
+required_conveyance = 1
+image = "vfs:art/interface/s_conveyance.art"
+frame = 1
 disabled = true
+
+[[hud]]
+id = "disarm"
+parent = "conveyance-panel"
+offset = [88,36]
+size = [32,32]
+image = "vfs:art/interface/s_conveyance1.art"
+required_conveyance = 1
+disabled = true
+
+[[hud]]
+id = "unlocking-cantrip"
+parent = "conveyance-panel"
+offset = [138,36]
+size = [32,32]
+image = "vfs:art/interface/s_conveyance2.art"
+required_conveyance = 2
+action = "cast-cantrip"
+hover_message = "Unlocking Cantrip"
 
 [[hud]]
 id = "schematics"
@@ -563,7 +618,8 @@ parent = "inventory-panel"
 offset = [703, 290]
 size = [80, 43]
 image = "vfs:art/interface/use_box_off.art"
-disabled = true
+binding = "inventory-use"
+hover_message = "Use"
 
 [[hud]]
 id = "drop-item"

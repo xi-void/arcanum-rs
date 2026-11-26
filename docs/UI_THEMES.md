@@ -257,3 +257,6 @@ the active gameplay settings and the shared pause-menu scale.
 
 NPC dialogue uses HUD bindings for the speaker bubble, response rows, and
 contextual information. See [NPC dialogue](DIALOGUE.md#theme-and-diagnostics).
+
+
+The Classic Spells button uses `toggle-spells`; `cast-cantrip` selects the known Conveyance spell. Spell-panel children use `spell_panel` and `required_conveyance` as defined in the Classic package. The `inventory-use` binding on the Use box submits the carried item to the shared targeting system. The `fatigue-fill` and `fatigue-value` bindings display the current character's charge and recovery.
