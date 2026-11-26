@@ -1960,11 +1960,11 @@ impl WindowSurface {
         }
         world.start_player()?;
         let frame_start = Instant::now();
-        let mut hud = hud.filter(|_| menu.is_none()).map(|hud| {
+        let mut hud = hud.filter(|_| menu.is_none());
+        if let Some(hud) = hud.as_deref_mut() {
             hud.layout((size.width, size.height));
             hud.hover(cursor);
-            hud
-        });
+        }
         let cursor = cursor.filter(|&point| {
             hud.as_ref()
                 .is_none_or(|hud| hud.hit(point) == hud::Hit::World)

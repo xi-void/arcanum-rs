@@ -669,10 +669,9 @@ impl Hud {
         {
             let e = &c.config;
             if e.inventory_panel {
-                if panel.is_some() {
-                    middle = e.size[1];
-                    widest = widest.max(e.size[0]);
-                }
+                // Reserve the full gameplay layout even while inventory is closed.
+                middle = middle.max(e.size[1]);
+                widest = widest.max(e.size[0]);
                 continue;
             }
             widest = widest.max(e.size[0]);

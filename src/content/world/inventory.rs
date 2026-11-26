@@ -315,7 +315,17 @@ struct Container {
 
 impl Container {
     fn check_access(&self, world: &InteractiveWorld, hour: u8) -> Result<(), String> {
-        world.check_inventory_reach(self.tile)?;
+        let player = world
+            .cache
+            .player
+            .as_ref()
+            .filter(|p| !p.moving())
+            .ok_or("Player must be stationary")?;
+        let cell =
+            |tile| SectorCache::player_cell(&world.cache.entries, &world.cache.door_states, tile);
+        if !collision::can_reach_container(player.tile(), self.tile, cell) {
+            return Err("Container is outside loaded interaction reach".into());
+        }
         if self.flags & (UNAVAILABLE | CLICK_THROUGH | 0x1000) != 0 {
             return Err("Container is hidden, inactive, trapped or otherwise unavailable".into());
         }

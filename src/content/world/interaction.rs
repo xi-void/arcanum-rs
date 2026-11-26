@@ -447,21 +447,23 @@ impl SectorCache {
         let tile = target.tile;
         let directions: &[u8] = match &target.action {
             Action::Door(door) => std::slice::from_ref(&door.direction),
+            Action::Container(_) => &[0, 1, 2, 3, 4, 5, 6, 7],
             _ => &[1, 3, 5, 7],
         };
+        let container = matches!(target.action, Action::Container(_));
+        let entries = &self.entries;
+        let states = &self.door_states;
+        let cell = |tile| Self::player_cell(entries, states, tile);
         let candidates: Vec<_> = std::iter::once(tile)
             .chain(
                 directions
                     .iter()
                     .filter_map(|&direction| neighbor(tile, direction)),
             )
+            .filter(|&from| !container || collision::can_reach_container(from, tile, cell))
             .collect();
-        let entries = &self.entries;
-        let states = &self.door_states;
         let player = self.player.as_mut()?;
-        player.destination_near(&candidates, run, |tile| {
-            Self::player_cell(entries, states, tile)
-        })
+        player.destination_near(&candidates, run, cell)
     }
 
     pub(super) fn use_target(

@@ -659,7 +659,8 @@ pub(super) fn load_prop(
             ((art >> 14) & 31) as usize,
             ((art >> 11) & 7) as u8,
         ),
-        (3, 4) => {
+        // Original containers can use furniture and other scenery ART.
+        (2 | 3, 4) => {
             let art = super::scenery::SceneryArt::decode(art)?;
             (
                 "scenery",

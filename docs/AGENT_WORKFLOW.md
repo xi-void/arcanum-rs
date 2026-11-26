@@ -132,6 +132,14 @@ errors. Compare `.result.renderer.stats.preparation.uploaded` and
 `.result.renderer.frames_presented` while changing scale and during idle
 intervals. Use Vulkan capture for the presented result.
 
+Bates Mansion Level 1 also has original containers at (78, 104) and
+(78, 107) whose category is container and whose ART is scenery. The category
+controls interaction and the authored ART controls appearance. A clear
+diagonal is within container reach, with wall edges and blocked corners
+checked during approach and again when opening. Check original flags and
+script bindings before treating an access rejection as a rendering or
+navigation defect.
+
 ## Asynchronous operations
 
 Read the top-level `status` before using `result`. `completed` confirms the

@@ -435,6 +435,6 @@ inventory_panel = true
         hud.close_inventory();
         hud.layout((936, 500));
         assert!(hud.placed[2].is_none());
-        assert_eq!(hud.effective_scale, 117);
+        assert_eq!(hud.effective_scale, 83);
     }
 }

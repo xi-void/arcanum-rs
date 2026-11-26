@@ -52,7 +52,7 @@ Vulkan scales native-size component textures, including labels with the
 font's palette coverage. Resizing and adjusting the scale update placement
 and clipping while retaining the component textures. The top HUD, active
 panel and bottom HUD share an effective scale in physical window pixels.
-The viewport limits this scale while preserving the requested percentage.
+The viewport fits the full layout even while the panel is closed, preserving the requested percentage.
 Camera zoom is independent.
 
 ### Assets and fonts

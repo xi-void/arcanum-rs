@@ -228,6 +228,33 @@ pub(super) fn step(tile: Tile, direction: u8, cell: impl Fn(Tile) -> Option<Cell
     Some(to)
 }
 
+/// Reach a container one step away, using the same edges and diagonal corner
+/// checks as movement. The target can occupy its own tile (CE sub_425840).
+pub(super) fn can_reach_container(
+    from: Tile,
+    target: Tile,
+    cell: impl Fn(Tile) -> Option<Cell>,
+) -> bool {
+    if from == target {
+        return cell(target).is_some_and(|cell| !cell.terrain_blocked);
+    }
+    (0..8).any(|direction| {
+        let (dx, dy) = DIRECTIONS[usize::from(direction)];
+        if from.0.checked_add_signed(dx) != Some(target.0)
+            || from.1.checked_add_signed(dy) != Some(target.1)
+        {
+            return false;
+        }
+        step(from, direction, |tile| {
+            let mut cell = cell(tile)?;
+            if tile == target {
+                cell.blocked = cell.terrain_blocked;
+            }
+            Some(cell)
+        }) == Some(target)
+    })
+}
+
 #[cfg(test)]
 pub(super) fn test_cell(blocked: bool) -> Cell {
     Cell {
@@ -239,6 +266,33 @@ pub(super) fn test_cell(blocked: bool) -> Cell {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn container_reach_allows_diagonals_but_preserves_corner_and_target_geometry() {
+        let from = (8, 8);
+        let target = (9, 9);
+        let cell = |tile| Some(test_cell(tile == target));
+        assert!(can_reach_container(from, target, cell));
+        assert!(!can_reach_container((7, 7), target, cell));
+
+        let blocked_corner = |tile| Some(test_cell(tile == (9, 8)));
+        assert!(!can_reach_container(from, target, blocked_corner));
+
+        let wall = |tile| {
+            Some(Cell {
+                edges: if tile == target { 1 << 1 } else { 0 },
+                ..Cell::default()
+            })
+        };
+        assert!(!can_reach_container(from, target, wall));
+        let blocked_target = |tile| {
+            Some(Cell {
+                terrain_blocked: tile == target,
+                ..Cell::default()
+            })
+        };
+        assert!(!can_reach_container(from, target, blocked_target));
+    }
 
     #[test]
     fn terrain_facade_and_sector_mask_each_block_a_tile() {
