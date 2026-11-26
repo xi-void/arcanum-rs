@@ -15,6 +15,7 @@ This document defines permanent architectural requirements and future compatibil
 - Stop investigating once sufficient evidence exists to implement a verified correction.
 - Prioritize functional improvements over lengthy reports and repetitive demonstrations.
 - Avoid unnecessary token consumption.
+- Maintain `docs/KNOWN_ISSUES.md` as the persistent defect backlog. Record nonblocking defects rather than expanding the current milestone to resolve them. Update issue status when relevant corrections are implemented and verified.
 
 Do not report user-facing behavior as verified unless the complete production input, state transition and rendering path has been exercised. Testing an action handler directly through RPC or unit tests does not establish that the corresponding mouse or keyboard interaction works. Clearly distinguish automated verification, native interaction testing and unverified behavior.
 

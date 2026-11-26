@@ -188,7 +188,10 @@ impl InteractiveWorld {
                     self.cache.door_states.diagnostic(door, self.cache.hour)
                 }
                 interaction::Action::Travel(dst) => json!({"kind":"transition","destination":dst}),
-                interaction::Action::Container(id) => json!({"kind":"container","id":id.key()}),
+                interaction::Action::Container(id) => json!({
+                    "kind":"container","id":id.key(),"developer_unlock":self.container_unlocked(*id),
+                }),
+                interaction::Action::Pickup(id) => json!({"kind":"pickup","id":id.key()}),
                 interaction::Action::Unsupported(reason) => {
                     json!({"kind":"unsupported","reason":reason})
                 }
@@ -342,15 +345,16 @@ impl InteractiveWorld {
             "coverage":"decoded records and available rasters in cached sectors"})
     }
 
-    pub fn debug_unlock(&mut self, object: DebugObject) -> Result<bool, String> {
+    pub fn debug_unlock(&mut self, vfs: &mut Vfs, object: DebugObject) -> Result<bool, String> {
         let target = self
             .cache
             .entries
             .get(&object.sector)
             .and_then(|(sector, _)| sector.interactions.get(&object.key))
-            .ok_or("Selected object has no supported door action")?;
+            .ok_or("Selected object has no supported lock")?;
         match &target.action {
             interaction::Action::Door(door) => self.cache.door_states.unlock(door),
+            interaction::Action::Container(id) => self.unlock_container(vfs, *id),
             _ => Err("Selected object has a scripted or unsupported action".into()),
         }
     }

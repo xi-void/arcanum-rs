@@ -469,7 +469,10 @@ inventory_views = ["container"]
 offset = [301, 47]
 size = [51, 50]
 image = "vfs:art/interface/takeallbutt.art"
-disabled = true
+pressed_frame = 1
+hover_frame = 2
+action = "inventory-take-all"
+hover_message = "Take All"
 
 [[hud]]
 id = "equipment-tab"
@@ -496,7 +499,9 @@ parent = "inventory-panel"
 offset = [763, 197]
 size = [28, 27]
 image = "vfs:art/interface/tiny_butt.art"
-disabled = true
+pressed_frame = 1
+action = "inventory-arrange"
+hover_message = "Arrange"
 
 [[hud]]
 id = "use-item"
@@ -512,7 +517,8 @@ parent = "inventory-panel"
 offset = [703, 344]
 size = [80, 43]
 image = "vfs:art/interface/drop_off.art"
-disabled = true
+binding = "inventory-drop"
+hover_message = "Drop"
 
 [[hud]]
 id = "backpack-grid"

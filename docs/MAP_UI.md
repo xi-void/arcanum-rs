@@ -17,7 +17,8 @@ cargo run --locked --release --features windowed -- \
   enters the detailed sheet. **Home** and the original navigate button
   recenter the detailed views. Use **Tab**, **Enter** and **Space** to
   operate map buttons with the keyboard.
-- Hover over a known location for its authored description. In the detailed
+- Hover over a known location to read its authored description in the bottom
+  HUD. In the detailed
   world map, click terrain or discovered locations to add waypoints in order.
   Click an existing waypoint and then another position to move it. Right-click
   a waypoint to remove it, or right-click elsewhere to remove the selected

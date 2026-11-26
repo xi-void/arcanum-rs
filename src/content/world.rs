@@ -38,7 +38,7 @@ pub use debug::{DebugCollision, DebugObject};
 mod prefetch;
 pub use super::jumps::Destination;
 pub use interaction::DoorStates;
-pub use inventory::{InventoryContents, InventoryReader};
+pub use inventory::{InventoryContents, InventoryEntry, InventoryReader};
 pub use lighting::DynamicLightState;
 pub use prefetch::{DeveloperAction, InteractiveWorld, PrefetchStats};
 
@@ -734,12 +734,20 @@ impl CachedSector {
             }
             self.mobiles[index].raster = Some(record);
             let entry = &self.mobiles[index];
-            if playing && entry.category == 2 && entry.id.kind == 2 {
+            let action = match entry.category {
+                2 => Some(interaction::Action::Container(entry.id)),
+                5..=14 => Some(interaction::Action::Pickup(entry.id)),
+                _ => None,
+            };
+            if playing
+                && entry.id.kind == 2
+                && let Some(action) = action
+            {
                 self.interactions.insert(
                     raster.key,
                     interaction::Target {
                         tile: caster.tile,
-                        action: interaction::Action::Container(entry.id),
+                        action,
                     },
                 );
             }
@@ -841,6 +849,7 @@ struct SectorCache {
     jumps: super::jumps::Jumps,
     door_states: DoorStates,
     inventory: inventory::Session,
+    dropped_targets: BTreeMap<WorldOrder, interaction::Target>,
     inventory_context: Option<(String, (u32, u32))>,
     roof_state: Option<roof::State>,
     hover: Option<WorldOrder>,

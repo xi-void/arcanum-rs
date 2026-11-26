@@ -127,8 +127,12 @@ With Classic active, click the bag button and click the authored chest in the
 world to exercise the production paths. After each interaction, inspect
 `rpc pos | jq '.result.ui.hud | {scale_percent, effective_scale_percent, inventory}'`.
 The inventory report includes panel and lens bounds, visible grid bounds,
-slots, footprints, resolved icon resources, scroll rows, hover, and access
-errors. Compare `.result.renderer.stats.preparation.uploaded` and
+slots, footprints, resolved icon resources, scroll rows, hover, the active
+drag's slot and validity, control bounds, and transaction errors. Use native
+press, motion, and release events to test the drag path. Use `itemowner`
+before and after rejected placements to compare identity and location.
+`pos.result.player.navigation.hovered_item` reports the GUID selected by the
+world picker under the pointer. Compare `.result.renderer.stats.preparation.uploaded` and
 `.result.renderer.frames_presented` while changing scale and during idle
 intervals. Use Vulkan capture for the presented result.
 

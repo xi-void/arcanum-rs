@@ -25,6 +25,8 @@ pub(super) enum Action {
     ToggleInventory,
     InventoryScrollUp,
     InventoryScrollDown,
+    InventoryTakeAll,
+    InventoryArrange,
     MapLocal,
     MapWorld,
     MapZoomIn,
@@ -113,6 +115,7 @@ pub(super) enum Binding {
     ContainerThumb,
     InventoryLens,
     InventoryHover,
+    InventoryDrop,
 }
 
 impl Binding {
@@ -181,6 +184,8 @@ struct Element {
     frame: usize,
     fill: Option<Color>,
     hover_fill: Option<Color>,
+    valid_drop_fill: Option<Color>,
+    invalid_drop_fill: Option<Color>,
     hover_frame: Option<usize>,
     pressed_frame: Option<usize>,
     selected_frame: Option<usize>,
@@ -574,6 +579,28 @@ impl Hud {
             {
                 component.state_art[0] = Some(generated_frame("grid-hover", sprite([1, 1], color)));
             }
+            if component.config.cell.is_some()
+                || component.config.binding == Some(Binding::InventoryDrop)
+            {
+                for (index, color) in [
+                    component
+                        .config
+                        .valid_drop_fill
+                        .unwrap_or([40, 110, 40, 145]),
+                    component
+                        .config
+                        .invalid_drop_fill
+                        .unwrap_or([145, 28, 28, 170]),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    component.state_art[index + 1] = Some(generated_frame(
+                        "inventory-placement",
+                        sprite([1, 1], color),
+                    ));
+                }
+            }
             components.push(component);
         }
         if let Some(author) = &theme.author {
@@ -767,7 +794,13 @@ impl Hud {
             .iter()
             .filter_map(|component| component.config.image.as_deref())
             .collect();
-        serde_json::json!({"scale_percent":self.scale,"effective_scale_percent":self.effective_scale,"inventory":self.inventory_diagnostics(),"fonts":self.font_profiles,"image_references":images,
+        let label = |binding| {
+            self.bound(binding)
+                .and_then(|index| self.components[index].label.as_ref())
+                .map(|label| label.value.as_str())
+        };
+        serde_json::json!({"context_message":label(Binding::InventoryHover),
+            "map_status":label(Binding::MapStatus),"scale_percent":self.scale,"effective_scale_percent":self.effective_scale,"inventory":self.inventory_diagnostics(),"fonts":self.font_profiles,"image_references":images,
             "focused":control(self.focus),"hovered":control(self.hover),"pressed":control(self.pressed)})
     }
 
@@ -1630,11 +1663,14 @@ mod tests {
             let mut hud = Hud::load(&path, &mut game, Some(scale)).unwrap();
             hud.layout((1920, 1080));
             assert_eq!(hud.draws(false).count(), 33);
-            let left = (1920 - 8 * u32::from(scale)) / 2;
+            assert_eq!(hud.scale(), scale);
+            let effective = u32::from(scale).min(180);
+            assert_eq!(hud.effective_scale, effective);
+            let left = (1920 - 8 * effective) / 2;
             let button = hud.placed[2].as_ref().unwrap().rect;
-            assert_eq!(button.x as u32, left + 4 * u32::from(scale) / 100);
-            assert_eq!(button.y as u32, 2 * u32::from(scale) / 100);
-            assert_eq!(button.w, 34 * u32::from(scale) / 100);
+            assert_eq!(button.x as u32, left + 4 * effective / 100);
+            assert_eq!(button.y as u32, 2 * effective / 100);
+            assert_eq!(button.w, 34 * effective / 100);
             assert_eq!(hud.hit((button.x as u32, button.y as u32)), Hit::Panel);
             let map = hud.placed[4].as_ref().unwrap().rect;
             assert_eq!(

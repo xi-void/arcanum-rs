@@ -1322,16 +1322,22 @@ fn show_world(
         (None, None, world_args)
     };
     let options = stripped.as_slice();
-    let (hud, inventory_reader) = if let Some(theme) = &theme {
+    let (hud, inventory_reader) = if playing {
         let mods = options
             .iter()
             .position(|arg| arg == "--mods")
             .map_or(&[][..], |index| &options[index..]);
         let mut vfs = inspection_vfs(game, mods, policy)?;
-        let hud = viewer::Hud::load(theme, &mut vfs, ui_scale)
-            .map_err(|error| format!("UI theme {}: {error}", theme.display()))?;
+        let hud = theme
+            .as_ref()
+            .map(|theme| {
+                viewer::Hud::load(theme, &mut vfs, ui_scale)
+                    .map(Box::new)
+                    .map_err(|error| format!("UI theme {}: {error}", theme.display()))
+            })
+            .transpose()?;
         (
-            Some(Box::new(hud)),
+            hud,
             Some(Box::new(content::world::InventoryReader::new(vfs))),
         )
     } else {

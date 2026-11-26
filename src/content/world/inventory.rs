@@ -18,6 +18,7 @@ pub(super) struct Session {
     state: State,
     revision: u64,
     ground: BTreeMap<OriginalId, GroundArt>,
+    unlocked: BTreeMap<String, BTreeSet<OriginalId>>,
 }
 
 struct GroundArt {
@@ -50,7 +51,24 @@ impl Session {
 }
 
 impl SectorCache {
+    pub(super) fn can_reach_item(
+        at: Tile,
+        tile: Tile,
+        cell: impl Fn(Tile) -> Option<collision::Cell>,
+    ) -> bool {
+        cell(tile).is_some()
+            && (at == tile
+                || [1u8, 3, 5, 7].into_iter().any(|dir| {
+                    let (dx, dy) = collision::DIRECTIONS[usize::from(dir)];
+                    at.0.checked_add_signed(dx) == Some(tile.0)
+                        && at.1.checked_add_signed(dy) == Some(tile.1)
+                        && cell(at).is_some_and(|c| !c.blocks_edge(dir))
+                        && cell(tile).is_some_and(|c| !c.blocks_edge((dir + 4) % 8))
+                }))
+    }
+
     pub(super) fn project_inventory(&mut self) {
+        self.dropped_targets.clear();
         if self.inventory.state.changes.is_empty() {
             return;
         }
@@ -75,6 +93,13 @@ impl SectorCache {
                 && self.active.contains(&tile_sector_id(*tile))
                 && let Some(raster) = art.raster(*tile, *reference, change.order)
             {
+                self.dropped_targets.insert(
+                    raster.key,
+                    interaction::Target {
+                        tile: *tile,
+                        action: interaction::Action::Pickup(*id),
+                    },
+                );
                 self.ordered.push(raster);
             }
         }
@@ -314,7 +339,12 @@ struct Container {
 }
 
 impl Container {
-    fn check_access(&self, world: &InteractiveWorld, hour: u8) -> Result<(), String> {
+    fn check_access(
+        &self,
+        world: &InteractiveWorld,
+        id: OriginalId,
+        hour: u8,
+    ) -> Result<(), String> {
         let player = world
             .cache
             .player
@@ -329,8 +359,10 @@ impl Container {
         if self.flags & (UNAVAILABLE | CLICK_THROUGH | 0x1000) != 0 {
             return Err("Container is hidden, inactive, trapped or otherwise unavailable".into());
         }
+        let unlocked = world.container_unlocked(id);
         if self.subtype_flags & 0x80 == 0
-            && (self.subtype_flags & 6 != 0 || interaction::locked(self.subtype_flags, hour))
+            && (self.subtype_flags & 6 != 0
+                || (!unlocked && interaction::locked(self.subtype_flags, hour)))
         {
             return Err("Container is locked, jammed or magically held".into());
         }
@@ -361,6 +393,17 @@ pub struct InventoryContents {
     pub columns: usize,
     pub rows: usize,
     pub entries: Vec<InventoryEntry>,
+    grid: Grid,
+}
+
+impl InventoryContents {
+    pub fn fits(&self, item: &InventoryEntry, slot: usize) -> bool {
+        parse_id(&item.id).is_ok_and(|id| {
+            self.grid
+                .fit(id, item.cells, self.rows, Some(slot))
+                .is_some()
+        })
+    }
 }
 
 pub struct InventoryEntry {
@@ -368,6 +411,8 @@ pub struct InventoryEntry {
     pub slot: usize,
     pub cells: [usize; 2],
     pub name: String,
+    pub movable: bool,
+    pub removable: bool,
     pub icon: Result<Arc<LoadedFrame>, String>,
 }
 
@@ -390,6 +435,38 @@ impl InventoryReader {
         }
     }
 
+    pub fn transfer(
+        &mut self,
+        world: &mut InteractiveWorld,
+        item: &str,
+        from: &str,
+        to: &str,
+        slot: Option<usize>,
+    ) -> Result<Value, String> {
+        world.transfer_item(&mut self.vfs, item, from, to, slot, None)
+    }
+
+    pub fn drop_item(&mut self, world: &mut InteractiveWorld, item: &str) -> Result<Value, String> {
+        world.drop_item(&mut self.vfs, item)
+    }
+
+    pub fn pickup(&mut self, world: &mut InteractiveWorld, item: &str) -> Result<Value, String> {
+        world.pickup_item(&mut self.vfs, item, None)
+    }
+
+    pub fn take_all(&mut self, world: &mut InteractiveWorld, target: &str) -> Result<(), String> {
+        world.take_all(&mut self.vfs, target)
+    }
+
+    pub fn arrange(
+        &mut self,
+        world: &mut InteractiveWorld,
+        target: Option<&str>,
+        vertical: bool,
+    ) -> Result<(), String> {
+        world.arrange_inventory(&mut self.vfs, target, vertical)
+    }
+
     pub fn contents(
         &mut self,
         world: &InteractiveWorld,
@@ -399,20 +476,14 @@ impl InventoryReader {
         let owner = target.map_or(Owner::Player, |id| Owner::Container(world.map.clone(), id));
         let mut records = world.records(&mut self.vfs);
         let container = target.map(|id| records.container(id)).transpose()?;
-        if let Some(container) = &container {
-            container.check_access(world, world.cache.hour)?;
+        if let (Some(container), Some(id)) = (&container, target) {
+            container.check_access(world, id, world.cache.hour)?;
         }
         let layout = records.layout(&world.cache.inventory.state, &owner, container.as_ref())?;
         let mut entries = Vec::new();
-        for (id, (slot, cells)) in layout.grid.items {
+        for (&id, &(slot, cells)) in &layout.grid.items {
             let item = &layout.items[&id];
-            if item
-                .effective
-                .flags
-                .value()
-                .is_some_and(|flags| flags & UNAVAILABLE != 0)
-                || item.flags & ITEM_NO_DISPLAY != 0
-            {
+            if !item_visible(item) {
                 continue;
             }
             let name = item
@@ -436,6 +507,8 @@ impl InventoryReader {
                 slot,
                 cells,
                 name,
+                movable: check_item(item).is_ok(),
+                removable: item.flags & ITEM_NO_DROP == 0,
                 icon,
             });
         }
@@ -444,6 +517,7 @@ impl InventoryReader {
             columns: COLUMNS,
             rows: owner.rows(),
             entries,
+            grid: layout.grid,
         })
     }
 }
@@ -495,7 +569,13 @@ impl InteractiveWorld {
         });
         Ok(
             json!({"owner":place.report(),"columns":COLUMNS,"rows":owner.rows(),
-            "container":container.as_ref().map(Container::report),
+            "container":container.as_ref().map(|container| {
+                let mut report = container.report();
+                if let Owner::Container(_, id) = owner {
+                    report["developer_unlock"] = json!(self.container_unlocked(id));
+                }
+                report
+            }),
             "items":items.into_iter().map(|item| item.report(&place, layout.grid.items.get(&item.id).map(|entry| entry.0))).collect::<Vec<_>>() }),
         )
     }
@@ -536,15 +616,7 @@ impl InteractiveWorld {
         let at = player.tile();
         let cell =
             |tile| SectorCache::player_cell(&self.cache.entries, &self.cache.door_states, tile);
-        let reachable = cell(tile).is_some()
-            && (at == tile
-                || [1u8, 3, 5, 7].into_iter().any(|dir| {
-                    let (dx, dy) = collision::DIRECTIONS[usize::from(dir)];
-                    at.0.checked_add_signed(dx) == Some(tile.0)
-                        && at.1.checked_add_signed(dy) == Some(tile.1)
-                        && cell(at).is_some_and(|c| !c.blocks_edge(dir))
-                        && cell(tile).is_some_and(|c| !c.blocks_edge((dir + 4) % 8))
-                }));
+        let reachable = SectorCache::can_reach_item(at, tile, cell);
         reachable
             .then_some(())
             .ok_or_else(|| "Item or container is outside loaded interaction reach".into())
@@ -594,23 +666,7 @@ impl InteractiveWorld {
         let state = &self.cache.inventory.state;
         let item = records.item(id, state)?;
         let current = state.place(&item);
-        let flags = item
-            .effective
-            .flags
-            .value()
-            .ok_or("Unresolved item visibility flags")?;
-        if flags & UNAVAILABLE != 0
-            || item.flags & ITEM_NO_DISPLAY != 0
-            || item.scripted
-            || item
-                .authored_slot
-                .is_some_and(|slot| matches!(slot, 1000..=1008 | 2000..=2009))
-        {
-            return Err(
-                "Item is unavailable or requires an unsupported scripted or equipment transaction"
-                    .into(),
-            );
-        }
+        let flags = check_item(&item)?;
         let (destination, requested) = match action {
             Move::Pickup(slot) => {
                 let Place::Ground(map, tile) = current else {
@@ -647,14 +703,13 @@ impl InteractiveWorld {
                 (Place::Owned(to), slot)
             }
         };
-        if current != &destination
-            && matches!(current, Place::Owned(_))
-            && item.flags & ITEM_NO_DROP != 0
-        {
-            return Err("Original item cannot be removed from its owner".into());
+        if current != &destination && matches!(current, Place::Owned(_)) {
+            check_removal(&item)?;
         }
         if let Place::Owned(Owner::Container(_, source)) = current {
-            records.container(*source)?.check_access(self, hour)?;
+            records
+                .container(*source)?
+                .check_access(self, *source, hour)?;
         }
         let mut ground = None;
         let layout = match &destination {
@@ -663,7 +718,7 @@ impl InteractiveWorld {
                     Owner::Player => None,
                     Owner::Container(_, target) => {
                         let container = records.container(*target)?;
-                        container.check_access(self, hour)?;
+                        container.check_access(self, *target, hour)?;
                         Some(container)
                     }
                     Owner::OriginalObject(..) => return Err("Unsupported inventory owner".into()),
@@ -694,12 +749,186 @@ impl InteractiveWorld {
         Ok(result)
     }
 
+    fn take_all(&mut self, vfs: &mut Vfs, target: &str) -> Result<(), String> {
+        let id = parse_id(target)?;
+        let source = Owner::Container(self.map.clone(), id);
+        let owner = Owner::Player;
+        let destination = Place::Owned(owner.clone());
+        let mut records = self.records(vfs);
+        let container = records.container(id)?;
+        container.check_access(self, id, self.cache.hour)?;
+        let state = &self.cache.inventory.state;
+        let mut loot = records.layout(state, &source, Some(&container))?;
+        let mut backpack = records.layout(state, &owner, None)?.grid;
+        let mut slots: Vec<_> = loot.grid.items.into_iter().collect();
+        slots.sort_unstable_by_key(|(_, (slot, _))| *slot);
+        let session = &mut self.cache.inventory;
+        let mut remaining = 0;
+        let mut reason = None;
+        for (id, _) in slots {
+            let item = loot.items.remove(&id).expect("layout item");
+            if !item_visible(&item) {
+                continue;
+            }
+            let cells = item.footprint.cells;
+            let moved = check_item(&item)
+                .and_then(|_| check_removal(&item))
+                .and_then(|()| {
+                    let slot = backpack
+                        .fit(id, cells, owner.rows(), None)
+                        .ok_or("Item does not fit in the requested destination")?;
+                    session.state.relocate(
+                        item,
+                        destination.clone(),
+                        Some((&backpack, Some(slot))),
+                    )?;
+                    backpack.items.insert(id, (slot, cells));
+                    session.revision += 1;
+                    Ok(())
+                });
+            if let Err(error) = moved {
+                reason.get_or_insert(error);
+                remaining += 1;
+            }
+        }
+        reason.map_or(Ok(()), |reason| {
+            Err(format!("{remaining} item(s) left: {reason}"))
+        })
+    }
+
+    fn arrange_inventory(
+        &mut self,
+        vfs: &mut Vfs,
+        target: Option<&str>,
+        vertical: bool,
+    ) -> Result<(), String> {
+        let mut records = self.records(vfs);
+        let state = &self.cache.inventory.state;
+        let mut planned = Vec::new();
+        for owner in ["player"].into_iter().chain(target) {
+            let owner = self.inventory_owner(owner)?;
+            let container = match &owner {
+                Owner::Container(_, id) => {
+                    let container = records.container(*id)?;
+                    container.check_access(self, *id, self.cache.hour)?;
+                    Some(container)
+                }
+                _ => None,
+            };
+            let mut layout = records.layout(state, &owner, container.as_ref())?;
+            let mut moving = Vec::new();
+            layout.grid.items.retain(|id, entry| {
+                let (slot, cells) = *entry;
+                let item = &layout.items[id];
+                if check_item(item).is_err() {
+                    return true;
+                }
+                moving.push((std::cmp::Reverse((cells[1], cells[0])), slot, *id));
+                false
+            });
+            moving.sort_unstable();
+            let mut changes = Vec::new();
+            for (_, previous, id) in moving {
+                let item = layout.items.remove(&id).expect("layout item");
+                let cells = item.footprint.cells;
+                let slot = layout
+                    .grid
+                    .fit_ordered(id, cells, owner.rows(), None, vertical)
+                    .ok_or("Inventory cannot be arranged within its capacity")?;
+                layout.grid.items.insert(id, (slot, cells));
+                if previous != slot {
+                    changes.push((item, slot));
+                }
+            }
+            planned.push((Place::Owned(owner), layout.grid, changes));
+        }
+        let session = &mut self.cache.inventory;
+        for (place, grid, changes) in planned {
+            for (item, slot) in changes {
+                session
+                    .state
+                    .relocate(item, place.clone(), Some((&grid, Some(slot))))
+                    .expect("arrangement slots validated before commit");
+                session.revision += 1;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn container_unlocked(&self, id: OriginalId) -> bool {
+        self.cache
+            .inventory
+            .unlocked
+            .get(&self.map)
+            .is_some_and(|ids| ids.contains(&id))
+    }
+
+    pub(super) fn unlock_container(
+        &mut self,
+        vfs: &mut Vfs,
+        id: OriginalId,
+    ) -> Result<bool, String> {
+        let container = self.records(vfs).container(id)?;
+        if container.scripted || container.subtype_flags & 6 != 0 {
+            return Err("Container has a scripted, jammed or magical restriction".into());
+        }
+        if container.flags & (UNAVAILABLE | CLICK_THROUGH | 0x1000) != 0 {
+            return Err("Container is unavailable".into());
+        }
+        if container.subtype_flags & 1 == 0 || container.subtype_flags & (8 | 0x80) != 0 {
+            return Ok(false);
+        }
+        let session = &mut self.cache.inventory;
+        let changed = session
+            .unlocked
+            .entry(self.map.clone())
+            .or_default()
+            .insert(id);
+        session.revision += u64::from(changed);
+        Ok(changed)
+    }
+
     pub fn inherit_object_state(&mut self, previous: &mut Self) {
         self.cache.inventory = std::mem::take(&mut previous.cache.inventory);
         if !self.cache.active.is_empty() {
             self.cache.activate(&self.cache.active.clone());
         }
     }
+}
+
+fn item_visible(item: &Item) -> bool {
+    item.flags & ITEM_NO_DISPLAY == 0
+        && item
+            .effective
+            .flags
+            .value()
+            .is_none_or(|flags| flags & UNAVAILABLE == 0)
+}
+
+fn check_removal(item: &Item) -> Result<(), String> {
+    (item.flags & ITEM_NO_DROP == 0)
+        .then_some(())
+        .ok_or_else(|| "Original item cannot be removed from its owner".into())
+}
+
+fn check_item(item: &Item) -> Result<u32, String> {
+    let flags = item
+        .effective
+        .flags
+        .value()
+        .ok_or("Unresolved item visibility flags")?;
+    if !item_visible(item)
+        || item.scripted
+        || item
+            .authored_slot
+            .is_some_and(|slot| matches!(slot, 1000..=1008 | 2000..=2009))
+    {
+        return Err(
+            "Item is unavailable or requires an unsupported scripted or equipment transaction"
+                .into(),
+        );
+    }
+    Ok(flags)
 }
 
 enum Move {
@@ -769,6 +998,35 @@ mod tests {
         let carried = world.inspect_item_owner(&mut data, id).unwrap();
         assert_eq!(carried["current"]["kind"], "player");
 
+        // A faded wall lies between the camera and this authored room tile.
+        let (mut room, _) = make_world("5011", (84, 104));
+        room.inherit_object_state(&mut world);
+        room.drop_item(&mut data, id).unwrap();
+        let (&key, _) = room.cache.dropped_targets.first_key_value().unwrap();
+        let raster = room
+            .cache
+            .ordered
+            .iter()
+            .find(|raster| raster.key == key)
+            .unwrap();
+        let sprite = raster.frame_draw(&raster.frame);
+        let (x, y) = crate::compositor::sprite_origin(sprite.frame, sprite.anchor);
+        let width = sprite.frame.width as usize;
+        assert!(
+            sprite
+                .frame
+                .pixels
+                .iter()
+                .enumerate()
+                .any(|(offset, pixel)| {
+                    let point = (x + (offset % width) as i64, y + (offset / width) as i64);
+                    pixel[3] > 0
+                        && room.cache.pick(point, room.reference, Duration::ZERO) == Some(key)
+                })
+        );
+        room.pickup_item(&mut data, id, Some(0)).unwrap();
+        world.inherit_object_state(&mut room);
+
         let (mut away, _) = make_world("5078", (2087, 2018));
         away.inherit_object_state(&mut world);
         assert_eq!(away.inspect_item_owner(&mut data, id).unwrap(), carried);
@@ -786,6 +1044,11 @@ mod tests {
                 .count()
         };
         assert_eq!(rendered_count(&world), 1);
+        let dropped = *world.cache.dropped_targets.keys().next().unwrap();
+        assert!(matches!(
+            world.cache.target(dropped).map(|target| &target.action),
+            Some(interaction::Action::Pickup(picked)) if *picked == parse_id(id).unwrap()
+        ));
         world.cache.activate(&[]);
         let ground_sector = tile_sector_id(tile);
         while world.cache.entries.contains_key(&ground_sector) {

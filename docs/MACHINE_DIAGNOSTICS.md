@@ -82,6 +82,10 @@ quit` closes the session cleanly.
   ID, source, destination, footprint and resulting slot. Inventory inspection
   failures return `inventory_unavailable`. Rejected moves return
   `inventory_rejected` with the reason in `error.message`.
+- `unlock` clears an ordinary selected door or container lock for the running
+  session. Select the object by clicking it with the developer console open.
+  Container inspection exposes the override as `developer_unlock`.
+  Scripted, jammed, and magical restrictions still apply.
 - `pos` combines player, camera, travel, renderer, streaming and UI state.
   `camera.view_ready` reports whether the current location has presented
   its view. `coc` and `teleport` validate and prepare the destination in

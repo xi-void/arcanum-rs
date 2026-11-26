@@ -263,6 +263,7 @@ pub struct InteractiveWorld {
     transition: Option<(Destination, u8)>,
     pending_use: Option<WorldOrder>,
     container_request: Option<crate::sector::objects::OriginalId>,
+    pickup_request: Option<crate::sector::objects::OriginalId>,
     route_goal: Option<((u32, u32), bool)>,
     wait_for_door: Option<Duration>,
     notice: Option<String>,
@@ -314,6 +315,7 @@ impl InteractiveWorld {
             transition: None,
             pending_use: None,
             container_request: None,
+            pickup_request: None,
             route_goal: None,
             wait_for_door: None,
             notice: None,
@@ -683,6 +685,10 @@ impl InteractiveWorld {
         self.container_request.take().map(|id| id.key())
     }
 
+    pub fn take_pickup_request(&mut self) -> Option<String> {
+        self.pickup_request.take().map(|id| id.key())
+    }
+
     pub fn take_notice(&mut self) -> Option<String> {
         self.notice.take()
     }
@@ -700,7 +706,15 @@ impl InteractiveWorld {
     }
 
     pub fn debug_navigation(&self) -> serde_json::Value {
+        let hovered_item = self
+            .cache
+            .hover
+            .and_then(|key| match self.cache.target(key)?.action {
+                interaction::Action::Pickup(id) => Some(id.key()),
+                _ => None,
+            });
         serde_json::json!({
+            "hovered_item":hovered_item,
             "moving":self.player_moving(),
             "destination":self.route_goal.map(|goal|goal.0).or_else(||self.cache.player.as_ref()?.route_destination()),
             "pending_interaction":self.pending_use.map(|key|key.1.6.unwrap_or(key.1.5)),
@@ -788,11 +802,16 @@ impl InteractiveWorld {
             && !moving
             && let Some(key) = self.pending_use.take()
         {
-            if let Some(interaction::Action::Container(id)) =
-                self.cache.target(key).map(|target| &target.action)
-            {
-                self.container_request = Some(*id);
-                return true;
+            match self.cache.target(key).map(|target| &target.action) {
+                Some(interaction::Action::Container(id)) => {
+                    self.container_request = Some(*id);
+                    return true;
+                }
+                Some(interaction::Action::Pickup(id)) => {
+                    self.pickup_request = Some(*id);
+                    return true;
+                }
+                _ => {}
             }
             let facing = facing_now;
             match self.cache.use_target(key, now) {
