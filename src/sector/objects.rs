@@ -7,7 +7,7 @@ use std::{fmt, ops::Range};
 mod instances;
 pub(crate) use instances::{
     FieldValue, Instance, ItemStats, OriginalId, PrototypeDefaults, decode_instance,
-    has_inventory_scripts, prototype_defaults,
+    has_inventory_scripts, prototype_defaults, purchase_attachment,
 };
 
 const WALL: u32 = 0;

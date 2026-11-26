@@ -135,6 +135,10 @@ pub(super) enum Binding {
     DialogueText,
     DialogueResponse,
     InventoryGold,
+    MerchantName,
+    MerchantGold,
+    MerchantPortrait,
+    MerchantOffer,
     InventoryArrows,
     InventoryBullets,
     InventoryCharges,
@@ -165,6 +169,9 @@ impl Binding {
                 | Self::JournalLeftFooter
                 | Self::JournalRightFooter
                 | Self::InventoryHover
+                | Self::MerchantName
+                | Self::MerchantOffer
+                | Self::MerchantGold
                 | Self::InventoryGold
                 | Self::InventoryArrows
                 | Self::InventoryBullets

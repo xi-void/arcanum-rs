@@ -295,6 +295,8 @@ impl SectorCache {
                     }
                 }
             }
+            inventory.character.spell_flags = defaults.appearance.spell_flags.unwrap_or_default();
+            inventory.character.haggle = defaults.haggle;
             inventory.character.background = defaults.background.unwrap_or_default();
             inventory.character.original_palette =
                 defaults.original_art.map_or(0, |art| (art >> 4) & 3);

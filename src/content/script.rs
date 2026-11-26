@@ -16,6 +16,7 @@ const GLOBAL_VARIABLES: i32 = 2000;
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Event {
     Unlock,
+    BuyObject,
     Dialogue,
 }
 
@@ -56,6 +57,70 @@ pub struct State {
     random: Option<Random>,
     #[serde(skip)]
     pub(super) game_minute: u64,
+    #[serde(skip)]
+    pub(super) interaction: Option<Interaction>,
+}
+
+/// The staged read view for a single SCR/DLG invocation. Operations commit with its state writes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct Interaction {
+    pub reaction: Option<i32>,
+    pub aptitude: i32,
+    pub spell_flags: u32,
+    pub gold: [i64; 2],
+    pub items: Vec<(u8, u32, String)>,
+    pub substitute: Option<String>,
+    pub operations: Vec<Transfer>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Transfer {
+    Gold { actor: u8, delta: i64 },
+    Item { id: String, from: u8, to: u8 },
+}
+
+impl Interaction {
+    pub fn adjust(&mut self, actor: u8, delta: i64) -> Result<(), String> {
+        let balance = self.gold[usize::from(actor)] + delta;
+        if !(0..=i64::from(i32::MAX)).contains(&balance) {
+            return Err("Insufficient gold or currency limit exceeded".into());
+        }
+        self.gold[usize::from(actor)] = balance;
+        self.operations.push(Transfer::Gold { actor, delta });
+        Ok(())
+    }
+    pub fn give(&mut self, name: u32, from: u8, to: u8, include_stock: bool) -> Result<(), String> {
+        let index = self
+            .items
+            .iter()
+            .position(|(side, n, _)| *side == from && *n == name)
+            .or_else(|| {
+                include_stock
+                    .then(|| {
+                        self.items
+                            .iter()
+                            .position(|(side, n, _)| *side == 2 && *n == name)
+                    })
+                    .flatten()
+            })
+            .ok_or_else(|| format!("Source does not own item named {name}"))?;
+        let entry = &mut self.items[index];
+        self.operations.push(Transfer::Item {
+            id: entry.2.clone(),
+            from: entry.0,
+            to,
+        });
+        entry.0 = to;
+        Ok(())
+    }
+}
+
+fn actor(focus: u8) -> Option<u8> {
+    match focus {
+        0 | 21 => Some(0),
+        1 => Some(1),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -246,6 +311,7 @@ impl Invocation<'_> {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Actor {
     Player,
+    Item(u32),
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -535,17 +601,56 @@ impl Code {
                 .ok_or_else(|| fault("script branch outside resource".into()))?;
             let value =
                 |op: &Operation, index| read(op.operand(index), &view, attachment, &temporaries);
+            // Buy-object predicates receive the offered item as triggerer.
+            let actor = |focus| {
+                if focus == 0 && matches!(input.triggerer, Actor::Item(_)) {
+                    None
+                } else {
+                    actor(focus)
+                }
+            };
             let cond = &row.condition;
             let test = match cond.opcode {
                 0 => Some(true), // SCT_TRUE
                 1 => Some((6..18).contains(&input.hour)),
+                2 => actor(cond.focus(0))
+                    .zip(value(cond, 1))
+                    .and_then(|(side, n)| {
+                        Some(
+                            view.state().interaction.as_ref()?.gold[usize::from(side)]
+                                >= i64::from(n),
+                        )
+                    }),
+                11..=15 if actor(cond.focus(0)) == Some(0) => view
+                    .state()
+                    .interaction
+                    .as_ref()
+                    .map(|s| match cond.opcode {
+                        // The current player has no summoned followers.
+                        11 => false,
+                        12 => s.spell_flags & 0x20000 != 0,
+                        13 => s.spell_flags & 0x80000 != 0,
+                        14 => s.spell_flags & 0x3c != 0,
+                        _ => s.spell_flags & 1 != 0,
+                    }),
+                17 => {
+                    actor(cond.focus(0))
+                        .zip(value(cond, 1))
+                        .and_then(|(side, n)| {
+                            Some(
+                                view.state().interaction.as_ref()?.items.iter().any(
+                                    |(s, name, _)| *s == side && i64::from(*name) == i64::from(n),
+                                ),
+                            )
+                        })
+                }
                 3 => value(cond, 0)
                     .and_then(|index| view.state().read(attachment, Slot::LocalFlag(index)))
                     .map(|v| v != 0),
                 4 | 5 => value(cond, 0)
                     .zip(value(cond, 1))
                     .map(|(a, b)| if cond.opcode == 4 { a == b } else { a <= b }),
-                6 if matches!(cond.focus(0), 0 | 1 | 21) => {
+                6 if actor(cond.focus(0)).is_some() => {
                     // Every currently supported event is triggered by the local PC.
                     let global = cond.focus(0) == 1;
                     value(cond, 1)
@@ -566,6 +671,10 @@ impl Code {
                             .map(|status| status as i32 == expected)
                     }),
                 10 if cond.focus(0) == 1 && matches!(cond.focus(1), 0 | 21) => input.met,
+                20 if cond.focus(0) == 0 => match input.triggerer {
+                    Actor::Item(name) => value(cond, 1).map(|n| i64::from(n) == i64::from(name)),
+                    Actor::Player => None,
+                },
                 18 if [cond.focus(0), cond.focus(1)] == [1, 0] => input.follows_player,
                 34 => input
                     .location(cond.focus(0))
@@ -670,6 +779,51 @@ impl Code {
                     } else {
                         state.quests.set_global(id, status);
                     }
+                    None
+                }
+                29 | 33 => {
+                    let facts = view.state().interaction.as_ref().ok_or_else(unresolved)?;
+                    let result = match action.opcode {
+                        29 if actor(action.focus(0)) == Some(1)
+                            && actor(action.focus(1)) == Some(0) =>
+                        {
+                            facts.reaction
+                        }
+                        33 if actor(action.focus(1)) == Some(0) && value(action, 0) == Some(16) => {
+                            Some(facts.aptitude)
+                        }
+                        _ => None,
+                    }
+                    .ok_or_else(unresolved)?;
+                    view.assign(
+                        attachment,
+                        action.operand(2).ok_or_else(unresolved)?,
+                        result,
+                        &mut temporaries,
+                    )
+                    .ok_or_else(unresolved)?;
+                    None
+                }
+                35 | 41 => {
+                    let a =
+                        value(action, usize::from(action.opcode == 35)).ok_or_else(unresolved)?;
+                    let side = actor(action.focus(usize::from(action.opcode == 41)))
+                        .ok_or_else(unresolved)?;
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    let facts = state.interaction.as_mut().ok_or_else(unresolved)?;
+                    if action.opcode == 35 {
+                        facts.adjust(side, i64::from(a))
+                    } else {
+                        facts.give(
+                            u32::try_from(a).map_err(|_| unresolved())?,
+                            side,
+                            actor(action.focus(2)).ok_or_else(unresolved)?,
+                            false,
+                        )
+                    }
+                    .map_err(fault)?;
                     None
                 }
                 37 => {
@@ -819,6 +973,60 @@ mod tests {
         assert_eq!(state.quests.status(1009, false), Some(Status::Botched));
         assert_eq!(state.quests.status(1009, true), Some(Status::Botched));
         assert_eq!(state.read(&attachment, Slot::GlobalFlag(1009)), Some(0));
+    }
+
+    #[test]
+    fn script_item_and_gold_actions_update_the_staged_owners() {
+        // Transfer the named item from the attachee to the triggerer, debit the
+        // triggerer's purse, then evaluate has-item-named on its new owner.
+        let bytes = original_rows(
+            3,
+            &[
+                (108, 41),
+                (112, 0x00000103),
+                (120, 4402),
+                (240, 35),
+                (244, 0x0300),
+                (256, (-100i32) as u32),
+                (328, 17),
+                (332, 0x0300),
+                (344, 4402),
+                (372, 2),
+                (416, 1),
+            ],
+        );
+        let owner = attachment("npc", Event::Dialogue);
+        let context = invocation(&owner);
+        let mut state = State {
+            interaction: Some(Interaction {
+                gold: [100, 0],
+                items: vec![(1, 4402, "key".into())],
+                ..Interaction::default()
+            }),
+            ..State::default()
+        };
+        let code = Code::decode(&bytes).unwrap();
+        let result = code
+            .run(&context, View::Writable(&mut state), &source())
+            .unwrap();
+        assert_eq!(result.outcome, Outcome::Return { run_default: true });
+        let facts = state.interaction.unwrap();
+        assert_eq!(facts.gold, [0, 0]);
+        assert_eq!(facts.items[0].0, 0);
+        assert_eq!(
+            facts.operations,
+            vec![
+                Transfer::Item {
+                    id: "key".into(),
+                    from: 1,
+                    to: 0
+                },
+                Transfer::Gold {
+                    actor: 0,
+                    delta: -100
+                }
+            ]
+        );
     }
 
     fn source() -> Source {

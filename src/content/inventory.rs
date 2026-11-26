@@ -26,11 +26,18 @@ pub(super) enum Owner {
 }
 
 impl Owner {
+    pub fn key(&self) -> String {
+        match self {
+            Self::Player => "player".into(),
+            Self::Container(_, id) | Self::OriginalObject(_, id) => id.key(),
+        }
+    }
+
     pub fn rows(&self) -> usize {
         match self {
             Self::Player => PLAYER_ROWS,
             Self::Container(..) => CONTAINER_ROWS,
-            Self::OriginalObject(..) => 0,
+            Self::OriginalObject(..) => PLAYER_ROWS,
         }
     }
 }
@@ -41,6 +48,8 @@ pub(super) enum Place {
     Owned(Owner),
     Equipped(EquipmentSlot),
     Merged(OriginalId),
+    Spent,
+    Retired,
 }
 
 impl Place {
@@ -54,6 +63,8 @@ impl Place {
                 json!({"kind":"original_object","map":map,"id":id.key()})
             }
             Self::Equipped(slot) => json!({"kind":"equipped","slot":slot}),
+            Self::Retired => json!({"kind":"restocked"}),
+            Self::Spent => json!({"kind":"spent"}),
             Self::Merged(id) => json!({"kind":"merged","into":id.key()}),
             Self::Ground(map, tile) => json!({"kind":"world","map":map,"tile":tile}),
         }
@@ -280,6 +291,7 @@ impl Grid {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct Change {
     pub item: Item,
     pub place: Place,
@@ -287,7 +299,7 @@ pub(super) struct Change {
     pub order: usize,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct State {
     pub changes: BTreeMap<OriginalId, Change>,
     pub next_generated: u64,

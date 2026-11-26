@@ -11,6 +11,7 @@ use winit::keyboard::{Key, NamedKey};
 pub(super) enum InventoryView {
     Inventory,
     Container,
+    Trade,
 }
 
 #[derive(Default)]
@@ -194,7 +195,9 @@ impl Hud {
         })?;
         self.close_inventory();
         self.inventory = InventoryPanel {
-            view: Some(if target.is_some() {
+            view: Some(if world.trading() {
+                InventoryView::Trade
+            } else if target.is_some() {
                 InventoryView::Container
             } else {
                 InventoryView::Inventory
@@ -230,13 +233,21 @@ impl Hud {
                 self.inventory.error = error;
             }
             Err(error) => {
-                self.close_inventory();
+                if world.trading() {
+                    self.inventory.revision = revision;
+                } else {
+                    self.close_inventory();
+                }
                 self.inventory.error = Some(error);
             }
         }
     }
 
     fn update_inventory_labels(&mut self, world: &InteractiveWorld) {
+        if let Some(trade) = world.trade_diagnostic() {
+            self.set_label(Binding::MerchantName, trade["name"].as_str().unwrap_or(""));
+            self.set_label(Binding::MerchantGold, &trade["gold"].to_string());
+        }
         let counts = world.inventory_counters();
         for (binding, value) in [
             Binding::InventoryGold,
@@ -686,6 +697,15 @@ impl Hud {
                 })
                 .unwrap_or_default()
         };
+        if self.inventory.view == Some(InventoryView::Trade) {
+            let offer = self.inventory.error.clone().unwrap_or_else(|| {
+                item.map_or_else(String::new, |i| {
+                    i.price
+                        .map_or_else(|| "No offer".into(), |n| format!("{n} gold each"))
+                })
+            });
+            self.set_label(Binding::MerchantOffer, &offer);
+        }
         let item_changed = self.inventory.hovered != id;
         self.inventory.hovered = id;
         let changed = self
@@ -758,7 +778,7 @@ impl Hud {
             Some(overlay(asset, rect, rect.intersect(grid.clip)?))
         });
         let thumb = self.grid(1).and_then(|(grid, contents)| {
-            let index = self.bound(Binding::ContainerThumb)?;
+            let index = self.placed_bound(Binding::ContainerThumb)?;
             let placement = self.placed[index].as_ref()?;
             let track = placement.full;
             let max = contents.rows.saturating_sub(grid.rows);
@@ -839,7 +859,7 @@ impl Hud {
                 "items":contents.entries.iter().map(|item| {
                     let footprint = grid.item_area(item.slot, contents.columns, item.cells);
                     json!({"id":item.id,"name":item.name,"slot":item.slot,"cells":item.cells,
-                        "visible_bounds":footprint.intersect(grid.clip).map(rect),"quantity":item.quantity,
+                        "visible_bounds":footprint.intersect(grid.clip).map(rect),"quantity":item.quantity,"unit_price":item.price,
                         "art":item.icon.as_ref().ok().map(|a|&a.source.virtual_path),
                         "art_error":item.icon.as_ref().err()})
                 }).collect::<Vec<_>>()})

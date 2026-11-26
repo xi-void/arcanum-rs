@@ -249,8 +249,8 @@ after the click.
 | Doc Roberts | `rpc coc 5000 90213 84148` | `2:0341df77fe12d4118f1d00e02920220c`. Click him to approach and reach line 1. Close with Escape and click again for line 205 in the same session. |
 | Constable Owens | `rpc coc 5000 90227 84175` | `2:eb7aed152e8d974391af827b51dcd1ea`. Clicking reaches line 1. |
 | Jongle Dunne | `rpc coc 5000 90271 84171` | `2:ddaf30288e52d4118f1d00a0cc6511c6`. Clicking reaches line 1. |
-| Wise Woman | `rpc coc 5000 90155 84179` | `2:837d39d717782a41bba337a11146b014`. Hover reports her GUID in `rpc pos`. Clicking records a SCR action 29 rejection. |
-| Herbalist, Black Root | `rpc coc 5000 70179 92088` | `2:5ce5e69a89ff8f4cb6e02aadf2f4cbf4`. Hover reports this separate Herbalist's GUID. Clicking records the same SCR action 29 rejection. |
+| Wise Woman | `rpc coc 5000 90155 84179` | `2:837d39d717782a41bba337a11146b014`. Click, then choose the barter response to open her stock. |
+| Herbalist, Black Root | `rpc coc 5000 70179 92088` | `2:5ce5e69a89ff8f4cb6e02aadf2f4cbf4`. Click, then choose the barter response. This merchant uses a different dialogue and stock source. |
 | Lukan's bridge gate | `rpc coc 5000 90100 84189` | `88248157567:54`. Click its leaf to get `door is locked` in the window title. Click the ground toward `(90096,84189)` to check that the player cannot cross the closed gate. |
 
 The gate record is at `(90099,84189)`. Its sector and the original
@@ -272,6 +272,14 @@ The Shrouded Hills placement is the Wise Woman at `(90157,84179)`.
 The original NPCs named Herbalist with attachment 1815 are placed elsewhere
 on the main map.
 
+
+## Vendor trading
+
+Launch the configured playable binary with `target/release/arcanum-rs`. Click a merchant and select the authored barter response. Right-click an item for a whole-stack exchange, or drag it between inventories and enter the quantity. Escape cancels a pending drag or quantity entry. Escape or I closes barter and resumes the conversation at the authored destination.
+
+Use `rpc pos` to inspect `dialogue.trade` for the NPC, stock owner, purse, buy-list mount, reaction, retail multiplier and scheduled restock. The HUD inventory reports each side's visible bounds, unit price, quantity and last rejection. Use `rpc inventory GUID` for the backing chest or NPC and `rpc itemowner GUID` for item identity. The native inventory inputs and developer transfers with the active NPC use the same transaction.
+
+Black Root's General Store Clerk is at `(70152,92097)` and Shrouded Hills' Gnome Shopkeeper is at `(90256,84150)` on map 5000. Both use the original rural-store inventory source. The installed buy list resolves to `Arcanum5.dat`, and replenishment uses loose `data/rules/InvenSource.mes`. Check both purse balances and the original stack when testing partial trades. A merchant with one coin can offer it for one bullet. Selling a stack at that price requires enough gold for every unit. Lukan's paid bridge response at `(90105,84188)` debits 1,000 gold and transfers his existing key named 4402.
 
 ## Quest logbook
 

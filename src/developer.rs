@@ -307,7 +307,7 @@ const COMMANDS: &[Command] = &[
     query!(
         "inventory",
         "inventory [OWNER]",
-        "Inspect player or original container contents and grid slots.",
+        "Inspect player, NPC or container items, slots and currency.",
         |a| match a {
             [] => Some(Request::Inventory("player".into())),
             [owner] => Some(Request::Inventory(owner.clone())),
@@ -345,7 +345,7 @@ const COMMANDS: &[Command] = &[
     command!(
         "transfer",
         "transfer ITEM_ID FROM TO [SLOT]",
-        "Move a whole item between owners or reposition it in its current grid.",
+        "Move a whole item or reposition it. Transfers to or from the active merchant use its quoted price.",
         |a| match a {
             [id, from, to] => Some(Request::Transfer(
                 id.clone(),

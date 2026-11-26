@@ -346,6 +346,14 @@ size = [358, 400]
 image = "vfs:art/interface/loot.art"
 
 [[hud]]
+id = "barter-loot-background"
+parent = "inventory-panel"
+inventory_views = ["trade"]
+offset = [0, 0]
+size = [358, 400]
+image = "vfs:art/interface/barter.art"
+
+[[hud]]
 id = "backpack-background"
 parent = "inventory-panel"
 offset = [358, 0]
@@ -371,10 +379,18 @@ image = "vfs:art/interface/lns_papr.art"
 [[hud]]
 id = "loot-world-inset"
 parent = "inventory-panel"
-inventory_views = ["container"]
+inventory_views = ["container","trade"]
 offset = [16, 17]
 size = [89, 89]
 binding = "inventory-lens"
+
+[[hud]]
+id = "barter-loot-inset-border"
+parent = "inventory-panel"
+inventory_views = ["trade"]
+offset = [16, 17]
+size = [89, 89]
+image = "vfs:art/interface/lns_bart.art"
 
 [[hud]]
 id = "loot-inset-border"
@@ -515,7 +531,7 @@ hover_message = "Take All"
 [[hud]]
 id = "equipment-tab"
 parent = "inventory-panel"
-inventory_views = ["container"]
+inventory_views = ["container","trade"]
 offset = [713, 37]
 size = [28, 27]
 image = "vfs:art/interface/pd_lil_butt.art"
@@ -524,7 +540,7 @@ disabled = true
 [[hud]]
 id = "backpack-tab"
 parent = "inventory-panel"
-inventory_views = ["container"]
+inventory_views = ["container","trade"]
 offset = [751, 37]
 size = [28, 27]
 image = "vfs:art/interface/inven_lil_butt.art"
@@ -944,3 +960,90 @@ image = "vfs:art/interface/pageturn_r.art"
 hover_frame = 2
 pressed_frame = 1
 action = "journal-next"
+[[hud]]
+id = "barter-container-grid"
+parent = "inventory-panel"
+inventory_views = ["trade"]
+offset = [8, 168]
+size = [320, 224]
+binding = "container-grid"
+cell = 32
+hover_fill = [64, 0, 0, 144]
+
+[[hud]]
+id = "barter-loot-scroll-up"
+parent = "inventory-panel"
+inventory_views = ["trade"]
+offset = [333, 168]
+size = [11, 15]
+image = "vfs:art/interface/scrllup.art"
+hover_frame = 2
+pressed_frame = 1
+action = "inventory-scroll-up"
+
+[[hud]]
+id = "barter-loot-scroll-down"
+parent = "inventory-panel"
+inventory_views = ["trade"]
+offset = [333, 378]
+size = [11, 14]
+image = "vfs:art/interface/scrlldwn.art"
+hover_frame = 2
+pressed_frame = 1
+action = "inventory-scroll-down"
+
+[[hud]]
+id = "barter-loot-scroll-thumb"
+parent = "inventory-panel"
+inventory_views = ["trade"]
+offset = [333, 183]
+size = [11, 195]
+image = "vfs:art/interface/scrllslidet.art"
+binding = "container-thumb"
+thumb_height = 5
+thumb_middle = "vfs:art/interface/scrllslidem1.art"
+thumb_bottom = "vfs:art/interface/scrllslideb.art"
+
+
+[[hud]]
+id = "merchant-name"
+parent = "inventory-panel"
+inventory_views = ["trade"]
+offset = [120, 102]
+size = [198, 20]
+binding = "merchant-name"
+font = "counters"
+
+[[hud]]
+id = "merchant-gold"
+parent = "inventory-panel"
+inventory_views = ["trade"]
+offset = [44, 130]
+size = [56, 20]
+binding = "merchant-gold"
+font = "counters"
+
+[[hud]]
+id = "merchant-portrait"
+parent = "inventory-panel"
+inventory_views = ["trade"]
+offset = [183, 33]
+size = [64, 64]
+binding = "merchant-portrait"
+
+[[hud]]
+id = "merchant-offer"
+parent = "inventory-panel"
+inventory_views = ["trade"]
+offset = [89, 128]
+size = [253, 30]
+binding = "merchant-offer"
+font = "counters"
+
+[[hud]]
+id = "gambling-disabled"
+parent = "inventory-panel"
+inventory_views = ["trade"]
+offset = [703, 236]
+size = [83, 47]
+image = "vfs:art/interface/gamble_box_off.art"

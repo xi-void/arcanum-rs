@@ -1,23 +1,32 @@
 # Arcanum-RS — Codex Instructions
 
-This document defines permanent architectural requirements and future compatibility targets. Implement only the functionality requested by the current milestone. The absence of a planned subsystem does not authorize expanding the task to implement it.
+Implement the agreed playable milestone and its bounded prerequisites under the rules below. Unrelated capabilities and subsequent milestones need separate authorization.
 
 ## Development workflow
 
 - Focus on implementation, debugging, testing and benchmarks.
-- Do not inspect Git state at the beginning of a task.
-- Do not run Git commands unless explicitly requested or strictly necessary for a specific development issue.
-- Never commit, push, merge, rebase, reset, create branches or open pull requests unless explicitly instructed.
-- Assume the current working branch is already prepared.
-- Leave implementation changes uncommitted for review.
-- Minimize unnecessary repository administration, planning and status narration.
-- Avoid expanding the requested milestone beyond its defined scope.
-- Stop investigating once sufficient evidence exists to implement a verified correction.
-- Prioritize functional improvements over lengthy reports and repetitive demonstrations.
-- Avoid unnecessary token consumption.
-- Maintain `docs/KNOWN_ISSUES.md` as the persistent defect backlog. Record nonblocking defects rather than expanding the current milestone to resolve them. Update issue status when relevant corrections are implemented and verified.
+- Do not inspect Git at task startup. Run Git only when explicitly requested or strictly necessary for a specific development issue.
+- Commits, pushes, merges, rebases, resets, branch creation and pull requests require explicit user instruction. Leave changes uncommitted for review.
+- Trust confirmed branch preparation without repeated confirmation or routine Git probes.
+- Minimize repository administration, planning, status narration and token use. Prioritize functional work over long reports and repeated demonstrations.
+- Stop investigating once evidence is sufficient to implement a verified correction.
+- Maintain `docs/KNOWN_ISSUES.md`: correct milestone blockers and introduced regressions, backlog unrelated nonblocking defects, and update issue status after verified corrections.
 
-Do not report user-facing behavior as verified unless the complete production input, state transition and rendering path has been exercised. Testing an action handler directly through RPC or unit tests does not establish that the corresponding mouse or keyboard interaction works. Clearly distinguish automated verification, native interaction testing and unverified behavior.
+Claim user-facing verification only after exercising production input, state changes and rendering. RPC or unit tests do not prove the mouse/keyboard path. Distinguish automated checks, native interaction tests and unverified behavior.
+
+## Autonomous milestone delivery
+
+- Own the agreed outcome through investigation, implementation, runtime integration, focused review, testing and correction. State a brief approach and material assumptions, then proceed without approval for routine decisions or bounded prerequisites.
+- Necessary generic resource, SCR/DLG, event, authoritative state, transaction, UI/input and persistence work is authorized. Adding a helper or module is not itself a scope change. Use original data and verified references, reuse shared systems, and choose the simplest compatible design.
+- A substantial additional gameplay capability or architectural change beyond the milestone requires a scope decision. Complete useful in-scope work, then report the exact blocker and smallest decision needed. Distinguish implemented, verified and blocked behavior.
+- Do not remove acceptance criteria, substitute easier actors or resource variants, or report an unmet outcome as complete. Keep diagnostics, documentation and checks proportional; finish once acceptance is met and sufficiently verified.
+
+## Milestone branches and manual integration
+
+- Each milestone requires its own fresh branch from updated `master` after the previous milestone is merged. Never reuse a completed milestone's branch or combine separate milestones.
+- The user prepares branches and performs Git integration unless a specific action is explicitly delegated. Branch requirements do not authorize Git operations.
+- Begin implementation after the user confirms branch readiness; an explicit statement in the milestone prompt suffices. Confirmation persists through corrections and resumed sessions. Keep follow-up corrections on that branch until integration.
+- At completion, report the outcome, verification and limitations, propose the next milestone/branch, and stop implementation. Planning is allowed; another milestone requires the user's instruction and fresh-branch confirmation.
 
 ## Project philosophy
 
@@ -228,13 +237,14 @@ Classic original-interface fidelity is the default presentation target for Arcan
 ## Testing and reference material
 
 - Prefer reproducible automated tests and focused native gameplay verification.
+- Verify acceptance with normal installed data/VFS precedence and identify winning resources and variants. Fixtures or explicit overrides do not prove the normal path.
+- Exercise real gameplay input and state transitions. RPC/developer controls may prepare or inspect tests, not replace the claimed action. Disclose setup bypasses and coverage limits.
+- For durable state changes, verify relevant save/load, full restart and map transitions. Check rejection/cancellation atomicity and older-save handling when the save format changes.
+- Review changed state ownership, transactions, persistence and integration once before completion; correct concrete issues without an exhaustive audit.
 - Use existing Arcanum-CE reference screenshots in `~/Pictures/Screenshots/`, particularly filenames containing `arcanum-ce`. The UI references captured on 2026-11-25 are useful for original inventory, equipment, character, journal, document and HUD presentation.
 - Consult reference source code and existing screenshots before launching the reference executable.
-- Avoid repeatedly launching and closing Arcanum-CE when sufficient evidence has already been collected.
-- Do not spend excessive time pursuing pixel-perfect cosmetic comparisons.
-- Do not repeatedly reuse the same demonstration scene as the sole evidence of generic engine correctness.
-- Use varied original locations to verify shared systems.
-- Treat location-specific tests as regression fixtures for generic engine functionality.
+- Reuse collected CE evidence; avoid repeated reference launches and exhaustive cosmetic comparisons.
+- Verify shared systems across varied original locations; use them as regression fixtures, not sole proof of generic correctness.
 - When implementing or changing startup or configuration, test direct executable startup with persistent configuration where available, actual documented launch commands and supported argument combinations. When implementing or changing UI behavior, verify scaling and input alignment through representative gameplay interactions.
 - Verify user-facing features through the playable executable rather than relying exclusively on internal tests.
 - Prefer targeted regression tests during implementation and appropriate broader validation before milestone completion.
@@ -243,9 +253,7 @@ Classic original-interface fidelity is the default presentation target for Arcan
 - Do not require physical GPU hardware for tests unrelated to rendering.
 - Preserve meaningful performance and resource-consumption measurements.
 - Avoid repeatedly running expensive full validation suites during small intermediate corrections unless necessary.
-- Clearly distinguish verified original behavior from incomplete or approximate implementations.
-- Never claim functionality has been verified if the corresponding test was not performed.
-- Do not treat successful compilation or passing automated tests as proof that a feature works correctly during gameplay.
+- Distinguish verified behavior, approximations and unsupported functionality. Claim only tests actually performed; compilation or automated checks alone do not establish native gameplay verification.
 - Record unresolved issues honestly instead of introducing speculative fixes to satisfy acceptance criteria.
 
 ## Machine-readable diagnostics and automation
@@ -267,6 +275,7 @@ Classic original-interface fidelity is the default presentation target for Arcan
 ## Completion reports
 
 - Summarize implemented changes and verified behavior.
+- State whether acceptance is met. If blocked, identify the dependency and smallest scope/access/product decision needed; never label partial work complete.
 - Include relevant test results, measurements and remaining limitations.
 - Explain the root cause of corrected defects and identify the reusable engine mechanism involved.
 - Include original source-data or reference-code evidence for significant compatibility corrections.
@@ -275,6 +284,5 @@ Classic original-interface fidelity is the default presentation target for Arcan
 - Verify that documented launch commands work before reporting completion.
 - Explicitly identify unsupported behavior and unresolved defects.
 - Distinguish implemented functionality from proposed future work.
-- Keep completion reports concise and factual.
-- Do not repeat information already established by previous milestone reports.
-- Do not perform Git integration.
+- Keep reports concise, factual and free of repeated milestone history.
+- Leave Git integration to the user unless they explicitly delegate a specific action.

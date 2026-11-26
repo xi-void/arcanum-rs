@@ -61,11 +61,11 @@ impl InteractiveWorld {
     }
 
     pub fn conversation(&self) -> Option<&Conversation> {
-        self.dialogue.as_ref()
+        self.dialogue.as_ref().filter(|_| self.trade.is_none())
     }
 
     pub fn dialogue_diagnostic(&self) -> serde_json::Value {
-        json!({"active":self.dialogue.as_ref().map(Conversation::diagnostic),
+        json!({"active":self.conversation().map(Conversation::diagnostic),"trade":self.trade_diagnostic(),
             "last_result":self.dialogue_status})
     }
 
@@ -97,6 +97,7 @@ impl InteractiveWorld {
     }
 
     pub fn close_dialogue(&mut self, reason: &str) {
+        self.trade = None;
         if let Some(session) = self.dialogue.take() {
             if matches!(reason, "completed" | "cancelled") {
                 self.met_npcs
@@ -271,6 +272,7 @@ impl super::inventory::InventoryReader {
         let met = world
             .met_npcs
             .contains(&(world.map.clone(), target.clone()));
+        let reaction = reaction.map(|r| r.saturating_add(world.reaction_delta(&target)));
         let context = Context {
             target,
             speaker: self.npc_name(resident, true),
@@ -312,6 +314,8 @@ impl super::inventory::InventoryReader {
         };
         let script = Script::load(&mut self.vfs, script)?;
         let mut staged = world.cache.scripts.clone();
+        staged.interaction =
+            Some(world.script_inventory(&mut self.vfs, &context.target, reaction)?);
         let invocation = context.entry.invocation(0);
         let execution = script.execute(&invocation, &mut staged).map_err(|fault| {
             let error = format!(
@@ -326,6 +330,7 @@ impl super::inventory::InventoryReader {
             error
         })?;
         let Outcome::Dialogue { line } = execution.outcome else {
+            world.commit_script_inventory(&mut self.vfs, &context.target, &mut staged)?;
             world.cache.scripts = staged;
             world.dialogue_status = Some(json!({
                 "status":"script_returned","target":context.target,"attachment":invocation.attachment,
@@ -356,6 +361,7 @@ impl super::inventory::InventoryReader {
                 .load(&mut self.vfs, &mut self.frames, 0)
                 .map_err(|e| format!("Cannot face NPC: {e}"))?
         };
+        world.commit_script_inventory(&mut self.vfs, &context.target, &mut staged)?;
         world
             .cache
             .player
@@ -370,29 +376,86 @@ impl super::inventory::InventoryReader {
     }
 
     pub fn choose_dialogue_response(&mut self, world: &mut InteractiveWorld, index: usize) -> bool {
-        let stats = world.character_statistics();
-        let gold = world.inventory_counters()[0];
-        let Some(session) = &mut world.dialogue else {
+        self.advance_dialogue(world, index, None)
+    }
+
+    pub fn finish_trade(&mut self, world: &mut InteractiveWorld) -> bool {
+        let Some(trade) = world.trade.take() else {
             return false;
         };
-        match session.choose(
-            &mut self.vfs,
-            index,
-            &stats,
-            gold,
-            &mut world.cache.scripts,
-            world.cache.hour,
-        ) {
-            Ok(true) => {
+        let reaction = trade
+            .reaction
+            .saturating_add(world.reaction_delta(&trade.npc));
+        if let Some(dialogue) = &mut world.dialogue {
+            dialogue.set_reaction(reaction);
+        }
+        self.advance_dialogue(world, trade.response, Some(trade.destination))
+    }
+
+    fn advance_dialogue(
+        &mut self,
+        world: &mut InteractiveWorld,
+        index: usize,
+        after_barter: Option<i32>,
+    ) -> bool {
+        use crate::content::dialogue::{ResponseRejection, Selection};
+        let Some(mut session) = world.dialogue.take() else {
+            return false;
+        };
+        let stats = world.character_statistics();
+        let mut staged = world.cache.scripts.clone();
+        let npc = session.target.clone();
+        let result = world
+            .script_inventory(&mut self.vfs, &npc, session.reaction())
+            .map_err(ResponseRejection::Effect)
+            .and_then(|facts| {
+                staged.interaction = Some(facts);
+                let selection = if let Some(next) = after_barter {
+                    Selection::AfterBarter(next)
+                } else if session.turn.responses.get(index).is_some_and(|r| r.barter) {
+                    let reaction = session.reaction().ok_or_else(|| {
+                        ResponseRejection::Effect("Merchant reaction unavailable".into())
+                    })?;
+                    let destination = session.select(index, &stats, &mut staged)?;
+                    world
+                        .exchange(|world| {
+                            world.commit_script_inventory(&mut self.vfs, &npc, &mut staged)?;
+                            world.open_trade(
+                                &mut self.vfs,
+                                &npc,
+                                session.speaker.clone(),
+                                reaction,
+                                (index, destination),
+                            )
+                        })
+                        .map_err(ResponseRejection::Effect)?;
+                    return Ok(true);
+                } else {
+                    Selection::Response(index)
+                };
+                let hour = world.cache.hour;
+                session.choose(
+                    &mut self.vfs,
+                    selection,
+                    &stats,
+                    &mut staged,
+                    |vfs, scripts| world.commit_script_inventory(vfs, &npc, scripts),
+                    hour,
+                )
+            });
+        match result {
+            Ok(open) => {
+                world.cache.scripts = staged;
+                world.dialogue = Some(session);
                 world.dialogue_status = None;
-                true
-            }
-            Ok(false) => {
-                world.close_dialogue("completed");
+                if !open {
+                    world.close_dialogue("completed");
+                }
                 true
             }
             Err(error) => {
                 world.dialogue_status = Some(session.record_rejection(index, error));
+                world.dialogue = Some(session);
                 false
             }
         }

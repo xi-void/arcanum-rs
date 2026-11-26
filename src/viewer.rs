@@ -759,7 +759,40 @@ impl Viewer<'_> {
         }
     }
 
+    fn dismiss_inventory(&mut self, cancel_drag: bool) -> bool {
+        let ViewContent::Stream {
+            world,
+            hud: Some(hud),
+            inventory_reader: Some(reader),
+            ..
+        } = &mut self.content
+        else {
+            return false;
+        };
+        if cancel_drag && hud.cancel_inventory_drag() {
+            return true;
+        }
+        if !hud.close_inventory() {
+            return false;
+        }
+        if world.trading() {
+            reader.finish_trade(world);
+            if let Some(audio) = &self.audio {
+                audio.voice(world.conversation().and_then(|s| s.turn.voice.as_deref()));
+            }
+        }
+        true
+    }
+
     fn hud_action(&mut self, action: hud::Action, event_loop: &ActiveEventLoop) {
+        if matches!(&self.content,ViewContent::Stream{world,..} if world.trading())
+            && matches!(
+                action,
+                hud::Action::Pause | hud::Action::OpenMap | hud::Action::ToggleJournal
+            )
+        {
+            return;
+        }
         let previous = self.settings;
         if let Some(audio) = &self.audio {
             audio.effect(3000, false);
@@ -791,13 +824,13 @@ impl Viewer<'_> {
                 }
             }
             hud::Action::ToggleInventory => {
-                if let ViewContent::Stream {
-                    world,
-                    hud: Some(hud),
-                    inventory_reader: Some(reader),
-                    ..
-                } = &mut self.content
-                    && !hud.close_inventory()
+                if !self.dismiss_inventory(false)
+                    && let ViewContent::Stream {
+                        world,
+                        hud: Some(hud),
+                        inventory_reader: Some(reader),
+                        ..
+                    } = &mut self.content
                     && let Err(error) = hud.open_inventory(reader, world, None)
                 {
                     eprintln!("Inventory: {error}");
@@ -1519,12 +1552,26 @@ impl Viewer<'_> {
             } if map.is_open() => map.travel_deadline().map(|time| self.epoch + time),
             _ => None,
         };
+        let stock = match (&self.content, &self.clock) {
+            (
+                ViewContent::Stream {
+                    world,
+                    inventory_reader: Some(_),
+                    ..
+                },
+                Some(clock),
+            ) if self.pause.is_none() && self.map_since.is_none() => world
+                .next_stock_minute()
+                .map(|minute| real_now + clock.until_minute(minute, self.game_elapsed(real_now))),
+            _ => None,
+        };
         let next = self
             .animation_deadline
             .into_iter()
             .chain(self.navigation.deadline())
             .chain(self.player_deadline)
             .chain(clock)
+            .chain(stock)
             .chain(travel)
             .chain(
                 self.view
@@ -1846,7 +1893,33 @@ impl ApplicationHandler for Viewer<'_> {
         self.pump_automation(event_loop);
     }
 
-    fn about_to_wait(&mut self, _: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Map changes and native loads can make an existing deadline immediately due.
+        let play = self.game_elapsed(Instant::now());
+        if self.pause.is_none()
+            && self.map_since.is_none()
+            && let Some(clock) = &self.clock
+            && let Some(view) = &self.view
+            && let ViewContent::Stream {
+                world,
+                camera,
+                inventory_reader: Some(reader),
+                ..
+            } = &mut self.content
+            && let Some(due) = world.next_stock_minute()
+        {
+            if clock.until_minute(due, play).is_zero() {
+                world.set_quest_time(clock.hours(play), clock.minute(play));
+                if reader.update_merchant_stock(
+                    world,
+                    camera.position(),
+                    logical_size(view.window.inner_size(), self.settings.zoom),
+                ) {
+                    view.window.request_redraw();
+                }
+            }
+            self.update_control_flow(event_loop);
+        }
         let ViewContent::Stream { world, hud, .. } = &mut self.content else {
             return;
         };
@@ -1923,6 +1996,11 @@ impl ApplicationHandler for Viewer<'_> {
                 world.set_quest_time(clock.hours(play), clock.minute(play));
             }
         }
+        if matches!(&self.content,ViewContent::Stream{world,..} if world.trading())
+            && matches!(&event,WindowEvent::KeyboardInput{event:key,..} if matches!(&key.logical_key,Key::Named(NamedKey::F7|NamedKey::F8)) || matches!(&key.logical_key,Key::Character(ch) if ch.eq_ignore_ascii_case("m")))
+        {
+            return;
+        }
         if self.dialogue_event(&event) {
             return;
         }
@@ -1960,9 +2038,7 @@ impl ApplicationHandler for Viewer<'_> {
                     && event.logical_key == Key::Named(NamedKey::Escape)
                     && self.pause.is_none() =>
                 {
-                    if let ViewContent::Stream { hud: Some(hud), .. } = &mut self.content
-                        && (hud.cancel_inventory_drag() || hud.close_inventory())
-                    {
+                    if self.dismiss_inventory(true) {
                         self.view.as_ref().unwrap().window.request_redraw();
                     } else {
                         self.pause_game(event_loop);
@@ -2385,6 +2461,12 @@ impl Viewer<'_> {
                 if let Some(index) = self.cursor.and_then(|point| hud.dialogue_choice(point)) {
                     sync_voice = reader.choose_dialogue_response(world, index);
                     if sync_voice {
+                        if let Some(target) = world.trade_target().map(str::to_owned)
+                            && let Err(error) = hud.open_inventory(reader, world, Some(target))
+                        {
+                            world.close_dialogue(&error);
+                            view.window.set_title(&format!("Arcanum-RS | {error}"));
+                        }
                         hud.clear_dialogue_choices();
                     }
                 }
@@ -3009,6 +3091,11 @@ impl WindowSurface {
         } else {
             None
         };
+        if let Some(hud) = hud.as_deref_mut()
+            && let Some(portrait) = world.merchant_portrait()
+        {
+            hud.set_lens_asset(hud::Binding::MerchantPortrait, Arc::clone(portrait));
+        }
         if let Some(hud) = hud.as_deref_mut()
             && let Some(binding) = [hud::Binding::InventoryLens, hud::Binding::JournalLens]
                 .into_iter()
