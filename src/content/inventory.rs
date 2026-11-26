@@ -61,33 +61,7 @@ pub(super) struct Footprint {
 
 impl Footprint {
     pub fn load(vfs: &mut Vfs, cache: &mut FrameCache, art: Option<u32>) -> Self {
-        let frame = (|| -> Result<_, Box<dyn std::error::Error>> {
-            let id = art
-                .filter(|id| id >> 28 == 6)
-                .ok_or("Missing or unsupported item inventory ART ID")?;
-            let table = match (id >> 12) & 3 {
-                0 => "art/item/item_ground.mes",
-                1 => "art/item/item_inven.mes",
-                2 => "art/item/item_paper.mes",
-                _ => "art/item/item_schematic.mes",
-            };
-            let names = load_mes(vfs, table)?;
-            let name = names
-                .mes
-                .get(item_art_entry(id))
-                .ok_or("Missing item ART table entry")?;
-            let name = crate::resource_path::normalize(name.trim())?;
-            if name.contains('/') || !name.ends_with(".art") {
-                return Err("Invalid item ART name".into());
-            }
-            cache.load(
-                vfs,
-                &format!("art/item/{name}"),
-                0,
-                ((id >> 4) & 3) as u8,
-                false,
-            )
-        })();
+        let frame = inventory_frame(vfs, cache, art);
         match frame {
             Ok(frame) => Self {
                 cells: [
@@ -107,10 +81,43 @@ impl Footprint {
     }
 }
 
+pub(super) fn inventory_frame(
+    vfs: &mut Vfs,
+    cache: &mut FrameCache,
+    art: Option<u32>,
+) -> Result<std::sync::Arc<super::art::LoadedFrame>, Box<dyn std::error::Error>> {
+    let id = art
+        .filter(|id| id >> 28 == 6)
+        .ok_or("Missing or unsupported item inventory ART ID")?;
+    let table = match (id >> 12) & 3 {
+        0 => "art/item/item_ground.mes",
+        1 => "art/item/item_inven.mes",
+        2 => "art/item/item_paper.mes",
+        _ => "art/item/item_schematic.mes",
+    };
+    let names = load_mes(vfs, table)?;
+    let name = names
+        .mes
+        .get(item_art_entry(id))
+        .ok_or("Missing item ART table entry")?;
+    let name = crate::resource_path::normalize(name.trim())?;
+    if name.contains('/') || !name.ends_with(".art") {
+        return Err("Invalid item ART name".into());
+    }
+    cache.load(
+        vfs,
+        &format!("art/item/{name}"),
+        0,
+        ((id >> 4) & 3) as u8,
+        false,
+    )
+}
+
 #[derive(Clone)]
 pub(super) struct Item {
     pub id: OriginalId,
     pub category: u32,
+    pub description: Option<u32>,
     pub prototype: u32,
     pub instance_source: Source,
     pub prototype_source: Source,

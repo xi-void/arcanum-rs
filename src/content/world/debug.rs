@@ -188,6 +188,7 @@ impl InteractiveWorld {
                     self.cache.door_states.diagnostic(door, self.cache.hour)
                 }
                 interaction::Action::Travel(dst) => json!({"kind":"transition","destination":dst}),
+                interaction::Action::Container(id) => json!({"kind":"container","id":id.key()}),
                 interaction::Action::Unsupported(reason) => {
                     json!({"kind":"unsupported","reason":reason})
                 }

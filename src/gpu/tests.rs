@@ -3,16 +3,15 @@ use crate::{
     art::{DecodedFrame, SpriteFrame},
     compositor::SpriteDraw,
     content::Source,
-    vfs::{Policy, Storage, Vfs},
+    vfs::{MountId, Policy, Storage, Vfs},
 };
 
 fn fixture(width: u32, height: u32, pixels: Vec<[u8; 4]>) -> Arc<LoadedFrame> {
-    let mount_id = Vfs::new(Policy::Ordered).mount_directory(".").unwrap();
     Arc::new(LoadedFrame {
         source: Source {
             virtual_path: "synthetic.art".into(),
-            mount_id,
-            mount_path: ".".into(),
+            mount_id: MountId::GENERATED,
+            mount_path: Default::default(),
             loose_path: None,
             storage: Storage::Loose,
             mod_id: None,
@@ -179,7 +178,7 @@ fn read_frame_with_overlay<'a>(
     zoom: u8,
     bg: [u8; 3],
     draws: impl IntoIterator<Item = WorldDraw<'a>>,
-    overlay: impl IntoIterator<Item = WorldDraw<'a>>,
+    overlay: impl IntoIterator<Item = OverlayDraw<'a>>,
 ) -> (Vec<[u8; 3]>, Preparation) {
     let stats = gpu
         .prepare_with_overlay(size, zoom, draws, overlay)
@@ -257,9 +256,31 @@ fn screen_overlay_keeps_screen_coordinates_at_each_world_zoom() {
                 })
             })
             .collect();
-        let (actual, _) = read_frame_with_overlay(&mut gpu, size, zoom, bg, [world], [hud]);
+        let (actual, _) = read_frame_with_overlay(
+            &mut gpu,
+            size,
+            zoom,
+            bg,
+            [world],
+            [OverlayDraw::at(hud.asset, hud.sprite.anchor)],
+        );
         assert_eq!(actual, expected, "world zoom {zoom}");
     }
+    let (scaled, stats) = read_frame_with_overlay(
+        &mut gpu,
+        size,
+        3,
+        bg,
+        [],
+        [OverlayDraw {
+            asset: &hud,
+            rect: [1., 1., 4., 2.],
+            clip: [2., 1., 2., 2.],
+        }],
+    );
+    assert_eq!(stats.uploaded, 0);
+    assert_eq!(&scaled[8..16], &[bg, bg, [40, 80, 160], bg, bg, bg, bg, bg]);
+    assert_eq!(&scaled[16..24], &scaled[8..16]);
 }
 
 #[test]
@@ -283,12 +304,24 @@ fn map_inset_stays_resident_and_scales_without_readback() {
         2,
         [0; 3],
         [],
-        [draw(&inset, (2, 2), Modulation::Unlit)],
+        [OverlayDraw::at(&inset, (2, 2))],
     );
     assert_eq!(stats.uploaded, 0);
     assert_eq!(pixels[5..7], [[25, 75, 180]; 2]);
     assert_eq!(pixels[9..11], [[25, 75, 180]; 2]);
     assert_eq!(pixels[0], [0; 3]);
+
+    gpu.render_sprite(&inset, 0.5, [13, 27, 91], []).unwrap();
+    let (updated, stats) = read_frame_with_overlay(
+        &mut gpu,
+        (4, 4),
+        2,
+        [0; 3],
+        [],
+        [OverlayDraw::at(&inset, (2, 2))],
+    );
+    assert_eq!(stats.uploaded, 0);
+    assert_eq!(updated[5..7], [[13, 27, 91]; 2]);
 }
 
 #[test]

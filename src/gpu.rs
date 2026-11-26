@@ -41,6 +41,27 @@ struct InstanceData {
     shade: [u32; 4],
     nodes_a: [u32; 4],
     nodes_b: [u32; 4],
+    clip: [f32; 4],
+}
+
+/// A resident UI sprite placed and clipped in physical window pixels.
+pub struct OverlayDraw<'a> {
+    pub asset: &'a Arc<LoadedFrame>,
+    pub rect: [f32; 4],
+    pub clip: [f32; 4],
+}
+
+impl<'a> OverlayDraw<'a> {
+    pub fn at(asset: &'a Arc<LoadedFrame>, anchor: (i32, i32)) -> Self {
+        let frame = &asset.decoded.frame;
+        let (x, y) = sprite_origin(frame, anchor);
+        let rect = [x as f32, y as f32, frame.width as f32, frame.height as f32];
+        Self {
+            asset,
+            rect,
+            clip: rect,
+        }
+    }
 }
 
 type TextureId = usize;
@@ -49,6 +70,7 @@ struct SpriteTexture {
     // Holding the weak allocation prevents pointer reuse while this key exists.
     asset: Weak<LoadedFrame>,
     bind: BindGroup,
+    target: Option<TextureView>,
     bytes: usize,
     used: u64,
 }
@@ -340,7 +362,7 @@ impl Compositor {
         size: (u32, u32),
         zoom: u8,
         input: impl IntoIterator<Item = WorldDraw<'a>>,
-        overlay: impl IntoIterator<Item = WorldDraw<'a>>,
+        overlay: impl IntoIterator<Item = OverlayDraw<'a>>,
     ) -> Result<Preparation, String> {
         if !(1..=3).contains(&zoom) {
             return Err("zoom must be 1, 2 or 3".into());
@@ -353,7 +375,7 @@ impl Compositor {
         size: (u32, u32),
         scale: f32,
         input: impl IntoIterator<Item = WorldDraw<'a>>,
-        overlay: impl IntoIterator<Item = WorldDraw<'a>>,
+        overlay: impl IntoIterator<Item = OverlayDraw<'a>>,
     ) -> Result<Preparation, String> {
         self.prepared = false;
         self.check_health()?;
@@ -375,16 +397,22 @@ impl Compositor {
         let mut missing = BTreeMap::new();
         let mut visible_bytes = 0;
         let limit = self.device.limits().max_texture_dimension_2d;
-        for (draw, overlay) in input
+        let world = input.into_iter().map(|draw| {
+            (
+                draw.asset,
+                Blend::for_modulation(draw.modulation),
+                Some(draw),
+                None,
+            )
+        });
+        let overlay = overlay
             .into_iter()
-            .map(|draw| (draw, false))
-            .chain(overlay.into_iter().map(|draw| (draw, true)))
-        {
-            let blend = Blend::for_modulation(draw.modulation);
+            .map(|draw| (draw.asset, Blend::SourceOver, None, Some(draw)));
+        for (asset, blend, world, overlay) in world.chain(overlay) {
             if self.draws.len() == MAX_DRAWS {
                 return Err("GPU frame exceeds the draw limit".into());
             }
-            let id = Arc::as_ptr(draw.asset) as usize;
+            let id = Arc::as_ptr(asset) as usize;
             if let Some(entry) = self.textures.get_mut(&id) {
                 if entry.used != self.frame {
                     visible_bytes += entry.bytes;
@@ -392,17 +420,22 @@ impl Compositor {
                     entry.used = self.frame;
                 }
             } else if let std::collections::btree_map::Entry::Vacant(entry) = missing.entry(id) {
-                let bytes = sprite_bytes(draw.asset, limit)?;
+                let bytes = sprite_bytes(asset, limit)?;
                 visible_bytes += bytes;
                 stats.uploaded_bytes += bytes;
-                entry.insert(draw.asset);
+                entry.insert(asset);
             }
-            let mut data = instance_data(&draw, &mut self.columns)?;
-            if overlay {
-                // The shader uses the sign to bypass camera zoom without
-                // adding another field to every sprite instance.
-                data.rect[3] = -data.rect[3];
-            }
+            let data = if let Some(draw) = overlay {
+                let [x, y, w, h] = draw.rect;
+                let [cx, cy, cw, ch] = draw.clip;
+                InstanceData {
+                    rect: [x, y, w, -h],
+                    clip: [cx, cy, cx + cw, cy + ch],
+                    ..InstanceData::zeroed()
+                }
+            } else {
+                instance_data(&world.unwrap(), &mut self.columns)?
+            };
 
             let index = self.draws.len() as u32;
             self.draws.push(data);
@@ -529,6 +562,7 @@ impl Compositor {
             SpriteTexture {
                 asset: Arc::downgrade(asset),
                 bind,
+                target: None,
                 bytes,
                 used: self.frame,
             },
@@ -560,29 +594,39 @@ impl Compositor {
             return Err("invalid Vulkan inset dimensions or scale".into());
         }
         self.prepare_draws(size, scale, draws, std::iter::empty())?;
-        let texture = self.device.create_texture(&TextureDescriptor {
-            label: Some("Arcanum map player inset"),
-            size: extent(size),
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: self.format,
-            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
+        let id = Arc::as_ptr(asset) as usize;
+        let existing = self
+            .textures
+            .get(&id)
+            .and_then(|entry| entry.target.clone());
+        let view = existing.clone().unwrap_or_else(|| {
+            self.device
+                .create_texture(&TextureDescriptor {
+                    label: Some("Arcanum world inset"),
+                    size: extent(size),
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: TextureDimension::D2,
+                    format: self.format,
+                    usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&TextureViewDescriptor::default())
         });
-        let view = texture.create_view(&TextureViewDescriptor::default());
         let mut encoder = self
             .device
             .create_command_encoder(&CommandEncoderDescriptor::default());
         self.encode(&mut encoder, &view, background)?;
         // Submit before a subsequent prepare writes the shared draw buffers.
         self.queue.submit([encoder.finish()]);
-        let id = Arc::as_ptr(asset) as usize;
-        if let Some(old) = self.textures.remove(&id) {
-            self.texture_bytes -= old.bytes;
+        if existing.is_none() {
+            if let Some(old) = self.textures.remove(&id) {
+                self.texture_bytes -= old.bytes;
+            }
+            self.make_room(1, bytes as usize);
+            self.retain_texture(id, asset, &view, bytes as usize);
+            self.textures.get_mut(&id).unwrap().target = Some(view);
         }
-        self.make_room(1, bytes as usize);
-        self.retain_texture(id, asset, &view, bytes as usize);
         self.check_health()
     }
 
@@ -733,8 +777,7 @@ fn pipeline(
     format: TextureFormat,
     blend: BlendState,
 ) -> RenderPipeline {
-    let attributes =
-        vertex_attr_array![0 => Float32x4, 1 => Uint32x4, 2 => Uint32x4, 3 => Uint32x4];
+    let attributes = vertex_attr_array![0 => Float32x4, 1 => Uint32x4, 2 => Uint32x4, 3 => Uint32x4, 4 => Float32x4];
     device.create_render_pipeline(&RenderPipelineDescriptor {
         label: Some("ordered sprite quads"),
         layout: Some(layout),

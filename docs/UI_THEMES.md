@@ -48,11 +48,12 @@ input through unless configured to capture it. The same rectangle is used
 for scissoring and for pointer hits. Provide `hover_fill` if the action
 should show hover, keyboard focus or active-run feedback.
 
-Images use nearest-neighbor scaling. Text samples each glyph directly at its final physical size, retaining the font’s palette coverage.
-Artwork, text and hit regions share the same UI scale. If the widest root
-would exceed the window, the effective scale is reduced to fit.
-This works in physical window pixels on all backends, independently of
-the camera. Layout changes on resize or when the user adjusts UI scale.
+Vulkan scales native-size component textures, including labels with the
+font's palette coverage. Resizing and adjusting the scale update placement
+and clipping while retaining the component textures. The top HUD, active
+panel and bottom HUD share an effective scale in physical window pixels.
+The viewport limits this scale while preserving the requested percentage.
+Camera zoom is independent.
 
 ### Assets and fonts
 
@@ -71,7 +72,7 @@ the camera. Layout changes on resize or when the user adjusts UI scale.
   ART fonts in the same format. Source palette red supplies coverage for
   non-key pixels, and `hot_x` is the horizontal advance. The stored space
   height supplies the line metric when present. Text uses the configured
-  color and size, with cumulative glyph positions rounded to physical pixels. Wrapping and clipping are supported. Platform font
+  color and size, with cumulative glyph positions rounded in theme pixels. Wrapping and clipping are supported. Platform font
   discovery, OpenType shaping, font scrolling and typographic features
   beyond ART spacing and the simple bitmap profile are outside this
   foundation.
@@ -82,6 +83,41 @@ lookup tries that source once. No unrelated art is selected automatically.
 The example uses only procedural colors and a bitmap profile. Change its
 `toolbar` anchor and `fonts.controls.size` in a copy of the package, then
 launch with the existing executable and `--ui path/to/copy`.
+
+## Inventory and containers
+
+Click the Classic bag button or press **I** to open or close the inventory.
+Click an accessible original container in the world to approach and open its
+loot panel. **Escape** closes the active panel. The mouse wheel and original
+arrow buttons scroll the container grid. Point to an item to see its footprint
+and name in the HUD. Dragging, equipment transactions, statistics, arrange,
+use, drop, and take-all are outside this interface milestone.
+
+A package can opt in with a center-anchored root using
+`inventory_panel = true`, zero offset, and `capture = true`. The root is
+centered in the space between top and bottom HUD roots. Use
+`inventory_views = ["inventory"]` or `["container"]` to select the modes
+where a component is placed. Add `action = "toggle-inventory"` to a HUD button.
+
+- Use `binding = "backpack"` or `"container-grid"` with `cell` in theme
+  pixels. The width must match the runtime's ten columns. Grid height
+  determines visible rows. `hover_fill` supplies the item footprint tint.
+- Use `binding = "inventory-lens"` below the inset border ART. This
+  component receives the live scene from the shared Vulkan compositor.
+- Use `binding = "inventory-hover"` with a font for item names and
+  optional component `hover_message` values.
+- Place `inventory-scroll-up` and `inventory-scroll-down` actions next to a
+  `container-thumb` binding covering the track. Bind the thumb's ART and
+  top cap height with `image` and `thumb_height`. Optional `thumb_middle`
+  and `thumb_bottom` add the other two ART pieces.
+
+Classic follows CE's `src/ui/inven_ui.c`. Interface MES entries 221, 223
+and 234 supply the backpack, paper-doll, and loot backgrounds. The backpack
+starts at (368, 8), and the loot grid starts at (8, 136) with eight visible
+rows. Both use 32-pixel cells. Entries 232 and 233 supply the lens borders.
+CE’s `intgame.c` samples a 178×178 world area into the 89×89 lens. The nine equipment regions use the original cover ART. Item icons and
+footprints come from the same original inventory ART IDs and authoritative
+slots used by runtime inventory.
 
 ## Original interface evidence and architecture
 
@@ -116,10 +152,9 @@ CE's gameplay font `morph15font.art` (entry 27) stores 19-pixel-high
 glyphs with varying advances and a grayscale edge palette.
 TIG `font.c` uses the byte-minus-31 frame and stored horizontal advance.
 Its source-alpha text blit in `art.c` uses `tig_color_alpha`, which
-returns palette red in `color.h`. The HUD preserves that coverage and
-samples the source directly at the requested physical glyph size. The
-previous renderer discarded fractional coverage and resized text first
-to its logical height and then again to the HUD scale.
+returns palette red in `color.h`. Labels keep the palette coverage
+when prepared at the theme's native size. The compositor scales the
+label with the rest of the layout.
 
 Before this change, gameplay's only UI was a procedurally painted pause
 and options sprite. Its controls and bitmap font were local to the
@@ -128,18 +163,15 @@ its existing path, which supplies the existing gameplay settings
 actions. The HUD reuses the ART loader, VFS precedence, compositor
 and bitmap alphabet. Gameplay owns settings and routes. The HUD reads
 run preference for feedback and emits typed actions. Layout,
-coordinates and artwork live in the package. Both CPU and GPU draw the
-same unlit overlay after the world pass.
+coordinates and artwork live in the package. Vulkan draws the unlit overlay after the world pass.
 
-Classic’s map icon opens the atlas. Its other original buttons and
-action slots are decorative. Alpha controls remain on the keyboard and in
+Classic’s map icon opens the atlas, and the bag opens the inventory. The other original buttons and action slots are decorative. Alpha controls remain on the keyboard and in
 the Escape menu. Health, fatigue, poison, currency, fate values,
 party portraits, and recent-action or item overlays require
 gameplay state that the HUD does not expose. The original day/night
 clock (entries 207–215) samples the game calendar and is also deferred.
 The Classic status display contains no fabricated numbers, colored
-fills, or hotbar assignments. Inventory, character, maps and dialogue remain
-independent future interfaces. The HUD foundation currently covers
+fills, or hotbar assignments. Character and dialogue remain future interfaces. The HUD foundation currently covers
 panels, labels, buttons, layout and focus. Tooltips, general theme
 modals and arbitrary gameplay-state binding remain future work.
 

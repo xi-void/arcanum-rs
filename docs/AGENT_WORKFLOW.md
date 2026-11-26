@@ -123,6 +123,15 @@ transaction preserves prior ownership and placement. Inventory transactions
 operate on whole original objects. Stack merging, generated loot, item decay,
 and scripted inventory interactions are outside the supported subset.
 
+With Classic active, click the bag button and click the authored chest in the
+world to exercise the production paths. After each interaction, inspect
+`rpc pos | jq '.result.ui.hud | {scale_percent, effective_scale_percent, inventory}'`.
+The inventory report includes panel and lens bounds, visible grid bounds,
+slots, footprints, resolved icon resources, scroll rows, hover, and access
+errors. Compare `.result.renderer.stats.preparation.uploaded` and
+`.result.renderer.frames_presented` while changing scale and during idle
+intervals. Use Vulkan capture for the presented result.
+
 ## Asynchronous operations
 
 Read the top-level `status` before using `result`. `completed` confirms the

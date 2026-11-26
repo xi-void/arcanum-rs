@@ -38,6 +38,7 @@ pub use debug::{DebugCollision, DebugObject};
 mod prefetch;
 pub use super::jumps::Destination;
 pub use interaction::DoorStates;
+pub use inventory::{InventoryContents, InventoryReader};
 pub use lighting::DynamicLightState;
 pub use prefetch::{DeveloperAction, InteractiveWorld, PrefetchStats};
 
@@ -660,7 +661,12 @@ impl CachedSector {
         }
     }
 
-    fn add_mobiles(&mut self, mobiles: mobile::PreparedMobiles, reference: (u32, u32)) {
+    fn add_mobiles(
+        &mut self,
+        mobiles: mobile::PreparedMobiles,
+        reference: (u32, u32),
+        playing: bool,
+    ) {
         self.mobile_shadows = mobiles.shadows;
         self.report.diagnostics.extend(mobiles.issues);
         self.mobiles = mobiles.objects;
@@ -727,6 +733,16 @@ impl CachedSector {
                 self.walk = Some((raster.key, walk));
             }
             self.mobiles[index].raster = Some(record);
+            let entry = &self.mobiles[index];
+            if playing && entry.category == 2 && entry.id.kind == 2 {
+                self.interactions.insert(
+                    raster.key,
+                    interaction::Target {
+                        tile: caster.tile,
+                        action: interaction::Action::Container(entry.id),
+                    },
+                );
+            }
             self.draws.push(raster);
             if mobile.casts_shadow {
                 self.casters.push(caster);
@@ -2548,7 +2564,7 @@ impl SectorLoader {
                     }
                 }
                 if let Some(mobiles) = mobiles {
-                    cached.add_mobiles(mobiles, self.reference);
+                    cached.add_mobiles(mobiles, self.reference, self.playing);
                 }
                 timing.rasters = start.elapsed();
                 cached

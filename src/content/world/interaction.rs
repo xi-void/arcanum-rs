@@ -9,6 +9,7 @@ type Id = (u64, usize);
 pub(super) enum Action {
     Travel(Destination),
     Door(Door),
+    Container(crate::sector::objects::OriginalId),
     Unsupported(String),
 }
 
@@ -508,6 +509,7 @@ impl SectorCache {
                 Some(Ok(Some(*dst)))
             }
             Action::Unsupported(reason) => Some(Err(reason.clone())),
+            Action::Container(_) => None,
         }
     }
 

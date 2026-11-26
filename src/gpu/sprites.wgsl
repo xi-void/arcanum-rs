@@ -9,6 +9,7 @@ struct Instance {
     @location(1) shade: vec4<u32>,
     @location(2) nodes_a: vec4<u32>,
     @location(3) nodes_b: vec4<u32>,
+    @location(4) clip: vec4<f32>,
 }
 struct Output {
     @builtin(position) position: vec4<f32>,
@@ -17,6 +18,7 @@ struct Output {
     @location(2) @interpolate(flat) nodes_a: vec4<u32>,
     @location(3) @interpolate(flat) nodes_b: vec4<u32>,
     @location(4) @interpolate(flat) scale: f32,
+    @location(5) @interpolate(flat) overlay_extent: vec2<f32>,
 }
 
 @vertex
@@ -25,11 +27,15 @@ fn vs(instance: Instance, @builtin(vertex_index) vertex: u32) -> Output {
                         vec2(0., 1.), vec2(1., 0.), vec2(1., 1.));
     let scale = select(viewport.zoom, 1., instance.rect.w < 0.);
     let extent = vec2(instance.rect.z, abs(instance.rect.w));
-    let relative = (instance.rect.xy + corners[vertex] * extent) * scale / viewport.size;
+    let overlay = instance.rect.w < 0.;
+    var pixel = instance.rect.xy + corners[vertex] * extent;
+    if overlay { pixel = clamp(pixel, instance.clip.xy, instance.clip.zw); }
+    let relative = pixel * scale / viewport.size;
     var out: Output;
     out.position = vec4(relative * vec2(2., -2.) + vec2(-1., 1.), 0., 1.);
     out.origin = instance.rect.xy;
     out.scale = scale;
+    out.overlay_extent = select(vec2(0.), extent, overlay);
     out.shade = instance.shade;
     out.nodes_a = instance.nodes_a;
     out.nodes_b = instance.nodes_b;
@@ -48,7 +54,11 @@ fn node(input: Output, index: u32) -> vec3<u32> {
 
 @fragment
 fn fs(input: Output) -> @location(0) vec4<f32> {
-    let p = vec2<u32>(input.position.xy / input.scale - input.origin);
+    var local = input.position.xy / input.scale - input.origin;
+    if input.overlay_extent.x > 0. {
+        local *= vec2<f32>(textureDimensions(sprite)) / input.overlay_extent;
+    }
+    let p = vec2<u32>(local);
     // Integer texel coordinates mean nearest sampling with no interpolation,
     // including at sprite edges and when a quad is clipped.
     let texel = vec4<u32>(round(textureLoad(sprite, vec2<i32>(p), 0) * 255.));
