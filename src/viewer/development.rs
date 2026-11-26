@@ -176,6 +176,10 @@ impl Developer {
         self.scale
     }
 
+    pub(super) fn set_configured_ui_scale(&mut self, scale: u16) {
+        self.scale = scale;
+    }
+
     pub(super) fn console_frame(
         &mut self,
         size: (u32, u32),
@@ -686,7 +690,10 @@ impl Viewer<'_> {
                     "streaming":world.stats(),
                     "ui":{"hud_theme":hud_theme,"map_theme":map_theme,"console_theme":console_theme,
                         "hud":hud.as_ref().map(|hud|hud.diagnostics()),"scale_percent":scale,"console_open":dev.console.open,
-                        "paused":self.pause.is_some(),"reload_generation":dev.reloads,"reload_status":dev.reload_status,
+                        "paused":self.pause.is_some(),
+                        "pause_menu":self.pause.as_ref().zip(self.pause_theme.as_ref())
+                            .map(|((menu, _), theme)| menu.diagnostic(theme, [viewport.0,viewport.1], scale)),
+                        "save_directory":self.saves.as_ref().ok().map(|store| store.directory()),"reload_generation":dev.reloads,"reload_status":dev.reload_status,
                         "selected":dev.selected.map(InteractiveWorld::debug_selection_id)},
                     "renderer":{"stats":self.view.as_ref().and_then(|view|view.renderer.stats.as_ref()),
                         "frames_presented":self.view.as_ref().map(|view|view.submitted_frames),
@@ -930,14 +937,23 @@ impl Viewer<'_> {
                         .transpose()?;
                     let next_console = Console::load(&dev.console_theme, &mut dev.vfs)
                         .map_err(|err| err.to_string())?;
-                    Ok((next_hud, next_map, next_console))
+                    let next_pause = self
+                        .pause_theme
+                        .as_ref()
+                        .map(|theme| {
+                            super::Classic::load(&theme.source, &mut dev.vfs).map(Box::new)
+                        })
+                        .transpose()
+                        .map_err(|err| err.to_string())?;
+                    Ok((next_hud, next_map, next_console, next_pause))
                 })();
-                let (next_hud, next_map, next_console) = loaded.map_err(|err| {
+                let (next_hud, next_map, next_console, next_pause) = loaded.map_err(|err| {
                     dev.reload_status = Some(json!({"status":"failed","message":err}));
                     dev.event("ui_reload", None, json!({"status":"failed"}));
                     Failure::new("ui_reload_failed", err)
                 })?;
                 *hud = next_hud;
+                self.pause_theme = next_pause;
                 if let (Some(ui), Some(theme)) = (map_ui, next_map) {
                     ui.replace_theme(theme);
                 }
@@ -951,6 +967,7 @@ impl Viewer<'_> {
                 outcome
             }
             Request::Scale(scale) => {
+                self.pause_scale = scale;
                 dev.scale = scale;
                 if let Some(hud) = hud {
                     hud.set_scale(scale);

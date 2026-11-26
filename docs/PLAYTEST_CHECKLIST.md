@@ -22,6 +22,14 @@
 - [ ] Contextual descriptions appear in the bottom HUD.
 - [ ] Panels toggle correctly and close with Escape.
 
+## Pause and savegames
+- [ ] Pause, Continue, Options and Quit confirmation work with native input.
+- [ ] Save a named slot, quit, relaunch and restore it through Load Game.
+- [ ] Equipment, stack quantities, object IDs, containers, drops, doors and discovered locations survive restoration.
+- [ ] An earlier slot restores its own world state after later changes.
+- [ ] Overwrite, delete, F7 and F8 work. A corrupt slot leaves gameplay intact.
+- [ ] Slot names, location, game time and previews render, and controls stay aligned after resizing and scaling.
+
 ## Maps and world travel
 - [ ] Local map displays correctly.
 - [ ] World map displays correctly.

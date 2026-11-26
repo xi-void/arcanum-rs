@@ -211,3 +211,15 @@ Text bindings for the existing inventory counters are `inventory-gold`,
 `inventory-arrows`, `inventory-bullets`, `inventory-charges` and
 `inventory-fuel`. Paper-doll summary labels support `inventory-weight`,
 `inventory-burden`, `inventory-speed` and `inventory-defense`.
+
+
+## Pause packages
+
+The default package is `ui/classic-pause/theme.toml`. To replace it, set
+`ui.pause` in `config.toml` to a package directory or manifest path. The
+manifest defines the authored canvas, ART resources, fonts, original string
+table, control placement and clipping rectangles. ART sources use the same
+`vfs:` and package-relative `file:` prefixes as HUD assets. The menu uses
+the shared requested UI scale and fits inside the physical viewport, with
+identical coordinates for input and Vulkan composition. Gameplay and slot
+operations are independent of the package.

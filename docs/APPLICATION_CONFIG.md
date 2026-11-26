@@ -23,7 +23,7 @@ arguments and work independently of the play configuration.
 | Root | `game_data` | Positional installation directory |
 | `window` | `width`, `height` in physical pixels, `fullscreen` (borderless) | `--window-size WIDTH HEIGHT`, `--fullscreen`, `--windowed` |
 | `display` | `lighting`, `shadows` | `--lighting-on`, `--lighting-off`, `--shadows`, `--no-shadows` |
-| `ui` | `hud`, `map`, `scale` | `--ui classic\|off\|PATH`, `--map-ui PATH`, `--ui-scale PERCENT` |
+| `ui` | `hud`, `map`, `pause`, `scale` | `--ui classic\|off\|PATH`, `--map-ui PATH`, `--ui-scale PERCENT` |
 | `camera` | `zoom`, `follow` | `--zoom 1\|2\|3`, `--follow`, `--no-follow` |
 | `input` | `run` | `--run`, `--walk-by-default` |
 | `developer` | `enabled`, `rpc`, `diagnostics`, `console_ui`, `map_reveal`, `discover_all` | `--debug`, `--no-debug`, `--rpc SOCKET`, `--no-rpc`, `--diagnostics DIRECTORY`, `--console-ui PATH`, `--map-reveal`, `--no-map-reveal`, `--discover-all`, `--no-discover-all` |
@@ -45,7 +45,7 @@ when `ui.scale` is absent.
 ## Changes during play
 
 The engine saves changed preferences on clean exit. This includes shared UI
-scale from the HUD, inventory or maps, camera zoom, lighting, shadows and the
+scale from the HUD, inventory, pause menu or maps, camera zoom, lighting, shadows and the
 default movement gait. The saved UI value is the requested percentage, so a
 temporary viewport constraint does not reduce the saved preference. Window
 resizing affects the current session. CLI overrides and diagnostic snapshot

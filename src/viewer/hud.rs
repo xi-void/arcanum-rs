@@ -1257,7 +1257,7 @@ fn parse(source: &str) -> Result<Theme, Box<dyn Error>> {
     Ok(theme)
 }
 
-fn resource(
+pub(super) fn resource(
     game: &mut Vfs,
     files: &mut Vfs,
     asset: &str,

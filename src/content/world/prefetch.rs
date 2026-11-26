@@ -694,6 +694,10 @@ impl InteractiveWorld {
         self.notice.take()
     }
 
+    pub fn door_states(&self) -> &DoorStates {
+        &self.cache.door_states
+    }
+
     pub fn take_door_states(&mut self) -> DoorStates {
         std::mem::take(&mut self.cache.door_states)
     }

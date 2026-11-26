@@ -153,6 +153,40 @@ impl WindowRenderer {
             .render_sprite(asset, scale, background, draws)
     }
 
+    pub fn save_preview<'a>(
+        &mut self,
+        draws: impl IntoIterator<Item = WorldDraw<'a>>,
+    ) -> Result<Vec<u8>, String> {
+        let size = arcanum_rs::content::save::PREVIEW_SIZE;
+        self.compositor
+            .prepare_with_overlay(size, 1, draws, std::iter::empty())?;
+        let device = &self.compositor.device;
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Savegame world preview"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+        self.compositor.encode(
+            &mut encoder,
+            &texture.create_view(&Default::default()),
+            [0; 3],
+        )?;
+        let (buffer, stride) = copy_pixels(device, &mut encoder, &texture, size);
+        let submission = self.compositor.queue.submit([encoder.finish()]);
+        let bytes = gpu::read_buffer(device, &buffer, submission)?;
+        Ok(rgb_pixels(&bytes, stride, size, self.config.format))
+    }
+
     pub fn redraw<'a>(
         &mut self,
         (size, zoom): ((u32, u32), u8),
@@ -203,32 +237,8 @@ impl WindowRenderer {
             .create_command_encoder(&CommandEncoderDescriptor::default());
         self.compositor.encode(&mut encoder, &target, background)?;
         let capture = self.pending.take().map(|request| {
-            let stride = (size.0 * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-            let buffer = self
-                .compositor
-                .device
-                .create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("Requested screenshot"),
-                    size: u64::from(stride) * u64::from(size.1),
-                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                    mapped_at_creation: false,
-                });
-            encoder.copy_texture_to_buffer(
-                frame.texture.as_image_copy(),
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &buffer,
-                    layout: wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(stride),
-                        rows_per_image: None,
-                    },
-                },
-                wgpu::Extent3d {
-                    width: size.0,
-                    height: size.1,
-                    depth_or_array_layers: 1,
-                },
-            );
+            let (buffer, stride) =
+                copy_pixels(&self.compositor.device, &mut encoder, &frame.texture, size);
             (request, buffer, stride)
         });
         let commands = encoder.finish();
@@ -286,14 +296,40 @@ impl WindowRenderer {
     }
 }
 
-fn write_capture(
-    request: Capture,
-    bytes: &[u8],
-    stride: u32,
+fn copy_pixels(
+    device: &Device,
+    encoder: &mut wgpu::CommandEncoder,
+    texture: &wgpu::Texture,
     size: (u32, u32),
-    format: TextureFormat,
-) -> Result<Value, String> {
-    let rgb: Vec<_> = bytes
+) -> (wgpu::Buffer, u32) {
+    let stride = (size.0 * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Requested image readback"),
+        size: u64::from(stride) * u64::from(size.1),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(stride),
+                rows_per_image: None,
+            },
+        },
+        wgpu::Extent3d {
+            width: size.0,
+            height: size.1,
+            depth_or_array_layers: 1,
+        },
+    );
+    (buffer, stride)
+}
+
+fn rgb_pixels(bytes: &[u8], stride: u32, size: (u32, u32), format: TextureFormat) -> Vec<u8> {
+    bytes
         .chunks_exact(stride as usize)
         .flat_map(|row| row[..size.0 as usize * 4].as_chunks::<4>().0)
         .flat_map(|&[a, g, b, _]| {
@@ -303,7 +339,17 @@ fn write_capture(
                 [a, g, b]
             }
         })
-        .collect();
+        .collect()
+}
+
+fn write_capture(
+    request: Capture,
+    bytes: &[u8],
+    stride: u32,
+    size: (u32, u32),
+    format: TextureFormat,
+) -> Result<Value, String> {
+    let rgb = rgb_pixels(bytes, stride, size, format);
     let file = request
         .directory
         .open_with(

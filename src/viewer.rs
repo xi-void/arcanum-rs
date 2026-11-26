@@ -3,6 +3,8 @@
 use arcanum_rs::art::SpriteFrame;
 use arcanum_rs::gpu::OverlayDraw;
 
+mod classic_menu;
+pub(crate) use classic_menu::Classic;
 mod console;
 mod development;
 pub(super) use development::Developer;
@@ -16,14 +18,14 @@ mod theme_source;
 use crate::app_config::ConfigFile;
 use arcanum_rs::camera::{Camera, CameraScene};
 use arcanum_rs::compositor::{Modulation, SpriteDraw};
-use arcanum_rs::content::travel::Clock;
 use arcanum_rs::content::{
     art::LoadedFrame,
     world::{Destination, DoorStates, InteractiveWorld, InventoryReader, WorldDraw, WorldStream},
 };
+use arcanum_rs::content::{save, travel::Clock};
+use classic_menu::{Command as MenuCommand, Menu};
 pub(super) use hud::Hud;
 pub(super) use menu::Settings;
-use menu::{Command as MenuCommand, Menu};
 use std::{
     collections::BTreeMap,
     sync::Arc,
@@ -177,10 +179,20 @@ pub type TravelLoader<'a> = Box<
             u8,
             (u32, u32),
             Option<u8>,
-            bool,
+            LocationMode<'_>,
         ) -> Result<(String, WorldStream, Camera), String>
         + 'a,
 >;
+
+pub(crate) enum LocationMode<'a> {
+    Travel {
+        bypass: bool,
+    },
+    Save {
+        state: &'a save::State,
+        doors: DoorStates,
+    },
+}
 
 struct Travel<'a> {
     map: String,
@@ -194,6 +206,8 @@ pub(crate) struct Startup {
     pub fullscreen: bool,
     pub settings: Settings,
     pub preferences: Option<ConfigFile>,
+    pub pause_theme: Option<Box<Classic>>,
+    pub ui_scale: u16,
 }
 
 pub struct StreamOptions<'a> {
@@ -341,6 +355,9 @@ fn run_content(
         fullscreen: startup.fullscreen,
         preferences: startup.preferences,
         pause: None,
+        pause_theme: startup.pause_theme,
+        pause_scale: startup.ui_scale.max(50),
+        saves: save::Store::user(),
         paused_for: Duration::ZERO,
         clock_paused_for: Duration::ZERO,
         map_since: None,
@@ -383,6 +400,9 @@ struct Viewer<'a> {
     fullscreen: bool,
     preferences: Option<ConfigFile>,
     pause: Option<(Menu, Instant)>,
+    pause_theme: Option<Box<Classic>>,
+    pause_scale: u16,
+    saves: Result<save::Store, String>,
     paused_for: Duration,
     clock_paused_for: Duration,
     map_since: Option<Instant>,
@@ -479,6 +499,7 @@ struct WindowSurface {
     map_inset: Option<Arc<LoadedFrame>>,
     inventory_inset: Option<Arc<LoadedFrame>>,
     developer_status: Option<Arc<LoadedFrame>>,
+    save_status: Option<(Arc<LoadedFrame>, Instant)>,
     last_frame_time: Duration,
     frame_presented_at: Option<Instant>,
     last_frame_interval: Option<Duration>,
@@ -519,10 +540,30 @@ impl Viewer<'_> {
         facing: u8,
         bypass: bool,
     ) -> Result<(), String> {
-        let hour = self
-            .clock
-            .as_ref()
-            .map(|clock| clock.hour(self.game_elapsed(Instant::now())));
+        self.enter_location(target, facing, LocationMode::Travel { bypass })
+    }
+
+    fn enter_location(
+        &mut self,
+        target: Destination,
+        facing: u8,
+        mode: LocationMode<'_>,
+    ) -> Result<(), String> {
+        let (map_hint, hour, bypass) = match &mode {
+            LocationMode::Save { state, .. } => (
+                Some(state.map.as_str()),
+                Some((state.clock.0 % 24) as u8),
+                false,
+            ),
+            LocationMode::Travel { bypass } => (
+                None,
+                self.clock
+                    .as_ref()
+                    .map(|clock| clock.hour(self.game_elapsed(Instant::now()))),
+                *bypass,
+            ),
+        };
+        let restoring = map_hint.is_some();
         let view = self.view.as_mut().ok_or("World window is unavailable")?;
         let ViewContent::Stream {
             world,
@@ -541,13 +582,13 @@ impl Viewer<'_> {
         };
         let size = view.window.inner_size();
         let (map, next, next_camera) = (travel.loader)(
-            &travel.map,
+            map_hint.unwrap_or(&travel.map),
             world,
             target,
             facing,
             logical_size(size, self.settings.zoom),
             hour,
-            bypass,
+            mode,
         )?;
         let wake = travel.wake.clone();
         let mut next = next
@@ -558,13 +599,15 @@ impl Viewer<'_> {
                 *trace,
             )
             .map_err(|err| err.to_string())?;
-        travel
-            .doors
-            .insert(travel.map.clone(), world.take_door_states());
-        if let Some(states) = travel.doors.remove(&map) {
-            next.restore_door_states(states);
+        if !restoring {
+            travel
+                .doors
+                .insert(travel.map.clone(), world.take_door_states());
+            if let Some(states) = travel.doors.remove(&map) {
+                next.restore_door_states(states);
+            }
+            next.inherit_object_state(world);
         }
-        next.inherit_object_state(world);
         eprintln!("Entered {map} at {:?}, game hour {hour:?}", target.tile);
         view.window.set_title(&format!("Arcanum-RS | {map} play"));
         view.developer_status = bypass.then(|| menu::developer_status("COLLISION OFF"));
@@ -651,7 +694,7 @@ impl Viewer<'_> {
         self.navigation = Navigation::default();
         self.player_deadline = None;
         self.animation_deadline = None;
-        self.pause = Some((Menu::new(), Instant::now()));
+        self.pause = Some((Menu::default(), Instant::now()));
         self.menu_action(MenuCommand::Stay, event_loop);
     }
 
@@ -737,12 +780,383 @@ impl Viewer<'_> {
                 }
             }
             MenuCommand::Quit => event_loop.exit(),
+            MenuCommand::Save { id, name } => match self.save_game(id.as_deref(), name, false) {
+                Ok(()) => {
+                    self.save_feedback("Game Saved Successfully");
+                    self.menu_action(MenuCommand::Continue, event_loop);
+                }
+                Err(error) => self.menu_error(error),
+            },
+            MenuCommand::Load(id) => match self.restore_game(&id, event_loop) {
+                Ok(()) => {
+                    self.save_feedback("Game Loaded Successfully");
+                    self.menu_action(MenuCommand::Continue, event_loop);
+                }
+                Err(error) => self.menu_error(error),
+            },
+            MenuCommand::Delete(id) => {
+                let store = self.saves.as_ref().map_err(String::as_str);
+                match store.and_then(|store| {
+                    store.remove(&id).map_err(|error| {
+                        eprintln!("Delete save: {error}");
+                        "Unable to delete saved game"
+                    })
+                }) {
+                    Ok(()) => {
+                        if let Some(((menu, _), theme)) =
+                            self.pause.as_mut().zip(self.pause_theme.as_ref())
+                        {
+                            menu.refresh(store, theme);
+                        }
+                        self.save_event("save_deleted", Some(&id), None);
+                    }
+                    Err(error) => self.menu_error(error.into()),
+                }
+            }
             MenuCommand::Stay => {}
         }
         if let Some(view) = &self.view {
             view.window.request_redraw();
         }
         self.update_control_flow(event_loop);
+    }
+
+    fn ui_scale(&self) -> u16 {
+        match &self.content {
+            ViewContent::Stream { hud: Some(hud), .. } => hud.scale(),
+            _ => self.pause_scale,
+        }
+    }
+
+    fn change_pause_scale(&mut self, delta: i32) {
+        let scale = (i32::from(self.ui_scale()) + delta).clamp(50, 300) as u16;
+        self.pause_scale = scale;
+        if let ViewContent::Stream { hud, map_ui, .. } = &mut self.content {
+            if let Some(hud) = hud {
+                hud.set_scale(scale);
+            }
+            if let Some(map) = map_ui {
+                map.set_scale(scale);
+            }
+        }
+        if let Some(dev) = &mut self.developer {
+            dev.set_configured_ui_scale(scale);
+        }
+        if let Some(preferences) = &mut self.preferences {
+            preferences.set("ui", "scale", i64::from(scale));
+        }
+    }
+
+    fn save_event(&mut self, kind: &str, slot: Option<&str>, error: Option<&str>) {
+        if let Some(dev) = &mut self.developer {
+            dev.event(kind, None, serde_json::json!({"slot":slot,"error":error}));
+        }
+    }
+
+    fn menu_error(&mut self, error: String) {
+        self.save_event("save_operation_failed", None, Some(&error));
+        if let Some((menu, _)) = &mut self.pause {
+            menu.message = Some(error);
+        } else {
+            self.save_feedback(&error);
+        }
+    }
+
+    fn save_feedback(&mut self, message: &str) {
+        eprintln!("{message}");
+        if let Some(view) = &mut self.view {
+            view.save_status = Some((
+                menu::developer_status(
+                    &message
+                        .to_ascii_uppercase()
+                        .chars()
+                        .take(80)
+                        .collect::<String>(),
+                ),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            view.window.request_redraw();
+        }
+    }
+
+    fn save_game(&mut self, id: Option<&str>, name: String, quick: bool) -> Result<(), String> {
+        if name.trim().is_empty() {
+            return Err("Enter a save name".into());
+        }
+        let store = self.saves.as_ref().map_err(Clone::clone)?;
+        let now = Instant::now();
+        let elapsed = self.play_elapsed(now);
+        let clock = self
+            .clock
+            .as_ref()
+            .ok_or("Game clock is unavailable")?
+            .for_save(self.game_elapsed(now));
+        let ViewContent::Stream {
+            world,
+            camera,
+            map_ui,
+            travel: Some(travel),
+            ..
+        } = &mut self.content
+        else {
+            return Err("No active gameplay session".into());
+        };
+        let (tile, _) = world
+            .player_map_position()
+            .ok_or("Wait for the current location to finish loading")?;
+        let facing = world.player_facing().ok_or("Player is unavailable")?;
+        let mut doors: BTreeMap<_, _> = travel
+            .doors
+            .iter()
+            .map(|(map, doors)| (map.clone(), doors.for_save()))
+            .collect();
+        doors.insert(travel.map.clone(), world.door_states().for_save());
+        let mut state = save::State {
+            map: travel.map.clone(),
+            tile,
+            facing,
+            clock,
+            objects: world.save_objects(),
+            doors,
+            discovered: Default::default(),
+            explored: Default::default(),
+        };
+        let location = map_ui
+            .as_ref()
+            .and_then(|map| map.location_name(&travel.map))
+            .unwrap_or(&travel.map)
+            .to_owned();
+        if let Some(map) = map_ui {
+            map.save_discovery(&mut state);
+        }
+        let view = self.view.as_mut().ok_or("World window is unavailable")?;
+        let mut preview_camera = camera.clone();
+        if self.settings.follow {
+            world.follow_player(elapsed, &mut preview_camera);
+        }
+        let preview = view.renderer.save_preview(scene_draws(
+            world,
+            &preview_camera,
+            save::PREVIEW_SIZE,
+            elapsed,
+            self.settings,
+        ))?;
+        let metadata = save::Metadata {
+            name,
+            location,
+            hours: clock.0,
+            saved_at_ms: 0,
+        };
+        if quick {
+            store.quicksave(metadata, &state, &preview)?;
+        } else {
+            store.write(id, metadata, &state, &preview)?;
+        }
+        self.save_event("save_written", id.or(quick.then_some("auto")), None);
+        Ok(())
+    }
+
+    fn restore_game(&mut self, id: &str, event_loop: &ActiveEventLoop) -> Result<(), String> {
+        let store = self.saves.as_ref().map_err(Clone::clone)?;
+        let state = store.load(id)?;
+        if let ViewContent::Stream {
+            map_ui: Some(map), ..
+        } = &self.content
+        {
+            map.validate_discovery(&state)?;
+        }
+        let mut doors: BTreeMap<_, _> = state
+            .doors
+            .iter()
+            .map(|(map, states)| Ok((map.clone(), DoorStates::from_save(states)?)))
+            .collect::<Result<_, String>>()?;
+        let active_doors = doors.remove(&state.map).unwrap_or_default();
+        self.enter_location(
+            Destination {
+                map: None,
+                tile: state.tile,
+            },
+            state.facing,
+            LocationMode::Save {
+                state: &state,
+                doors: active_doors,
+            },
+        )?;
+
+        let clock_start = self
+            .pause
+            .as_ref()
+            .map_or_else(Instant::now, |(_, paused)| *paused);
+        self.clock_paused_for = clock_start.saturating_duration_since(self.epoch);
+        self.clock = Some(Clock::from_save(state.clock));
+        if self.map_since.is_some() {
+            self.close_map(event_loop);
+        }
+        if let ViewContent::Stream {
+            travel: Some(travel),
+            map_ui,
+            ..
+        } = &mut self.content
+        {
+            travel.doors = doors;
+            if let Some(map) = map_ui {
+                map.restore_discovery(state);
+            }
+        }
+        self.save_event("save_loaded", Some(id), None);
+        self.update_control_flow(event_loop);
+        Ok(())
+    }
+
+    fn quick_save_or_load(&mut self, key: &NamedKey, event_loop: &ActiveEventLoop) {
+        let result = if *key == NamedKey::F7 {
+            if self.map_since.is_some() {
+                if let ViewContent::Stream {
+                    map_ui: Some(map), ..
+                } = &mut self.content
+                    && let Some(arrival) = map.cancel_journey()
+                {
+                    self.finish_travel(event_loop, arrival);
+                } else {
+                    self.close_map(event_loop);
+                }
+            }
+            self.save_game(None, "Auto-Save".into(), true)
+                .map(|()| "Game Saved Successfully")
+        } else {
+            let result = self
+                .saves
+                .as_ref()
+                .map_err(Clone::clone)
+                .and_then(save::Store::recent);
+            result
+                .and_then(|id| self.restore_game(&id, event_loop))
+                .map(|()| "Game Loaded Successfully")
+        };
+        match result {
+            Ok(message) => self.save_feedback(message),
+            Err(error) => self.menu_error(error),
+        }
+        self.update_control_flow(event_loop);
+    }
+
+    fn pause_event(&mut self, event_loop: &ActiveEventLoop, event: &WindowEvent) -> bool {
+        let scale = self.ui_scale();
+        let Some(((menu, _), theme)) = self.pause.as_mut().zip(self.pause_theme.as_ref()) else {
+            return false;
+        };
+        let view = self
+            .view
+            .as_ref()
+            .expect("pause input has an active window");
+        let size = view.window.inner_size();
+        let physical = [size.width, size.height];
+        let previous = self.settings;
+        let store = self.saves.as_ref().map_err(String::as_str);
+        let command = if let Some(options) = &mut menu.options {
+            let action = match event {
+                WindowEvent::KeyboardInput { event, .. }
+                    if event.state.is_pressed() && !event.repeat =>
+                {
+                    match event.logical_key {
+                        Key::Named(NamedKey::Escape) => options.back(),
+                        Key::Named(NamedKey::Enter) => options.activate(&mut self.settings),
+                        Key::Named(NamedKey::ArrowUp) => {
+                            options.adjust(-1);
+                            menu::Command::Stay
+                        }
+                        Key::Named(NamedKey::ArrowDown) => {
+                            options.adjust(1);
+                            menu::Command::Stay
+                        }
+                        _ => return true,
+                    }
+                }
+                WindowEvent::MouseInput {
+                    state: ElementState::Released,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    if let Some((x, y)) = self.cursor {
+                        let zoom = u32::from(self.settings.zoom);
+                        options.click(
+                            (x / zoom, y / zoom),
+                            logical_size(size, self.settings.zoom),
+                            &mut self.settings,
+                        )
+                    } else {
+                        menu::Command::Stay
+                    }
+                }
+                WindowEvent::MouseInput { .. }
+                | WindowEvent::KeyboardInput { .. }
+                | WindowEvent::MouseWheel { .. } => return true,
+                _ => return false,
+            };
+            if action == menu::Command::Continue {
+                menu.options = None;
+            }
+            MenuCommand::Stay
+        } else {
+            match event {
+                WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
+                    if let Key::Character(key) = &event.logical_key
+                        && matches!(key.as_str(), "[" | "]")
+                    {
+                        self.change_pause_scale(if key == "[" { -25 } else { 25 });
+                        self.menu_action(MenuCommand::Stay, event_loop);
+                        return true;
+                    }
+                    if event.repeat && !menu.editing() {
+                        return true;
+                    }
+                    menu.key(&event.logical_key, event.text.as_deref(), theme, store)
+                }
+                WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } => {
+                    if menu.hover(self.cursor, physical, scale, theme) {
+                        view.window.request_redraw();
+                    }
+                    return true;
+                }
+                WindowEvent::MouseInput {
+                    state,
+                    button: MouseButton::Left,
+                    ..
+                } => {
+                    menu.hover(self.cursor, physical, scale, theme);
+                    menu.mouse(
+                        state.is_pressed(),
+                        (self.cursor, physical, scale),
+                        theme,
+                        store,
+                    )
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let y = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => f64::from(*y),
+                        MouseScrollDelta::PixelDelta(point) => point.y,
+                    };
+                    menu.scroll(
+                        if y > 0. {
+                            -1
+                        } else if y < 0. {
+                            1
+                        } else {
+                            0
+                        },
+                        theme,
+                    );
+                    MenuCommand::Stay
+                }
+                WindowEvent::KeyboardInput { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::ModifiersChanged(_) => return true,
+                _ => return false,
+            }
+        };
+        self.record_settings(previous);
+        self.menu_action(command, event_loop);
+        true
     }
 
     fn open_map(&mut self, event_loop: &ActiveEventLoop) {
@@ -1003,8 +1417,11 @@ impl Viewer<'_> {
 
     fn update_control_flow(&self, event_loop: &ActiveEventLoop) {
         let real_now = Instant::now();
-        let clock = (self.clock.is_some() && self.pause.is_none())
-            .then(|| real_now + Clock::until_next_hour(self.game_elapsed(real_now)));
+        let clock = self
+            .clock
+            .as_ref()
+            .filter(|_| self.pause.is_none())
+            .map(|clock| real_now + clock.until_next_hour(self.game_elapsed(real_now)));
         let travel = match &self.content {
             ViewContent::Stream {
                 map_ui: Some(map), ..
@@ -1018,6 +1435,11 @@ impl Viewer<'_> {
             .chain(self.player_deadline)
             .chain(clock)
             .chain(travel)
+            .chain(
+                self.view
+                    .as_ref()
+                    .and_then(|view| view.save_status.as_ref().map(|(_, until)| *until)),
+            )
             .min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
@@ -1107,6 +1529,7 @@ impl Viewer<'_> {
             map_inset: None,
             inventory_inset: None,
             developer_status: None,
+            save_status: None,
             last_frame_time: Duration::ZERO,
             frame_presented_at: None,
             last_frame_interval: None,
@@ -1128,6 +1551,16 @@ impl ApplicationHandler for Viewer<'_> {
             return;
         }
         let now = Instant::now();
+        if let Some(view) = &mut self.view
+            && view
+                .save_status
+                .as_ref()
+                .is_some_and(|(_, until)| *until <= now)
+        {
+            view.save_status = None;
+            view.window.request_redraw();
+            self.update_control_flow(event_loop);
+        }
         if self.pause.is_some() {
             return;
         }
@@ -1315,10 +1748,27 @@ impl ApplicationHandler for Viewer<'_> {
         if self.view.as_ref().is_none_or(|view| view.window.id() != id) {
             return;
         }
-        if self.developer_event(event_loop, &event) || self.map_event(event_loop, &event) {
+        if self.developer_event(event_loop, &event) {
             return;
         }
         let playing = matches!(&self.content, ViewContent::Stream { world, .. } if world.playing());
+        if playing
+            && self.pause.is_none()
+            && let WindowEvent::KeyboardInput {
+                event: key,
+                is_synthetic: false,
+                ..
+            } = &event
+            && key.state.is_pressed()
+            && !key.repeat
+            && let Key::Named(named @ (NamedKey::F7 | NamedKey::F8)) = &key.logical_key
+        {
+            self.quick_save_or_load(named, event_loop);
+            return;
+        }
+        if self.map_event(event_loop, &event) {
+            return;
+        }
         let elapsed = self.play_elapsed(Instant::now());
         if playing {
             match &event {
@@ -1333,12 +1783,10 @@ impl ApplicationHandler for Viewer<'_> {
                     ..
                 } if event.state.is_pressed()
                     && !event.repeat
-                    && event.logical_key == Key::Named(NamedKey::Escape) =>
+                    && event.logical_key == Key::Named(NamedKey::Escape)
+                    && self.pause.is_none() =>
                 {
-                    if let Some((menu, _)) = &mut self.pause {
-                        let command = menu.back();
-                        self.menu_action(command, event_loop);
-                    } else if let ViewContent::Stream { hud: Some(hud), .. } = &mut self.content
+                    if let ViewContent::Stream { hud: Some(hud), .. } = &mut self.content
                         && (hud.cancel_inventory_drag() || hud.close_inventory())
                     {
                         self.view.as_ref().unwrap().window.request_redraw();
@@ -1349,50 +1797,11 @@ impl ApplicationHandler for Viewer<'_> {
                 }
                 _ => {}
             }
-            if let Some((menu, _)) = &mut self.pause {
-                let previous = self.settings;
-                let command = match &event {
-                    WindowEvent::KeyboardInput { event, .. } => {
-                        if !event.state.is_pressed() || event.repeat {
-                            return;
-                        }
-                        match event.logical_key {
-                            Key::Named(NamedKey::ArrowUp) => {
-                                menu.adjust(-1);
-                                MenuCommand::Stay
-                            }
-                            Key::Named(NamedKey::ArrowDown) => {
-                                menu.adjust(1);
-                                MenuCommand::Stay
-                            }
-                            Key::Named(NamedKey::Enter) => menu.activate(&mut self.settings),
-                            _ => return,
-                        }
-                    }
-                    WindowEvent::MouseInput {
-                        state: ElementState::Pressed,
-                        button: MouseButton::Left,
-                        ..
-                    } => {
-                        let Some(cursor) = self.cursor else { return };
-                        let size = self.view.as_ref().unwrap().window.inner_size();
-                        let scale = u32::from(self.settings.zoom);
-                        menu.click(
-                            (cursor.0 / scale, cursor.1 / scale),
-                            logical_size(size, self.settings.zoom),
-                            &mut self.settings,
-                        )
-                    }
-                    WindowEvent::MouseInput { .. }
-                    | WindowEvent::MouseWheel { .. }
-                    | WindowEvent::ModifiersChanged(_) => return,
-                    _ => {
-                        self.render_event(event_loop, id, event, elapsed);
-                        return;
-                    }
-                };
-                self.record_settings(previous);
-                self.menu_action(command, event_loop);
+            if self.pause.is_some() && self.pause_event(event_loop, &event) {
+                return;
+            }
+            if self.pause.is_some() {
+                self.render_event(event_loop, id, event, elapsed);
                 return;
             }
         }
@@ -1973,10 +2382,12 @@ impl Viewer<'_> {
                         if let (Some(hud), Some(hours)) = (hud.as_mut(), clock_hours) {
                             hud.set_game_time(hours);
                         }
-                        let menu = self
-                            .pause
-                            .as_ref()
-                            .map(|(menu, _)| menu.frame(self.settings, "VULKAN"));
+                        let scale = hud.as_ref().map_or(self.pause_scale, |hud| hud.scale());
+                        let menu = self.pause.as_ref().zip(self.pause_theme.as_mut()).map(
+                            |((menu, _), theme)| {
+                                theme.render(menu, [size.width, size.height], scale, self.settings)
+                            },
+                        );
                         if let (Some(map_ui), Some(travel), Some((tile, town))) = (
                             map_ui.as_mut(),
                             travel.as_ref(),
@@ -2106,7 +2517,7 @@ fn inventory_inset(width: u32, height: u32) -> Arc<LoadedFrame> {
 struct FrameOptions<'a> {
     elapsed: Duration,
     settings: Settings,
-    menu: Option<&'a Arc<arcanum_rs::content::art::LoadedFrame>>,
+    menu: Option<&'a classic_menu::Frame>,
     hud: Option<&'a mut Hud>,
     developer: Option<&'a mut Developer>,
     cursor: Option<(u32, u32)>,
@@ -2212,17 +2623,11 @@ impl WindowSurface {
             )
         });
         let developer = developer.as_deref();
-        let draws = scene_draws(world, camera, viewport, elapsed, settings)
-            .chain(
-                developer
-                    .into_iter()
-                    .flat_map(|dev| dev.world_marks(world, camera, viewport)),
-            )
-            .chain(menu.map(|asset| WorldDraw {
-                asset,
-                sprite: menu::layer(asset, viewport),
-                modulation: Modulation::Unlit,
-            }));
+        let draws = scene_draws(world, camera, viewport, elapsed, settings).chain(
+            developer
+                .into_iter()
+                .flat_map(|dev| dev.world_marks(world, camera, viewport)),
+        );
         if trace {
             eprintln!(
                 "GPU world camera {:?} animation {}ms schedule {:?} order {:?} shading {:?}",
@@ -2239,6 +2644,13 @@ impl WindowSurface {
             draws,
             hud.into_iter()
                 .flat_map(|hud| hud.draws(settings.run))
+                .chain(menu.into_iter().flat_map(classic_menu::Frame::draws))
+                .chain(
+                    self.save_status
+                        .iter()
+                        .filter(|(_, until)| menu.is_none() && Instant::now() < *until)
+                        .map(|(asset, _)| OverlayDraw::at(asset, (12, 52))),
+                )
                 .chain(
                     self.developer_status
                         .iter()

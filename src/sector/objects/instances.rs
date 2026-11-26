@@ -49,7 +49,9 @@ pub(super) fn field_type(category: u32, index: usize) -> Option<u8> {
     layout.get(index / 32)?.get(index % 32).copied()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub(crate) struct OriginalId {
     pub kind: u16,
     pub payload: [u8; 16],

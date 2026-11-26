@@ -1520,20 +1520,54 @@ fn show_world(
         } else {
             None
         };
+        let pause_theme = if playing {
+            let source = config
+                .ui
+                .pause
+                .as_deref()
+                .map_or_else(viewer::ThemeSource::pause, |path| {
+                    theme_package(resolve(path))
+                });
+            let mut vfs = inspection_vfs(game, mount_options, policy)?;
+            Some(Box::new(viewer::Classic::load(&source, &mut vfs).map_err(
+                |error| format!("Pause UI {}: {error}", source.path().display()),
+            )?))
+        } else {
+            None
+        };
         let travel: Option<viewer::TravelLoader<'_>> = if playing {
             Some(Box::new(
-                move |current, previous, dst, facing, viewport, current_hour, bypass| {
+                move |current, previous, dst, facing, viewport, current_hour, mode| {
                     let load = || -> Result<_, Box<dyn Error>> {
                         let mut vfs = inspection_vfs(game, mount_options, policy)?;
                         let catalog = content::maps::Catalog::load(&mut vfs)?;
                         let id = dst.map.map(|id| id.to_string());
-                        let map = catalog.find(id.as_deref().unwrap_or(current))?;
+                        let map = if matches!(&mode, viewer::LocationMode::Save { .. }) {
+                            catalog
+                                .maps
+                                .iter()
+                                .find(|map| map.directory == current)
+                                .ok_or("Saved map is unavailable")?
+                        } else {
+                            catalog.find(id.as_deref().unwrap_or(current))?
+                        };
                         let files = map.files(&mut vfs)?;
                         let center = files.center(Some(dst.tile))?;
                         let region = files.bounds();
                         let mut camera =
                             region.camera(center).ok_or("invalid destination bounds")?;
                         camera.follow((0, 0));
+                        if let viewer::LocationMode::Save { state, .. } = &mode {
+                            for (directory, saved_doors) in &state.doors {
+                                if !catalog.maps.iter().any(|map| &map.directory == directory) {
+                                    return Err(format!(
+                                        "Saved door map {directory:?} is unavailable"
+                                    )
+                                    .into());
+                                }
+                                saved_doors.validate(&mut vfs, directory)?;
+                            }
+                        }
                         let mut world = content::world::WorldStream::new(
                             vfs,
                             map.directory.clone(),
@@ -1543,16 +1577,26 @@ fn show_world(
                         if let Some(hour) = hour {
                             world = world.with_lighting(current_hour.unwrap_or(hour))?;
                         }
-                        world = world
-                            .with_arriving_player(previous)?
-                            .with_collision_bypass(bypass);
+                        let restore = matches!(&mode, viewer::LocationMode::Save { .. });
+                        world = match mode {
+                            viewer::LocationMode::Travel { bypass } => world
+                                .with_arriving_player(previous)?
+                                .with_collision_bypass(bypass),
+                            viewer::LocationMode::Save { state, doors } => {
+                                world.with_saved_player(doors, &state.objects, &catalog)?
+                            }
+                        };
                         world.reuse_mobile_discovery(previous);
                         if debug {
                             world = world.with_object_audit();
                         }
                         world.set_arrival_facing(facing);
                         world.prepare(&camera, viewport)?;
-                        world.validate_arrival(center)?;
+                        if restore {
+                            world.validate_saved_position(center)?;
+                        } else {
+                            world.validate_arrival(center)?;
+                        }
                         Ok((map.directory.clone(), world, camera))
                     };
                     load().map_err(|error| error.to_string())
@@ -1587,6 +1631,8 @@ fn show_world(
                         run: config.input.run,
                     },
                     preferences,
+                    pause_theme,
+                    ui_scale: ui_scale.unwrap_or(100),
                 },
             },
         )

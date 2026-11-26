@@ -26,7 +26,7 @@ const DIRECTIONS: [Sector; 8] = [
 const LIMIT: usize = 5000;
 pub const INITIAL_DELAY: Duration = Duration::from_millis(50);
 pub const STEP_DELAY: Duration = Duration::from_millis(62);
-const HOUR: u64 = 3_600_000;
+const REAL_HOUR: u64 = 3_600_000 / 8;
 
 pub fn sector_center(pixel: Point, width: u32) -> Option<Point> {
     Some((
@@ -56,7 +56,8 @@ pub fn starting_hour(vfs: &mut Vfs) -> Result<u8, Box<dyn StdError>> {
 }
 
 pub struct Clock {
-    start_hour: u8,
+    start_hour: u64,
+    phase_ms: u64,
     travel_hours: u64,
     hour_offset: i64,
 }
@@ -64,7 +65,8 @@ pub struct Clock {
 impl Clock {
     pub fn new(start_hour: u8) -> Self {
         Self {
-            start_hour,
+            start_hour: u64::from(start_hour),
+            phase_ms: 0,
             travel_hours: 0,
             hour_offset: 0,
         }
@@ -80,9 +82,10 @@ impl Clock {
     }
 
     pub fn hours(&self, play: Duration) -> u64 {
-        let normal = u64::from(self.start_hour)
+        let normal = self
+            .start_hour
             .saturating_add(self.travel_hours)
-            .saturating_add((play.as_millis() * 8 / u128::from(HOUR)) as u64);
+            .saturating_add((self.elapsed_ms(play) / u128::from(REAL_HOUR)) as u64);
         normal.saturating_add_signed(self.hour_offset)
     }
 
@@ -90,9 +93,32 @@ impl Clock {
         (self.hours(play) % 24) as u8
     }
 
-    pub fn until_next_hour(play: Duration) -> Duration {
-        const REAL_HOUR: u64 = HOUR / 8;
-        Duration::from_millis(REAL_HOUR - (play.as_millis() % u128::from(REAL_HOUR)) as u64)
+    fn elapsed_ms(&self, play: Duration) -> u128 {
+        play.as_millis() + u128::from(self.phase_ms)
+    }
+
+    pub fn for_save(&self, play: Duration) -> (u64, u64) {
+        (
+            self.hours(play),
+            (self.elapsed_ms(play) % u128::from(REAL_HOUR)) as u64,
+        )
+    }
+
+    pub fn from_save((hours, phase_ms): (u64, u64)) -> Self {
+        Self {
+            start_hour: hours,
+            phase_ms,
+            travel_hours: 0,
+            hour_offset: 0,
+        }
+    }
+
+    pub(crate) fn valid_phase(phase_ms: u64) -> bool {
+        phase_ms < REAL_HOUR
+    }
+
+    pub fn until_next_hour(&self, play: Duration) -> Duration {
+        Duration::from_millis(REAL_HOUR - self.for_save(play).1)
     }
 }
 
@@ -367,7 +393,7 @@ mod tests {
     fn set_time_keeps_day_and_elapsed_progression() {
         let mut clock = Clock::new(15);
         clock.step_travel(25);
-        let elapsed = Duration::from_millis(HOUR / 8);
+        let elapsed = Duration::from_millis(REAL_HOUR);
         assert_eq!(clock.hours(elapsed), 41);
         clock.set_hour(2, elapsed);
         assert_eq!(clock.hours(elapsed), 26);
@@ -406,7 +432,7 @@ mod tests {
         assert_eq!(clock.hour(Duration::ZERO), 18);
         assert_eq!(clock.hour(Duration::from_secs(6 * 450)), 0);
         assert_eq!(
-            Clock::until_next_hour(Duration::from_secs(449)),
+            Clock::new(0).until_next_hour(Duration::from_secs(449)),
             Duration::from_secs(1)
         );
     }

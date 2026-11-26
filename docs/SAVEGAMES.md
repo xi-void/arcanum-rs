@@ -1,0 +1,56 @@
+# Native savegames
+
+Play starts at the original Crash Site. Press **Escape** or click the HUD menu
+button to open the Classic pause menu. Choose **Save Game**, select **New**,
+type a name, and click the right arrow or press **Enter**. Select an existing
+slot and confirm to overwrite it under the same name. **Load Game** uses the
+same slot list. Use the red delete button or **Delete** and confirm to remove
+the selected save. The info toggle hides or shows the name, location and game
+time over the world preview. **Quit Game** confirms and exits the application.
+
+**F7** writes the fixed **Auto-Save** slot during play. **F8** loads the newest
+save by file modification time, including named saves. These are the stock
+key bindings in the CE reference. The unofficial patch moves quickload to F9.
+The native engine uses F8.
+
+On Linux, slots live in `$XDG_DATA_HOME/arcanum-rs/saves/`, with
+`$HOME/.local/share/arcanum-rs/saves/` as the fallback. The directory is
+created on the first write and is separate from configuration and installed
+game files. Keep the same original data and gameplay mods when loading a slot.
+
+## Format version 1
+
+Each slot is a single `.ars` file. Its name is an engine-generated identifier.
+`auto.ars` is the quicksave slot. The user-facing name is stored in metadata.
+
+| Section | Encoding |
+| --- | --- |
+| Signature | Eight ASCII bytes, `ARCRSAVE` |
+| Header | Five little-endian unsigned 32-bit words for version, metadata byte count, preview byte count, state byte count and CRC-32 |
+| Metadata | UTF-8 JSON with `name`, `location`, total game `hours` and `saved_at_ms` (Unix epoch milliseconds). Additional metadata fields may be added. |
+| Preview | A 468 × 300 opaque RGB8 image, top-to-bottom row order, captured through the Vulkan world compositor. A zero-length preview is accepted by the format. |
+| State | UTF-8 JSON with map directory, committed tile and facing, total game hours and elapsed milliseconds within the current hour, character data, item transactions, door changes, discovered area IDs and explored town-map pixels |
+| CRC-32 | IEEE CRC-32 over the three sections, stored in the header |
+
+Object state carries changed item IDs, original-record or prototype references,
+owners, grid slots, equipment slots, stack quantities, drop positions and
+merged-stack links. Generated IDs retain the allocator state. Door IDs use
+the original map directory, sector and record index. The engine rebuilds
+sector caches and GPU resources from the installed data during restoration.
+
+Writes sync a complete temporary file in the save directory before publishing
+it atomically. Loads validate the header, checksum and saved state, rebuild
+item and character resources from the mounted VFS, and prepare the destination
+before replacing the running session. The destination uses the saved committed
+tile. Routes, in-progress animations, camera settings and UI panels are
+transient. Door changes restore to their settled open or closed state.
+
+The format is native to Arcanum-RS. Portrait, level and quest summary fields are
+intentionally empty while their gameplay systems are pending.
+
+
+The Classic package uses CE's `mainmenu_ui.c` in-play button positions,
+save/load content rectangles and interface ART IDs 329, 745–748.
+The pause labels use `Morph30Font.ART` (327). Slot text uses
+`Flare12Font.ART` (229). The confirmation geometry comes from TIG's
+`window.c`. Each asset is resolved through the existing VFS.

@@ -18,7 +18,7 @@ pub(super) const COLUMNS: usize = 10;
 pub(super) const PLAYER_ROWS: usize = 12;
 pub(super) const CONTAINER_ROWS: usize = 96;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub(super) enum Owner {
     Player,
     Container(String, OriginalId),
@@ -35,7 +35,7 @@ impl Owner {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(super) enum Place {
     Ground(String, Tile),
     Owned(Owner),

@@ -172,6 +172,49 @@ impl MapUi {
         self.world.size().0
     }
 
+    pub(super) fn location_name(&self, directory: &str) -> Option<&str> {
+        let map = self
+            .atlas
+            .catalog
+            .maps
+            .iter()
+            .find(|map| map.directory == directory)?;
+        Some(
+            map.area
+                .and_then(|id| self.atlas.areas.get(&id))
+                .map_or(&map.name, |area| &area.name),
+        )
+    }
+
+    pub(super) fn save_discovery(&self, state: &mut arcanum_rs::content::save::State) {
+        state.discovered.clone_from(&self.atlas.discovered);
+        state.explored.clone_from(&self.explored);
+    }
+
+    pub(super) fn restore_discovery(&mut self, state: arcanum_rs::content::save::State) {
+        self.close();
+        self.atlas.discovered = state.discovered;
+        self.atlas.destination = None;
+        self.explored = state.explored;
+        self.origin_map = None;
+        self.tile = None;
+        self.invalidate_sheet();
+    }
+
+    pub(super) fn validate_discovery(
+        &self,
+        state: &arcanum_rs::content::save::State,
+    ) -> Result<(), String> {
+        if state
+            .discovered
+            .iter()
+            .any(|id| !self.atlas.areas.contains_key(id))
+        {
+            return Err("Save refers to unavailable world map discoveries".into());
+        }
+        Ok(())
+    }
+
     pub(super) fn discover_all(&mut self) -> usize {
         self.atlas.discover_all();
         self.dirty = true;
