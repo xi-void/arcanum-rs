@@ -270,6 +270,10 @@ pub struct InteractiveWorld {
     sounds: std::collections::VecDeque<SoundEvent>,
     transition: Option<(Destination, u8)>,
     pending_use: Option<WorldOrder>,
+    pub(super) npc_request: Option<WorldOrder>,
+    pub(super) dialogue: Option<super::super::dialogue::Conversation>,
+    pub(super) met_npcs: BTreeSet<(String, String)>,
+    pub(super) dialogue_status: Option<serde_json::Value>,
     container_request: Option<crate::sector::objects::OriginalId>,
     pickup_request: Option<crate::sector::objects::OriginalId>,
     route_goal: Option<((u32, u32), bool)>,
@@ -324,6 +328,10 @@ impl InteractiveWorld {
             sounds: Default::default(),
             transition: None,
             pending_use: None,
+            npc_request: None,
+            dialogue: None,
+            dialogue_status: None,
+            met_npcs: BTreeSet::new(),
             container_request: None,
             pickup_request: None,
             route_goal: None,
@@ -642,6 +650,12 @@ impl InteractiveWorld {
         if !self.cache.collision_disabled
             && let Some(key) = self.cache.pick(point, self.reference, elapsed)
         {
+            if matches!(
+                self.cache.target(key).map(|target| &target.action),
+                Some(interaction::Action::Npc(_))
+            ) {
+                self.dialogue_status = None;
+            }
             let steps = self.cache.approach(key, run);
             self.pending_use = steps.map(|_| key);
             if steps.is_none() {
@@ -702,6 +716,7 @@ impl InteractiveWorld {
 
     pub fn cancel_player_route(&mut self) {
         self.pending_use = None;
+        self.npc_request = None;
         self.route_goal = None;
         self.wait_for_door = None;
         if let Some(player) = &mut self.cache.player {
@@ -747,6 +762,7 @@ impl InteractiveWorld {
             });
         serde_json::json!({
             "hovered_item":hovered_item,
+            "hovered_npc":self.hovered_npc(),
             "moving":self.player_moving(),
             "destination":self.route_goal.map(|goal|goal.0).or_else(||self.cache.player.as_ref()?.route_destination()),
             "pending_interaction":self.pending_use.map(|key|key.1.6.unwrap_or(key.1.5)),
@@ -864,6 +880,10 @@ impl InteractiveWorld {
             && let Some(key) = self.pending_use.take()
         {
             match self.cache.target(key).map(|target| &target.action) {
+                Some(interaction::Action::Npc(_)) => {
+                    self.npc_request = Some(key);
+                    return true;
+                }
                 Some(interaction::Action::Container(id)) => {
                     self.container_request = Some(*id);
                     return true;

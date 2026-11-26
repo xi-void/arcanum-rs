@@ -49,6 +49,8 @@ by its absolute path. An executable on your `PATH` can be launched with
 to run there. A new click replaces the route after the current step reaches
 the next tile center. Left-click an original door or staircase to approach
 and use it. **Mouse wheel** zooms from 1× to 3×. Press **0** to reset.
+Hover an NPC for their description and left-click to talk. Click a response
+to continue or press **Escape** to close the conversation. [NPC dialogue and voice packs](docs/DIALOGUE.md)
 **Escape** opens the Classic pause menu. Choose Save Game, Load Game,
 Options, Quit Game or Continue. **F7** writes the quicksave and **F8** loads
 the newest save. [Native savegames](docs/SAVEGAMES.md)

@@ -624,6 +624,11 @@ impl Viewer<'_> {
         view.window.set_title(&format!("Arcanum-RS | {map} play"));
         view.developer_status = bypass.then(|| menu::developer_status("COLLISION OFF"));
         travel.map = map;
+        if world.conversation().is_some()
+            && let Some(audio) = &self.audio
+        {
+            audio.voice(None);
+        }
         **world = next;
         if let Some(hud) = hud {
             hud.close_inventory();
@@ -1690,6 +1695,40 @@ impl ApplicationHandler for Viewer<'_> {
                                 *direction = (after.0 - before.0, after.1 - before.1);
                             }
                         }
+                        if let Some(reader) = inventory_reader.as_mut()
+                            && let Some(result) = reader.start_npc_interaction(world)
+                        {
+                            match result {
+                                Ok(())
+                                    if hud.as_ref().is_some_and(|hud| hud.supports_dialogue()) =>
+                                {
+                                    if let Some(hud) = hud.as_mut() {
+                                        hud.close_inventory();
+                                        hud.cancel_press();
+                                    }
+                                    self.navigation = Navigation::default();
+                                    world.update_hover(None, (0, 0), camera, elapsed);
+                                    if let Some(audio) = &self.audio {
+                                        audio.voice(
+                                            world
+                                                .conversation()
+                                                .and_then(|s| s.turn.voice.as_deref()),
+                                        );
+                                    }
+                                }
+                                Ok(()) => {
+                                    world.close_dialogue("theme_has_no_dialogue_components");
+                                    view.window.set_title(
+                                        "Arcanum-RS | Selected UI has no dialogue components",
+                                    );
+                                }
+                                Err(error) => {
+                                    eprintln!("Dialogue: {error}");
+                                    view.window.set_title(&format!("Arcanum-RS | {error}"));
+                                }
+                            }
+                            redraw = true;
+                        }
                         if let Some(target) = world.take_container_request()
                             && let (Some(hud), Some(reader)) =
                                 (hud.as_mut(), inventory_reader.as_mut())
@@ -1842,6 +1881,9 @@ impl ApplicationHandler for Viewer<'_> {
             return;
         }
         let playing = matches!(&self.content, ViewContent::Stream { world, .. } if world.playing());
+        if self.dialogue_event(&event) {
+            return;
+        }
         if playing
             && self.pause.is_none()
             && let WindowEvent::KeyboardInput {
@@ -2145,6 +2187,88 @@ impl ApplicationHandler for Viewer<'_> {
 }
 
 impl Viewer<'_> {
+    fn dialogue_event(&mut self, event: &WindowEvent) -> bool {
+        let ViewContent::Stream {
+            world,
+            hud: Some(hud),
+            inventory_reader: Some(reader),
+            ..
+        } = &mut self.content
+        else {
+            return false;
+        };
+        if world.conversation().is_none() {
+            return false;
+        }
+        let view = self.view.as_ref().unwrap();
+        let mut sync_voice = false;
+        let handled = match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = (position.x >= 0. && position.y >= 0.)
+                    .then_some((position.x as u32, position.y as u32));
+                hud.hover(self.cursor);
+                true
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.cursor = None;
+                hud.hover(None);
+                true
+            }
+            WindowEvent::KeyboardInput {
+                event: key,
+                is_synthetic: false,
+                ..
+            } if key.state.is_pressed() && !key.repeat => {
+                match &key.logical_key {
+                    Key::Named(NamedKey::Escape) => {
+                        world.close_dialogue("cancelled");
+                        sync_voice = true;
+                    }
+                    Key::Character(ch) if ch == "[" || ch == "]" => {
+                        let previous = hud.scale();
+                        hud.clear_dialogue_choices();
+                        hud.adjust_scale(if ch == "[" { -25 } else { 25 });
+                        if hud.scale() != previous
+                            && let Some(preferences) = &mut self.preferences
+                        {
+                            preferences.set("ui", "scale", i64::from(hud.scale()));
+                        }
+                    }
+                    _ => {}
+                }
+                true
+            }
+            WindowEvent::MouseInput {
+                button: MouseButton::Left,
+                state,
+                ..
+            } if state.is_pressed() => {
+                if let Some(index) = self.cursor.and_then(|point| hud.dialogue_choice(point)) {
+                    sync_voice = reader.choose_dialogue_response(world, index);
+                    if sync_voice {
+                        hud.clear_dialogue_choices();
+                    }
+                }
+                true
+            }
+            WindowEvent::KeyboardInput { .. }
+            | WindowEvent::MouseInput { .. }
+            | WindowEvent::MouseWheel { .. } => true,
+            WindowEvent::Resized { .. } | WindowEvent::ScaleFactorChanged { .. } => {
+                hud.clear_dialogue_choices();
+                false
+            }
+            _ => false,
+        };
+        if sync_voice && let Some(audio) = &self.audio {
+            audio.voice(world.conversation().and_then(|s| s.turn.voice.as_deref()));
+        }
+        if handled {
+            view.window.request_redraw();
+        }
+        handled
+    }
+
     fn render_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -2507,6 +2631,7 @@ impl Viewer<'_> {
                                 menu: menu.as_ref(),
                                 cursor: self.cursor,
                                 hud: hud.as_deref_mut(),
+                                inventory_reader: inventory_reader.as_deref(),
                                 developer: self.developer.as_mut(),
                             },
                         )
@@ -2612,6 +2737,7 @@ struct FrameOptions<'a> {
     settings: Settings,
     menu: Option<&'a classic_menu::Frame>,
     hud: Option<&'a mut Hud>,
+    inventory_reader: Option<&'a InventoryReader>,
     developer: Option<&'a mut Developer>,
     cursor: Option<(u32, u32)>,
 }
@@ -2631,6 +2757,7 @@ impl WindowSurface {
             settings,
             menu,
             hud,
+            inventory_reader,
             mut developer,
             cursor,
         } = options;
@@ -2654,7 +2781,15 @@ impl WindowSurface {
         let frame_start = Instant::now();
         let mut hud = hud.filter(|_| menu.is_none());
         if let Some(hud) = hud.as_deref_mut() {
-            hud.layout((size.width, size.height));
+            let npc_at = world.dialogue_anchor().map(|(x, y)| {
+                let (cx, cy) = camera.position();
+                let zoom = i32::from(zoom);
+                (
+                    (x - cx) * zoom + size.width as i32 / 2,
+                    (y - cy) * zoom + size.height as i32 / 2,
+                )
+            });
+            hud.set_dialogue(world.conversation(), npc_at, (size.width, size.height));
             hud.hover(cursor);
         }
         let cursor = cursor.filter(|&point| {
@@ -2665,12 +2800,18 @@ impl WindowSurface {
             let scale = u32::from(zoom);
             world.update_hover(
                 cursor
-                    .filter(|_| menu.is_none())
+                    .filter(|_| menu.is_none() && world.conversation().is_none())
                     .map(|(x, y)| (x / scale, y / scale)),
                 viewport,
                 camera,
                 elapsed,
             );
+        }
+        if world.conversation().is_none()
+            && let Some(hud) = hud.as_deref_mut()
+        {
+            let context = inventory_reader.and_then(|reader| reader.npc_context(world));
+            hud.set_label(hud::Binding::NpcContext, context.as_deref().unwrap_or(""));
         }
         let start = trace.then(Instant::now);
         let pose = world.update_walk(elapsed);

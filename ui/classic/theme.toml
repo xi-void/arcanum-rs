@@ -657,3 +657,91 @@ offset = [261, 358]
 size = [23, 35]
 binding = "inventory-defense"
 font = "inventory"
+
+[[hud]]
+id = "dialogue-options"
+anchor = "bottom"
+size = [400, 100]
+fill = [0, 0, 0, 180]
+dialogue_only = true
+capture = true
+
+[[hud]]
+id = "dialogue-speaker"
+anchor = "center"
+size = [200, 200]
+dialogue_only = true
+binding = "dialogue-text"
+font = "inventory"
+text_shadow = [0, 0, 0, 255]
+align = "center"
+wrap = true
+
+[[hud]]
+id = "npc-context"
+parent = "bottom"
+offset = [211, 66]
+size = [383, 84]
+binding = "npc-context"
+font = "inventory"
+wrap = true
+
+[[hud]]
+id = "dialogue-response-1"
+parent = "dialogue-options"
+offset = [6, 3]
+size = [388, 17]
+binding = "dialogue-response"
+response = 0
+font = "inventory"
+hover_text_color = [255, 255, 0, 255]
+disabled_text_color = [150, 150, 150, 255]
+text_shadow = [0, 0, 0, 255]
+
+[[hud]]
+id = "dialogue-response-2"
+parent = "dialogue-options"
+offset = [6, 23]
+size = [388, 17]
+binding = "dialogue-response"
+response = 1
+font = "inventory"
+hover_text_color = [255, 255, 0, 255]
+disabled_text_color = [150, 150, 150, 255]
+text_shadow = [0, 0, 0, 255]
+
+[[hud]]
+id = "dialogue-response-3"
+parent = "dialogue-options"
+offset = [6, 43]
+size = [388, 17]
+binding = "dialogue-response"
+response = 2
+font = "inventory"
+hover_text_color = [255, 255, 0, 255]
+disabled_text_color = [150, 150, 150, 255]
+text_shadow = [0, 0, 0, 255]
+
+[[hud]]
+id = "dialogue-response-4"
+parent = "dialogue-options"
+offset = [6, 63]
+size = [388, 17]
+binding = "dialogue-response"
+response = 3
+font = "inventory"
+hover_text_color = [255, 255, 0, 255]
+disabled_text_color = [150, 150, 150, 255]
+text_shadow = [0, 0, 0, 255]
+
+[[hud]]
+id = "dialogue-response-5"
+parent = "dialogue-options"
+offset = [6, 83]
+size = [388, 17]
+binding = "dialogue-response"
+response = 4
+font = "inventory"
+hover_text_color = [255, 255, 0, 255]
+disabled_text_color = [150, 150, 150, 255]
+text_shadow = [0, 0, 0, 255]

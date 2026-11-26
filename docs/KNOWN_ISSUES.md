@@ -1,6 +1,6 @@
 # Arcanum-RS — Known Issues
 
-Baseline: Milestone 68-R (audio and Classic Options). Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
+Baseline: Milestone 69-R (NPC interaction and dialogue foundation). Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
 
 ## Triage
 
@@ -11,6 +11,47 @@ Baseline: Milestone 68-R (audio and Classic Options). Update this register as mi
 Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep reproduction steps, evidence and dependencies current. Do not mark an issue resolved without verifying the affected production path.
 
 ## Open issues
+
+### DLG-001 — Dialogue requires unimplemented script and game state
+
+- **Priority:** P2 | **Status:** Deferred
+- Full entry handlers, dialogue effects, negative destinations, alternate
+  dialogue overrides and script continuations require the original script
+  interpreter and its gameplay dependencies. For example, the Bates house
+  guards use a script with equipment and combat checks and floating lines.
+- Quest, global script variables, local counters, reputation, skill, encounter and
+  party checks remain unresolved. Initial reaction uses the original base
+  and available character modifiers. Persistent reaction history and live AI changes
+  are outside the current runtime.
+- Some greetings and response directives need class-, race-, quest- or
+  service-specific dialogue. Talk-triggered scripts, trade and companion
+  recruitment are deferred. Scriptless NPCs have no conversation panel.
+
+### DLG-002 — Generated greetings and long-response layout
+
+- **Priority:** P2 | **Status:** Deferred
+- Plain `G:` greetings and several original generic response directives
+  use installed tables. Variant selection currently uses the first matching
+  entry. Reputation, complex greeting branches and alternate dialogue
+  overrides require the corresponding systems.
+- Classic uses five fixed-width response rows. CE can widen the response
+  region for unusually long lines. The current HUD clips long responses.
+- Talk eligibility uses available object, stat and flag data. Temporary
+  effects, hostility scripts, and scripted or autonomous NPC behavior need
+  their respective runtime systems.
+
+### MAP-003 — Void Islands town-map resource rejected
+
+- **Priority:** P2 | **Status:** Needs reproduction
+- M69-R native fixture discovery reported an invalid version, ID or length
+  for `townmap/void-islands/void-islands.tmi` from `Arcanum.PATCH9`.
+  The Void map loaded. Town-map interpretation remains to be investigated.
+
+### AUD-002 — Unknown sound scheme ID 29
+
+- **Priority:** P2 | **Status:** Needs reproduction
+- M69-R native fixture discovery reported SchemeIndex ID 29 on Void and
+  Tulla Interior – Battle – Morph. Map playback and dialogue testing continued.
 
 ### UI-009 — Quit Game exits the application
 

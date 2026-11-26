@@ -292,6 +292,7 @@ struct Status {
     hour: u8,
     paused: bool,
     loops: Vec<PathKey>,
+    active_voice: Option<String>,
     recent: VecDeque<Played>,
     resource_reads: u64,
     effect_cache_hits: u64,
@@ -313,6 +314,7 @@ enum Command {
         reset: bool,
     },
     Volumes(Volumes),
+    Voice(Option<String>),
     Pause(bool),
     Effect {
         id: i32,
@@ -376,6 +378,10 @@ impl Audio {
                 reset,
             });
         }
+    }
+
+    pub(super) fn voice(&self, path: Option<&str>) {
+        self.send(Command::Voice(path.map(str::to_owned)));
     }
 
     pub(super) fn volumes(&self, levels: Volumes) {
@@ -507,6 +513,20 @@ impl Mixer<'_> {
                     self.map = map;
                 }
                 self.set_schemes(next, reset);
+            }
+            Command::Voice(path) => {
+                self.clips.retain(|clip| clip.key.1 != Channel::Voice);
+                if let Some(path) = path {
+                    self.play(Request {
+                        path,
+                        channel: Channel::Voice,
+                        volume: 100,
+                        balance: 50,
+                        mode: Mode::Random,
+                        world: true,
+                        id: None,
+                    });
+                }
             }
             Command::Volumes(levels) => {
                 self.levels = levels;
@@ -689,7 +709,8 @@ impl Mixer<'_> {
     fn play(&mut self, request: Request) {
         let path = &request.path;
         if self.failed.contains(path)
-            || request.mode == Mode::Random
+            || request.channel == Channel::Effects
+                && request.mode == Mode::Random
                 && self
                     .clips
                     .iter()
@@ -730,7 +751,8 @@ impl Mixer<'_> {
         let pan = (f32::from(balance) - 50.) / 50.;
         let stereo = || vec![1. - pan.max(0.), 1. + pan.min(0.)];
         let mount;
-        if mode == Mode::Random
+        if channel == Channel::Effects
+            && mode == Mode::Random
             && let Some(index) = self.cached.iter().position(|(key, _, _)| *key == path)
         {
             let cached = self.cached.remove(index).unwrap();
@@ -753,7 +775,8 @@ impl Mixer<'_> {
                 sink.append(decoder.build_looped()?.fade_in(FADE));
             } else {
                 let decoder = decoder.build()?;
-                if mode == Mode::Random
+                if channel == Channel::Effects
+                    && mode == Mode::Random
                     && decoder
                         .total_duration()
                         .is_some_and(|time| time <= MAX_CACHED_EFFECT_DURATION)
@@ -812,6 +835,11 @@ impl Mixer<'_> {
         status.paused = self.paused;
         status.resource_reads = self.vfs.read_attempts();
         status.loops.clear();
+        status.active_voice = self
+            .clips
+            .iter()
+            .find(|clip| clip.key.1 == Channel::Voice && !clip.sink.empty())
+            .map(|clip| clip.key.0.clone());
         status.loops.extend(
             self.clips
                 .iter()

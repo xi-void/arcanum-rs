@@ -11,6 +11,7 @@ pub(super) enum Action {
     Door(Door),
     Container(crate::sector::objects::OriginalId),
     Pickup(crate::sector::objects::OriginalId),
+    Npc(crate::sector::objects::OriginalId),
     Unsupported(String),
 }
 
@@ -448,11 +449,18 @@ impl SectorCache {
         Some(states.cell(sector, tile, sector.collision.as_ref()?.cell(tile)))
     }
 
-    pub(super) fn door_frame<'a>(
+    pub(super) fn interaction_frame<'a>(
         &'a self,
         raster: &Raster,
         elapsed: Duration,
     ) -> Option<(&'a Arc<LoadedFrame>, SpriteDraw<'a>)> {
+        if let Some((_, frame)) = self
+            .speaking_pose
+            .as_ref()
+            .filter(|(key, _)| *key == raster.key)
+        {
+            return Some((frame, raster.frame_draw(frame)));
+        }
         raster.key.1.6?;
         match &self.target(raster.key)?.action {
             Action::Door(door) => Some(door.draw(&self.door_states, elapsed)),
@@ -500,7 +508,7 @@ impl SectorCache {
                     && self.raster_revealed(raster)
             })
             .find_map(|raster| {
-                let sprite = self.door_frame(raster, elapsed).map_or_else(
+                let sprite = self.interaction_frame(raster, elapsed).map_or_else(
                     || raster.frame_draw(raster.asset_at(elapsed, self.fidget)),
                     |(_, sprite)| sprite,
                 );
@@ -513,7 +521,7 @@ impl SectorCache {
         let tile = target.tile;
         let directions: &[u8] = match &target.action {
             Action::Door(door) => std::slice::from_ref(&door.direction),
-            Action::Container(_) => &[0, 1, 2, 3, 4, 5, 6, 7],
+            Action::Container(_) | Action::Npc(_) => &[0, 1, 2, 3, 4, 5, 6, 7],
             _ => &[1, 3, 5, 7],
         };
         let entries = &self.entries;
@@ -524,6 +532,10 @@ impl SectorCache {
             Action::Pickup(_) => Self::can_reach_item(from, tile, cell),
             _ => true,
         };
+        let from = self.player.as_ref()?.route_origin();
+        if matches!(target.action, Action::Npc(_)) && npc::in_range(from, tile) {
+            return Some(0);
+        }
         let candidates: Vec<_> = std::iter::once(tile)
             .chain(
                 directions
@@ -598,7 +610,7 @@ impl SectorCache {
                 Some(Ok(Some(*dst)))
             }
             Action::Unsupported(reason) => Some(Err(reason.clone())),
-            Action::Container(_) | Action::Pickup(_) => None,
+            Action::Container(_) | Action::Pickup(_) | Action::Npc(_) => None,
         }
     }
 

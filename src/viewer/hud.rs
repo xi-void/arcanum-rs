@@ -116,6 +116,9 @@ pub(super) enum Binding {
     ContainerThumb,
     InventoryLens,
     InventoryHover,
+    NpcContext,
+    DialogueText,
+    DialogueResponse,
     InventoryGold,
     InventoryArrows,
     InventoryBullets,
@@ -137,6 +140,9 @@ impl Binding {
                 | Self::MapSouth
                 | Self::MapStatus
                 | Self::PlaceLabel
+                | Self::NpcContext
+                | Self::DialogueText
+                | Self::DialogueResponse
                 | Self::InventoryHover
                 | Self::InventoryGold
                 | Self::InventoryArrows
@@ -190,6 +196,11 @@ struct Element {
     travel_available: Option<bool>,
     #[serde(default)]
     inventory_panel: bool,
+    #[serde(default)]
+    dialogue_only: bool,
+    response: Option<usize>,
+    hover_text_color: Option<Color>,
+    disabled_text_color: Option<Color>,
     #[serde(default)]
     inventory_views: Vec<InventoryView>,
     cell: Option<u32>,
@@ -311,13 +322,14 @@ struct Label {
     font: Font,
     native_height: u32,
     value: String,
+    ink_height: u32,
 }
 
 impl Label {
     fn text(&self, value: &str) -> Text {
         let glyphs = value
             .chars()
-            .take(128)
+            .take(4096)
             .map(|ch| {
                 if ch == '\n' {
                     None
@@ -366,6 +378,8 @@ pub(crate) struct Hud {
     external_panel: Option<[u32; 2]>,
     shared_band: Option<(Rect, u32)>,
     inventory: InventoryPanel,
+    dialogue_open: bool,
+    dialogue_available: [bool; 5],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -561,6 +575,7 @@ impl Hud {
                             font: font.clone(),
                             native_height,
                             value: String::new(),
+                            ink_height: 0,
                         });
                     }
                     prepared_text = Some(Text {
@@ -657,6 +672,8 @@ impl Hud {
             external_panel: None,
             shared_band: None,
             inventory: InventoryPanel::default(),
+            dialogue_open: false,
+            dialogue_available: [false; 5],
         })
     }
 
@@ -712,10 +729,22 @@ impl Hud {
         let mut top = 0;
         let mut bottom = 0;
         let [mut widest, mut middle] = external_panel.unwrap_or([1, 0]);
+        if self.dialogue_open {
+            let dialogue_height = self
+                .components
+                .iter()
+                .filter(|c| c.parent.is_none() && c.config.dialogue_only && !c.config.hidden)
+                .map(|c| {
+                    widest = widest.max(c.config.size[0]);
+                    c.config.size[1]
+                })
+                .sum();
+            middle = middle.max(dialogue_height);
+        }
         for c in self
             .components
             .iter()
-            .filter(|c| c.parent.is_none() && !c.config.hidden)
+            .filter(|c| c.parent.is_none() && !c.config.hidden && !c.config.dialogue_only)
         {
             let e = &c.config;
             if e.inventory_panel {
@@ -765,7 +794,8 @@ impl Hud {
         for component in &self.components {
             let parent = component.parent.map_or_else(
                 || {
-                    let area = if component.config.inventory_panel {
+                    let area = if component.config.inventory_panel || component.config.dialogue_only
+                    {
                         band
                     } else {
                         viewport
@@ -779,6 +809,10 @@ impl Hud {
                     !component.config.map_views.is_empty()
                         && !component.config.map_views.contains(&mode)
                 }) || component.config.hidden
+                    || (component.config.dialogue_only && !self.dialogue_open)
+                    || (component.config.binding == Some(Binding::NpcContext) && panel.is_some())
+                    || (self.dialogue_open
+                        && component.config.binding == Some(Binding::InventoryHover))
                     || (component.config.inventory_panel && panel.is_none())
                     || (!component.config.inventory_views.is_empty()
                         && panel
@@ -822,7 +856,13 @@ impl Hud {
                 .and_then(|index| self.components[index].label.as_ref())
                 .map(|label| label.value.as_str())
         };
+        let responses: Vec<_> = self.components.iter().zip(&self.placed).filter_map(|(c,p)| {
+            let index = c.config.response?;
+            let p = p.as_ref()?.rect;
+            Some(serde_json::json!({"index":index,"bounds":[p.x,p.y,p.w,p.h],"available":self.dialogue_available[index]}))
+        }).collect();
         serde_json::json!({"context_message":label(Binding::InventoryHover),
+            "npc_context":label(Binding::NpcContext),"dialogue_responses":responses,
             "map_status":label(Binding::MapStatus),"scale_percent":self.scale,"effective_scale_percent":self.effective_scale,"inventory":self.inventory_diagnostics(),"fonts":self.font_profiles,"image_references":images,
             "focused":control(self.focus),"hovered":control(self.hover),"pressed":control(self.pressed)})
     }
@@ -941,15 +981,114 @@ impl Hud {
     }
 
     pub(super) fn set_label(&mut self, binding: Binding, value: &str) {
-        if let Some(index) = self.bound(binding)
-            && let Some(label) = &mut self.components[index].label
+        if let Some(index) = self.bound(binding) {
+            self.write_label(index, value);
+        }
+    }
+
+    fn write_label(&mut self, index: usize, value: &str) {
+        if let Some(label) = &mut self.components[index].label
             && label.value != value
         {
             label.value = value.into();
             self.components[index].text = Some(label.text(value));
             let component = &mut self.components[index];
             component.art = native_art(component, &component.base, None);
+            if component.config.binding == Some(Binding::DialogueText) {
+                let frame = &component.art.decoded.frame;
+                component.label.as_mut().unwrap().ink_height = frame
+                    .pixels
+                    .chunks_exact(frame.width as usize)
+                    .rposition(|row| row.iter().any(|pixel| pixel[3] != 0))
+                    .map_or(0, |row| row as u32 + 1);
+            }
+            if let Some(text) = &component.text {
+                let normal = text.font.color;
+                for (variant, color) in [
+                    (0, component.config.hover_text_color),
+                    (2, component.config.disabled_text_color),
+                ] {
+                    if let Some(color) = color {
+                        component.text.as_mut().unwrap().font.color = color;
+                        component.state_art[variant] =
+                            Some(native_art(component, &component.base, None));
+                    }
+                }
+                component.text.as_mut().unwrap().font.color = normal;
+            }
         }
+    }
+
+    pub(super) fn supports_dialogue(&self) -> bool {
+        self.bound(Binding::DialogueText).is_some_and(|i| {
+            !self.components[i].config.hidden && self.components[i].label.is_some()
+        }) && (0..5).all(|row| {
+            self.components
+                .iter()
+                .any(|c| c.config.response == Some(row) && !c.config.hidden && c.label.is_some())
+        })
+    }
+
+    pub(super) fn set_dialogue(
+        &mut self,
+        session: Option<&arcanum_rs::content::dialogue::Conversation>,
+        npc_at: Option<(i32, i32)>,
+        size: (u32, u32),
+    ) {
+        if self.dialogue_open != session.is_some() {
+            self.dialogue_open = session.is_some();
+            self.clear_layout();
+        }
+        self.layout(size);
+        let Some(session) = session else { return };
+        self.set_label(Binding::NpcContext, &session.speaker);
+        self.set_label(Binding::DialogueText, &session.turn.text);
+        self.dialogue_available =
+            std::array::from_fn(|row| session.turn.responses.get(row).is_some_and(|r| r.available));
+        for index in 0..self.components.len() {
+            if let Some(row) = self.components[index].config.response {
+                self.write_label(
+                    index,
+                    session.turn.responses.get(row).map_or("", |r| &r.text),
+                );
+            }
+        }
+        let response_top = self
+            .components
+            .iter()
+            .zip(&self.placed)
+            .filter_map(|(c, p)| c.config.response.and(p.as_ref()).map(|p| p.rect.y))
+            .min();
+        if let Some(index) = self.bound(Binding::DialogueText)
+            && let Some(place) = self.placed[index].as_mut()
+            && let Some((x, y)) = npc_at
+        {
+            let band = self.panel_band;
+            let rect = &mut place.full;
+            let bottom = response_top.unwrap_or(band.y + band.h as i32);
+            let visible = self.components[index]
+                .label
+                .as_ref()
+                .map_or(0, |label| (label.ink_height * place.scale / 100) as i32);
+            rect.x = (x - rect.w as i32 / 2)
+                .clamp(band.x, band.x + band.w.saturating_sub(rect.w) as i32);
+            rect.y = (y - visible).clamp(band.y, (bottom - visible).max(band.y));
+            place.rect = rect
+                .intersect(Rect {
+                    h: (bottom - band.y).max(0) as u32,
+                    ..band
+                })
+                .unwrap_or(Rect { w: 0, h: 0, ..band });
+        }
+    }
+
+    pub(super) fn clear_dialogue_choices(&mut self) {
+        self.dialogue_available.fill(false);
+    }
+
+    pub(super) fn dialogue_choice(&self, point: (u32, u32)) -> Option<usize> {
+        let row = self.components[self.select(point)?].config.response?;
+        self.dialogue_available[row].then_some(row)
     }
 
     pub(super) fn draw_map_label(
@@ -1043,7 +1182,7 @@ impl Hud {
             .find_map(|(index, placement)| {
                 let config = &self.components[index].config;
                 (placement.as_ref()?.rect.contains(point)
-                    && (config.capture || config.action.is_some()))
+                    && (config.capture || config.action.is_some() || config.response.is_some()))
                 .then_some(index)
             })
     }
@@ -1053,9 +1192,13 @@ impl Hud {
         })
     }
     pub fn hover(&mut self, point: Option<(u32, u32)>) -> bool {
-        let hover = point
-            .and_then(|point| self.select(point))
-            .filter(|&index| self.available_action(index).is_some());
+        let hover = point.and_then(|point| self.select(point)).filter(|&index| {
+            self.available_action(index).is_some()
+                || self.components[index]
+                    .config
+                    .response
+                    .is_some_and(|row| self.dialogue_available[row])
+        });
         let controls_changed = std::mem::replace(&mut self.hover, hover) != hover;
         self.inventory_hover(point) || controls_changed
     }
@@ -1170,7 +1313,13 @@ impl Hud {
                     || (running && action == Some(Action::ToggleRun)))
                 .then_some(component.state_art[0].as_ref())
                 .flatten();
-                let asset = state
+                let disabled_choice = component
+                    .config
+                    .response
+                    .filter(|&row| !self.dialogue_available[row])
+                    .and(component.state_art[2].as_ref());
+                let asset = disabled_choice
+                    .or(state)
                     .or(selected)
                     .or(highlighted)
                     .or(p.live_asset.as_ref())
@@ -1221,6 +1370,8 @@ fn parse(source: &str) -> Result<Theme, Box<dyn Error>> {
                     || !matches!(e.anchor, Anchor::Center)
                     || e.offset != [0, 0]
                     || !e.inventory_views.is_empty()))
+            || e.response.is_some_and(|index| index >= 5)
+            || e.response.is_some() != (e.binding == Some(Binding::DialogueResponse))
             || e.text.as_ref().is_some_and(|s| s.len() > 256)
         {
             return Err(format!("invalid size, offset or text in component {}", e.id).into());
@@ -1378,6 +1529,17 @@ fn raster(
         }
     }
     if let Some(text) = &c.text {
+        if let Some(color) = c.config.text_shadow {
+            draw_text_colored(
+                &mut frame,
+                text,
+                &c.config,
+                full,
+                clip,
+                scale,
+                (color, (scale / 100).max(1)),
+            );
+        }
         draw_text(&mut frame, text, &c.config, full, clip, scale);
     }
     generated_frame(&c.config.id, frame)
@@ -1457,6 +1619,26 @@ fn draw_text(
     clip: Rect,
     scale: u32,
 ) {
+    draw_text_colored(
+        frame,
+        text,
+        element,
+        full,
+        clip,
+        scale,
+        (text.font.color, 0),
+    );
+}
+
+fn draw_text_colored(
+    frame: &mut SpriteFrame,
+    text: &Text,
+    element: &Element,
+    full: Rect,
+    clip: Rect,
+    scale: u32,
+    (color, offset): (Color, u32),
+) {
     let Text {
         glyphs,
         font,
@@ -1469,7 +1651,7 @@ fn draw_text(
     let visible_x = (clip.x - full.x) as u32;
     let visible_y = (clip.y - full.y) as u32;
     while start < glyphs.len() {
-        let y = to_pixels(line * line_step);
+        let y = offset + to_pixels(line * line_step);
         if y >= visible_y + frame.height {
             break;
         }
@@ -1498,8 +1680,8 @@ fn draw_text(
         };
         let mut pen = 0;
         for (glyph, _) in glyphs[start..end].iter().flatten() {
-            let x = origin + scale_glyph(pen);
-            let w = (origin + scale_glyph(pen + glyph.width) - x).max(1);
+            let x = offset + origin + scale_glyph(pen);
+            let w = (offset + origin + scale_glyph(pen + glyph.width) - x).max(1);
             let h = scale_glyph(glyph.height).max(1);
             let bold = if font.bold { (scale / 100).max(1) } else { 0 };
             for py in y.max(visible_y)..(y + h).min(visible_y + frame.height) {
@@ -1517,7 +1699,7 @@ fn draw_text(
                         alpha
                     };
                     let at = ((py - visible_y) * frame.width + px - visible_x) as usize;
-                    blend_glyph(&mut frame.pixels[at], font.color, alpha);
+                    blend_glyph(&mut frame.pixels[at], color, alpha);
                 }
             }
             pen += glyph.hotspot.0 as u32;

@@ -34,6 +34,7 @@ mod scan;
 pub use scan::{ScanOptions, compatibility_scan};
 mod interaction;
 mod inventory;
+mod npc;
 pub use debug::{DebugCollision, DebugObject};
 mod prefetch;
 pub use super::jumps::Destination;
@@ -754,6 +755,7 @@ impl CachedSector {
             let entry = &self.mobiles[index];
             let action = match entry.category {
                 2 => Some(interaction::Action::Container(entry.id)),
+                16 => Some(interaction::Action::Npc(entry.id)),
                 5..=14 => Some(interaction::Action::Pickup(entry.id)),
                 _ => None,
             };
@@ -871,6 +873,7 @@ struct SectorCache {
     inventory_context: Option<(String, (u32, u32))>,
     roof_state: Option<roof::State>,
     hover: Option<WorldOrder>,
+    speaking_pose: Option<(WorldOrder, Arc<LoadedFrame>)>,
     faded_roofs: BTreeSet<(u32, u32)>,
     faded_walls: BTreeMap<WorldOrder, u8>,
 }
@@ -1728,11 +1731,12 @@ impl SectorCache {
                 return None;
             }
             let raster = &self.ordered[index];
-            let (asset, sprite) = if let Some((asset, draw)) = self.door_frame(raster, elapsed) {
-                (asset, viewport.place(draw, RasterBounds::new(draw))?)
-            } else {
-                raster.visible_at(&viewport, elapsed, self.fidget)?
-            };
+            let (asset, sprite) =
+                if let Some((asset, draw)) = self.interaction_frame(raster, elapsed) {
+                    (asset, viewport.place(draw, RasterBounds::new(draw))?)
+                } else {
+                    raster.visible_at(&viewport, elapsed, self.fidget)?
+                };
             if !self.raster_revealed(raster) {
                 return None;
             }

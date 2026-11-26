@@ -151,10 +151,13 @@ impl InteractiveWorld {
         let Some(raster) = raster else { return result };
         let key = raster.key;
         let tile = (key.1.2, key.1.1);
-        let (asset, sprite) = self.cache.door_frame(raster, now).unwrap_or_else(|| {
-            let asset = raster.asset_at(now, self.cache.fidget);
-            (asset, raster.frame_draw(asset))
-        });
+        let (asset, sprite) = self
+            .cache
+            .interaction_frame(raster, now)
+            .unwrap_or_else(|| {
+                let asset = raster.asset_at(now, self.cache.fidget);
+                (asset, raster.frame_draw(asset))
+            });
         let visible = self.cache.raster_revealed(raster);
         let intersects =
             Viewport::new(camera.position(), size).intersects(RasterBounds::new(sprite));
@@ -184,6 +187,7 @@ impl InteractiveWorld {
             "palette":asset.decoded.stored_palette,"anchor":sprite.anchor});
         if let Some(target) = sector.interactions.get(&key) {
             result["interaction"] = match &target.action {
+                interaction::Action::Npc(id) => json!({"kind":"npc", "id":id.key()}),
                 interaction::Action::Door(door) => {
                     self.cache.door_states.diagnostic(door, self.cache.hour)
                 }

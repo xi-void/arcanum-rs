@@ -82,6 +82,12 @@ fn read_script<T>(
     id: i32,
     decode: impl FnOnce(&[u8]) -> Result<T, &'static str>,
 ) -> Result<T, Box<dyn std::error::Error>> {
+    let path = script_path(vfs, id)?;
+    let (source, bytes) = read_bounded(vfs, &path, 64 * 1024)?;
+    decode(&bytes).map_err(|e| format!("{path} from {source}: {e}").into())
+}
+
+pub(super) fn script_path(vfs: &Vfs, id: i32) -> Result<String, String> {
     let prefix = format!("scr/{id:05}");
     let paths: Vec<_> = vfs
         .paths_with_prefix(&prefix)
@@ -89,11 +95,9 @@ fn read_script<T>(
         .filter(|path| path.ends_with(".scr") && !path[prefix.len()..].contains('/'))
         .collect();
     let [path] = paths.as_slice() else {
-        return Err(format!("missing or ambiguous script {id}").into());
+        return Err(format!("missing or ambiguous script {id}"));
     };
-    let path = (*path).to_owned();
-    let (source, bytes) = read_bounded(vfs, &path, 64 * 1024)?;
-    decode(&bytes).map_err(|e| format!("{path} from {source}: {e}").into())
+    Ok((*path).to_owned())
 }
 
 fn decode_unlock(bytes: &[u8], global_flag: impl Fn(u32) -> bool) -> Result<(), &'static str> {

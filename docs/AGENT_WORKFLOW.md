@@ -211,6 +211,18 @@ Use an OS audio monitor or listen to the output when confirming samples reach
 the device. For location tests, check the output again after
 `coc` or a native load and after `settime` changes the game hour.
 
+## Native NPC dialogue
+
+Use `rpc objects category npc` to locate original NPCs and see their effective
+`dialog_script` attachment. Inspect `rpc pos` while hovering and clicking the
+sprite. The navigation state reports `hovered_npc` and any pending approach.
+`dialogue.active` reports the active turn and script provenance.
+`dialogue.last_result` reports a rejected entry, rejected response or closure.
+Use `ui.hud.dialogue_responses` for physical mouse coordinates. Inspect
+`audio.output.active_voice` and the winning VFS source in
+`audio.output.recent` while a line plays. Use an isolated sound monitor for
+sample-level verification. See [NPC dialogue and voice packs](DIALOGUE.md).
+
 ## Diagnostic snapshots
 
 ```sh
