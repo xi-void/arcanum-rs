@@ -1,4 +1,5 @@
 //! The modal atlas uses the same layout, typography and compositor as the HUD.
+use super::ThemeSource;
 use super::hud::{Action, Binding, Hit, Hud, MapView as Mode, Rect};
 use arcanum_rs::{
     art::SpriteFrame,
@@ -9,7 +10,6 @@ use arcanum_rs::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
-    path::Path,
     time::Duration,
 };
 
@@ -106,7 +106,7 @@ const MAX_VISIBLE_CHUNKS: u32 = 4096;
 
 impl MapUi {
     pub(crate) fn load(
-        path: &Path,
+        path: &ThemeSource,
         mut vfs: Vfs,
         scale: Option<u16>,
         inspect_all: bool,
@@ -178,7 +178,7 @@ impl MapUi {
         self.atlas.discovered.len()
     }
 
-    pub(super) fn prepare_theme(&mut self, path: &Path, scale: u16) -> Result<Hud, String> {
+    pub(super) fn prepare_theme(&mut self, path: &ThemeSource, scale: u16) -> Result<Hud, String> {
         let hud = Hud::load(path, &mut self.vfs, Some(scale)).map_err(|e| e.to_string())?;
         if !hud.has_canvas() {
             return Err("map theme needs a visible map-canvas binding".into());
@@ -438,6 +438,10 @@ impl MapUi {
             self.zoom = zoom;
             self.pan(0., 0.);
         }
+    }
+
+    pub(super) fn scale(&self) -> u16 {
+        self.hud.scale()
     }
 
     pub(super) fn adjust_scale(&mut self, step: i16) -> u16 {

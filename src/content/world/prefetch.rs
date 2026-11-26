@@ -752,7 +752,13 @@ impl InteractiveWorld {
         }
     }
 
-    pub fn advance_player(&mut self, now: Duration, camera: &mut Camera) -> bool {
+    pub fn advance_player<'a>(
+        &mut self,
+        now: Duration,
+        camera: impl Into<Option<&'a mut Camera>>,
+    ) -> bool {
+        let camera = camera.into();
+        let stationary_camera = camera.is_none();
         if !self.player_started {
             return false;
         }
@@ -770,9 +776,12 @@ impl InteractiveWorld {
             return false;
         };
         let pose = self.cache.player.as_ref().unwrap().sample(now);
-        let previous_camera = camera.position();
-        camera.follow(anchor);
-        let changed = previous_camera != anchor
+        let camera_changed = camera.is_some_and(|camera| {
+            let previous = camera.position();
+            camera.follow(anchor);
+            previous != anchor
+        });
+        let changed = camera_changed
             || before.is_some_and(|(previous, asset, tile, _)| {
                 previous != anchor || asset != Arc::as_ptr(pose.asset) || tile != pose.tile
             });
@@ -837,7 +846,7 @@ impl InteractiveWorld {
             }
             return true;
         }
-        changed
+        changed || (stationary_camera && moving)
     }
 
     /// Start at the current epoch and report whether the viewport needs redraw.

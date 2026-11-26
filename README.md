@@ -34,8 +34,16 @@ game assets are not included.
 ## First playable alpha
 
 ```sh
-cargo run --locked --release --features windowed -- play "$HOME/Work/arcanum-ce-test"
+cargo build --locked --release --features windowed
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/arcanum-rs"
+mkdir -p "$config_dir"
+cp -n docs/config.example.toml "$config_dir/config.toml"
 ```
+
+Set `game_data` in `config.toml` to your Arcanum installation directory, then run
+`target/release/arcanum-rs`. From another working directory, run the executable
+by its absolute path. An executable on your `PATH` can be launched with
+`arcanum-rs`. [Configuration reference](docs/APPLICATION_CONFIG.md)
 
 **Left-click** a destination on the floor to walk there, or **Shift + left-click**
 to run there. A new click replaces the route after the current step reaches
@@ -43,11 +51,11 @@ the next tile center. Left-click an original door or staircase to approach
 and use it. **Mouse wheel** zooms from 1× to 3×. Press **0** to reset.
 **Escape** pauses the game. Use the mouse or **Up/Down** and **Enter**
 to choose Resume, Options, or Quit. Escape backs out of menus.
-The camera follows the character, and original sectors load in the
+The camera follows the character by default, and original sectors load in the
 background. The default spawn is the original Zephyr crash site, resolved
 from the game's `START_MAP` metadata. Click the nearby cave entrance to
-enter, then click the exit inside to return. Select Bates Mansion with
-`--map 5011`. For K’na Tha, add `--map "k'na tha" --center 383 928`.
+enter, then click the exit inside to return. Use `arcanum-rs play --map 5011` for Bates Mansion or
+`arcanum-rs play --map "k'na tha" --center 383 928` for K’na Tha.
 The windowed build uses Vulkan through wgpu.
 
 The default Classic HUD uses your installed Arcanum interface artwork.

@@ -23,9 +23,12 @@ use std::path::Path;
 use std::process::ExitCode;
 
 #[cfg(feature = "windowed")]
+mod app_config;
+#[cfg(feature = "windowed")]
 mod viewer;
 
 const USAGE: &str = "Usage:
+  arcanum-rs                                   (launch using config.toml, requires --features windowed)
   arcanum-rs list <archive>
   arcanum-rs info <archive> <resource-path>
   arcanum-rs extract <archive> <resource-path> <output-file>
@@ -41,7 +44,7 @@ const USAGE: &str = "Usage:
   arcanum-rs [--ordered] mes get <game-directory> <resource-path> <entry-id> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art inspect <game-directory> <resource-path> <frame> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art export <game-directory> <resource-path> <frame> <output.pam> [--mods <mods-directory> <mod-id> ...]
-  arcanum-rs [--ordered] play <game-directory> [--map <map-name-or-id>] [--center X Y] [--ui classic|off|PATH] [--ui-scale PERCENT] [--map-ui PATH] [--map-reveal] [--discover-all] [--debug] [--console-ui PATH] [--lighting <hour>] (requires --features windowed)
+  arcanum-rs [--ordered] play [<game-directory>] [--map <map-name-or-id>] [--center X Y] [--ui classic|off|PATH] [--ui-scale PERCENT] [--map-ui PATH] [--map-reveal] [--discover-all] [--debug] [--console-ui PATH] [--lighting <hour>] (requires --features windowed)
   arcanum-rs art demo                          (requires --features windowed)
   arcanum-rs [--ordered] art sector-audit <game-directory> [--mods <mods-directory> <mod-id> ...]
   arcanum-rs [--ordered] art sector-wide <game-directory> [--mods <mods-directory> <mod-id> ...]  (requires --features windowed)
@@ -77,7 +80,10 @@ const USAGE: &str = "Usage:
   arcanum-rs simulate same-channel-demo
   arcanum-rs rpc SOCKET [--id N] COMMAND [ARGS...]
   arcanum-rs world-scan GAME [--map MAP] [--sector ID] [--limit N] [--category CATEGORY] [--group CODE] [--summary | --examples N]
-  play options: --debug --rpc SOCKET [--diagnostics DIRECTORY]";
+  play options: --debug | --no-debug, --rpc SOCKET | --no-rpc, --diagnostics DIRECTORY
+                --window-size WIDTH HEIGHT, --fullscreen | --windowed, --zoom 1|2|3
+                --follow | --no-follow, --lighting-on | --lighting-off, --shadows | --no-shadows
+                --run | --walk-by-default, --no-map-reveal, --no-discover-all, --no-mods";
 
 fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -159,12 +165,16 @@ fn main() -> ExitCode {
             inspect_world(Path::new(game), options, policy)
         }
         #[cfg(feature = "windowed")]
-        (Some("play"), [_, game, options @ ..]) => {
-            show_world(Path::new(game), options, policy, true)
-        }
+        (None, []) => launch_play(&[], policy),
+        #[cfg(feature = "windowed")]
+        (Some("play"), [_, options @ ..]) => launch_play(options, policy),
+        #[cfg(not(feature = "windowed"))]
+        (None, []) | (Some("play"), _) => Err(
+            "play requires a build with --features windowed (see --help for other commands)".into(),
+        ),
         #[cfg(feature = "windowed")]
         (Some("art"), [_, action, game, options @ ..]) if action == "world" => {
-            show_world(Path::new(game), options, policy, false)
+            show_world(Path::new(game), options, policy, None)
         }
         #[cfg(feature = "windowed")]
         (Some("art"), [_, action, game, options @ ..])
@@ -1184,11 +1194,13 @@ fn show_room(
 }
 
 #[cfg(feature = "windowed")]
-type PlayUiOptions = (Option<std::path::PathBuf>, Option<u16>, Vec<OsString>);
+type PlayUiOptions = (Option<viewer::ThemeSource>, Option<u16>, Vec<OsString>);
 
 #[cfg(feature = "windowed")]
-fn play_ui_options(options: &[OsString]) -> Result<PlayUiOptions, Box<dyn Error>> {
-    let mut theme = Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/classic/theme.toml"));
+fn play_ui_options(
+    options: &[OsString],
+    mut theme: Option<viewer::ThemeSource>,
+) -> Result<PlayUiOptions, Box<dyn Error>> {
     let mut seen_theme = false;
     let mut scale = None;
     let mut kept = Vec::with_capacity(options.len());
@@ -1207,16 +1219,11 @@ fn play_ui_options(options: &[OsString]) -> Result<PlayUiOptions, Box<dyn Error>
                 .next()
                 .ok_or("expected theme path, classic or off after --ui")?;
             seen_theme = true;
-            if value == "off" {
-                theme = None;
-            } else if value != "classic" {
-                let path = Path::new(value);
-                theme = Some(if path.is_dir() {
-                    path.join("theme.toml")
-                } else {
-                    path.into()
-                });
-            }
+            theme = if value == "off" || value == "classic" {
+                hud_theme(Path::new(value), Path::to_path_buf)
+            } else {
+                Some(theme_package(std::path::absolute(value)?))
+            };
         } else if flag == "--ui-scale" {
             if scale.is_some() {
                 return Err("--ui-scale can be specified once".into());
@@ -1250,11 +1257,53 @@ fn play_hud_selection_preserves_world_and_mod_options() {
         "test",
     ]
     .map(OsString::from);
-    let (theme, scale, world) = play_ui_options(&options).unwrap();
+    let (theme, scale, world) =
+        play_ui_options(&options, Some(viewer::ThemeSource::hud())).unwrap();
     assert!(theme.is_none());
     assert_eq!(scale, Some(200));
     assert_eq!(world, options[4..]);
-    assert!(play_ui_options(&["--ui-scale", "301"].map(OsString::from)).is_err());
+    assert!(play_ui_options(&["--ui-scale", "301"].map(OsString::from), None).is_err());
+}
+
+#[cfg(feature = "windowed")]
+fn theme_package(path: std::path::PathBuf) -> viewer::ThemeSource {
+    viewer::ThemeSource::external(if path.is_dir() {
+        path.join("theme.toml")
+    } else {
+        path
+    })
+}
+
+#[cfg(feature = "windowed")]
+fn hud_theme(
+    value: &Path,
+    resolve: impl FnOnce(&Path) -> std::path::PathBuf,
+) -> Option<viewer::ThemeSource> {
+    match value.to_str() {
+        Some("off") => None,
+        Some("classic") => Some(viewer::ThemeSource::hud()),
+        _ => Some(theme_package(resolve(value))),
+    }
+}
+
+#[cfg(feature = "windowed")]
+fn launch_play(options: &[OsString], policy: Policy) -> Result<(), Box<dyn Error>> {
+    let (file, config) = app_config::ConfigFile::open()?;
+    let (game, options) = match options {
+        [game, rest @ ..] if !game.as_encoded_bytes().starts_with(b"--") => {
+            (std::path::absolute(game)?, rest)
+        }
+        _ => (
+            file.resolve(config.game_data.as_deref().filter(|p| !p.as_os_str().is_empty()).ok_or_else(|| {
+                format!("Game data is not configured. Set game_data in {} to your Arcanum installation directory (see docs/config.example.toml), or run arcanum-rs play <game-directory>.", file.path().display())
+            })?),
+            options,
+        ),
+    };
+    if !game.is_dir() {
+        return Err(format!("Game data directory {} is missing or unreadable. Set game_data in {} or pass the correct installation directory to play.", game.display(), file.path().display()).into());
+    }
+    show_world(&game, options, policy, Some((file, config)))
 }
 
 #[cfg(feature = "windowed")]
@@ -1262,15 +1311,23 @@ fn show_world(
     game: &Path,
     options: &[OsString],
     policy: Policy,
-    playing: bool,
+    startup: Option<(app_config::ConfigFile, app_config::Config)>,
 ) -> Result<(), Box<dyn Error>> {
+    let playing = startup.is_some();
+    let (preferences, mut config) = match startup {
+        Some((file, config)) => (Some(file), config),
+        None => (None, app_config::Config::default()),
+    };
+    let resolve = |path: &Path| preferences.as_ref().unwrap().resolve(path);
     let mut map_theme = None;
-    let mut map_reveal = false;
-    let mut discover_all = false;
-    let mut debug = false;
+    let mut map_reveal = None;
+    let mut discover_all = None;
+    let mut debug = config.developer.enabled;
     let mut console_theme = None;
     let mut rpc = None;
+    let mut automatic_rpc = config.developer.rpc;
     let mut diagnostics = None;
+    let mut no_mods = false;
     let mut world_args = Vec::with_capacity(options.len());
     let mut args = options.iter();
     while let Some(flag) = args.next() {
@@ -1279,49 +1336,111 @@ fn show_world(
             world_args.extend(args.cloned());
             break;
         }
+        if !playing {
+            world_args.push(flag.clone());
+            continue;
+        }
         match flag.to_str() {
-            Some("--map-ui") if playing && map_theme.is_none() => {
-                let path = Path::new(
+            Some("--map-ui") if map_theme.is_none() => {
+                map_theme = Some(theme_package(std::path::absolute(
                     args.next()
                         .ok_or("--map-ui expects a package or manifest")?,
-                );
-                map_theme = Some(if path.is_dir() {
-                    path.join("theme.toml")
-                } else {
-                    path.into()
-                });
+                )?));
             }
-            Some("--map-reveal") if playing => map_reveal = true,
-            Some("--discover-all") if playing => discover_all = true,
-            Some("--debug") if playing => debug = true,
-            Some("--rpc") if playing && rpc.is_none() => {
+            Some("--map-reveal" | "--no-map-reveal") => map_reveal = Some(flag == "--map-reveal"),
+            Some("--discover-all" | "--no-discover-all") => {
+                discover_all = Some(flag == "--discover-all")
+            }
+            Some("--debug" | "--no-debug") => debug = flag == "--debug",
+            Some("--rpc") if rpc.is_none() => {
                 rpc = Some(std::path::PathBuf::from(
                     args.next().ok_or("--rpc expects a socket path")?,
                 ));
             }
-            Some("--diagnostics") if playing && diagnostics.is_none() => {
+            Some("--no-rpc") => {
+                rpc = None;
+                automatic_rpc = false;
+            }
+            Some("--diagnostics") if diagnostics.is_none() => {
                 diagnostics = Some(std::path::PathBuf::from(
                     args.next()
                         .ok_or("--diagnostics expects an output directory")?,
                 ));
             }
-            Some("--console-ui") if playing && console_theme.is_none() => {
-                console_theme = Some(std::path::PathBuf::from(
+            Some("--console-ui") if console_theme.is_none() => {
+                console_theme = Some(viewer::ThemeSource::external(std::path::absolute(
                     args.next().ok_or("--console-ui expects a TOML path")?,
-                ));
+                )?));
             }
+            Some("--window-size") => {
+                let width = args.next().ok_or("--window-size expects WIDTH HEIGHT")?;
+                let height = args.next().ok_or("--window-size expects WIDTH HEIGHT")?;
+                config.window.width = parse_view_number(width, "window width")?;
+                config.window.height = parse_view_number(height, "window height")?;
+            }
+            Some("--fullscreen" | "--windowed") => {
+                config.window.fullscreen = flag == "--fullscreen"
+            }
+            Some("--zoom") => {
+                config.camera.zoom = parse_view_number(
+                    args.next().ok_or("--zoom expects 1, 2 or 3")?,
+                    "camera zoom",
+                )?;
+            }
+            Some("--follow" | "--no-follow") => config.camera.follow = flag == "--follow",
+            Some("--lighting-on" | "--lighting-off") => {
+                config.display.lighting = flag == "--lighting-on"
+            }
+            Some("--shadows" | "--no-shadows") => config.display.shadows = flag == "--shadows",
+            Some("--run" | "--walk-by-default") => config.input.run = flag == "--run",
+            Some("--no-mods") => no_mods = true,
             _ => world_args.push(flag.clone()),
         }
     }
     if (console_theme.is_some() || rpc.is_some() || diagnostics.is_some()) && !debug {
-        return Err("--console-ui, --rpc and --diagnostics require --debug".into());
+        return Err(
+            "--console-ui, --rpc and --diagnostics require --debug or developer.enabled".into(),
+        );
+    }
+    if playing && !(1..=3).contains(&config.camera.zoom) {
+        return Err("camera.zoom (--zoom) expects 1, 2 or 3".into());
+    }
+    if playing
+        && !no_mods
+        && !config.mods.enabled.is_empty()
+        && !world_args.iter().any(|arg| arg == "--mods")
+    {
+        let dir = config
+            .mods
+            .directory
+            .as_deref()
+            .ok_or("Set mods.directory when mods.enabled contains mod IDs")?;
+        world_args.extend(["--mods".into(), resolve(dir).into_os_string()]);
+        world_args.extend(config.mods.enabled.into_iter().map(OsString::from));
     }
     let (theme, ui_scale, stripped) = if playing {
-        play_ui_options(&world_args)?
+        let configured_theme = config.ui.hud.as_deref().map_or_else(
+            || Some(viewer::ThemeSource::hud()),
+            |path| hud_theme(path, resolve),
+        );
+        let (theme, scale, stripped) = play_ui_options(&world_args, configured_theme)?;
+        let scale = scale.or(config.ui.scale).or(config.ui.hud_scale);
+        if scale.is_some_and(|scale| !(50..=300).contains(&scale)) {
+            return Err("ui.scale must be 50–300 percent".into());
+        }
+        (theme, scale, stripped)
     } else {
         (None, None, world_args)
     };
     let options = stripped.as_slice();
+    let window_size = playing.then_some((config.window.width, config.window.height));
+    let stream = streaming_world(game, options, policy, window_size).map_err(|error| {
+        if let Some(file) = &preferences {
+            format!("Cannot start play with game data at {}: {error}. Verify the installed Arcanum resources and game_data in {}, or pass the installation directory to play.", game.display(), file.path().display()).into()
+        } else {
+            error
+        }
+    })?;
     let (hud, inventory_reader) = if playing {
         let mods = options
             .iter()
@@ -1333,7 +1452,7 @@ fn show_world(
             .map(|theme| {
                 viewer::Hud::load(theme, &mut vfs, ui_scale)
                     .map(Box::new)
-                    .map_err(|error| format!("UI theme {}: {error}", theme.display()))
+                    .map_err(|error| format!("UI theme {}: {error}", theme.path().display()))
             })
             .transpose()?;
         (
@@ -1343,9 +1462,7 @@ fn show_world(
     } else {
         (None, None)
     };
-    if let Some((world, camera, size, trace, map, animation_ms, explore)) =
-        streaming_world(game, options, policy, playing)?
-    {
+    if let Some((world, camera, size, trace, map, animation_ms, explore)) = stream {
         let world = if playing { world.with_player()? } else { world };
         let world = if debug {
             world.with_object_audit()
@@ -1357,14 +1474,24 @@ fn show_world(
             .iter()
             .position(|arg| arg == "--mods")
             .map_or(&[][..], |index| &options[index..]);
+        let map_theme =
+            map_theme.or_else(|| config.ui.map.as_deref().map(|p| theme_package(resolve(p))));
         let custom = map_theme.is_some();
-        let path = map_theme.unwrap_or_else(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/classic-map/theme.toml")
-        });
+        let path = map_theme.unwrap_or_else(viewer::ThemeSource::map);
+        let map_reveal = map_reveal.unwrap_or(debug && config.developer.map_reveal);
+        let discover_all = discover_all.unwrap_or(debug && config.developer.discover_all);
         let developer = if debug {
-            let console_theme = console_theme.unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/developer-console.toml")
-            });
+            let console_theme = console_theme
+                .or_else(|| {
+                    config
+                        .developer
+                        .console_ui
+                        .as_deref()
+                        .map(|p| viewer::ThemeSource::external(resolve(p)))
+                })
+                .unwrap_or_else(viewer::ThemeSource::console);
+            let diagnostics =
+                diagnostics.or_else(|| config.developer.diagnostics.as_deref().map(resolve));
             Some(
                 viewer::Developer::load(
                     inspection_vfs(game, mount_options, policy)?,
@@ -1373,7 +1500,7 @@ fn show_world(
                     path.clone(),
                     ui_scale.unwrap_or(100),
                 )?
-                .with_automation(rpc, diagnostics)?,
+                .with_automation(rpc, automatic_rpc, diagnostics)?,
             )
         } else {
             None
@@ -1386,7 +1513,9 @@ fn show_world(
                     eprintln!("Map interface unavailable: {error}");
                     None
                 }
-                Err(error) => return Err(format!("Map UI {}: {error}", path.display()).into()),
+                Err(error) => {
+                    return Err(format!("Map UI {}: {error}", path.path().display()).into());
+                }
             }
         } else {
             None
@@ -1448,6 +1577,17 @@ fn show_world(
                 map_ui,
                 hud,
                 inventory_reader,
+                startup: viewer::Startup {
+                    fullscreen: config.window.fullscreen,
+                    settings: viewer::Settings {
+                        zoom: config.camera.zoom,
+                        follow: config.camera.follow,
+                        lighting: config.display.lighting,
+                        shadows: config.display.shadows,
+                        run: config.input.run,
+                    },
+                    preferences,
+                },
             },
         )
         .map_err(Into::into);
@@ -1570,7 +1710,7 @@ fn inspect_maps(
 
 fn inspect_world(game: &Path, options: &[OsString], policy: Policy) -> Result<(), Box<dyn Error>> {
     if let Some((mut world, mut camera, size, trace, map, _, _)) =
-        streaming_world(game, options, policy, false)?
+        streaming_world(game, options, policy, None)?
     {
         if trace {
             world = world.with_object_audit();
@@ -1702,10 +1842,11 @@ fn streaming_world(
     game: &Path,
     options: &[OsString],
     policy: Policy,
-    playing: bool,
+    play_size: Option<(u32, u32)>,
 ) -> Result<Option<StreamPreview>, Box<dyn Error>> {
     use arcanum_rs::sector::Coordinates;
     use content::world::{SectorRegion, WorldStream};
+    let playing = play_size.is_some();
     let (flag, rest) = options
         .split_first()
         .map_or((None, options), |(flag, rest)| (Some(flag), rest));
@@ -1713,7 +1854,12 @@ fn streaming_world(
         let [name, rest @ ..] = rest else {
             return Err("expected a map name after --map".into());
         };
-        (Some(resource_name(name)?), None, (1280, 720), rest)
+        (
+            Some(resource_name(name)?),
+            None,
+            play_size.unwrap_or((1280, 720)),
+            rest,
+        )
     } else if flag.is_some_and(|flag| flag == "--sectors") {
         let [
             map,
@@ -1757,8 +1903,8 @@ fn streaming_world(
             size,
             rest,
         )
-    } else if playing {
-        (None, None, (1280, 720), options)
+    } else if let Some(size) = play_size {
+        (None, None, size, options)
     } else {
         return Ok(None);
     };

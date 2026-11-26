@@ -12,6 +12,8 @@ mod map_ui;
 use map_ui::Arrival;
 pub(super) use map_ui::MapUi;
 mod menu;
+mod theme_source;
+use crate::app_config::ConfigFile;
 use arcanum_rs::camera::{Camera, CameraScene};
 use arcanum_rs::compositor::{Modulation, SpriteDraw};
 use arcanum_rs::content::travel::Clock;
@@ -20,18 +22,20 @@ use arcanum_rs::content::{
     world::{Destination, DoorStates, InteractiveWorld, InventoryReader, WorldDraw, WorldStream},
 };
 pub(super) use hud::Hud;
-use menu::{Command as MenuCommand, Menu, Settings};
+pub(super) use menu::Settings;
+use menu::{Command as MenuCommand, Menu};
 use std::{
     collections::BTreeMap,
     sync::Arc,
     time::{Duration, Instant},
 };
+pub(crate) use theme_source::ThemeSource;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize, Size};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Fullscreen, Window, WindowId};
 
 const BACKGROUND: [u8; 3] = [32, 43, 58];
 const MAX_SURFACE_PIXELS: usize = 16 * 1024 * 1024;
@@ -185,6 +189,13 @@ struct Travel<'a> {
     doors: std::collections::BTreeMap<String, DoorStates>,
 }
 
+#[derive(Default)]
+pub(crate) struct Startup {
+    pub fullscreen: bool,
+    pub settings: Settings,
+    pub preferences: Option<ConfigFile>,
+}
+
 pub struct StreamOptions<'a> {
     pub trace: bool,
     pub animation_ms: Option<u64>,
@@ -195,6 +206,7 @@ pub struct StreamOptions<'a> {
     pub hud: Option<Box<Hud>>,
     pub inventory_reader: Option<Box<InventoryReader>>,
     pub map_ui: Option<Box<MapUi>>,
+    pub startup: Startup,
 }
 
 pub fn show_stream(
@@ -214,6 +226,7 @@ pub fn show_stream(
         hud,
         inventory_reader,
         map_ui,
+        startup,
     } = options;
     let event_loop = make_loop()?;
     let proxy = event_loop.create_proxy();
@@ -255,6 +268,7 @@ pub fn show_stream(
         PhysicalSize::<u32>::from(size).into(),
         event_loop,
         developer,
+        startup,
     )
 }
 
@@ -287,7 +301,7 @@ enum ViewContent<'a> {
 }
 
 fn show_content(title: String, content: ViewContent<'_>, size: Size) -> Result<(), String> {
-    run_content(title, content, size, make_loop()?, None)
+    run_content(title, content, size, make_loop()?, None, Startup::default())
 }
 
 fn make_loop() -> Result<EventLoop<()>, String> {
@@ -302,6 +316,7 @@ fn run_content(
     size: Size,
     event_loop: EventLoop<()>,
     mut developer: Option<Developer>,
+    startup: Startup,
 ) -> Result<(), String> {
     if let Some(dev) = &mut developer {
         dev.start_automation(event_loop.create_proxy())?;
@@ -322,7 +337,9 @@ fn run_content(
         navigation: Navigation::default(),
         player_deadline: None,
         cursor: None,
-        settings: Settings::default(),
+        settings: startup.settings,
+        fullscreen: startup.fullscreen,
+        preferences: startup.preferences,
         pause: None,
         paused_for: Duration::ZERO,
         clock_paused_for: Duration::ZERO,
@@ -337,7 +354,18 @@ fn run_content(
     if let ViewContent::Stream { world, .. } = &app.content {
         eprintln!("World cache {:?}", world.stats());
     }
-    app.failure.map_or(Ok(()), Err)
+    if let Some(error) = app.failure {
+        return Err(error);
+    }
+    if let Some(preferences) = app.preferences {
+        preferences.save().map_err(|error| {
+            format!(
+                "Cannot save preferences to {}: {error}",
+                preferences.path().display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 struct Viewer<'a> {
@@ -352,6 +380,8 @@ struct Viewer<'a> {
     player_deadline: Option<Instant>,
     cursor: Option<(u32, u32)>,
     settings: Settings,
+    fullscreen: bool,
+    preferences: Option<ConfigFile>,
     pause: Option<(Menu, Instant)>,
     paused_for: Duration,
     clock_paused_for: Duration,
@@ -544,6 +574,7 @@ impl Viewer<'_> {
             hud.close_inventory();
         }
         *camera = next_camera;
+        world.follow_player(Duration::ZERO, camera);
         *last_presented = None;
         *last_viewport = (0, 0);
         *waiting = false;
@@ -624,7 +655,26 @@ impl Viewer<'_> {
         self.menu_action(MenuCommand::Stay, event_loop);
     }
 
+    fn record_settings(&mut self, previous: Settings) {
+        if let Some(preferences) = &mut self.preferences {
+            let current = self.settings;
+            if current.zoom != previous.zoom {
+                preferences.set("camera", "zoom", i64::from(current.zoom));
+            }
+            if current.lighting != previous.lighting {
+                preferences.set("display", "lighting", current.lighting);
+            }
+            if current.shadows != previous.shadows {
+                preferences.set("display", "shadows", current.shadows);
+            }
+            if current.run != previous.run {
+                preferences.set("input", "run", current.run);
+            }
+        }
+    }
+
     fn hud_action(&mut self, action: hud::Action, event_loop: &ActiveEventLoop) {
+        let previous = self.settings;
         match action {
             hud::Action::Pause => self.pause_game(event_loop),
             hud::Action::ToggleRun => self.settings.run = !self.settings.run,
@@ -670,6 +720,7 @@ impl Viewer<'_> {
         if let Some(view) = &self.view {
             view.window.request_redraw();
         }
+        self.record_settings(previous);
     }
 
     fn menu_action(&mut self, command: MenuCommand, event_loop: &ActiveEventLoop) {
@@ -917,7 +968,13 @@ impl Viewer<'_> {
                     arrival = map.activate_focus(now);
                 }
                 Key::Character(key) if key == "[" || key == "]" => {
+                    let previous = map.scale();
                     let scale = map.adjust_scale(if key == "[" { -25 } else { 25 });
+                    if scale != previous
+                        && let Some(preferences) = &mut self.preferences
+                    {
+                        preferences.set("ui", "scale", i64::from(scale));
+                    }
                     if let Some(hud) = hud {
                         hud.set_scale(scale);
                     }
@@ -1032,7 +1089,8 @@ impl Viewer<'_> {
     fn open(&self, event_loop: &ActiveEventLoop) -> Result<WindowSurface, String> {
         let attributes = Window::default_attributes()
             .with_title(&self.title)
-            .with_inner_size(self.size);
+            .with_inner_size(self.size)
+            .with_fullscreen(self.fullscreen.then(|| Fullscreen::Borderless(None)));
         let window = Arc::new(
             event_loop
                 .create_window(attributes)
@@ -1133,7 +1191,10 @@ impl ApplicationHandler for Viewer<'_> {
                     if self.player_deadline.is_some_and(|deadline| now >= deadline) {
                         if !*waiting && !view.occluded {
                             let before = camera.position();
-                            redraw |= world.advance_player(elapsed, camera);
+                            redraw |= world.advance_player(
+                                elapsed,
+                                self.settings.follow.then_some(&mut *camera),
+                            );
                             let after = camera.position();
                             if before != after {
                                 *direction = (after.0 - before.0, after.1 - before.1);
@@ -1289,6 +1350,7 @@ impl ApplicationHandler for Viewer<'_> {
                 _ => {}
             }
             if let Some((menu, _)) = &mut self.pause {
+                let previous = self.settings;
                 let command = match &event {
                     WindowEvent::KeyboardInput { event, .. } => {
                         if !event.state.is_pressed() || event.repeat {
@@ -1329,6 +1391,7 @@ impl ApplicationHandler for Viewer<'_> {
                         return;
                     }
                 };
+                self.record_settings(previous);
                 self.menu_action(command, event_loop);
                 return;
             }
@@ -1446,7 +1509,13 @@ impl ApplicationHandler for Viewer<'_> {
                     _ => 0,
                 };
                 if step != 0 {
+                    let previous = hud.scale();
                     hud.adjust_scale(step);
+                    if hud.scale() != previous
+                        && let Some(preferences) = &mut self.preferences
+                    {
+                        preferences.set("ui", "scale", i64::from(hud.scale()));
+                    }
                     hud.hover(self.cursor);
                     view.window.request_redraw();
                     return;
@@ -1642,10 +1711,12 @@ impl Viewer<'_> {
                     MouseScrollDelta::LineDelta(_, y) => f64::from(y),
                     MouseScrollDelta::PixelDelta(position) => position.y,
                 };
+                let previous = self.settings;
                 self.settings.zoom = (i32::from(self.settings.zoom) + (y > 0.) as i32
                     - (y < 0.) as i32)
                     .clamp(1, 3) as u8;
                 view.window.request_redraw();
+                self.record_settings(previous);
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
@@ -1778,7 +1849,15 @@ impl Viewer<'_> {
                 }
                 if matches!(&self.content, ViewContent::Stream { world, .. } if world.playing()) {
                     if matches!(&event.logical_key, Key::Character(key) if key == "0") {
+                        let previous = self.settings;
                         self.settings.zoom = 1;
+                        view.window.request_redraw();
+                        self.record_settings(previous);
+                    } else if !self.settings.follow
+                        && event.logical_key == Key::Named(NamedKey::Home)
+                        && let ViewContent::Stream { world, camera, .. } = &mut self.content
+                    {
+                        world.follow_player(play_elapsed, camera);
                         view.window.request_redraw();
                     }
                     return;
@@ -2057,7 +2136,9 @@ impl WindowSurface {
         if size.width == 0 || size.height == 0 {
             return Ok(false);
         }
-        world.follow_player(elapsed, camera);
+        if settings.follow {
+            world.follow_player(elapsed, camera);
+        }
         camera.resize(viewport);
         let prepared = world.prepare(camera, viewport, direction)?;
         if !prepared.ready {

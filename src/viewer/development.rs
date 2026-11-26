@@ -16,9 +16,9 @@ pub(crate) struct Developer {
     console: Console,
     vfs: Vfs,
     atlas: Atlas,
-    console_theme: PathBuf,
-    hud_theme: Option<PathBuf>,
-    map_theme: PathBuf,
+    console_theme: ThemeSource,
+    hud_theme: Option<ThemeSource>,
+    map_theme: ThemeSource,
     scale: u16,
     selected: Option<DebugObject>,
     collision: bool,
@@ -27,6 +27,7 @@ pub(crate) struct Developer {
     marks: Marks,
     status: Option<(String, Arc<LoadedFrame>)>,
     socket: Option<PathBuf>,
+    automatic_rpc: bool,
     server: Option<Server>,
     captures: Option<(PathBuf, Arc<cap_std::fs::Dir>)>,
     events: EventHistory,
@@ -39,9 +40,9 @@ pub(crate) struct Developer {
 impl Developer {
     pub(crate) fn load(
         mut vfs: Vfs,
-        console_theme: PathBuf,
-        hud_theme: Option<PathBuf>,
-        map_theme: PathBuf,
+        console_theme: ThemeSource,
+        hud_theme: Option<ThemeSource>,
+        map_theme: ThemeSource,
         scale: u16,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let console = Console::load(&console_theme, &mut vfs)?;
@@ -61,6 +62,7 @@ impl Developer {
             marks: Marks::new(),
             status: None,
             socket: None,
+            automatic_rpc: false,
             server: None,
             captures: None,
             events: EventHistory::default(),
@@ -74,9 +76,11 @@ impl Developer {
     pub(crate) fn with_automation(
         mut self,
         socket: Option<PathBuf>,
+        automatic_rpc: bool,
         directory: Option<PathBuf>,
     ) -> std::io::Result<Self> {
         self.socket = socket;
+        self.automatic_rpc = automatic_rpc;
         if let Some(path) = directory {
             let path = path.canonicalize()?;
             let directory =
@@ -87,13 +91,19 @@ impl Developer {
     }
 
     pub(super) fn start_automation(&mut self, proxy: EventLoopProxy<()>) -> Result<(), String> {
+        let wake = move || {
+            let _ = proxy.send_event(());
+        };
         if let Some(socket) = self.socket.take() {
             self.server = Some(
-                Server::bind(&socket, move || {
-                    let _ = proxy.send_event(());
-                })
-                .map_err(|err| format!("Developer socket {}: {err}", socket.display()))?,
+                Server::bind(&socket, wake)
+                    .map_err(|err| format!("Developer socket {}: {err}", socket.display()))?,
             );
+        } else if self.automatic_rpc {
+            let server = Server::bind_automatic(wake)
+                .map_err(|err| format!("Cannot initialize automatic developer socket: {err}"))?;
+            eprintln!("Developer RPC socket: {}", server.path().display());
+            self.server = Some(server);
         }
         Ok(())
     }
@@ -520,7 +530,11 @@ impl Viewer<'_> {
     }
 }
 
-fn load_hud(path: Option<&Path>, vfs: &mut Vfs, scale: u16) -> Result<Option<Box<Hud>>, String> {
+fn load_hud(
+    path: Option<&ThemeSource>,
+    vfs: &mut Vfs,
+    scale: u16,
+) -> Result<Option<Box<Hud>>, String> {
     path.map(|path| Hud::load(path, vfs, Some(scale)).map(Box::new))
         .transpose()
         .map_err(|e| e.to_string())
@@ -575,6 +589,9 @@ impl Viewer<'_> {
             return Err("No active playable world".into());
         };
         let scale = hud.as_ref().map_or(dev.scale, |theme| theme.scale());
+        let hud_theme = dev.hud_theme.as_ref().map(ThemeSource::path);
+        let map_theme = dev.map_theme.path();
+        let console_theme = dev.console_theme.path();
         let viewport = self
             .view
             .as_ref()
@@ -664,10 +681,10 @@ impl Viewer<'_> {
                     "world":{"hour":current_hour,"world_tile":mapped,"area":area,
                         "atlas_pixel":mapped.and_then(|tile|world_pixel(tile,map_ui.as_ref()?.world_width())),
                         "travel":map_ui.as_ref().map(|map|map.diagnostic())},
-                    "camera":{"projected":camera.position(),"viewport":viewport,"zoom":self.settings.zoom,
+                    "camera":{"projected":camera.position(),"viewport":viewport,"zoom":self.settings.zoom,"follow":self.settings.follow,
                         "view_ready":last_presented.is_some() && !*waiting},
                     "streaming":world.stats(),
-                    "ui":{"hud_theme":dev.hud_theme,"map_theme":dev.map_theme,"console_theme":dev.console_theme,
+                    "ui":{"hud_theme":hud_theme,"map_theme":map_theme,"console_theme":console_theme,
                         "hud":hud.as_ref().map(|hud|hud.diagnostics()),"scale_percent":scale,"console_open":dev.console.open,
                         "paused":self.pause.is_some(),"reload_generation":dev.reloads,"reload_status":dev.reload_status,
                         "selected":dev.selected.map(InteractiveWorld::debug_selection_id)},
@@ -754,9 +771,9 @@ impl Viewer<'_> {
                         lighting: self.settings.lighting,
                         shadows: self.settings.shadows,
                         run: self.settings.run,
-                        hud_theme: dev.hud_theme.clone(),
-                        map_theme: dev.map_theme.clone(),
-                        console_theme: dev.console_theme.clone(),
+                        hud_theme: hud_theme.map(Path::to_path_buf),
+                        map_theme: map_theme.to_path_buf(),
+                        console_theme: console_theme.to_path_buf(),
                         mods: dev.mods(),
                         selected: dev.selected.map(InteractiveWorld::debug_selection_id),
                         overlays: [dev.collision, dev.sectors, dev.fps],
@@ -776,9 +793,9 @@ impl Viewer<'_> {
                 }
                 let snapshot = Snapshot::parse(&text)?;
                 if snapshot.mods != dev.mods()
-                    || snapshot.hud_theme != dev.hud_theme
-                    || snapshot.map_theme != dev.map_theme
-                    || snapshot.console_theme != dev.console_theme
+                    || snapshot.hud_theme.as_deref() != hud_theme
+                    || snapshot.map_theme != map_theme
+                    || snapshot.console_theme != console_theme
                 {
                     return Err(Failure::new(
                         "snapshot_environment_mismatch",
@@ -906,7 +923,7 @@ impl Viewer<'_> {
             }
             Request::ReloadUi => {
                 let loaded = (|| -> Result<_, String> {
-                    let next_hud = load_hud(dev.hud_theme.as_deref(), &mut dev.vfs, scale)?;
+                    let next_hud = load_hud(dev.hud_theme.as_ref(), &mut dev.vfs, scale)?;
                     let next_map = map_ui
                         .as_mut()
                         .map(|map| map.prepare_theme(&dev.map_theme, scale))

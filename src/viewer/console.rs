@@ -1,12 +1,11 @@
 //! Modal command editing and themed console sprites for the shared UI pass.
 
-use super::{LoadedFrame, SpriteFrame, hud};
+use super::{LoadedFrame, SpriteFrame, ThemeSource, hud};
 use arcanum_rs::{developer, vfs::Vfs};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, VecDeque},
     io::Read,
-    path::Path,
     sync::{Arc, mpsc},
 };
 use winit::{
@@ -96,9 +95,9 @@ impl Layout {
 }
 
 impl Console {
-    pub fn load(path: &Path, vfs: &mut Vfs) -> Result<Self, Box<dyn std::error::Error>> {
-        let theme = parse_theme(&std::fs::read_to_string(path)?)?;
-        let glyphs = hud::console_font(vfs, path, &theme.font)?;
+    pub fn load(source: &ThemeSource, vfs: &mut Vfs) -> Result<Self, Box<dyn std::error::Error>> {
+        let theme = parse_theme(&source.read(128 * 1024 + 1)?)?;
+        let glyphs = hud::console_font(vfs, source, &theme.font)?;
         let mut console = Self::new(theme, glyphs);
         console.notice("Developer console. Type help for commands.");
         Ok(console)

@@ -1,5 +1,6 @@
 //! Declarative HUD layout, assets and hit testing, in physical window pixels.
 mod inventory;
+use super::ThemeSource;
 use arcanum_rs::{
     art::{DecodedFrame, SpriteFrame},
     content::{
@@ -11,7 +12,7 @@ use arcanum_rs::{
 };
 use inventory::{InventoryPanel, InventoryView};
 use serde::Deserialize;
-use std::{collections::BTreeMap, error::Error, fs::File, io::Read, path::Path, sync::Arc};
+use std::{collections::BTreeMap, error::Error, sync::Arc};
 
 type Color = [u8; 4];
 
@@ -375,18 +376,16 @@ pub(super) enum Hit {
 }
 
 impl Hud {
-    pub fn load(path: &Path, game: &mut Vfs, scale: Option<u16>) -> Result<Self, Box<dyn Error>> {
-        let mut source = String::new();
-        File::open(path)?
-            .take(128 * 1024 + 1)
-            .read_to_string(&mut source)?;
-        let theme = parse(&source)?;
+    pub fn load(
+        source: &ThemeSource,
+        game: &mut Vfs,
+        scale: Option<u16>,
+    ) -> Result<Self, Box<dyn Error>> {
+        let theme = parse(&source.read(128 * 1024 + 1)?)?;
         let mut files = Vfs::new(Policy::Ordered);
-        files.mount_directory(
-            path.parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or(Path::new(".")),
-        )?;
+        if let Some(directory) = source.directory() {
+            files.mount_directory(directory)?;
+        }
         let scale = scale.unwrap_or(theme.scale);
         if !(50..=300).contains(&scale) {
             return Err("UI scale must be 50–300 percent".into());
@@ -625,7 +624,12 @@ impl Hud {
         if let Some(author) = &theme.author {
             eprintln!("HUD author: {author}");
         }
-        eprintln!("HUD {} from {} at {}%", theme.name, path.display(), scale);
+        eprintln!(
+            "HUD {} from {} at {}%",
+            theme.name,
+            source.path().display(),
+            scale
+        );
         Ok(Self {
             components,
             font_profiles,
@@ -1545,15 +1549,13 @@ pub(super) fn blend_glyph(dst: &mut Color, color: Color, coverage: u8) {
 
 pub(super) fn console_font(
     game: &mut Vfs,
-    path: &Path,
+    theme: &ThemeSource,
     source: &str,
 ) -> Result<BTreeMap<char, SpriteFrame>, Box<dyn Error>> {
     let mut files = Vfs::new(Policy::Ordered);
-    files.mount_directory(
-        path.parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new(".")),
-    )?;
+    if let Some(directory) = theme.directory() {
+        files.mount_directory(directory)?;
+    }
     let font = Font {
         source: source.into(),
         size: 16,
@@ -1601,7 +1603,11 @@ mod tests {
         fn theme(&self, source: &str) -> Result<Hud, Box<dyn Error>> {
             let path = self.0.join("theme.toml");
             fs::write(&path, source)?;
-            Hud::load(&path, &mut Vfs::new(Policy::Ordered), None)
+            Hud::load(
+                &ThemeSource::external(path),
+                &mut Vfs::new(Policy::Ordered),
+                None,
+            )
         }
     }
 
@@ -1663,7 +1669,7 @@ mod tests {
     fn classic_uses_native_button_bounds_and_installed_font_metrics() {
         let root = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
         let mut game = Vfs::from_game(root, Policy::Ce).unwrap();
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/classic/theme.toml");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/classic/theme.toml");
         let mut files = Vfs::new(Policy::Ordered);
         let font = Font {
             source: "vfs:art/interface/morph15font.art".into(),
@@ -1685,8 +1691,9 @@ mod tests {
                 .any(|color| color[3] > 0 && color[3] < 255)
         );
 
+        let source = ThemeSource::external(path);
         for scale in [100, 125, 150, 200] {
-            let mut hud = Hud::load(&path, &mut game, Some(scale)).unwrap();
+            let mut hud = Hud::load(&source, &mut game, Some(scale)).unwrap();
             hud.layout((1920, 1080));
             assert_eq!(hud.draws(false).count(), 33);
             assert_eq!(hud.scale(), scale);
@@ -1728,8 +1735,9 @@ mod tests {
     fn atlas_controls_use_authored_frames_and_cancel_press_outside() {
         let root = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
         let mut game = Vfs::from_game(root, Policy::Ce).unwrap();
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/classic-map/theme.toml");
-        let mut hud = Hud::load(&path, &mut game, Some(125)).unwrap();
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/classic-map/theme.toml");
+        let mut hud = Hud::load(&ThemeSource::external(path), &mut game, Some(125)).unwrap();
         hud.set_map_view(MapView::Local);
         hud.layout((1920, 1080));
         let index = hud

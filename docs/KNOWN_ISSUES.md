@@ -1,6 +1,6 @@
 # Arcanum-RS — Known Issues
 
-Baseline: Milestone 65-R (character, equipment and quantities). Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
+Baseline: Milestone 66-R (application startup and preferences). Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
 
 ## Triage
 
@@ -11,6 +11,17 @@ Baseline: Milestone 65-R (character, equipment and quantities). Update this regi
 Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep reproduction steps, evidence and dependencies current. Do not mark an issue resolved without verifying the affected production path.
 
 ## Open issues
+
+### DEV-001 — Atlas presents are absent from the frame counter
+- **Priority:** P2 | **Status:** Open
+- **Observed:** During M66-R native scale verification, an atlas redraw changed the displayed scale while `rpc pos` kept the previous `renderer.frames_presented` value.
+- **Cause:** The existing world redraw increments the counter. The modal atlas submits through a separate redraw entry point that omits the increment.
+- **Verification:** Use Vulkan capture to observe atlas redraws until the diagnostic counter covers both presentation paths.
+
+### INPUT-001 — Synthetic X11 wheel tick advances world zoom twice
+- **Priority:** P2 | **Status:** Needs reproduction
+- **Observed:** One XTest Button4 press and release over the world advanced zoom from 1× to 3× in both the M66-R build and the pre-milestone native baseline.
+- **Investigation:** Compare physical wheel input with the XTest sequence and inspect the wheel events delivered to winit.
 
 ### UI-001 — World-map hover description outside the HUD
 - **Priority:** P2 | **Status:** Open
