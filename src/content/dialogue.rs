@@ -125,6 +125,7 @@ pub struct Response {
     pub condition: String,
     pub effect: String,
     pub available: bool,
+    pub barter: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -222,6 +223,11 @@ pub(crate) struct Context {
     pub entry: EntryContext,
 }
 
+pub(crate) enum Selection {
+    Response(usize),
+    AfterBarter(i32),
+}
+
 impl Conversation {
     pub(crate) fn open(
         vfs: &mut Vfs,
@@ -301,15 +307,19 @@ impl Conversation {
         Ok(session)
     }
 
-    pub(crate) fn choose(
+    pub(crate) fn reaction(&self) -> Option<i32> {
+        self.state.reaction
+    }
+
+    pub(crate) fn set_reaction(&mut self, value: i32) {
+        self.state.reaction = Some(value);
+    }
+    pub(crate) fn select(
         &mut self,
-        vfs: &mut Vfs,
         index: usize,
         stats: &CharacterStatistics,
-        gold: u64,
         scripts: &mut State,
-        hour: u8,
-    ) -> Result<bool, ResponseRejection> {
+    ) -> Result<i32, ResponseRejection> {
         let response = self
             .turn
             .responses
@@ -320,7 +330,7 @@ impl Conversation {
         if !conditions(
             &response.condition,
             stats,
-            gold,
+            0,
             &self.state,
             scripts,
             attachment,
@@ -329,15 +339,15 @@ impl Conversation {
         {
             return Err(ResponseRejection::Condition);
         }
-        let mut staged = scripts.clone();
-        let previous = self.state.clone();
         match effects(&response.effect) {
             Some(effects) => {
-                self.apply_effects(&effects, &mut staged, response.id.unwrap_or(self.turn.line))
+                self.apply_effects(&effects, scripts, response.id.unwrap_or(self.turn.line))
                     .map_err(ResponseRejection::Effect)?;
-                self.state
-                    .unresolved
-                    .retain(|slot| !effects.iter().any(|(written, _)| written == slot));
+                self.state.unresolved.retain(|slot| {
+                    !effects
+                        .iter()
+                        .any(|e| matches!(e, Effect::Write(written,_) if written==slot))
+                });
             }
             None if legacy_reaction(&response.effect) && response.next >= 0 => {
                 self.state.reaction = None
@@ -348,7 +358,24 @@ impl Conversation {
                 ));
             }
         }
-        let destination = response.next;
+        Ok(response.next)
+    }
+
+    pub(crate) fn choose(
+        &mut self,
+        vfs: &mut Vfs,
+        selection: Selection,
+        stats: &CharacterStatistics,
+        scripts: &mut State,
+        finish: impl FnOnce(&mut Vfs, &mut State) -> Result<(), String>,
+        hour: u8,
+    ) -> Result<bool, ResponseRejection> {
+        let mut staged = scripts.clone();
+        let previous = self.state.clone();
+        let destination = match selection {
+            Selection::Response(index) => self.select(index, stats, &mut staged)?,
+            Selection::AfterBarter(line) => line,
+        };
         let result = (|| {
             let mut continuation = None;
             let next = match destination {
@@ -375,10 +402,11 @@ impl Conversation {
                 None
             } else {
                 Some(
-                    self.build_turn(vfs, next, stats, gold, &mut staged)
+                    self.build_turn(vfs, next, stats, 0, &mut staged)
                         .map_err(ResponseRejection::Destination)?,
                 )
             };
+            finish(vfs, &mut staged).map_err(ResponseRejection::Effect)?;
             self.continuation = continuation;
             Ok(turn)
         })();
@@ -443,13 +471,36 @@ impl Conversation {
 
     fn apply_effects(
         &self,
-        writes: &[(Slot, i32)],
+        writes: &[Effect],
         scripts: &mut State,
         line: i32,
     ) -> Result<(), String> {
         let attachment = &self.context.attachment;
         let source = &self.dialogue.source;
-        for &(slot, value) in writes {
+        for &effect in writes {
+            let (slot, value) = match effect {
+                Effect::Write(slot, value) => (slot, value),
+                Effect::Gold(n) => {
+                    let facts = scripts
+                        .interaction
+                        .as_mut()
+                        .ok_or("Gold transfer context unavailable")?;
+                    facts.adjust(0, i64::from(n))?;
+                    if n < 0 {
+                        facts.adjust(1, -i64::from(n))?;
+                    }
+                    continue;
+                }
+                Effect::Item(n) => {
+                    let facts = scripts
+                        .interaction
+                        .as_mut()
+                        .ok_or("Item transfer context unavailable")?;
+                    let from = u8::from(n < 0);
+                    facts.give(n.unsigned_abs(), from, 1 - from, n < 0)?;
+                    continue;
+                }
+            };
             let applied = if let Slot::Quest(id) = slot {
                 super::quest::Status::decode(value).and_then(|status| {
                     scripts
@@ -489,9 +540,11 @@ impl Conversation {
         let speaker_effects = effects(&line.effect);
         if let Some(effects) = &speaker_effects {
             self.apply_effects(effects, scripts, id)?;
-            condition_state
-                .unresolved
-                .retain(|slot| !effects.iter().any(|(written, _)| written == slot));
+            condition_state.unresolved.retain(|slot| {
+                !effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::Write(written,_) if written==slot))
+            });
         } else {
             // Preserve visibility for the existing text-only fallback. Conditions
             // affected by a skipped write stay unresolved until a supported write.
@@ -600,6 +653,7 @@ impl Conversation {
             let text = match directive(&response.text) {
                 Some(code) => {
                     let start = match code {
+                        'b' => 300,
                         'y' => 1,
                         'n' => 100,
                         's' => 200,
@@ -646,6 +700,7 @@ impl Conversation {
                 });
             }
             turn.responses.push(Response {
+                barter: response.text.eq_ignore_ascii_case("b:"),
                 id: Some(response.id),
                 text: substitute(text, &self.speaker, response.id, &mut turn.dependencies),
                 next: response.next,
@@ -659,6 +714,7 @@ impl Conversation {
             && let Some(text) = self.generic(400)
         {
             turn.responses.push(Response {
+                barter: false,
                 id: None,
                 text: text.to_owned(),
                 next: 0,
@@ -831,14 +887,27 @@ fn state_operands(code: &str, raw: &str) -> Option<(Slot, i32)> {
     args.next().is_none().then_some((slot, value))
 }
 
-fn effects(raw: &str) -> Option<Vec<(Slot, i32)>> {
+#[derive(Clone, Copy)]
+enum Effect {
+    Write(Slot, i32),
+    Gold(i32),
+    Item(i32),
+}
+fn effects(raw: &str) -> Option<Vec<Effect>> {
     if raw.is_empty() {
         return Some(vec![]);
     }
     raw.split(',')
         .map(|effect| {
-            let (slot, value) = state_slot(effect.trim())?;
-            slot.accepts(value).then_some((slot, value))
+            let effect = effect.trim();
+            match effect.get(..2)?.to_ascii_lowercase().as_str() {
+                "$$" => Some(Effect::Gold(effect[2..].trim().parse().ok()?)),
+                "in" => Some(Effect::Item(effect[2..].trim().parse().ok()?)),
+                _ => {
+                    let (slot, value) = state_slot(effect)?;
+                    slot.accepts(value).then_some(Effect::Write(slot, value))
+                }
+            }
         })
         .collect()
 }
@@ -904,21 +973,40 @@ fn conditions(
                 })
         } else {
             args.parse::<i32>().ok().and_then(|n| {
-                let stat = match code.as_str() {
-                    "ch" => stats.attributes[7],
-                    "re" => state.reaction?,
-                    "me" if matches!(n, 0 | 1) => return Some(state.met == (n == 1)),
-                    "pe" => stats.attributes[5],
-                    "al" => stats.base[19],
-                    "ma" => stats.aptitude,
-                    "ta" => -stats.aptitude,
-                    "le" => -stats.level,
-                    "ra" => {
-                        return Some((i64::from(stats.race) + 1 == i64::from(n).abs()) == (n > 0));
-                    }
-                    "$$" => return Some(n >= 0 && gold >= n as u64),
-                    _ => return None,
-                };
+                let stat =
+                    match code.as_str() {
+                        "ch" => stats.attributes[7],
+                        "re" => state.reaction?,
+                        "me" if matches!(n, 0 | 1) => return Some(state.met == (n == 1)),
+                        "pe" => stats.attributes[5],
+                        "al" => stats.base[19],
+                        "ma" => stats.aptitude,
+                        "ta" => -stats.aptitude,
+                        "le" => -stats.level,
+                        "ra" => {
+                            return Some(
+                                (i64::from(stats.race) + 1 == i64::from(n).abs()) == (n > 0),
+                            );
+                        }
+                        "$$" => {
+                            return Some(threshold(
+                                scripts
+                                    .interaction
+                                    .as_ref()
+                                    .map_or(gold as i64, |s| s.gold[0]),
+                                n,
+                            ));
+                        }
+                        "in" | "ni" => {
+                            let has = scripts.interaction.as_ref()?.items.iter().any(
+                                |(side, name, _)| {
+                                    (*side == 0) == (n >= 0) && *name == n.unsigned_abs()
+                                },
+                            );
+                            return Some(if code == "in" { has } else { !has });
+                        }
+                        _ => return None,
+                    };
                 Some(threshold(i64::from(stat), n))
             })
         };
@@ -1079,7 +1167,14 @@ mod tests {
         scripts.initialize_random();
         let before = scripts.clone();
         let reject = conversation
-            .choose(&mut vfs, 0, &context.stats, 0, &mut scripts, 12)
+            .choose(
+                &mut vfs,
+                Selection::Response(0),
+                &context.stats,
+                &mut scripts,
+                |_, _| Ok(()),
+                12,
+            )
             .unwrap_err();
         let diagnostic = conversation.record_rejection(0, reject);
         assert_eq!(diagnostic["stage"], "script_continuation");
@@ -1102,7 +1197,14 @@ mod tests {
         assert_eq!(scripts.read(local, Slot::Quest(1010)), Some(1));
         assert!(
             conversation
-                .choose(&mut vfs, 1, &context.stats, 0, &mut scripts, 12)
+                .choose(
+                    &mut vfs,
+                    Selection::Response(1),
+                    &context.stats,
+                    &mut scripts,
+                    |_, _| Ok(()),
+                    12
+                )
                 .unwrap()
         );
         assert_eq!(conversation.turn.line, 20);
@@ -1111,7 +1213,14 @@ mod tests {
         assert_eq!(conversation.turn.responses[0].id, Some(21));
         assert!(
             !conversation
-                .choose(&mut vfs, 0, &context.stats, 0, &mut scripts, 12)
+                .choose(
+                    &mut vfs,
+                    Selection::Response(0),
+                    &context.stats,
+                    &mut scripts,
+                    |_, _| Ok(()),
+                    12
+                )
                 .unwrap()
         );
         assert_eq!(scripts.read(local, Slot::LocalFlag(2)), Some(0));
@@ -1139,7 +1248,10 @@ mod tests {
         assert_eq!(check("ch9, pe -9, $$5", &scripts), (false, vec![]));
         assert_eq!(check("ch8gf2010 0, qu1020 2", &scripts), (false, vec![]));
         let writes = effects("GF2010 1, lf3 0, lf3 1, gv4 -5, lc2 3").unwrap();
-        for (slot, value) in writes {
+        for effect in writes {
+            let Effect::Write(slot, value) = effect else {
+                panic!()
+            };
             scripts.write(&attachment, slot, value).unwrap();
         }
         assert_eq!(

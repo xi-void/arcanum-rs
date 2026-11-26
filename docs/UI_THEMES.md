@@ -117,9 +117,10 @@ The Use action remains inactive.
 A package can opt in with a center-anchored root using
 `inventory_panel = true`, zero offset, and `capture = true`. The root is
 centered in the space between top and bottom HUD roots. Use
-`inventory_views = ["inventory"]` or `["container"]` to select the modes
+`inventory_views` with any combination of `"inventory"`, `"container"` and `"trade"` to select the modes
 where a component is placed. Add `action = "toggle-inventory"` to a HUD button.
 
+- In trade view, `container-grid` displays the merchant’s stock. The `merchant-name`, `merchant-gold` and `merchant-offer` text bindings display the counterparty and the current offer. `merchant-portrait` draws the original race or creature icon. Classic uses `barter.art` and `lns_bart.art` with seven visible stock rows.
 - Use `binding = "backpack"` or `"container-grid"` with `cell` in theme
   pixels. The width must match the runtime's ten columns. Grid height
   determines visible rows. `hover_fill` supplies the item footprint tint.

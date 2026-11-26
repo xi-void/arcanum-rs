@@ -7,6 +7,8 @@ use crate::sector::objects::ItemStats;
 
 mod equipment;
 mod save;
+mod stock;
+pub(super) mod trade;
 use super::*;
 use crate::prototype::MAX_PROTOTYPE_BYTES;
 use crate::sector::objects::{self, FieldValue, OriginalId};
@@ -26,6 +28,8 @@ pub(super) struct Session {
     revision: u64,
     character: Character,
     rules: Rules,
+    accounts: trade::Accounts,
+    restocks: stock::Events,
     ground: BTreeMap<OriginalId, GroundArt>,
     unlocked: BTreeMap<String, BTreeSet<OriginalId>>,
 }
@@ -263,9 +267,17 @@ impl Records<'_> {
         container: Option<&Container>,
     ) -> Result<Layout, String> {
         let mut layout = Layout::default();
-        if let Some(container) = container {
-            let mut originals = container
-                .members
+        let members = match owner {
+            Owner::OriginalObject(map, id)
+                if map == self.map && self.index()?.category(*id) == Some(16) =>
+            {
+                Some(self.index()?.members(*id))
+            }
+            Owner::OriginalObject(..) => return Err("Invalid NPC inventory owner".into()),
+            _ => container.map(|c| c.members.clone()),
+        };
+        if let Some(members) = members {
+            let mut originals = members
                 .iter()
                 .map(|&id| self.item(id, state))
                 .collect::<Result<Vec<_>, _>>()?;
@@ -445,6 +457,7 @@ pub struct InventoryEntry {
     pub equipment: Option<EquipmentSlot>,
     pub quantity: Option<u32>,
     pub detail: String,
+    pub price: Option<u32>,
     pub category: u32,
     pub ammo_type: Option<u32>,
     pub prototype: u32,
@@ -516,11 +529,25 @@ impl InventoryReader {
         world: &InteractiveWorld,
         target: Option<&str>,
     ) -> Result<InventoryContents, String> {
+        let trading = world
+            .trade
+            .as_ref()
+            .filter(|t| target == Some(t.npc.as_str()));
         let target = target.map(parse_id).transpose()?;
-        let owner = target.map_or(Owner::Player, |id| Owner::Container(world.map.clone(), id));
+        let owner = if let Some(t) = trading {
+            t.stock.clone()
+        } else {
+            target.map_or(Owner::Player, |id| Owner::Container(world.map.clone(), id))
+        };
         let mut records = world.records(&mut self.vfs);
-        let container = target.map(|id| records.container(id)).transpose()?;
-        if let (Some(container), Some(id)) = (&container, target) {
+        let container = if let Owner::Container(_, id) = &owner {
+            Some(records.container(*id)?)
+        } else {
+            None
+        };
+        if trading.is_none()
+            && let (Some(container), Some(id)) = (&container, target)
+        {
             container.check_access(world, id, world.cache.hour)?;
         }
         let layout = records.layout(&world.cache.inventory.state, &owner, container.as_ref())?;
@@ -566,12 +593,26 @@ impl InventoryReader {
                     .or(item.inventory_art),
             )
             .map_err(|error| error.to_string());
+            let quote = world
+                .trading()
+                .then(|| world.quote(item, trading.is_some()).map(|(p, _)| p));
+            let mut detail = item.detail(world.cache.inventory.aptitude());
+            if let Some(quote) = &quote {
+                match quote {
+                    Ok(price) => detail.push_str(&format!("  {} gold each", price)),
+                    Err(e) => {
+                        detail.push_str("  ");
+                        detail.push_str(e);
+                    }
+                }
+            }
             let entry = InventoryEntry {
                 pickup_sound: item.handling_sound(true, world.cache.inventory.aptitude()),
                 id: item.id.key(),
                 equipment: equipped,
                 quantity: item.stats.quantity,
-                detail: item.detail(world.cache.inventory.aptitude()),
+                detail,
+                price: quote.and_then(Result::ok),
                 category: item.category,
                 ammo_type: item.stats.ammo_type,
                 prototype: item.prototype,
@@ -621,7 +662,14 @@ impl InteractiveWorld {
         if key == "player" {
             return Ok(Owner::Player);
         }
-        Ok(Owner::Container(self.map.clone(), parse_id(key)?))
+        let id = parse_id(key)?;
+        Ok(
+            if self.mobile_index.get().and_then(|index| index.category(id)) == Some(16) {
+                Owner::OriginalObject(self.map.clone(), id)
+            } else {
+                Owner::Container(self.map.clone(), id)
+            },
+        )
     }
 
     pub fn inspect_inventory(&self, vfs: &mut Vfs, key: &str) -> Result<Value, String> {
@@ -631,9 +679,12 @@ impl InteractiveWorld {
         let container = match &owner {
             Owner::Player => None,
             Owner::Container(_, id) => Some(records.container(*id)?),
-            Owner::OriginalObject(..) => return Err("Unsupported inventory owner".into()),
+            Owner::OriginalObject(..) => None,
         };
         let layout = records.layout(state, &owner, container.as_ref())?;
+        let npc_gold = matches!(owner, Owner::OriginalObject(..))
+            .then(|| self.npc_gold(vfs, key))
+            .transpose()?;
         let place = Place::Owned(owner.clone());
         let mut items: Vec<_> = layout.items.values().collect();
         items.sort_by_key(|item| {
@@ -648,7 +699,7 @@ impl InteractiveWorld {
             )
         });
         Ok(
-            json!({"owner":place.report(),"columns":COLUMNS,"rows":owner.rows(),
+            json!({"owner":place.report(),"gold":npc_gold,"columns":COLUMNS,"rows":owner.rows(),
             "container":container.as_ref().map(|container| {
                 let mut report = container.report();
                 if let Owner::Container(_, id) = owner {
@@ -730,6 +781,9 @@ impl InteractiveWorld {
         slot: Option<usize>,
         hour: Option<u8>,
     ) -> Result<Value, String> {
+        if self.merchant_owns(from) || self.merchant_owns(to) {
+            return self.trade_item(vfs, key, from, to, slot, None);
+        }
         let from = self.inventory_owner(from)?;
         let to = self.inventory_owner(to)?;
         self.move_item(
@@ -750,6 +804,9 @@ impl InteractiveWorld {
         slot: Option<usize>,
         quantity: u32,
     ) -> Result<Value, String> {
+        if self.merchant_owns(from) || self.merchant_owns(to) {
+            return self.trade_item(vfs, key, from, to, slot, Some(quantity));
+        }
         let from = self.inventory_owner(from)?;
         let movement = if to == "ground" {
             if from != Owner::Player {
@@ -792,6 +849,7 @@ impl InteractiveWorld {
             }
         }
         let pickup = matches!(action, Move::Pickup(_));
+        let authorized = matches!(action, Move::Exchange(..));
         let (destination, requested) = match action {
             Move::Pickup(slot) => {
                 let Place::Ground(map, tile) = &current else {
@@ -821,7 +879,15 @@ impl InteractiveWorld {
                 (Place::Ground(self.map.clone(), tile), None)
             }
             Move::Drop => return Err("Only player-owned items can be dropped".into()),
-            Move::Transfer(from, to, slot) => {
+            Move::Transfer(from, to, slot) | Move::Exchange(from, to, slot) => {
+                if !authorized
+                    && matches!(
+                        (&from, &to),
+                        (Owner::OriginalObject(..), _) | (_, Owner::OriginalObject(..))
+                    )
+                {
+                    return Err("NPC transfers require trade or script authorization".into());
+                }
                 if current != Place::Owned(from) {
                     return Err("Item does not belong to the specified source".into());
                 }
@@ -834,7 +900,7 @@ impl InteractiveWorld {
         if current != destination && matches!(current, Place::Owned(_)) {
             check_removal(&item)?;
         }
-        if let Place::Owned(Owner::Container(_, source)) = &current {
+        if !authorized && let Place::Owned(Owner::Container(_, source)) = &current {
             records
                 .container(*source)?
                 .check_access(self, *source, hour)?;
@@ -861,9 +927,12 @@ impl InteractiveWorld {
                     Owner::Player => None,
                     Owner::Container(_, target) => {
                         let container = records.container(*target)?;
-                        container.check_access(self, *target, hour)?;
+                        if !authorized {
+                            container.check_access(self, *target, hour)?;
+                        }
                         Some(container)
                     }
+                    Owner::OriginalObject(..) if authorized => None,
                     Owner::OriginalObject(..) => return Err("Unsupported inventory owner".into()),
                 };
                 Some(records.layout(state, owner, container.as_ref())?)
@@ -872,7 +941,7 @@ impl InteractiveWorld {
                 ground = Some(records.ground_art(&item, *tile, self.reference)?);
                 None
             }
-            Place::Equipped(_) | Place::Merged(_) => {
+            Place::Equipped(_) | Place::Merged(_) | Place::Spent | Place::Retired => {
                 return Err("Invalid transfer destination".into());
             }
         };
@@ -897,6 +966,12 @@ impl InteractiveWorld {
                         .get(&id)
                         .map(|entry| entry.0)
                 }
+                Place::Owned(owner @ Owner::OriginalObject(..)) => records
+                    .layout(state, owner, None)?
+                    .grid
+                    .items
+                    .get(&id)
+                    .map(|v| v.0),
                 _ => None,
             }
         } else {
@@ -981,6 +1056,9 @@ impl InteractiveWorld {
     }
 
     fn take_all(&mut self, vfs: &mut Vfs, target: &str) -> Result<(), String> {
+        if self.trading() {
+            return Err("Take all is unavailable while trading".into());
+        }
         let id = parse_id(target)?;
         let source = Owner::Container(self.map.clone(), id);
         let mut records = self.records(vfs);
@@ -1020,7 +1098,10 @@ impl InteractiveWorld {
         let mut records = self.records(vfs);
         let state = &self.cache.inventory.state;
         let mut planned = Vec::new();
-        for owner in ["player"].into_iter().chain(target) {
+        for owner in ["player"]
+            .into_iter()
+            .chain(target.filter(|_| !self.trading()))
+        {
             let owner = self.inventory_owner(owner)?;
             let container = match &owner {
                 Owner::Container(_, id) => {
@@ -1157,6 +1238,7 @@ enum Move {
     Pickup(Option<usize>),
     Drop,
     Transfer(Owner, Owner, Option<usize>),
+    Exchange(Owner, Owner, Option<usize>),
 }
 
 #[cfg(test)]

@@ -291,6 +291,9 @@ fn int_array<const N: usize>(value: FieldValue<'_>) -> [Option<i32>; N] {
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub(crate) struct ItemStats {
+    pub worth: i32,
+    pub name: u32,
+    pub hp: [i32; 3],
     pub weight: Option<i32>,
     pub magic_weight: Option<i32>,
     pub complexity: Option<i32>,
@@ -334,6 +337,9 @@ impl ItemStats {
                         .is_some_and(|entry| entry[8..12] != [0; 4])
                 })
             }
+            (_, 21) => self.name = scalar.unwrap_or_default(),
+            (_, 26..=28) => self.hp[field - 26] = signed.unwrap_or_default(),
+            (_, 68) => self.worth = signed.unwrap_or_default(),
             (_, 66) => self.weight = signed,
             (_, 67) => self.magic_weight = signed,
             (_, 72) => self.use_art = scalar,
@@ -388,8 +394,23 @@ pub(crate) struct PrototypeDefaults {
     pub reaction_base: Option<i32>,
     pub social_class: Option<i32>,
     pub npc_leader: Option<OriginalId>,
+    pub buy_script: (i32, crate::content::script::Local),
+    pub merchant_gold: u32,
+    pub retail: i32,
+    pub substitute: Option<OriginalId>,
+    pub haggle: u32,
 }
 
+pub(crate) fn purchase_attachment(value: FieldValue<'_>) -> (i32, crate::content::script::Local) {
+    value
+        .array_entry(17)
+        .map_or_else(Default::default, |bytes| {
+            (
+                i32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+                crate::content::script::Local::from_attachment(bytes),
+            )
+        })
+}
 pub(crate) fn has_inventory_scripts(value: FieldValue<'_>) -> bool {
     // SAP_GET, DROP, INSERT_ITEM, REMOVE_ITEM and TRANSFER.
     [4, 5, 21, 28, 32].into_iter().any(|slot| {
@@ -428,6 +449,7 @@ pub(crate) fn prototype_defaults(
     let mut fields = Fields::default();
     let mut description = None;
     let mut inventory_scripts = false;
+    let mut buy_script = Default::default();
     let mut hp = [0; 2];
     let mut npc_damage = [0; 2];
     let mut npc_unknown_description = None;
@@ -452,6 +474,7 @@ pub(crate) fn prototype_defaults(
         }
         if index == 31 {
             inventory_scripts = has_inventory_scripts(value);
+            buy_script = purchase_attachment(value);
         }
         fields.project(index, category, value);
     }
@@ -468,6 +491,8 @@ pub(crate) fn prototype_defaults(
         None
     };
     let mut background = None;
+    let (mut merchant_gold, mut retail, mut substitute, mut inventory_source, mut haggle) =
+        (0, 0, None, None, 0);
     let (mut npc_flags, mut reaction_base, mut npc_leader, mut social_class) =
         (None, None, None, None);
     if category == 15 {
@@ -477,6 +502,11 @@ pub(crate) fn prototype_defaults(
                 let value = read_value(&mut reader, index, category)?;
                 match index {
                     70..=71 => fatigue[index - 70] = value.scalar().unwrap_or_default() as i32,
+                    67 => {
+                        haggle = value
+                            .array_entry(9)
+                            .map_or(0, |v| u32::from_le_bytes(v.try_into().unwrap()))
+                    }
                     132 => background = value.scalar().map(|v| v as i32),
                     _ => {}
                 }
@@ -490,6 +520,10 @@ pub(crate) fn prototype_defaults(
                 match index {
                     70..=71 => fatigue[index - 70] = value.scalar().unwrap_or_default() as i32,
                     72 => npc_damage[1] = value.scalar().unwrap_or_default() as i32,
+                    78 => merchant_gold = value.scalar().unwrap_or_default(),
+                    85 => inventory_source = value.scalar(),
+                    141 => retail = value.scalar().unwrap_or_default() as i32,
+                    142 => substitute = value.reference(),
                     86 => npc_unknown_description = value.scalar(),
                     128 => npc_flags = value.scalar(),
                     129 => npc_leader = value.reference(),
@@ -500,7 +534,7 @@ pub(crate) fn prototype_defaults(
             }
         }
     }
-    let (mut subtype_flags, mut inventory_art, mut inventory_source) = (None, None, None);
+    let (mut subtype_flags, mut inventory_art) = (None, None);
     if matches!(category, 2 | 5..=14) {
         subtype_flags = read_value(&mut reader, 64, category)?.scalar();
         if let Some(item) = &mut item {
@@ -551,5 +585,10 @@ pub(crate) fn prototype_defaults(
         reaction_base,
         social_class,
         npc_leader,
+        buy_script,
+        merchant_gold,
+        retail,
+        substitute,
+        haggle,
     })
 }

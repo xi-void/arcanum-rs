@@ -121,6 +121,13 @@ impl Clock {
         phase_ms < REAL_HOUR
     }
 
+    /// Time to an absolute game minute, bounded by the next hourly clock update.
+    pub fn until_minute(&self, target: u64, play: Duration) -> Duration {
+        let (hours, phase) = self.for_save(play);
+        let minute = target.saturating_sub(hours.saturating_mul(60)).min(60);
+        Duration::from_millis((minute * REAL_HOUR).div_ceil(60).saturating_sub(phase))
+    }
+
     pub fn until_next_hour(&self, play: Duration) -> Duration {
         Duration::from_millis(REAL_HOUR - self.for_save(play).1)
     }
@@ -392,6 +399,24 @@ impl Journey {
 mod tests {
     use super::*;
     use crate::content::map_atlas::Atlas;
+
+    #[test]
+    fn scheduled_minutes_include_overdue_events_and_saved_fractional_hours() {
+        let clock = Clock::from_save((23, REAL_HOUR - 10));
+        assert_eq!(clock.until_minute(23 * 60, Duration::ZERO), Duration::ZERO);
+        assert_eq!(
+            clock.until_minute(24 * 60, Duration::ZERO),
+            Duration::from_millis(10)
+        );
+        assert_eq!(
+            clock.until_minute(24 * 60, Duration::from_millis(10)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            clock.until_minute(24 * 60 + 1, Duration::from_millis(10)),
+            Duration::from_millis(REAL_HOUR / 60)
+        );
+    }
 
     #[test]
     fn set_time_keeps_day_and_elapsed_progression() {

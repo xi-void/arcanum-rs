@@ -162,6 +162,7 @@ pub(crate) struct Adjustments {
     special: [i32; SPECIAL.len()],
     resistance: [i32; 5],
     heal_percent: i32,
+    haggle: i32,
     pub(crate) other: Vec<String>,
 }
 
@@ -179,7 +180,9 @@ impl Adjustments {
             };
             let key = key.to_ascii_lowercase();
             let value = value.trim();
-            let target = if key == "healrate" && value.ends_with('%') {
+            let target = if key == "haggle" {
+                Some((&mut result.haggle, value))
+            } else if key == "healrate" && value.ends_with('%') {
                 Some((&mut result.heal_percent, value.trim_end_matches('%')))
             } else {
                 STATS
@@ -229,6 +232,13 @@ pub(crate) struct Rules {
 }
 
 impl Rules {
+    pub(crate) fn haggle(&self) -> i64 {
+        self.modifiers()
+            .chain(&self.encumbrance)
+            .map(|effect| i64::from(effect.haggle))
+            .sum()
+    }
+
     fn modifiers(&self) -> impl Iterator<Item = &Adjustments> {
         self.race.iter().chain(&self.gender).chain(&self.background)
     }
@@ -243,6 +253,10 @@ impl Rules {
 #[derive(Clone, Serialize, serde::Deserialize)]
 pub(crate) struct Character {
     pub(crate) base: [i32; 28],
+    #[serde(default)]
+    pub(crate) haggle: u32,
+    #[serde(default)]
+    pub(crate) spell_flags: u32,
     pub(crate) background: i32,
     pub(crate) original_palette: u32,
     pub(crate) base_ac: i32,
@@ -264,6 +278,8 @@ impl Default for Character {
         base[26] = 1;
         Self {
             base,
+            haggle: 0,
+            spell_flags: 0,
             background: 0,
             original_palette: 0,
             base_ac: 0,

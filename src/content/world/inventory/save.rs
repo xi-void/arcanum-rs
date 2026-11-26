@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 pub struct Objects {
+    #[serde(default)]
+    accounts: trade::Accounts,
+    #[serde(default)]
+    restocks: stock::Events,
     character: Character,
     next_generated: u64,
     items: Vec<SavedItem>,
@@ -18,6 +22,8 @@ struct SavedItem {
     category: u32,
     origin_map: String,
     instance: String,
+    #[serde(default)]
+    identified: bool,
     quantity: Option<u32>,
     place: Place,
     slot: Option<usize>,
@@ -28,6 +34,8 @@ impl InteractiveWorld {
     pub fn save_objects(&self) -> Objects {
         let session = &self.cache.inventory;
         Objects {
+            accounts: session.accounts.clone(),
+            restocks: session.restocks.clone(),
             character: session.character.clone(),
             next_generated: session.state.next_generated,
             items: session
@@ -42,6 +50,7 @@ impl InteractiveWorld {
                         category: item.category,
                         origin_map: item.origin_map.clone(),
                         instance: item.instance_source.virtual_path.clone(),
+                        identified: item.flags & 1 != 0,
                         quantity: item.stats.quantity,
                         place: change.place.clone(),
                         slot: change.slot,
@@ -140,11 +149,12 @@ impl Objects {
 
             item.id = saved.id;
             item.generated = generated;
+            if saved.identified {
+                item.flags |= 1;
+            }
             item.stats.quantity = saved.quantity;
             match &saved.place {
-                Place::Owned(owner @ (Owner::Player | Owner::Container(..)))
-                    if saved.slot.is_some() =>
-                {
+                Place::Owned(owner) if saved.slot.is_some() => {
                     owners.insert(owner.clone());
                 }
                 Place::Equipped(slot) if saved.slot.is_none() => {
@@ -162,6 +172,9 @@ impl Objects {
                     let art = records(vfs, map, None).ground_art(&item, *tile, *tile)?;
                     session.ground.insert(saved.id, art);
                 }
+                Place::Retired if saved.slot.is_none() => {}
+                Place::Spent
+                    if item.category == 8 && saved.quantity == Some(0) && saved.slot.is_none() => {}
                 Place::Merged(target) if saved.slot.is_none() && *target != saved.id => {}
                 _ => return Err("Invalid saved item placement".into()),
             }
@@ -201,6 +214,9 @@ impl Objects {
                 let mut records = records(vfs, map, Some(index));
                 let container = records.container(*id)?;
                 (records, Some(container))
+            } else if let Owner::OriginalObject(map, _) = &owner {
+                let index = map_index(vfs, catalog, &mut indices, map)?;
+                (records(vfs, map, Some(index)), None)
             } else {
                 (records(vfs, "", None), None)
             };
@@ -211,6 +227,29 @@ impl Objects {
                 }
             }
         }
+        for (map, accounts) in &self.accounts {
+            let index = map_index(vfs, catalog, &mut indices, map)?;
+            for (key, account) in accounts {
+                if index.category(parse_id(key)?) != Some(16)
+                    || account.gold > i32::MAX as u32
+                    || account.reaction_delta < 0
+                {
+                    return Err("Invalid saved merchant account".into());
+                }
+            }
+        }
+        for (map, events) in &self.restocks {
+            let index = map_index(vfs, catalog, &mut indices, map)?;
+            for (key, event) in events {
+                if !matches!(index.category(parse_id(key)?), Some(2 | 16))
+                    || index.category(parse_id(&event.merchant)?) != Some(16)
+                {
+                    return Err("Invalid merchant restock identity".into());
+                }
+            }
+        }
+        session.restocks = self.restocks.clone();
+        session.accounts = self.accounts.clone();
         for (map, ids) in &self.unlocked {
             let index = map_index(vfs, catalog, &mut indices, map)?;
             let mut records = records(vfs, map, Some(index));

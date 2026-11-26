@@ -1,6 +1,6 @@
 # Arcanum-RS — Known Issues
 
-Baseline: Milestone 72-R (Quest state and Classic quest logbook). Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
+Baseline: Milestone 73-R (vendor trading and scripted transfers). Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
 
 ## Triage
 
@@ -25,8 +25,8 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
   Initial reaction uses the original base and available character modifiers.
   Persistent reaction and meeting history and live AI changes are pending.
 - Some greetings and response directives need class-, race-, quest- or
-  service-specific dialogue. Talk-triggered scripts, trade and companion
-  recruitment are deferred. Scriptless NPCs have no conversation panel.
+  service-specific dialogue. Companion recruitment and service-specific
+  actions such as identification remain deferred. Scriptless NPCs have no conversation panel.
 
 ### QUEST-001 — Quest rewards and broader logbook coverage
 
@@ -41,8 +41,7 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
   authored floating line). The unresolved DLG action disables those
   responses and their quest writes. The correct-answer route reaches Completed.
   Its prize remains blocked at `dlg/01036riddler3.dlg` line 16 by the mixed
-  `in -5700, gf2730 1, rp 1071` effect, which needs DLG inventory transfer and
-  reputation support.
+  `in -5700, gf2730 1, rp 1071` effect, which still needs reputation support.
 
 ### DLG-002 — Generated greetings and talk eligibility
 
@@ -62,17 +61,12 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
   authored recruitment continuation in `scr/01280docroberts.scr` starts at
   statement 16 and requires `SAT_CRITTER_FOLLOW` (action 21) at statement 17.
   Dialogue does not implement recruitment or the bank fight.
-- The Wise Woman now renders and receives clicks. Her `03055sh_identify_lady`
-  and Black Root's `01815herbalist` both stop at statement 0,
-  `SAT_GET_REACTION` (action 29). Statement 1 reads magick/tech aptitude
-  with `SAT_GET_STAT` (action 33). Their later checks use spell state and
-  bad associates, and their services need trade or item identification.
+- Native clicks now reach the Wise Woman's and Black Root Herbalist's greetings and barter responses. Their other services, including identification, remain pending.
 - The freestanding bridge gate now renders and takes Use input. Its original
   lock and local collision still apply. Use attachment 30019 requires
   `SCT_SECTOR_IS_BLOCKED` (condition 45) and
   `SAT_TOGGLE_SECTOR_BLOCKED` (action 106) at statement 0 for overland
-  travel. Lukan's key handoff uses DLG `in -4402`, which needs the original
-  item transfer and key handling. See the
+  travel. Lukan's paid dialogue now hands over his original key through `in -4402`. Using a matching key in the gate lock remains pending. See the
   [installed-data reproduction](AGENT_WORKFLOW.md#shrouded-hills-interaction-check).
 - The original NPC event scheduler remains deferred. Doc's first heartbeat
   `01302docfirst_heartbeat.scr` can change his day standpoint and remove the
@@ -82,7 +76,14 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
   its attachee. The bridge copy starts with `OF_OFF`. The Wise Woman and
   Black Root Herbalist have no First Heartbeat or Heartbeat attachment.
 
-### MAP-003 — Void Islands town-map resource rejected
+### TRADE-001 — Merchant service and equipment dependencies
+
+- **Priority:** P2 | **Status:** Deferred
+- Gambling, identification, NPC equipment selection and inventory scripts with unsupported side effects need their corresponding gameplay systems. A purchase predicate that the interpreter cannot evaluate rejects the sale. Shop stock uses original item records and probability tables for replacement.
+
+### MAP-003 — Installed town-map resources rejected
+
+- On the Shrouded Hills merchant route the winning `townmap/shrouded hills/shrouded hills.tmi` from module `Arcanum.PATCH9` reports an invalid version, ID or length. World interaction remains available.
 
 - **Priority:** P2 | **Status:** Needs reproduction
 - M69-R native fixture discovery reported an invalid version, ID or length
@@ -232,7 +233,7 @@ These are planned capabilities, not regressions. Implement in their own mileston
 
 - **M64-R:** interactive inventory rearrangement, transfers, Take All, Arrange, ground pickup/drop and drag cancellation; developer unlocking of ordinary locked containers (verify existing command behavior first).
 - **Inventory extensions:** generated loot, consumption, decay and scripted inventory behavior as their dependencies become available.
-- **Later systems:** dialogue, scripting, combat, magick, technology, crafting, trading and progression.
+- **Later systems:** dialogue, scripting, combat, magick, technology, crafting and progression.
 - **Use action:** remains inactive until the relevant gameplay mechanics exist.
 
 ## Regression watchlist — previously corrected

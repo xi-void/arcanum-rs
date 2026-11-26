@@ -18,6 +18,8 @@ On Linux, slots live in `$XDG_DATA_HOME/arcanum-rs/saves/`, with
 created on the first write and is separate from configuration and installed
 game files. Keep the same original data and gameplay mods when loading a slot.
 
+Merchant purses, trade reaction adjustments, identified items, named-item transfers, split stacks and pending restock events persist across maps and restarts. Opening a version-1 slot written before trading initializes the new fields from original data on demand.
+
 ## Format version 1
 
 Each slot is a single `.ars` file. Its name is an engine-generated identifier.

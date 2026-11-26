@@ -98,6 +98,12 @@ Plain `G:` greetings use the original class or race tables and available
 character state. Several simple CE generic response directives use the installed `gd_*.mes`
 tables. More complex directives depend on their corresponding gameplay systems.
 
+## Trading and scripted transfers
+
+An available `B:` response opens the active NPC's inventory or nearby original substitute chest. Its response effects execute on selection. Closing barter follows the response destination with the current inventory and reaction. Classic reads its two panes, scroll controls, offer, portrait and purse from the shared HUD theme.
+
+The interpreter resolves named items against runtime ownership. DLG `in` transfers an existing named item. A negative number gives it to the player from the speaker or substitute stock. DLG `$$` awards gold for positive values and transfers payment to the speaker for negative values. SCR conditions 2 and 17 query gold and named items. Actions 35 and 41 change one actor's gold or move a named item between actors. All writes for an interaction commit together after the destination and inventory operations validate.
+
 ## Voice packs and VFS overrides
 
 Original recordings use `sound/speech/NNNNN/vS_m.mp3` and `vS_f.mp3`.
