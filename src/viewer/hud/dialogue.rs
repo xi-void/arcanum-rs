@@ -151,13 +151,10 @@ impl Hud {
             .min(config.size[1])
             .min(speech_height);
         let height = scaled(visible, scale);
-        let (x, y) = npc_at.map_or(
-            (
-                authored.x + authored.w as i32 / 2,
-                authored.y + height as i32,
-            ),
-            |at| at,
-        );
+        let (x, y) = npc_at.unwrap_or((
+            authored.x + authored.w as i32 / 2,
+            authored.y + height as i32,
+        ));
         let viewport = Rect {
             x: (x - authored.w as i32 / 2)
                 .clamp(band.x, band.x + band.w.saturating_sub(authored.w) as i32),
@@ -251,9 +248,8 @@ impl Hud {
             && label.raster_slice != Some((from, to))
         {
             label.raster_slice = Some((from, to));
-            let render = |c: &Component| raster(c, &c.base, native, slice, 100, None);
-            c.art = render(c);
-            c.update_text_states(render);
+            c.art = raster(c, &c.base, native, slice, 100, None);
+            c.update_text_states(|c| raster(c, &c.base, native, slice, 100, None));
         }
         self.placed[index] = Some(Placement {
             full: drawn,
