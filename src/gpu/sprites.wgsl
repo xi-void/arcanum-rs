@@ -93,6 +93,11 @@ fn fs(input: Output) -> @location(0) vec4<f32> {
             let opacity = (left * (size.x - p.x) + right * p.x) / (size.x * size.y);
             alpha = alpha * opacity / 255u;
         }
+        case 5u: {
+            color = color * rgb(input.shade.y) / 255u;
+            let submerged = p.y + input.shade.z >= textureDimensions(sprite).y;
+            alpha = alpha * input.shade.w * select(255u, 92u, submerged) / 65025u;
+        }
         default: {}
     }
     return vec4<f32>(vec4(color, alpha)) / 255.;

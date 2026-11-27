@@ -21,12 +21,21 @@ const NO_BLOCK: u32 = 0x400;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Cell {
     blocked: bool,
+    mobiles: u32,
     pub(super) terrain_blocked: bool,
     edges: u8,
     portals: [u16; 4],
 }
 
 impl Cell {
+    pub(super) fn vacate(mut self, count: u32) -> Self {
+        self.mobiles = self.mobiles.saturating_sub(count);
+        self
+    }
+    pub(super) fn occupied(mut self) -> Self {
+        self.blocked = true;
+        self
+    }
     pub(super) fn portal_state(mut self, direction: u8, was_open: bool, open: bool) -> Self {
         let count = &mut self.portals[usize::from(direction / 2)];
         match (was_open, open) {
@@ -165,7 +174,7 @@ impl Collision {
     }
 
     pub(super) fn occupy(&mut self, tile: Tile) {
-        self.cells[index(tile)].blocked = true;
+        self.cells[index(tile)].mobiles += 1;
     }
 
     pub(super) fn cell(&self, tile: Tile) -> Cell {
@@ -200,7 +209,7 @@ fn prototype(
 }
 
 pub(super) fn can_stand(cell: Option<Cell>) -> bool {
-    cell.is_some_and(|cell| !cell.blocked)
+    cell.is_some_and(|cell| !cell.blocked && cell.mobiles == 0)
 }
 
 pub(super) fn step(tile: Tile, direction: u8, cell: impl Fn(Tile) -> Option<Cell>) -> Option<Tile> {
@@ -213,6 +222,7 @@ pub(super) fn step(tile: Tile, direction: u8, cell: impl Fn(Tile) -> Option<Cell
         let source = cell(from)?;
         let target = cell(to)?;
         (!target.blocked
+            && target.mobiles == 0
             && !source.blocks_edge(direction)
             && !target.blocks_edge((direction + 4) % 8))
         .then_some(to)
@@ -249,6 +259,7 @@ pub(super) fn can_reach_container(
             let mut cell = cell(tile)?;
             if tile == target {
                 cell.blocked = cell.terrain_blocked;
+                cell.mobiles = 0;
             }
             Some(cell)
         }) == Some(target)
@@ -368,4 +379,47 @@ mod tests {
         );
         assert_eq!(collision.cell(tile).portals, [0, 0, 1, 0]);
     }
+}
+
+/// Trace a tile ray across wall and portal edges without treating occupied floor as opaque.
+/// A portal may itself be selected from either side of its boundary.
+pub(super) fn sight(
+    from: Tile,
+    to: Tile,
+    portal: bool,
+    cell: impl Fn(Tile) -> Option<Cell>,
+) -> bool {
+    let length = from.0.abs_diff(to.0).max(from.1.abs_diff(to.1));
+    if length == 0 {
+        return true;
+    }
+    let axis = |a: u32, b: u32, i: u32| {
+        let delta = i64::from(b) - i64::from(a);
+        (i64::from(a)
+            + (delta.signum()
+                * ((delta.unsigned_abs() * u64::from(i) + u64::from(length / 2))
+                    / u64::from(length)) as i64)) as u32
+    };
+    let mut prev = from;
+    for i in 1..=length {
+        let next = (axis(from.0, to.0, i), axis(from.1, to.1, i));
+        let Some(dir) = DIRECTIONS.iter().position(|&(dx, dy)| {
+            prev.0.checked_add_signed(dx) == Some(next.0)
+                && prev.1.checked_add_signed(dy) == Some(next.1)
+        }) else {
+            return false;
+        };
+        if !(portal && next == to)
+            && step(prev, dir as u8, |t| {
+                let mut c = cell(t)?;
+                c.blocked = false;
+                c.mobiles = 0;
+                Some(c)
+            }) != Some(next)
+        {
+            return false;
+        }
+        prev = next
+    }
+    true
 }

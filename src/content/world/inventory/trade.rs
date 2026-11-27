@@ -290,7 +290,7 @@ impl InteractiveWorld {
 
     pub(super) fn quote(&self, item: &Item, buying: bool) -> Result<(u32, i32), String> {
         let t = self.trade.as_ref().ok_or("Trading is closed")?;
-        check_item(item)?;
+        check_item(item, &self.cache.inventory.state)?;
         check_removal(item)?;
         if item.category == 8 {
             return Err("Gold is the currency".into());

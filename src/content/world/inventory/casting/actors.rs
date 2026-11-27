@@ -1,0 +1,366 @@
+//! Read and persist health, fatigue, conditions and spell-derived character statistics.
+use super::*;
+
+pub(super) fn npc_character(
+    defaults: &objects::PrototypeDefaults,
+    instance: Option<&objects::Instance<'_>>,
+) -> Character {
+    let mut pc = Character::default();
+    let scalar = |i, base| {
+        instance
+            .and_then(|o| o.field(i))
+            .and_then(FieldValue::scalar)
+            .map_or(base, |n| n as i32)
+    };
+    let array = |field, index, base| {
+        instance.and_then(|o| o.field(field)).map_or(base, |a| {
+            a.array_entry(index)
+                .map(|bytes| i32::from_le_bytes(bytes.try_into().unwrap()))
+                .unwrap_or(0)
+        })
+    };
+    for (i, base) in pc.base.iter_mut().enumerate() {
+        *base = array(
+            66,
+            i,
+            defaults
+                .character
+                .as_ref()
+                .and_then(|a| a[i])
+                .unwrap_or(*base),
+        )
+    }
+    pc.hp = std::array::from_fn(|i| scalar(26 + i, defaults.hp[i]));
+    pc.fatigue = std::array::from_fn(|i| scalar(70 + i, defaults.fatigue[i]));
+    pc.health_damage = scalar(28, defaults.npc_damage[0]);
+    pc.fatigue_damage = scalar(72, defaults.npc_damage[1]);
+    pc.base_resistance =
+        std::array::from_fn(|i| array(30, i, defaults.resistance.and_then(|a| a[i]).unwrap_or(0)));
+    let f = instance.map(|o| o.appearance()).unwrap_or_default();
+    pc.critter_flags = f
+        .critter_flags
+        .or(defaults.appearance.critter_flags)
+        .unwrap_or_default();
+    pc.spell_flags = f
+        .spell_flags
+        .or(defaults.appearance.spell_flags)
+        .unwrap_or_default();
+    pc
+}
+impl Session {
+    pub(in crate::content::world) fn displaced_actor(
+        &self,
+        id: OriginalId,
+    ) -> Option<&mobile::population::Resident> {
+        self.magick.moved.get(&id).map(|(r, _)| r.as_ref())
+    }
+
+    pub(in crate::content::world::inventory) fn spell_deadline(&self) -> Option<u64> {
+        self.magick
+            .active
+            .iter()
+            .flat_map(|r| [r.due, r.callback])
+            .flatten()
+            .min()
+    }
+    pub(super) fn program(&self, id: usize) -> Result<Arc<Program>, String> {
+        self.rules
+            .progression
+            .spells
+            .get(id)
+            .ok_or("Unknown spell")?
+            .program
+            .clone()
+    }
+    pub(super) fn refresh_magick(&mut self) {
+        self.rules.temporary = self.magick.effects(&Subject::Player, &self.rules);
+        let (spell, critter) = self.magick.flags(&Subject::Player);
+        self.rules.temporary_critter = critter;
+        self.rules.tempo = if spell & 0x04000000 != 0 { 10 } else { 0 };
+    }
+    pub(in crate::content::world::inventory) fn restore_magick(
+        &mut self,
+        vfs: &mut Vfs,
+    ) -> Result<(), String> {
+        let mut frames = FrameCache::default();
+        let mut art = BTreeMap::new();
+        let mut ids = BTreeSet::new();
+        let mut stuns = BTreeMap::new();
+        for run in &self.magick.active {
+            let program = self.program(run.spell)?;
+            if program.maintain.is_some() && run.due.is_none() && !run.ending {
+                return Err("Missing saved spell deadline".into());
+            }
+            for b in &run.bindings {
+                for (id, n) in &b.effects {
+                    if *n < 0 || !self.rules.progression.spell_effects.contains_key(id) {
+                        return Err("Invalid saved spell effect".into());
+                    }
+                }
+                if let Some(art) = b.stun {
+                    stuns.insert(art, stun_clip(vfs, &mut frames, art)?);
+                }
+                if let Some(form) = b.form {
+                    let key = ModelKey::Form(form, b.form_palette);
+                    if let std::collections::btree_map::Entry::Vacant(e) = art.entry(key) {
+                        e.insert(key.load(vfs, &mut frames)?);
+                    }
+                }
+            }
+            for s in &run.summons {
+                if s.facing >= 8 || s.visuals.iter().any(|v| {
+                    !program.components.iter().any(|c|matches!(c.operation,Operation::Eye{index,..} if run.spell as i32*10+index==v.entry))
+                    || v.until.is_some_and(|end|end<v.start)
+                    || v.hazard.as_ref().is_some_and(|h| h.count==0 || h.count>u16::MAX as usize || h.frame>=h.count || h.period_ms==0 || h.period_ms>1000)
+                }){
+                    return Err("invalid saved summon animation".into())
+                }
+                if s.id.kind != u16::MAX
+                    || s.id.payload[8..] != [0; 8]
+                    || !ids.insert(s.id)
+                    || self.state.changes.contains_key(&s.id)
+                    || u64::from_le_bytes(s.id.payload[..8].try_into().unwrap())
+                        >= self.state.next_generated
+                {
+                    return Err("Invalid saved summon identity".into());
+                }
+                let key = s.model_key(&self.state);
+                if let std::collections::btree_map::Entry::Vacant(e) = art.entry(key) {
+                    e.insert(key.load(vfs, &mut frames)?);
+                }
+            }
+        }
+        let mut indices = BTreeMap::new();
+        let mut prototypes = Prototypes::default();
+        let mut moved = BTreeMap::new();
+        for (id, placement) in &self.magick.offsets {
+            let id = parse_id(id)?;
+            if placement.sequence >= self.state.next_generated
+                || placement.sequence >= (usize::MAX / 2 - 2) as u64
+            {
+                return Err("Invalid displaced mobile sequence".into());
+            }
+            let mut payload = [0; 16];
+            payload[..8].copy_from_slice(&placement.sequence.to_le_bytes());
+            let sequence = OriginalId {
+                kind: u16::MAX,
+                payload,
+            };
+            if !ids.insert(sequence) || self.state.changes.contains_key(&sequence) {
+                return Err("Duplicate runtime object sequence".into());
+            }
+            let index = indices
+                .entry(placement.map.clone())
+                .or_insert_with(|| Index::load(vfs, &placement.map));
+            if index.category(id) != Some(16) {
+                return Err("Displaced mobile missing from original map".into());
+            }
+            let prepared = mobile::prepare(
+                vfs,
+                &mut frames,
+                mobile::Prepare {
+                    index,
+                    prototypes: &mut prototypes,
+                    excluded: &BTreeSet::new(),
+                    sector: tile_sector_id(placement.source),
+                    reference: placement.source,
+                    lighting: false,
+                    fidget: false,
+                    walking: false,
+                },
+            );
+            let r = prepared
+                .objects
+                .into_iter()
+                .find(|r| r.id == id && !r.conflict && r.tile == Some(placement.source))
+                .ok_or("Displaced mobile original record mismatch")?;
+            let frame = standing(
+                vfs,
+                &mut frames,
+                r.current_art
+                    .value()
+                    .ok_or("Displaced mobile ART unavailable")?,
+            )?;
+            moved.insert(id, (Arc::new(r), frame));
+        }
+        self.magick.moved = moved;
+        self.magick.stun = stuns;
+        self.magick.art = art;
+        self.refresh_magick();
+        Ok(())
+    }
+    pub(super) fn apply_actor_changes(&self, id: OriginalId, pc: &mut Character) {
+        if let Some(d) = self.magick.actors.get(&id.key()) {
+            pc.health_damage = d.health.unwrap_or(pc.health_damage);
+            pc.fatigue_damage = d.fatigue.unwrap_or(pc.fatigue_damage);
+            pc.base[24] = d.poison.unwrap_or(pc.base[24]);
+            pc.critter_flags = (pc.critter_flags | d.critter_on) & !d.critter_off;
+            pc.spell_flags |= d.spell_on;
+        }
+        let (s, c) = self.magick.flags(&Subject::Mobile(id));
+        pc.spell_flags |= s;
+        pc.critter_flags |= c;
+    }
+    pub(in crate::content::world) fn npc_vitals(
+        &self,
+        id: OriginalId,
+        defaults: &objects::PrototypeDefaults,
+        instance: &objects::Instance<'_>,
+    ) -> (Character, CharacterStatistics) {
+        let mut pc = npc_character(defaults, Some(instance));
+        self.apply_actor_changes(id, &mut pc);
+        let rules = Rules {
+            tempo: if self.rules.tempo == 0 {
+                0
+            } else if pc.spell_flags & 0x04000000 != 0 {
+                10
+            } else {
+                -10
+            },
+            temporary: self.magick.effects(&Subject::Mobile(id), &self.rules),
+            ..Rules::default()
+        };
+        let stats = pc.statistics(&rules, Some(0), 0, [0; 5], false);
+        (pc, stats)
+    }
+    pub(super) fn change_vitals(&mut self, t: &mut Target, channel: Channel, delta: i32) {
+        let v = match channel {
+            Channel::Poison => &mut t.poison,
+            Channel::Fatigue => &mut t.fatigue,
+            _ => &mut t.hp,
+        };
+        *v = v.saturating_add(delta).max(0);
+        match &t.subject {
+            Subject::Player => match channel {
+                Channel::Poison => self.character.base[24] = *v,
+                Channel::Fatigue => self.character.fatigue_damage = *v,
+                _ => self.character.health_damage = *v,
+            },
+            Subject::Mobile(id) => {
+                if *v >= t.maximum
+                    && t.maximum > 0
+                    && !matches!(channel, Channel::Poison | Channel::Fatigue)
+                {
+                    // CE sub_459EA0 releases the caster's Familiar restriction on death.
+                    for run in &mut self.magick.active {
+                        if run
+                            .summons
+                            .iter()
+                            .any(|s| s.id == *id && s.npc_flags & 0x8000 != 0)
+                        {
+                            for b in run
+                                .bindings
+                                .iter_mut()
+                                .filter(|b| b.target == Subject::Player)
+                            {
+                                b.spell &= !0x40000000;
+                            }
+                        }
+                    }
+                }
+                let d = self.magick.actors.entry(id.key()).or_default();
+                match channel {
+                    Channel::Poison => d.poison = Some(*v),
+                    Channel::Fatigue => d.fatigue = Some(*v),
+                    _ => d.health = Some(*v),
+                }
+            }
+            Subject::Item(id)
+                if t.item.is_some() && !matches!(channel, Channel::Fatigue | Channel::Poison) =>
+            {
+                let item = t.item.as_mut().unwrap();
+                item.stats.hp[2] = *v;
+                let broken = *v >= t.maximum && t.maximum > 0;
+                let previous = self.state.changes.get(id);
+                let place = if broken {
+                    Place::Consumed
+                } else {
+                    self.state.place(item).clone()
+                };
+                let slot = if broken {
+                    None
+                } else {
+                    previous.and_then(|c| c.slot)
+                };
+                self.state.put(item.clone(), place, slot);
+                if broken {
+                    self.ground.remove(id);
+                }
+            }
+            _ => (),
+        }
+    }
+    pub(super) fn permanent_flags(&mut self, t: &Subject, field: Field, mask: u32, on: bool) {
+        match t {
+            Subject::Player => {
+                let bits = match field {
+                    Field::Critter => &mut self.character.critter_flags,
+                    Field::Spell => &mut self.character.spell_flags,
+                    _ => return,
+                };
+                *bits = if on { *bits | mask } else { *bits & !mask }
+            }
+            Subject::Mobile(id) => {
+                let d = self.magick.actors.entry(id.key()).or_default();
+                match field {
+                    Field::Critter => {
+                        if on {
+                            d.critter_on |= mask;
+                            d.critter_off &= !mask
+                        } else {
+                            d.critter_off |= mask;
+                            d.critter_on &= !mask
+                        }
+                    }
+                    Field::Spell => {
+                        if on {
+                            d.spell_on |= mask
+                        } else {
+                            d.spell_on &= !mask
+                        }
+                    }
+                    _ => (),
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn elemental_damage_survives_reload_and_full_healing_reverses_actor_damage() {
+        let mut inv = Session::default();
+        let id = inv.state.generated_id();
+        let mut target = Target::new(Subject::Mobile(id), (0, 0), None, Kind::Actor);
+        target.maximum = 80;
+        target.resistance[1] = 50;
+        let spell = crate::mes::Mes::parse_text(concat!(
+            "{1000}{AoE: Tgt_Object}{1001}{Cost: 3}",
+            "{1005}{[Begin], Type: Damage, DmgType: Dmg_Fire, Dmg: 8-32, Dmg_Flags: Scaled}",
+            "{1006}{[Begin], Type: Heal, Dmg: 0, Dmg_Flags: Full}"
+        ))
+        .unwrap();
+        let program = Program::decode(&spell, 0).unwrap();
+        apply_vital(&mut inv, &mut target, &program.components[0], 100, 25);
+        inv.change_vitals(&mut target, Channel::Fatigue, 7);
+        inv.change_vitals(&mut target, Channel::Poison, 3);
+        inv.magick = serde_json::from_value(serde_json::to_value(&inv.magick).unwrap()).unwrap();
+        let mut npc = Character::default();
+        inv.apply_actor_changes(id, &mut npc);
+        assert_eq!(
+            (npc.health_damage, npc.fatigue_damage, npc.base[24]),
+            (12, 7, 3)
+        );
+        apply_vital(&mut inv, &mut target, &program.components[1], 100, 0);
+        inv.apply_actor_changes(id, &mut npc);
+        assert_eq!(
+            (npc.health_damage, npc.fatigue_damage, npc.base[24]),
+            (0, 0, 3)
+        );
+        assert_eq!(inv.character.health_damage, 0);
+    }
+}

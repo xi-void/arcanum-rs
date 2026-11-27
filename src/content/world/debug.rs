@@ -206,6 +206,7 @@ impl InteractiveWorld {
                 interaction::Action::Container(id) => json!({
                     "kind":"container","id":id.key(),"developer_unlock":self.container_unlocked(*id),
                 }),
+                interaction::Action::Summon(id) => json!({"kind":"summon","id":id.key()}),
                 interaction::Action::Pickup(id) => json!({"kind":"pickup","id":id.key()}),
                 interaction::Action::Unsupported(reason) => {
                     json!({"kind":"unsupported","reason":reason})

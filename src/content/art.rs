@@ -278,6 +278,15 @@ impl FrameLoop {
         })
     }
 
+    pub(super) fn timed(frames: Vec<Arc<LoadedFrame>>, fps: u32) -> Result<Self, &'static str> {
+        if frames.is_empty() || !(1..=1000).contains(&fps) {
+            return Err("invalid animation cadence");
+        }
+        Ok(Self {
+            frames: frames.into_boxed_slice(),
+            period_ms: 1000 / fps,
+        })
+    }
     pub(super) fn period(&self) -> Duration {
         Duration::from_millis(u64::from(self.period_ms))
     }

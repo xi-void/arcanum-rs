@@ -159,7 +159,7 @@ impl Session {
     }
 
     pub(super) fn check_equipment(&self, item: &Item, slot: EquipmentSlot) -> Result<(), String> {
-        check_item(item)?;
+        check_item(item, &self.state)?;
         check_removal(item)?;
         let stats = &item.stats;
         let flags = stats.equipment_flags.unwrap_or_default();
@@ -249,6 +249,9 @@ impl Session {
             }
         }
         self.rules = Rules {
+            tempo: 0,
+            temporary_critter: 0,
+            temporary: Vec::new(),
             progression: crate::content::character::progression::ProgressionRules::load(vfs)?,
             terrain_flags,
             worn: Vec::new(),
@@ -330,6 +333,29 @@ impl Session {
 }
 
 impl SectorCache {
+    pub(in crate::content::world) fn terrain_flags_at(&self, tile: Tile) -> Option<(bool, bool)> {
+        let encoded = self
+            .entries
+            .get(&tile_sector_id(tile))?
+            .0
+            .sound_surfaces
+            .as_ref()?[((tile.1 & 63) * 64 + (tile.0 & 63)) as usize];
+        self.inventory.rules.terrain_flags[usize::from(encoded / 64)]
+            .get(usize::from(encoded % 64))
+            .copied()
+    }
+
+    pub(in crate::content::world) fn player_body_anchor(
+        &self,
+        tile: Tile,
+        anchor: (i32, i32),
+    ) -> (i32, i32) {
+        let wading = self.player_spell_flags() & 0x00200000 == 0
+            && self
+                .terrain_flags_at(tile)
+                .is_some_and(|(_, sinkable)| sinkable);
+        (anchor.0, anchor.1 + if wading { 15 } else { 0 })
+    }
     pub(in crate::content::world) fn update_character_sector(&mut self) {
         let Some(player) = &self.player else { return };
         let aptitude = self
@@ -340,17 +366,7 @@ impl SectorCache {
             .contains(&self.inventory.character.background)
             .then(|| {
                 let tile = player.tile();
-                let encoded = self
-                    .entries
-                    .get(&tile_sector_id(tile))?
-                    .0
-                    .sound_surfaces
-                    .as_ref()?[((tile.1 & 63) * 64 + (tile.0 & 63)) as usize];
-                let (natural, sinkable) = self.inventory.rules.terrain_flags
-                    [usize::from(encoded / 64)]
-                .get(usize::from(encoded % 64))
-                .copied()
-                .unwrap_or_default();
+                let (natural, sinkable) = self.terrain_flags_at(tile)?;
                 let outdoors = self.outdoor_at(tile)?;
                 let dark = if self.inventory.character.background == 68 {
                     let (ambient, reference) = self.ambient?;
@@ -569,6 +585,9 @@ impl InteractiveWorld {
     ) -> Result<Value, String> {
         let player = self.cache.player.as_ref().ok_or("Player is unavailable")?;
         let inventory = &self.cache.inventory;
+        if incoming.is_some() && self.cache.player_spell_flags() & 0x2003c != 0 {
+            return Err("Cannot equip an item while transformed".into());
+        }
         let worn = inventory.equipped(slot).map(|change| change.item.clone());
         let incoming = incoming
             .map(|key| {
@@ -746,7 +765,8 @@ impl InteractiveWorld {
                 "learned": stats.colleges[college] as usize > rank,
                 "required_level": SPELL_LEVEL[rank], "required_intelligence": 5,
                 "required_willpower": spell.willpower.as_ref().ok(), "issue": spell.willpower.as_ref().err(),
-                "point_cost": 1, "execution": if id == 1 { "unlocking_cantrip" } else { "unavailable" }
+                "remaining_dependencies": spell.program.as_ref().ok().map(|p| p.remaining_dependencies()),
+                "point_cost": 1, "execution": spell.program.as_ref().map(|p|p.as_ref()).ok(), "program_error":spell.program.as_ref().err()
             })
         }).collect::<Vec<_>>();
         let mut degrees = Vec::new();

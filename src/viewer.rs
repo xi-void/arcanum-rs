@@ -663,6 +663,18 @@ impl Viewer<'_> {
 
     fn finish_travel(&mut self, event_loop: &ActiveEventLoop, arrival: Arrival) {
         let (map, tile, cancelled) = match arrival {
+            Arrival::Spell(map, tile) => {
+                if let ViewContent::Stream { world, .. } = &mut self.content {
+                    world.select_spell_destination(Destination {
+                        map: Some(map),
+                        tile,
+                    })
+                }
+                self.close_map(event_loop);
+                self.player_deadline = Some(Instant::now());
+                self.update_control_flow(event_loop);
+                return;
+            }
             Arrival::Destination(map, tile) => (map, Some(tile), false),
             Arrival::Cancelled(map, tile) => (map, tile, true),
         };
@@ -818,10 +830,14 @@ impl Viewer<'_> {
             world.cancel_ability();
         }
         match action {
-            hud::Action::ToggleSpells | hud::Action::CastCantrip | hud::Action::SpellCollege(_) => {
+            hud::Action::ToggleSpells
+            | hud::Action::CastCantrip
+            | hud::Action::CastSpell(_)
+            | hud::Action::SpellCollege(_) => {
                 if let ViewContent::Stream {
                     world,
                     hud: Some(hud),
+                    inventory_reader,
                     ..
                 } = &mut self.content
                 {
@@ -830,8 +846,35 @@ impl Viewer<'_> {
                     } else if let hud::Action::SpellCollege(i) = action {
                         hud.choose_college(i);
                     } else {
-                        world.select_cantrip();
+                        world.select_spell(if let hud::Action::CastSpell(id) = action {
+                            id
+                        } else {
+                            1
+                        });
+                        if world.selecting_spell_item()
+                            && let Some(reader) = inventory_reader.as_mut()
+                            && let Err(e) = hud.open_inventory(reader, world, None)
+                        {
+                            world.cancel_ability();
+                            eprintln!("{e}");
+                        }
+                        if world.selecting_spell_destination() {
+                            self.open_map(event_loop);
+                            return;
+                        }
+                        self.player_deadline = Some(Instant::now());
                     }
+                }
+            }
+            hud::Action::DismissSpell(slot) => {
+                let elapsed = self.play_elapsed(Instant::now());
+                if let ViewContent::Stream {
+                    world,
+                    inventory_reader: Some(reader),
+                    ..
+                } = &mut self.content
+                {
+                    reader.dismiss_spell(world, slot, elapsed);
                 }
             }
             hud::Action::Pause => self.pause_game(event_loop),
@@ -1358,6 +1401,13 @@ impl Viewer<'_> {
                 hud.close_inventory();
             }
             map.open(hud.as_ref().map(|hud| hud.scale()));
+            if world.selecting_spell_destination()
+                && let Err(e) = map.select_teleport()
+            {
+                world.reject_selected_spell(&e);
+                map.close();
+                return;
+            }
             *shift = false;
             self.map_since = Some(Instant::now());
             self.navigation = Navigation::default();
@@ -1379,6 +1429,9 @@ impl Viewer<'_> {
         } = &mut self.content
         {
             map.close();
+            if world.selecting_spell_destination() {
+                world.cancel_ability();
+            }
             if let Some(hud) = hud {
                 hud.set_label(hud::Binding::InventoryHover, "");
             }
@@ -1817,7 +1870,11 @@ impl ApplicationHandler for Viewer<'_> {
             {
                 if let Some(clock) = &self.clock {
                     redraw |= world.set_game_hour(clock.hour(game_elapsed));
-                    redraw |= world.update_ability_time(clock.game_second(game_elapsed));
+                    let second = clock.game_second(game_elapsed);
+                    if let Some(reader) = inventory_reader.as_mut() {
+                        redraw |= reader.tick_magick(world, second, elapsed);
+                    }
+                    redraw |= world.update_ability_time(second);
                     world.set_quest_time(clock.hours(game_elapsed), clock.minute(game_elapsed));
                     if let Some(hud) = hud.as_mut() {
                         redraw |= hud.set_game_time(clock.hours(game_elapsed));
@@ -2001,6 +2058,10 @@ impl ApplicationHandler for Viewer<'_> {
         for sound in world.take_sounds() {
             match sound {
                 SoundEvent::Effect(id) => audio.effect(id, true),
+                SoundEvent::EffectVariant {
+                    preferred,
+                    fallback,
+                } => audio.variant(preferred, fallback),
                 SoundEvent::Footstep { surface, armor } => audio.footstep(surface, armor),
             }
         }
@@ -2271,6 +2332,22 @@ impl ApplicationHandler for Viewer<'_> {
                 && let Some(reader) = inventory_reader
                 && hud.inventory_open()
             {
+                if world.selecting_spell_item() {
+                    if button == MouseButton::Right && !state.is_pressed() {
+                        world.cancel_ability();
+                        hud.close_inventory();
+                    }
+                    if button == MouseButton::Left
+                        && !state.is_pressed()
+                        && let Some(item) = self.cursor.and_then(|p| hud.carried_item_at(p))
+                        && world.select_spell_item(item)
+                    {
+                        hud.close_inventory();
+                        self.player_deadline = Some(Instant::now());
+                    }
+                    view.window.request_redraw();
+                    return;
+                }
                 if hud.dragging_inventory() {
                     if !state.is_pressed() {
                         match button {

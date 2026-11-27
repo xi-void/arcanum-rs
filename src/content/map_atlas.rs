@@ -152,6 +152,58 @@ impl Atlas {
         }
     }
 
+    /// CE AntiTeleport.mes uses map numbers and contiguous sector-radius regions.
+    pub fn check_teleport(
+        &self,
+        vfs: &mut Vfs,
+        map: i32,
+        from: Option<Point>,
+        to: Option<Point>,
+    ) -> Result<(), Box<dyn Error>> {
+        let path = "rules/antiteleport.mes";
+        if vfs.resolve(path)?.winner().is_none() {
+            return Ok(());
+        }
+        let rules = super::load_mes(vfs, path)?.mes;
+        for line in (1000..).map_while(|i| rules.get(i)) {
+            let n: i32 = line.trim().parse()?;
+            let id = if n > 5000 {
+                n
+            } else {
+                n.checked_add(5000)
+                    .ok_or("AntiTeleport map number overflow")?
+            };
+            if id == map {
+                return Err("Teleportation is restricted on this map".into());
+            }
+        }
+        let from = from.ok_or("The current map has no teleportable world area")?;
+        for line in (100..).map_while(|i| rules.get(i)) {
+            let mut parts = line.split(',').map(str::trim);
+            let x: u32 = parts
+                .next()
+                .ok_or("Missing anti-teleport region X")?
+                .parse()?;
+            let y: u32 = parts
+                .next()
+                .ok_or("Missing anti-teleport region Y")?
+                .parse()?;
+            let r: u32 = parts
+                .next()
+                .ok_or("Missing anti-teleport radius")?
+                .parse()?;
+            let radius = r.checked_mul(64).ok_or("Anti-teleport radius overflow")?;
+            if [Some(from), to]
+                .into_iter()
+                .flatten()
+                .any(|p| x.abs_diff(p.0).max(y.abs_diff(p.1)) < radius)
+            {
+                return Err("Teleportation is restricted in this region".into());
+            }
+        }
+        Ok(())
+    }
+
     pub fn select(&mut self, id: i32, vfs: &Vfs) -> Result<(), Box<dyn Error>> {
         if !self.discovered.contains(&id) {
             return Err("destination is undiscovered".into());

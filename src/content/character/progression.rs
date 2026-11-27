@@ -61,6 +61,8 @@ pub struct ProgressionRules {
     pub(crate) worn_spells: BTreeMap<u32, Vec<std::sync::Arc<super::Adjustments>>>,
     rewards: BTreeMap<i32, i32>,
     pub spells: Vec<SpellStudy>,
+    pub(crate) spell_source: Option<crate::content::Source>,
+    pub(crate) spell_effects: BTreeMap<i32, std::sync::Arc<super::Adjustments>>,
     pub stat_names: Vec<String>,
     pub sheet_labels: Vec<String>,
     pub interface: BTreeMap<i32, String>,
@@ -74,6 +76,7 @@ pub struct ProgressionRules {
 }
 
 pub struct SpellStudy {
+    pub(crate) program: Result<std::sync::Arc<crate::content::magick::Program>, String>,
     pub name: String,
     pub willpower: Result<i32, String>,
 }
@@ -87,6 +90,9 @@ impl ProgressionRules {
         let mut rules = Self::default();
         let mut load = |path: &str| {
             let table = load_mes(vfs, path)?;
+            if path == "rules/spelllist.mes" {
+                rules.spell_source = Some(table.source.clone());
+            }
             rules
                 .sources
                 .insert(path.to_owned(), table.source.to_string());
@@ -120,6 +126,14 @@ impl ProgressionRules {
         let names = load("mes/spell.mes")?;
         let list = load("rules/spelllist.mes")?;
         let effects = load("rules/effect.mes")?;
+        rules.spell_effects = effects
+            .entries()
+            .filter_map(|(id, line)| {
+                super::Adjustments::parse(line)
+                    .ok()
+                    .map(|e| (id, std::sync::Arc::new(e)))
+            })
+            .collect();
         for spell in 0..223 {
             let base = if spell < 140 { 1000 } else { 3000 } + 50 * spell;
             if let Some(ids) = wear_effects(&list, base)
@@ -156,6 +170,8 @@ impl ProgressionRules {
                     Ok(BASE_WILLPOWER[i as usize % 5])
                 };
                 SpellStudy {
+                    program: crate::content::magick::Program::decode(&list, i)
+                        .map(std::sync::Arc::new),
                     name: name(&names, i),
                     willpower,
                 }
@@ -509,6 +525,7 @@ mod tests {
         let mut rules = Rules::default();
         rules.progression.spells = (0..80)
             .map(|i| SpellStudy {
+                program: Err("no fixture".into()),
                 name: String::new(),
                 willpower: Ok(BASE_WILLPOWER[i % 5]),
             })

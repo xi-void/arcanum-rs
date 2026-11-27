@@ -155,7 +155,7 @@ impl Tables {
                 Ok(table) => {
                     for (id, name) in table.mes.entries() {
                         sounds.entry(id).or_insert_with(|| {
-                            format!("sound/{name}")
+                            format!("sound/{}", name.trim())
                                 .replace('\\', "/")
                                 .to_ascii_lowercase()
                         });
@@ -168,6 +168,9 @@ impl Tables {
                 Err(error) => eprintln!("Audio table {path}: {error}"),
             }
         }
+        // Empty stock SFX entries reserve an ID without naming a sample. Keep
+        // first-table precedence before discarding those directory-only paths.
+        sounds.retain(|_, path| path != "sound/");
         let index = load_mes(vfs, "sound/schemeindex.mes")?.mes;
         let list = load_mes(vfs, "sound/schemelist.mes")?.mes;
         let schemes = index
@@ -308,6 +311,7 @@ struct Played {
 }
 
 enum Command {
+    Variant(i32, i32),
     Location {
         map: String,
         sector: Option<[i32; 2]>,
@@ -399,6 +403,14 @@ impl Audio {
             .as_ref()
             .unwrap()
             .try_send(Command::Effect { id, world });
+    }
+
+    pub(super) fn variant(&self, preferred: i32, fallback: i32) {
+        let _ = self
+            .queue
+            .as_ref()
+            .unwrap()
+            .try_send(Command::Variant(preferred, fallback));
     }
 
     pub(super) fn footstep(&self, surface: u8, armor: u8) {
@@ -541,6 +553,14 @@ impl Mixer<'_> {
                     self.clips
                         .retain(|clip| !clip.world || clip.looping || clip.transition);
                 }
+            }
+            Command::Variant(id, fallback) => {
+                let found = self
+                    .tables
+                    .sounds
+                    .get(&id)
+                    .is_some_and(|p| self.vfs.resolve(p).is_ok_and(|r| r.winner().is_some()));
+                self.effect(if found { id } else { fallback }, true);
             }
             Command::Effect { id, world } => self.effect(id, world),
             Command::Footstep { surface, armor } => {

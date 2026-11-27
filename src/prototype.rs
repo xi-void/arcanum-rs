@@ -18,6 +18,17 @@ const RESISTANCE_TYPES: usize = 5;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SerializedPrototypeId(pub u32);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BasicPrototypeId(pub u32);
+
+impl BasicPrototypeId {
+    /// Map a positive basic lookup ID to the serialized numeric ID.
+    pub fn serialized(self) -> Option<SerializedPrototypeId> {
+        let value = self.0.checked_add(20)?;
+        (self.0 != 0 && value <= i32::MAX as u32).then_some(SerializedPrototypeId(value))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DescriptionId(pub i32);
 

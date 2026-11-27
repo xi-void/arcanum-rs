@@ -123,11 +123,23 @@ size = [32, 32]
 image = "vfs:art/interface/splslt1.art"
 
 [[hud]]
+id = "maintained-spell-1"
+parent = "maintained-spell-slot-1"
+size = [32, 32]
+maintained_slot = 0
+
+[[hud]]
 id = "maintained-spell-slot-2"
 parent = "top"
 offset = [331, 3]
 size = [32, 32]
 image = "vfs:art/interface/splslt2.art"
+
+[[hud]]
+id = "maintained-spell-2"
+parent = "maintained-spell-slot-2"
+size = [32, 32]
+maintained_slot = 1
 
 [[hud]]
 id = "maintained-spell-slot-3"
@@ -137,6 +149,12 @@ size = [32, 32]
 image = "vfs:art/interface/splslt3.art"
 
 [[hud]]
+id = "maintained-spell-3"
+parent = "maintained-spell-slot-3"
+size = [32, 32]
+maintained_slot = 2
+
+[[hud]]
 id = "maintained-spell-slot-4"
 parent = "top"
 offset = [431, 3]
@@ -144,11 +162,23 @@ size = [32, 32]
 image = "vfs:art/interface/splslt4.art"
 
 [[hud]]
+id = "maintained-spell-4"
+parent = "maintained-spell-slot-4"
+size = [32, 32]
+maintained_slot = 3
+
+[[hud]]
 id = "maintained-spell-slot-5"
 parent = "top"
 offset = [481, 3]
 size = [32, 32]
 image = "vfs:art/interface/splslt5.art"
+
+[[hud]]
+id = "maintained-spell-5"
+parent = "maintained-spell-slot-5"
+size = [32, 32]
+maintained_slot = 4
 
 [[hud]]
 id = "clock-face"

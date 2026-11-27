@@ -43,6 +43,12 @@ pub enum Modulation<'a> {
     /// Original indexed shadow ART subtracted after grayscale multiplication.
     Shadow(u8),
     Uniform([u8; 3]),
+    /// CE draws the submerged bottom strip of an upright sprite at opacity 92.
+    Wading {
+        color: [u8; 3],
+        alpha: u8,
+        depth: u32,
+    },
     Floor([[u8; 3]; 9]),
     /// Screen-oriented multipliers, one per sprite column.
     Columns(&'a [[u8; 3]]),
@@ -175,6 +181,25 @@ pub fn blit_modulated<'a>(
                         let right = tr * (h - y) + br * y;
                         let opacity = (left * (w - x) + right * x) / (w * h);
                         (u32::from(alpha) * opacity / 255) as u8
+                    },
+                )?;
+            }
+            Modulation::Wading {
+                color,
+                alpha,
+                depth,
+            } => {
+                let surface = draw.frame.height.saturating_sub(depth) as usize;
+                blit_with_alpha::<OVER, _>(
+                    destination,
+                    dimensions,
+                    stride,
+                    draw.frame,
+                    position,
+                    |_| move |rgb, _| multiply(rgb, color),
+                    |a, _, y| {
+                        (u32::from(a) * u32::from(alpha) * if y >= surface { 92 } else { 255 }
+                            / 65025) as u8
                     },
                 )?;
             }

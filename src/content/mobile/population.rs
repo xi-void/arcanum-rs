@@ -366,6 +366,7 @@ impl Effective {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Resident {
     pub id: OriginalId,
     pub category: u32,

@@ -181,6 +181,7 @@ pub(crate) struct Adjustments {
     crithitchance: i32,
     critfailchance: i32,
 
+    operations: Vec<(usize, Modifier)>,
     pub(crate) other: Vec<String>,
 }
 
@@ -207,6 +208,19 @@ impl Adjustments {
                 } else {
                     result.other.push(clause.to_owned())
                 }
+                continue;
+            }
+            let key_index = STATS
+                .iter()
+                .position(|k| k.eq_ignore_ascii_case(&key))
+                .or_else(|| RESISTANCE.iter().position(|k| *k == key).map(|i| 26 + i))
+                .or_else(|| SKILL_KEYS.iter().position(|k| *k == key).map(|i| 31 + i));
+            if let Some(i) = key_index
+                && let Some(op) = Modifier::parse(value)
+                && !matches!(op, Modifier::Add(_))
+                && !(key == "healrate" && value.ends_with('%'))
+            {
+                result.operations.push((i, op));
                 continue;
             }
             let target = if let Some(i) = SKILL_KEYS.iter().position(|&name| name == key) {
@@ -279,6 +293,9 @@ impl Adjustments {
 #[derive(Default)]
 pub(crate) struct Rules {
     pub(crate) progression: ProgressionRules,
+    pub(crate) tempo: i32,
+    pub(crate) temporary_critter: u32,
+    pub(crate) temporary: Vec<(std::sync::Arc<Adjustments>, i32)>,
     pub(crate) worn: Vec<std::sync::Arc<Adjustments>>,
     pub(crate) race: Option<Adjustments>,
     pub(crate) gender: Option<Adjustments>,
@@ -310,10 +327,11 @@ impl Rules {
     }
 
     pub(crate) fn skill_modifier(&self, skill: usize) -> i64 {
-        self.modifiers()
-            .chain(&self.encumbrance)
-            .map(|effect| i64::from(effect.skills[skill]))
-            .sum()
+        self.evaluate(31 + skill, 0)
+            + self
+                .encumbrance
+                .as_ref()
+                .map_or(0, |effect| i64::from(effect.skills[skill]))
     }
 
     fn modifiers(&self) -> impl Iterator<Item = &Adjustments> {
@@ -324,6 +342,42 @@ impl Rules {
             .chain(self.worn.iter().map(AsRef::as_ref))
     }
 
+    fn evaluate(&self, index: usize, base: i64) -> i64 {
+        let mut sum = ModifierSum::default();
+        let additive = |a: &Adjustments| match index {
+            0..26 => a.stats[index],
+            26..31 => a.resistance[index - 26],
+            _ => a.skills[index - 31],
+        };
+        for (a, count) in self
+            .modifiers()
+            .map(|a| (a, 1))
+            .chain(self.temporary.iter().map(|(a, n)| (a.as_ref(), *n)))
+        {
+            sum.add = sum
+                .add
+                .saturating_add(i64::from(additive(a)) * i64::from(count));
+            for (_, op) in a.operations.iter().filter(|(k, _)| *k == index) {
+                match *op {
+                    Modifier::Percent(n) => {
+                        sum.percent = sum.percent.saturating_add(i64::from(n) * i64::from(count))
+                    }
+                    Modifier::Multiply(n) => {
+                        sum.mul = sum
+                            .mul
+                            .saturating_mul(i64::from(n).saturating_pow(count as u32))
+                    }
+                    Modifier::Divide(n) => {
+                        sum.div = sum
+                            .div
+                            .saturating_mul(i64::from(n).saturating_pow(count as u32))
+                    }
+                    op => sum.include(op),
+                }
+            }
+        }
+        i64::from(sum.apply(base.clamp(i32::MIN.into(), i32::MAX.into()) as i32))
+    }
     pub(crate) fn stat(&self, index: usize) -> i64 {
         self.modifiers()
             .map(|effect| i64::from(effect.stats[index]))
@@ -620,7 +674,7 @@ impl Character {
         incomplete_equipment: bool,
     ) -> CharacterStatistics {
         let adjusted =
-            |value: i64, index, min, max| (value + rules.stat(index)).clamp(min, max) as i32;
+            |value: i64, index, min, max| rules.evaluate(index, value).clamp(min, max) as i32;
         let environmental_attribute = |i| {
             self.environment.map_or(0, |e| {
                 if !matches!(i, 0 | 1 | 4 | 6) {
@@ -676,9 +730,17 @@ impl Character {
             } else {
                 i64::from(rules.encumbrance.as_ref()?.stats[11]) * i64::from(tier.effects())
             };
-            let raw = i64::from(dexterity + if dexterity >= 20 { 5 } else { 0 })
-                + rules.stat(11)
-                + burden;
+            let raw = rules.evaluate(
+                11,
+                i64::from(
+                    dexterity + if dexterity >= 20 { 5 } else { 0 } + rules.tempo
+                        - if (self.critter_flags | rules.temporary_critter) & 0x400 != 0 {
+                            5
+                        } else {
+                            0
+                        },
+                ) + burden,
+            );
             Some(raw.clamp(1, 100) as i32)
         });
         let damage = strength - 10;
@@ -721,7 +783,12 @@ impl Character {
                     training: (packed >> 6) & 3,
                     level: SkillValue::level(
                         packed,
-                        rules.skill_modifier(i),
+                        rules.evaluate(31 + i, i64::from(4 * (packed & 63)))
+                            - i64::from(4 * (packed & 63))
+                            + rules
+                                .encumbrance
+                                .as_ref()
+                                .map_or(0, |effect| i64::from(effect.skills[i])),
                         attributes[KEY_STATS[i]],
                     ),
                 }
@@ -794,25 +861,24 @@ impl Character {
             reaction_adjustment: special(2),
             // CE object_get_ac applies the AC effect to armor and again through STAT_AC_ADJUSTMENT.
             armor_class: (i64::from(self.base_ac)
-                + rules.stat(10)
+                + rules.evaluate(10, 0)
                 + i64::from(adjusted(i64::from(dexterity - 10), 10, -9, 95))
                 + armor)
                 .clamp(0, 95) as i32,
             defense: 0,
             resistance: std::array::from_fn(|i| {
-                let racial = rules
-                    .modifiers()
-                    .map(|m| i64::from(m.resistance[i]))
-                    .sum::<i64>();
                 let constitution = if i == 3 {
                     5 * (constitution - 4).max(0)
                 } else {
                     0
                 };
-                (resistance[i]
-                    + i64::from(self.base_resistance[i])
-                    + i64::from(constitution)
-                    + racial)
+                rules
+                    .evaluate(
+                        26 + i,
+                        resistance[i]
+                            + i64::from(self.base_resistance[i])
+                            + i64::from(constitution),
+                    )
                     .clamp(0, 95) as i32
             }),
             unresolved,
@@ -975,6 +1041,7 @@ impl ModifierSum {
             .saturating_div(self.div)
             .saturating_add(self.add)
             .max(self.min.into())
-            .min(self.max.into()) as i32
+            .min(self.max.into())
+            .clamp(i32::MIN.into(), i32::MAX.into()) as i32
     }
 }

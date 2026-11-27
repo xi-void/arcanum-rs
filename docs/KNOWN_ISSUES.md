@@ -1,6 +1,6 @@
 # Arcanum-RS — Known Issues
 
-Baseline: Milestone 76-R (character progression, magick, technology and alignment). Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
+Baseline: M76-R with M77-R college spell execution. Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
 
 ## Triage
 
@@ -15,9 +15,16 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 ### PROG-001 — Remaining character and ability execution
 
 - **Priority** P2. **Status** Deferred.
-- The 80 college spells have study requirements. Unlocking Cantrip has a targeting and execution path. Other learned spells appear in the spell menu with their original icons. Their targeting, damage, summoning, sustained effects and other components need the corresponding execution systems.
+- The Classic spellbook executes the installed programs for the 16 colleges through the casting and progression systems. Remaining spell dependencies are tracked in MAG-001.
 - The learned schematic book supports the 56 degree recipes through the installed recipe and inventory definitions. Found schematics, followers supplying components, powered-device use and consumable effects need further runtime support. Conditional equipment scripts outside the supported reversible effect operations report the winning script when blocked.
 - Manual point allocation, original skill training tiers, dialogue and quest experience operate for the player. Automatic leveling schemes, combat XP, kill and pickpocket alignment changes, follower attitude AI and college mastery quests depend on those gameplay systems. Some background and item effect operators remain outside the statistic subset and appear in character diagnostics.
+
+### MAG-001 — Spell interactions with combat, party and environmental systems
+
+- **Priority** P1. **Status** Open for full M77-R acceptance.
+- The interpreter reads all 80 original programs. Living targets, resistance, health and fatigue, movement, temporary effects, summons, forms and dispel use session-owned state. The combat and party schedulers still need to consume attack, fear, hostility, paralysis, control and follower flags. Summons retain their identities and original placement on return to a map. Nightmare can set fleeing, Dominate Will and Control Beast can set control, and Hardened Hands can modify attack statistics. Autonomous flight, commanded attacks and unarmed hit resolution need the combat scheduler. Summoned followers still need party travel to accompany the caster between maps.
+- Damage to carried and loose items has a persistent structural-damage field. Disintegrate can damage or destroy a portable item. Removing an immovable object, updating its collision and running its destruction script require the breakable-world-object lifecycle. The player renderer reads sinkable terrain and the water-walking flag set by Body of Air and Body of Water. Native shore transitions, NPC wading and water shadows remain unverified. Detect Traps needs trap instances and their discovery state. Player transformations store or drop worn gear according to available backpack space and re-equip previously worn items still carried. For authored NPCs, integrating equipped armor into resistance, restoring a complete NPC loadout after transformation and choosing the best combat weapon remain open.
+- Spell-specific results from the native input checks, including maintained state and renderer provenance, are available in the local M77-R visual captures. Representative casts covered every college. The original gate still resists Unlocking Cantrip at aptitude 10 and opens at 20 for ten fatigue each. A controlled summon and the player each receive one Regenerate binding, with its caster EyeCandy on the player.
 
 ### DLG-001 — Dialogue requires unimplemented script and game state
 
@@ -82,7 +89,7 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 - **Priority:** P2 | **Status:** Deferred
 - Key checks read carried keys and authored key-ring entries. Automatic collection into rings, follower key sharing and forced entry remain outside the playable subset.
 - Pick Locks and Unlocking Cantrip change the original lock bit. Ordinary use still checks jam, magical hold and original Unlock and Use scripts. A successful Cantrip on a jammed lock leaves it jammed.
-- Lock attempts expose the authored guard notification, loudness and outcome. NPC sight, hearing, Catching Thief scripts and combat reactions still require the AI system. Fate-point spending, difficulty settings beyond Normal, timed equipment enchantments and party-assisted skill use are deferred. The pick delay represents the original work interval. Lockpicking still lacks a dedicated character pose. Cantrip uses its original caster and target EyeCandy. Other spell execution and related character dependencies are tracked in PROG-001.
+- Lock attempts expose the authored guard notification, loudness and outcome. NPC sight, hearing, Catching Thief scripts and combat reactions still require the AI system. Fate-point spending, difficulty settings beyond Normal, timed equipment enchantments and party-assisted skill use are deferred. The pick delay represents the original work interval. Lockpicking still lacks a dedicated character pose. Cantrip uses its original caster and target EyeCandy. Other spell execution and character dependencies are tracked in MAG-001 and PROG-001.
 - Unsupported script operations still refuse access. Bates Mansion's pedestrian gate has key ID 64 and Unlock script 1151. With global flag 1024 set, the script requests attachment removal at statement 1. The engine reports that dependency even with the right key. Its timed gate-control branch also needs the event scheduler. Container Use and Unlock checks support read-only predicates.
 
 ### TRADE-001 — Merchant service and equipment dependencies
@@ -262,6 +269,15 @@ These are not open defects. Retain focused regression coverage and reopen only i
 - UI scale changes trigger expensive asset reconstruction, texture uploads or noticeable stalls.
 - Scenery-ART containers fail to render or open. M63-R reports generic classification and reachability corrections; verify ordinary locked containers still reject access.
 - Inventory transfers lose object identity, duplicate items, or mutate state on rejected placements. M62-R reports atomic whole-object transactions across map changes and sector eviction.
+
+### MAG-002 — Wrong wall, summon and elemental ART
+
+- **Priority** P1. **Status** Resolved and checked against vanilla captures and native Vulkan gameplay.
+- Spell `Proto` operands use the basic prototype numbering in CE `magictech.c` and `proto.c`. The serialized ID is the basic ID plus 20. Wall of Stone, Wall of Fire, Wall of Force and Squall of Ice use serialized prototypes 4052, 4051, 4050 and 4054 respectively. Squall uses blank scenery with animated EyeCandy. The former raw-ID lookup loaded unrelated world objects. The winning spell and EyeCandy definitions were in Arcanum5.dat.
+- A second error discarded `Apply_AoE: Tgt_Summoned` EyeCandy. The generated owner now supplies the world anchor, and the installed EyeCandy record supplies animation, layer, sound and lifetime. Stock wall casts form five tiles in vanilla. Stone and Force blocked a mouse-issued route into their rendered footprint until dismissal. Fire and Squall admitted the player and applied damage on the rendered tiles.
+- TIG determines the stored rotation count from bit zero of the ART header. The earlier whitelist rejected original single-rotation summon arrival frames with flags 0x11, preventing the callback that reveals the model. Palette and frame bounds remain validated.
+- Actor forms and summoned creatures use the normal directional ART and palette cache. The summoned Trait reset reads the prototype’s original AID, which distinguishes the Phantasmal Fiend and Hellgate demon even though they share a monster ART file. Guardian Ogre also needs its worn armor from prototype inventory source 93. The shared inventory generator and equipment appearance rules supply the armored model. The vanilla mage already had a Familiar when comparisons began. Its visible model supplied the reference for the newly cast RS Familiar.
+- The installed Earth college names its fourth spell **Body of Stone**. Each elemental form walked using its directional ART, survived F7/F8 and restored the prior player appearance on dismissal. Native audio output confirmed the original Guardian Ogre caster, arrival and reverse cues 23030, 23035 and 23038. Frame-exact timing and sound parity across every pose remain unmeasured.
 
 ## Grand Compatibility Sweep
 

@@ -17,7 +17,7 @@ fn estimate(from: Tile, to: Tile) -> u64 {
     DIAGONAL * x.min(y) + STRAIGHT * x.abs_diff(y)
 }
 
-pub(super) fn find(
+pub(in crate::content) fn find(
     from: Tile,
     target: Tile,
     cell: impl Fn(Tile) -> Option<Cell>,
