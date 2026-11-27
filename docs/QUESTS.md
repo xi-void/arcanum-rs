@@ -80,11 +80,12 @@ bounds. `world-scan` reports static quest message coverage and VFS provenance
 under `research.quest_resources`.
 
 The remaining logbook tabs, generated quest responses, unbotch operations,
-quest completion side effects (experience, alignment, reaction, sound), and
+quest completion reaction and sound, and
 additional authored reward actions are deferred. In the randomized variant,
 the first riddler's wrong answers in `dlg/01034riddler1.dlg` combine a Botched
 write with `fl 33`, an unsupported floating line. Those choices stay disabled.
 The third riddler's correct answer commits Completed, then opens speaker line
 16 in `dlg/01036riddler3.dlg`. Its mixed reward effect
-`in -5700, gf2730 1, rp 1071` needs inventory transfer and reputation support.
+`in -5700, gf2730 1, rp 1071` awaits reputation support. Its inventory and flag changes stay atomic.
+Completing an eligible quest awards XP through the installed quest reward class and changes base alignment by the second column of the original quest rules.
 Reopening a resolved riddler's conversation may also require floating dialogue.

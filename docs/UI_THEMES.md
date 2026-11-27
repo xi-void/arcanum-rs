@@ -188,16 +188,7 @@ The HUD, atlas and Classic menus use the same glyph measurement and
 rasterizer. Vulkan draws the prepared UI after the world pass. Theme
 packages own the layout and assets. Gameplay owns settings and actions.
 
-Classic’s map icon opens the atlas, the bag opens the inventory, and the
-logbook opens Quests. The other original buttons and action slots are decorative. Alpha controls remain on the keyboard and in
-the Escape menu. Health, fatigue, poison, currency, fate values,
-party portraits, and recent-action or item overlays require
-gameplay state that the HUD does not expose. The original day/night
-clock (entries 207–215) samples the game calendar and is also deferred.
-The Classic status display contains no fabricated numbers, colored
-fills, or hotbar assignments. The inventory paper doll has a character
-summary, and inventory inspection uses the bottom HUD for item details.
-The standalone character sheet and document reader have no active screens.
+Classic’s map, bag, logbook and character buttons open their respective panels. Health and fatigue vials consume the player's current and maximum values. The spell button exposes learned colleges and their spells, and the schematic book reads acquired degrees. Inventory inspection and advancement feedback use the bottom HUD. The document reader, day/night clock, poison and fate indicators, party portraits and action-slot assignments depend on additional gameplay and presentation support.
 
 Set `journal_panel = true` on a centered gameplay-panel root to add the quest
 spread. Use `toggle-journal` on the HUD button, `journal-quests` for the selected
@@ -259,4 +250,8 @@ NPC dialogue uses HUD bindings for the speaker bubble, response rows, and
 contextual information. See [NPC dialogue](DIALOGUE.md#theme-and-diagnostics).
 
 
-The Classic Spells button uses `toggle-spells`; `cast-cantrip` selects the known Conveyance spell. Spell-panel children use `spell_panel` and `required_conveyance` as defined in the Classic package. The `inventory-use` binding on the Use box submits the carried item to the shared targeting system. The `fatigue-fill` and `fatigue-value` bindings display the current character's charge and recovery.
+The Classic Spells button uses `toggle-spells` to open the college selector. The `cast-cantrip` action selects Unlocking Cantrip when the player has learned it and selected Conveyance. The `inventory-use` binding on the Use box submits a carried item to the shared targeting system. The `fatigue-fill` and `fatigue-value` bindings display current fatigue as it changes through casting and recovery.
+
+### Character sheet and learned schematics
+
+Classic declares the sheet and book through the same HUD theme as the other panels. Use `sheet_panel` for a modal root and `sheet_page` for skills, technology, magick or schematics. `sheet_value`, `sheet_image`, `skill_gauge` and `aptitude_travel` bind components to the active character. The `[sheet]` table maps college and discipline icon IDs through the installed interface table. Sheet actions buy or refund an investment in the current group, select a page or discipline, navigate a learned recipe, or combine components. The spell menu uses `spell-college` actions and zero-based `spell_slot` components. See the Classic package for complete TOML declarations. All measurements use the parent’s reference-scale coordinate system.

@@ -1,6 +1,6 @@
 # Arcanum-RS — Known Issues
 
-Baseline: Milestone 75-R (lockpicking and Unlocking Cantrip). Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
+Baseline: Milestone 76-R (character progression, magick, technology and alignment). Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
 
 ## Triage
 
@@ -12,6 +12,13 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 
 ## Open issues
 
+### PROG-001 — Remaining character and ability execution
+
+- **Priority** P2. **Status** Deferred.
+- The 80 college spells have study requirements. Unlocking Cantrip has a targeting and execution path. Other learned spells appear in the spell menu with their original icons. Their targeting, damage, summoning, sustained effects and other components need the corresponding execution systems.
+- The learned schematic book supports the 56 degree recipes through the installed recipe and inventory definitions. Found schematics, followers supplying components, powered-device use and consumable effects need further runtime support. Conditional equipment scripts outside the supported reversible effect operations report the winning script when blocked.
+- Manual point allocation, original skill training tiers, dialogue and quest experience operate for the player. Automatic leveling schemes, combat XP, kill and pickpocket alignment changes, follower attitude AI and college mastery quests depend on those gameplay systems. Some background and item effect operators remain outside the statistic subset and appear in character diagnostics.
+
 ### DLG-001 — Dialogue requires unimplemented script and game state
 
 - **Priority:** P2 | **Status:** Deferred
@@ -21,9 +28,9 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
   gameplay dependencies. The Bates house guards use equipment and combat
   checks and floating lines.
 - Direct quest state conditions are implemented. Generated quest responses,
-  reputation, skill, encounter and party checks remain unresolved.
+  reputation, encounter and party checks remain unresolved. Skill, training and alignment conditions read the acting character.
   Initial reaction uses the original base and available character modifiers.
-  Persistent reaction and meeting history and live AI changes are pending.
+  Authored reaction changes persist in the NPC account. Persistent meeting history and live AI changes are pending.
 - Some greetings and response directives need class-, race-, quest- or
   service-specific dialogue. Companion recruitment and service-specific
   actions such as identification remain deferred. Scriptless NPCs have no conversation panel.
@@ -33,8 +40,7 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 - **Priority:** P2 | **Status:** Deferred
 - The Classic book exposes Quests. Other sections depend on their gameplay
   systems. The original logbook notification highlight is pending.
-- Completion records persist. XP, alignment, NPC reaction changes and the
-  completion sound still need their original transactions. Floating-line
+- Completion awards original quest XP and alignment. Quest-specific NPC reaction changes and the completion sound are pending. Floating-line
   responses and unbotching are deferred.
 - In the randomized waterfront riddler, the wrong-answer responses in
   `dlg/01034riddler1.dlg` combine botching quest 1009 with `fl 33` (an
@@ -76,7 +82,7 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 - **Priority:** P2 | **Status:** Deferred
 - Key checks read carried keys and authored key-ring entries. Automatic collection into rings, follower key sharing and forced entry remain outside the playable subset.
 - Pick Locks and Unlocking Cantrip change the original lock bit. Ordinary use still checks jam, magical hold and original Unlock and Use scripts. A successful Cantrip on a jammed lock leaves it jammed.
-- Lock attempts expose the authored guard notification, loudness and outcome. NPC sight, hearing, Catching Thief scripts and combat reactions still require the AI system. Fate-point spending, difficulty settings beyond Normal, timed equipment enchantments and party-assisted skill use are deferred. The pick delay represents the original work interval. Lockpicking still lacks a dedicated character pose. Cantrip uses its original caster and target EyeCandy. Other spells, character progression screens and combat remain outside this milestone.
+- Lock attempts expose the authored guard notification, loudness and outcome. NPC sight, hearing, Catching Thief scripts and combat reactions still require the AI system. Fate-point spending, difficulty settings beyond Normal, timed equipment enchantments and party-assisted skill use are deferred. The pick delay represents the original work interval. Lockpicking still lacks a dedicated character pose. Cantrip uses its original caster and target EyeCandy. Other spell execution and related character dependencies are tracked in PROG-001.
 - Unsupported script operations still refuse access. Bates Mansion's pedestrian gate has key ID 64 and Unlock script 1151. With global flag 1024 set, the script requests attachment removal at statement 1. The engine reports that dependency even with the right key. Its timed gate-control branch also needs the event scheduler. Container Use and Unlock checks support read-only predicates.
 
 ### TRADE-001 — Merchant service and equipment dependencies
@@ -236,7 +242,7 @@ These are planned capabilities, not regressions. Implement in their own mileston
 
 - **M64-R:** interactive inventory rearrangement, transfers, Take All, Arrange, ground pickup/drop and drag cancellation; developer unlocking of ordinary locked containers (verify existing command behavior first).
 - **Inventory extensions:** generated loot, consumption, decay and scripted inventory behavior as their dependencies become available.
-- **Later systems:** dialogue, scripting, combat, magick, technology, crafting and progression.
+- **Later systems:** combat, broader script and spell execution, and uses of crafted devices.
 - **Use action:** the inventory Use box accepts original lockpicks. Other targeted items need their own gameplay mechanics.
 
 ## Regression watchlist — previously corrected

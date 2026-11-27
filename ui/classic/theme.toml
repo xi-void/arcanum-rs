@@ -52,7 +52,10 @@ parent = "top"
 offset = [4, 2]
 size = [34, 34]
 image = "vfs:art/interface/char_but.art"
-disabled = true
+action = "toggle-character"
+hover_frame = 2
+pressed_frame = 1
+selected_frame = 1
 
 [[hud]]
 id = "journal"
@@ -324,33 +327,216 @@ spell_panel = true
 capture = true
 
 [[hud]]
-id = "conveyance"
+id = "select-college-0"
 parent = "conveyance-panel"
 offset = [5, 5]
-size = [24,24]
-required_conveyance = 1
 image = "vfs:art/interface/s_conveyance.art"
-frame = 1
-disabled = true
+size = [24, 24]
+action = { spell-college = 0 }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "select-college-1"
+parent = "conveyance-panel"
+offset = [30, 5]
+image = "vfs:art/interface/s_divination.art"
+size = [24, 24]
+action = { spell-college = 1 }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "select-college-2"
+parent = "conveyance-panel"
+offset = [55, 5]
+image = "vfs:art/interface/s_air.art"
+size = [24, 24]
+action = { spell-college = 2 }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "select-college-3"
+parent = "conveyance-panel"
+offset = [80, 5]
+image = "vfs:art/interface/s_earth.art"
+size = [24, 24]
+action = { spell-college = 3 }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "select-college-4"
+parent = "conveyance-panel"
+offset = [105, 5]
+image = "vfs:art/interface/s_fire.art"
+size = [24, 24]
+action = { spell-college = 4 }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "select-college-5"
+parent = "conveyance-panel"
+offset = [130, 5]
+image = "vfs:art/interface/s_water.art"
+size = [24, 24]
+action = { spell-college = 5 }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "select-college-6"
+parent = "conveyance-panel"
+offset = [155, 5]
+image = "vfs:art/interface/s_forc.art"
+size = [24, 24]
+action = { spell-college = 6 }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "select-college-7"
+parent = "conveyance-panel"
+offset = [180, 5]
+image = "vfs:art/interface/s_mental.art"
+size = [24, 24]
+action = { spell-college = 7 }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "select-college-8"
+parent = "conveyance-panel"
+offset = [204, 5]
+image = "vfs:art/interface/s_meta.art"
+size = [24, 24]
+action = { spell-college = 8 }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "select-college-9"
+parent = "conveyance-panel"
+offset = [229, 5]
+image = "vfs:art/interface/s_morph.art"
+size = [24, 24]
+action = { spell-college = 9 }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "select-college-10"
+parent = "conveyance-panel"
+offset = [254, 5]
+image = "vfs:art/interface/s_nature.art"
+size = [24, 24]
+action = { spell-college = 10 }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "select-college-11"
+parent = "conveyance-panel"
+offset = [279, 5]
+image = "vfs:art/interface/s_evilnecro.art"
+size = [24, 24]
+action = { spell-college = 11 }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "select-college-12"
+parent = "conveyance-panel"
+offset = [304, 5]
+image = "vfs:art/interface/s_goodnecro.art"
+size = [24, 24]
+action = { spell-college = 12 }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "select-college-13"
+parent = "conveyance-panel"
+offset = [329, 5]
+image = "vfs:art/interface/s_phantasm.art"
+size = [24, 24]
+action = { spell-college = 13 }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "select-college-14"
+parent = "conveyance-panel"
+offset = [354, 5]
+image = "vfs:art/interface/s_summoning.art"
+size = [24, 24]
+action = { spell-college = 14 }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "select-college-15"
+parent = "conveyance-panel"
+offset = [379, 5]
+image = "vfs:art/interface/s_temporal.art"
+size = [24, 24]
+action = { spell-college = 15 }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
 
 [[hud]]
 id = "disarm"
 parent = "conveyance-panel"
-offset = [88,36]
-size = [32,32]
-image = "vfs:art/interface/s_conveyance1.art"
-required_conveyance = 1
-disabled = true
+offset = [88, 36]
+size = [32, 32]
+spell_slot = 0
 
 [[hud]]
 id = "unlocking-cantrip"
 parent = "conveyance-panel"
-offset = [138,36]
-size = [32,32]
-image = "vfs:art/interface/s_conveyance2.art"
-required_conveyance = 2
+offset = [138, 36]
+size = [32, 32]
+spell_slot = 1
 action = "cast-cantrip"
-hover_message = "Unlocking Cantrip"
+
+[[hud]]
+id = "spell-rank-3"
+parent = "conveyance-panel"
+offset = [188, 36]
+size = [32, 32]
+spell_slot = 2
+
+[[hud]]
+id = "spell-rank-4"
+parent = "conveyance-panel"
+offset = [239, 36]
+size = [32, 32]
+spell_slot = 3
+
+[[hud]]
+id = "spell-rank-5"
+parent = "conveyance-panel"
+offset = [289, 36]
+size = [32, 32]
+spell_slot = 4
 
 [[hud]]
 id = "schematics"
@@ -358,7 +544,10 @@ parent = "bottom"
 offset = [693, 98]
 size = [39, 39]
 image = "vfs:art/interface/schematics_button.art"
-disabled = true
+action = "toggle-schematics"
+hover_frame = 2
+pressed_frame = 1
+selected_frame = 1
 
 [[hud]]
 id = "hotkey-switch"
@@ -1103,3 +1292,1886 @@ inventory_views = ["trade"]
 offset = [703, 236]
 size = [83, 47]
 image = "vfs:art/interface/gamble_box_off.art"
+
+[sheet]
+spell_icon_bases = [11, 44, 38, 92, 50, 86, 56, 98, 62, 68, 74, 104, 110, 80, 116, 122]
+degree_icons = [653, 649, 650, 651, 652, 654, 655, 656]
+
+[fonts.sheet-heading]
+source = "vfs:art/interface/morph15font.art"
+color = [238, 222, 157, 255]
+
+[fonts.sheet-small]
+source = "vfs:art/interface/garmond9font.art"
+color = [232, 225, 199, 255]
+
+[[hud]]
+id = "health-fill"
+parent = "health-vial"
+size = [28, 96]
+image = "vfs:art/interface/redvial.art"
+binding = "health-fill"
+
+[[hud]]
+id = "health-value"
+parent = "bottom"
+offset = [14, 137]
+size = [28, 15]
+binding = "health-value"
+font = "counters"
+align = "center"
+
+[[hud]]
+id = "sheet"
+image = "vfs:art/interface/char_maint.art"
+size = [800, 400]
+anchor = "center"
+sheet_panel = true
+capture = true
+
+[[hud]]
+id = "sheet-lens"
+parent = "sheet"
+offset = [12, 10]
+size = [89, 89]
+binding = "sheet-lens"
+
+[[hud]]
+id = "sheet-portrait"
+parent = "sheet"
+offset = [142, 22]
+size = [64, 64]
+sheet_image = "portrait"
+
+[[hud]]
+id = "sheet-level"
+parent = "sheet"
+offset = [212, 32]
+size = [125, 18]
+binding = "sheet-value"
+sheet_value = "level"
+font = "sheet-heading"
+
+[[hud]]
+id = "sheet-points"
+parent = "sheet"
+offset = [212, 51]
+size = [125, 18]
+binding = "sheet-value"
+sheet_value = "points"
+font = "sheet-heading"
+
+[[hud]]
+id = "sheet-xp-next"
+parent = "sheet"
+offset = [212, 70]
+size = [125, 18]
+binding = "sheet-value"
+sheet_value = "xp-next"
+font = "sheet-heading"
+
+[[hud]]
+id = "sheet-race"
+parent = "sheet"
+offset = [337, 32]
+size = [125, 18]
+binding = "sheet-value"
+sheet_value = "race"
+font = "sheet-heading"
+
+[[hud]]
+id = "sheet-gender"
+parent = "sheet"
+offset = [337, 51]
+size = [125, 18]
+binding = "sheet-value"
+sheet_value = "gender"
+font = "sheet-heading"
+
+[[hud]]
+id = "sheet-age"
+parent = "sheet"
+offset = [337, 70]
+size = [125, 18]
+binding = "sheet-value"
+sheet_value = "age"
+font = "sheet-heading"
+
+[[hud]]
+id = "buy-attribute-0"
+parent = "sheet"
+offset = [224, 117]
+image = "vfs:art/interface/char_plus.art"
+size = [19, 19]
+action = { sheet = { buy = { attribute = 0 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-attribute-0"
+parent = "sheet"
+offset = [170, 117]
+image = "vfs:art/interface/char_minus.art"
+size = [19, 19]
+action = { sheet = { refund = { attribute = 0 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "attribute-0"
+parent = "sheet"
+offset = [191, 115]
+size = [31, 22]
+binding = "sheet-value"
+sheet_value = { attribute = 0 }
+font = "sheet-heading"
+align = "center"
+
+[[hud]]
+id = "buy-attribute-1"
+parent = "sheet"
+offset = [224, 197]
+image = "vfs:art/interface/char_plus.art"
+size = [19, 19]
+action = { sheet = { buy = { attribute = 1 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-attribute-1"
+parent = "sheet"
+offset = [170, 197]
+image = "vfs:art/interface/char_minus.art"
+size = [19, 19]
+action = { sheet = { refund = { attribute = 1 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "attribute-1"
+parent = "sheet"
+offset = [191, 195]
+size = [31, 22]
+binding = "sheet-value"
+sheet_value = { attribute = 1 }
+font = "sheet-heading"
+align = "center"
+
+[[hud]]
+id = "buy-attribute-2"
+parent = "sheet"
+offset = [224, 157]
+image = "vfs:art/interface/char_plus.art"
+size = [19, 19]
+action = { sheet = { buy = { attribute = 2 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-attribute-2"
+parent = "sheet"
+offset = [170, 157]
+image = "vfs:art/interface/char_minus.art"
+size = [19, 19]
+action = { sheet = { refund = { attribute = 2 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "attribute-2"
+parent = "sheet"
+offset = [191, 155]
+size = [31, 22]
+binding = "sheet-value"
+sheet_value = { attribute = 2 }
+font = "sheet-heading"
+align = "center"
+
+[[hud]]
+id = "buy-attribute-3"
+parent = "sheet"
+offset = [224, 237]
+image = "vfs:art/interface/char_plus.art"
+size = [19, 19]
+action = { sheet = { buy = { attribute = 3 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-attribute-3"
+parent = "sheet"
+offset = [170, 237]
+image = "vfs:art/interface/char_minus.art"
+size = [19, 19]
+action = { sheet = { refund = { attribute = 3 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "attribute-3"
+parent = "sheet"
+offset = [191, 235]
+size = [31, 22]
+binding = "sheet-value"
+sheet_value = { attribute = 3 }
+font = "sheet-heading"
+align = "center"
+
+[[hud]]
+id = "buy-attribute-4"
+parent = "sheet"
+offset = [367, 117]
+image = "vfs:art/interface/char_plus.art"
+size = [19, 19]
+action = { sheet = { buy = { attribute = 4 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-attribute-4"
+parent = "sheet"
+offset = [313, 117]
+image = "vfs:art/interface/char_minus.art"
+size = [19, 19]
+action = { sheet = { refund = { attribute = 4 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "attribute-4"
+parent = "sheet"
+offset = [334, 115]
+size = [31, 22]
+binding = "sheet-value"
+sheet_value = { attribute = 4 }
+font = "sheet-heading"
+align = "center"
+
+[[hud]]
+id = "buy-attribute-5"
+parent = "sheet"
+offset = [367, 197]
+image = "vfs:art/interface/char_plus.art"
+size = [19, 19]
+action = { sheet = { buy = { attribute = 5 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-attribute-5"
+parent = "sheet"
+offset = [313, 197]
+image = "vfs:art/interface/char_minus.art"
+size = [19, 19]
+action = { sheet = { refund = { attribute = 5 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "attribute-5"
+parent = "sheet"
+offset = [334, 195]
+size = [31, 22]
+binding = "sheet-value"
+sheet_value = { attribute = 5 }
+font = "sheet-heading"
+align = "center"
+
+[[hud]]
+id = "buy-attribute-6"
+parent = "sheet"
+offset = [367, 157]
+image = "vfs:art/interface/char_plus.art"
+size = [19, 19]
+action = { sheet = { buy = { attribute = 6 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-attribute-6"
+parent = "sheet"
+offset = [313, 157]
+image = "vfs:art/interface/char_minus.art"
+size = [19, 19]
+action = { sheet = { refund = { attribute = 6 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "attribute-6"
+parent = "sheet"
+offset = [334, 155]
+size = [31, 22]
+binding = "sheet-value"
+sheet_value = { attribute = 6 }
+font = "sheet-heading"
+align = "center"
+
+[[hud]]
+id = "buy-attribute-7"
+parent = "sheet"
+offset = [367, 237]
+image = "vfs:art/interface/char_plus.art"
+size = [19, 19]
+action = { sheet = { buy = { attribute = 7 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-attribute-7"
+parent = "sheet"
+offset = [313, 237]
+image = "vfs:art/interface/char_minus.art"
+size = [19, 19]
+action = { sheet = { refund = { attribute = 7 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "attribute-7"
+parent = "sheet"
+offset = [334, 235]
+size = [31, 22]
+binding = "sheet-value"
+sheet_value = { attribute = 7 }
+font = "sheet-heading"
+align = "center"
+
+[[hud]]
+id = "buy-health"
+parent = "sheet"
+offset = [465, 144]
+image = "vfs:art/interface/char_plus.art"
+size = [19, 19]
+action = { sheet = { buy = "health" } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-health"
+parent = "sheet"
+offset = [409, 144]
+image = "vfs:art/interface/char_minus.art"
+size = [19, 19]
+action = { sheet = { refund = "health" } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "sheet-health"
+parent = "sheet"
+offset = [426, 143]
+size = [44, 21]
+binding = "sheet-value"
+sheet_value = "health"
+font = "sheet-heading"
+align = "center"
+
+[[hud]]
+id = "buy-fatigue"
+parent = "sheet"
+offset = [465, 214]
+image = "vfs:art/interface/char_plus.art"
+size = [19, 19]
+action = { sheet = { buy = "fatigue" } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-fatigue"
+parent = "sheet"
+offset = [409, 214]
+image = "vfs:art/interface/char_minus.art"
+size = [19, 19]
+action = { sheet = { refund = "fatigue" } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "sheet-fatigue"
+parent = "sheet"
+offset = [426, 213]
+size = [44, 21]
+binding = "sheet-value"
+sheet_value = "fatigue"
+font = "sheet-heading"
+align = "center"
+
+[[hud]]
+id = "sheet-derived"
+parent = "sheet"
+offset = [48, 279]
+size = [253, 20]
+font = "sheet-heading"
+text = "Derived Stats"
+align = "center"
+
+[[hud]]
+id = "sheet-resistance"
+parent = "sheet"
+offset = [314, 279]
+size = [150, 20]
+font = "sheet-heading"
+text = "Resistance"
+align = "center"
+
+[[hud]]
+id = "derived-0"
+parent = "sheet"
+offset = [49, 307]
+size = [129, 18]
+binding = "sheet-value"
+sheet_value = { derived = 0 }
+font = "body"
+
+[[hud]]
+id = "derived-1"
+parent = "sheet"
+offset = [49, 325]
+size = [129, 18]
+binding = "sheet-value"
+sheet_value = { derived = 1 }
+font = "body"
+
+[[hud]]
+id = "derived-2"
+parent = "sheet"
+offset = [49, 343]
+size = [129, 18]
+binding = "sheet-value"
+sheet_value = { derived = 2 }
+font = "body"
+
+[[hud]]
+id = "derived-3"
+parent = "sheet"
+offset = [49, 361]
+size = [129, 18]
+binding = "sheet-value"
+sheet_value = { derived = 3 }
+font = "body"
+
+[[hud]]
+id = "derived-4"
+parent = "sheet"
+offset = [178, 307]
+size = [129, 18]
+binding = "sheet-value"
+sheet_value = { derived = 4 }
+font = "body"
+
+[[hud]]
+id = "derived-5"
+parent = "sheet"
+offset = [178, 325]
+size = [129, 18]
+binding = "sheet-value"
+sheet_value = { derived = 5 }
+font = "body"
+
+[[hud]]
+id = "derived-6"
+parent = "sheet"
+offset = [178, 343]
+size = [129, 18]
+binding = "sheet-value"
+sheet_value = { derived = 6 }
+font = "body"
+
+[[hud]]
+id = "derived-7"
+parent = "sheet"
+offset = [178, 361]
+size = [129, 18]
+binding = "sheet-value"
+sheet_value = { derived = 7 }
+font = "body"
+
+[[hud]]
+id = "resist-0"
+parent = "sheet"
+offset = [322, 299]
+size = [145, 17]
+binding = "sheet-value"
+sheet_value = { resist = 0 }
+font = "body"
+
+[[hud]]
+id = "resist-1"
+parent = "sheet"
+offset = [322, 315]
+size = [145, 17]
+binding = "sheet-value"
+sheet_value = { resist = 1 }
+font = "body"
+
+[[hud]]
+id = "resist-2"
+parent = "sheet"
+offset = [322, 331]
+size = [145, 17]
+binding = "sheet-value"
+sheet_value = { resist = 2 }
+font = "body"
+
+[[hud]]
+id = "resist-3"
+parent = "sheet"
+offset = [322, 347]
+size = [145, 17]
+binding = "sheet-value"
+sheet_value = { resist = 3 }
+font = "body"
+
+[[hud]]
+id = "resist-4"
+parent = "sheet"
+offset = [322, 363]
+size = [145, 17]
+binding = "sheet-value"
+sheet_value = { resist = 4 }
+font = "body"
+
+[[hud]]
+id = "sheet-magick-aptitude"
+parent = "sheet"
+offset = [754, 65]
+size = [32, 15]
+binding = "sheet-value"
+sheet_value = "magic"
+font = "body"
+align = "center"
+
+[[hud]]
+id = "sheet-tech-aptitude"
+parent = "sheet"
+offset = [754, 365]
+size = [32, 15]
+binding = "sheet-value"
+sheet_value = "tech"
+font = "body"
+align = "center"
+
+[[hud]]
+id = "aptitude-needle"
+parent = "sheet"
+offset = [775, 221]
+image = "vfs:art/interface/mt_apt.art"
+size = [14, 6]
+aptitude_travel = 128
+
+[[hud]]
+id = "alignment-needle"
+parent = "sheet"
+offset = [43, 177]
+size = [27, 9]
+sheet_image = "alignment"
+
+[[hud]]
+id = "alignment-value"
+parent = "sheet"
+offset = [40, 198]
+size = [34, 17]
+binding = "sheet-value"
+sheet_value = "alignment"
+font = "body"
+align = "center"
+
+[[hud]]
+id = "tab-skills"
+parent = "sheet"
+offset = [527, 11]
+image = "vfs:art/interface/char_common_skills.art"
+size = [39, 39]
+action = { sheet = { page = "skills" } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "tab-technology"
+parent = "sheet"
+offset = [595, 11]
+image = "vfs:art/interface/char_tech_skills.art"
+size = [39, 39]
+action = { sheet = { page = "technology" } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "tab-magick"
+parent = "sheet"
+offset = [663, 11]
+image = "vfs:art/interface/char_spells_skills.art"
+size = [39, 39]
+action = { sheet = { page = "magick" } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "sheet-schematics"
+parent = "sheet"
+offset = [754, 21]
+image = "vfs:art/interface/char_schem_skills.art"
+size = [32, 32]
+action = { sheet = { page = "schematics" } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "sheet-skills"
+parent = "sheet"
+offset = [503, 63]
+image = "vfs:art/interface/skills_window.art"
+size = [235, 325]
+sheet_page = "skills"
+capture = true
+
+[[hud]]
+id = "sheet-technology"
+parent = "sheet"
+offset = [503, 63]
+image = "vfs:art/interface/disciplines_window.art"
+size = [235, 325]
+sheet_page = "technology"
+capture = true
+
+[[hud]]
+id = "sheet-magick"
+parent = "sheet"
+offset = [503, 63]
+image = "vfs:art/interface/char_spells.art"
+size = [235, 325]
+sheet_page = "magick"
+capture = true
+
+[[hud]]
+id = "skill-group-0"
+parent = "sheet-skills"
+offset = [21, 17]
+image = "vfs:art/interface/combat_but.art"
+size = [32, 32]
+action = { sheet = { group = 0 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "skill-group-1"
+parent = "sheet-skills"
+offset = [75, 17]
+image = "vfs:art/interface/thieving_but.art"
+size = [33, 32]
+action = { sheet = { group = 1 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "skill-group-2"
+parent = "sheet-skills"
+offset = [129, 17]
+image = "vfs:art/interface/social_but.art"
+size = [34, 32]
+action = { sheet = { group = 2 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "skill-group-3"
+parent = "sheet-skills"
+offset = [185, 17]
+image = "vfs:art/interface/technological_but.art"
+size = [32, 32]
+action = { sheet = { group = 3 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "skill-name-0"
+parent = "sheet-skills"
+offset = [17, 61]
+size = [144, 22]
+binding = "sheet-value"
+sheet_value = { skill = 0 }
+font = "sheet-heading"
+
+[[hud]]
+id = "training-0"
+parent = "sheet-skills"
+offset = [136, 63]
+size = [80, 20]
+binding = "sheet-value"
+sheet_value = { training = 0 }
+font = "body"
+align = "right"
+
+[[hud]]
+id = "skill-gauge-0"
+parent = "sheet-skills"
+offset = [59, 87]
+image = "vfs:art/interface/skilgauge.art"
+size = [120, 27]
+skill_gauge = 0
+
+[[hud]]
+id = "buy-skill-0"
+parent = "sheet-skills"
+offset = [192, 84]
+image = "vfs:art/interface/skiladdbut.art"
+size = [29, 30]
+action = { sheet = { buy = { skill = 0 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-skill-0"
+parent = "sheet-skills"
+offset = [18, 84]
+image = "vfs:art/interface/skilminusbut.art"
+size = [29, 30]
+action = { sheet = { refund = { skill = 0 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "skill-name-1"
+parent = "sheet-skills"
+offset = [17, 127]
+size = [144, 22]
+binding = "sheet-value"
+sheet_value = { skill = 1 }
+font = "sheet-heading"
+
+[[hud]]
+id = "training-1"
+parent = "sheet-skills"
+offset = [136, 129]
+size = [80, 20]
+binding = "sheet-value"
+sheet_value = { training = 1 }
+font = "body"
+align = "right"
+
+[[hud]]
+id = "skill-gauge-1"
+parent = "sheet-skills"
+offset = [59, 153]
+image = "vfs:art/interface/skilgauge.art"
+size = [120, 27]
+skill_gauge = 1
+
+[[hud]]
+id = "buy-skill-1"
+parent = "sheet-skills"
+offset = [192, 150]
+image = "vfs:art/interface/skiladdbut.art"
+size = [29, 30]
+action = { sheet = { buy = { skill = 1 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-skill-1"
+parent = "sheet-skills"
+offset = [18, 150]
+image = "vfs:art/interface/skilminusbut.art"
+size = [29, 30]
+action = { sheet = { refund = { skill = 1 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "skill-name-2"
+parent = "sheet-skills"
+offset = [17, 193]
+size = [144, 22]
+binding = "sheet-value"
+sheet_value = { skill = 2 }
+font = "sheet-heading"
+
+[[hud]]
+id = "training-2"
+parent = "sheet-skills"
+offset = [136, 195]
+size = [80, 20]
+binding = "sheet-value"
+sheet_value = { training = 2 }
+font = "body"
+align = "right"
+
+[[hud]]
+id = "skill-gauge-2"
+parent = "sheet-skills"
+offset = [59, 219]
+image = "vfs:art/interface/skilgauge.art"
+size = [120, 27]
+skill_gauge = 2
+
+[[hud]]
+id = "buy-skill-2"
+parent = "sheet-skills"
+offset = [192, 216]
+image = "vfs:art/interface/skiladdbut.art"
+size = [29, 30]
+action = { sheet = { buy = { skill = 2 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-skill-2"
+parent = "sheet-skills"
+offset = [18, 216]
+image = "vfs:art/interface/skilminusbut.art"
+size = [29, 30]
+action = { sheet = { refund = { skill = 2 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "skill-name-3"
+parent = "sheet-skills"
+offset = [17, 259]
+size = [144, 22]
+binding = "sheet-value"
+sheet_value = { skill = 3 }
+font = "sheet-heading"
+
+[[hud]]
+id = "training-3"
+parent = "sheet-skills"
+offset = [136, 261]
+size = [80, 20]
+binding = "sheet-value"
+sheet_value = { training = 3 }
+font = "body"
+align = "right"
+
+[[hud]]
+id = "skill-gauge-3"
+parent = "sheet-skills"
+offset = [59, 285]
+image = "vfs:art/interface/skilgauge.art"
+size = [120, 27]
+skill_gauge = 3
+
+[[hud]]
+id = "buy-skill-3"
+parent = "sheet-skills"
+offset = [192, 282]
+image = "vfs:art/interface/skiladdbut.art"
+size = [29, 30]
+action = { sheet = { buy = { skill = 3 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-skill-3"
+parent = "sheet-skills"
+offset = [18, 282]
+image = "vfs:art/interface/skilminusbut.art"
+size = [29, 30]
+action = { sheet = { refund = { skill = 3 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "college-0"
+parent = "sheet-magick"
+offset = [13, 15]
+image = "vfs:art/interface/s_conveyance.art"
+size = [24, 24]
+action = { sheet = { college = 0 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "college-1"
+parent = "sheet-magick"
+offset = [38, 15]
+image = "vfs:art/interface/s_divination.art"
+size = [24, 24]
+action = { sheet = { college = 1 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "college-2"
+parent = "sheet-magick"
+offset = [63, 15]
+image = "vfs:art/interface/s_air.art"
+size = [24, 24]
+action = { sheet = { college = 2 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "college-3"
+parent = "sheet-magick"
+offset = [88, 15]
+image = "vfs:art/interface/s_earth.art"
+size = [24, 24]
+action = { sheet = { college = 3 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "college-4"
+parent = "sheet-magick"
+offset = [113, 15]
+image = "vfs:art/interface/s_fire.art"
+size = [24, 24]
+action = { sheet = { college = 4 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "college-5"
+parent = "sheet-magick"
+offset = [138, 15]
+image = "vfs:art/interface/s_water.art"
+size = [24, 24]
+action = { sheet = { college = 5 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "college-6"
+parent = "sheet-magick"
+offset = [162, 15]
+image = "vfs:art/interface/s_forc.art"
+size = [24, 24]
+action = { sheet = { college = 6 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "college-7"
+parent = "sheet-magick"
+offset = [187, 15]
+image = "vfs:art/interface/s_mental.art"
+size = [24, 24]
+action = { sheet = { college = 7 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "college-8"
+parent = "sheet-magick"
+offset = [25, 40]
+image = "vfs:art/interface/s_meta.art"
+size = [24, 24]
+action = { sheet = { college = 8 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "college-9"
+parent = "sheet-magick"
+offset = [50, 40]
+image = "vfs:art/interface/s_morph.art"
+size = [24, 24]
+action = { sheet = { college = 9 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "college-10"
+parent = "sheet-magick"
+offset = [75, 40]
+image = "vfs:art/interface/s_nature.art"
+size = [24, 24]
+action = { sheet = { college = 10 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "college-11"
+parent = "sheet-magick"
+offset = [100, 40]
+image = "vfs:art/interface/s_evilnecro.art"
+size = [24, 24]
+action = { sheet = { college = 11 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "college-12"
+parent = "sheet-magick"
+offset = [124, 40]
+image = "vfs:art/interface/s_goodnecro.art"
+size = [24, 24]
+action = { sheet = { college = 12 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "college-13"
+parent = "sheet-magick"
+offset = [149, 40]
+image = "vfs:art/interface/s_phantasm.art"
+size = [24, 24]
+action = { sheet = { college = 13 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "college-14"
+parent = "sheet-magick"
+offset = [174, 40]
+image = "vfs:art/interface/s_summoning.art"
+size = [24, 24]
+action = { sheet = { college = 14 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "college-15"
+parent = "sheet-magick"
+offset = [199, 40]
+image = "vfs:art/interface/s_temporal.art"
+size = [24, 24]
+action = { sheet = { college = 15 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "discipline-0"
+parent = "sheet-technology"
+offset = [8, 7]
+image = "vfs:art/interface/anatomical_but.art"
+size = [32, 31]
+action = { sheet = { discipline = 0 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "discipline-1"
+parent = "sheet-technology"
+offset = [34, 29]
+image = "vfs:art/interface/chemistry_but.art"
+size = [32, 31]
+action = { sheet = { discipline = 1 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "discipline-2"
+parent = "sheet-technology"
+offset = [61, 7]
+image = "vfs:art/interface/electrical_but.art"
+size = [33, 31]
+action = { sheet = { discipline = 2 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "discipline-3"
+parent = "sheet-technology"
+offset = [88, 28]
+image = "vfs:art/interface/explosives_but.art"
+size = [32, 31]
+action = { sheet = { discipline = 3 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "discipline-4"
+parent = "sheet-technology"
+offset = [116, 7]
+image = "vfs:art/interface/gunsmithy_but.art"
+size = [32, 31]
+action = { sheet = { discipline = 4 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "discipline-5"
+parent = "sheet-technology"
+offset = [142, 29]
+image = "vfs:art/interface/mechanical_but.art"
+size = [32, 31]
+action = { sheet = { discipline = 5 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "discipline-6"
+parent = "sheet-technology"
+offset = [171, 7]
+image = "vfs:art/interface/smithy_but.art"
+size = [32, 31]
+action = { sheet = { discipline = 6 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "discipline-7"
+parent = "sheet-technology"
+offset = [198, 29]
+image = "vfs:art/interface/therapeutics_but.art"
+size = [32, 31]
+action = { sheet = { discipline = 7 } }
+pressed_frame = 1
+hover_frame = 2
+selected_frame = 1
+
+[[hud]]
+id = "degree-heading"
+parent = "sheet-technology"
+offset = [16, 67]
+size = [207, 20]
+binding = "sheet-value"
+sheet_value = "discipline"
+font = "sheet-heading"
+align = "center"
+
+[[hud]]
+id = "known-degree-0"
+parent = "sheet-technology"
+offset = [8, 96]
+size = [32, 32]
+sheet_image = { degree = 0 }
+
+[[hud]]
+id = "buy-degree-0"
+parent = "sheet-technology"
+offset = [8, 96]
+image = "vfs:art/interface/spelltech_add.art"
+size = [32, 32]
+action = { sheet = { buy = { degree = 0 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-degree-0"
+parent = "sheet-technology"
+offset = [8, 96]
+image = "vfs:art/interface/spelltech_minus.art"
+size = [32, 32]
+action = { sheet = { refund = { degree = 0 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "degree-name-0"
+parent = "sheet-technology"
+offset = [46, 92]
+size = [186, 19]
+binding = "sheet-value"
+sheet_value = { degree = 0 }
+font = "body"
+
+[[hud]]
+id = "degree-requirement-0"
+parent = "sheet-technology"
+offset = [46, 109]
+size = [186, 15]
+binding = "sheet-value"
+sheet_value = { degree-requirement = 0 }
+font = "sheet-small"
+
+[[hud]]
+id = "known-degree-1"
+parent = "sheet-technology"
+offset = [8, 129]
+size = [32, 32]
+sheet_image = { degree = 1 }
+
+[[hud]]
+id = "buy-degree-1"
+parent = "sheet-technology"
+offset = [8, 129]
+image = "vfs:art/interface/spelltech_add.art"
+size = [32, 32]
+action = { sheet = { buy = { degree = 1 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-degree-1"
+parent = "sheet-technology"
+offset = [8, 129]
+image = "vfs:art/interface/spelltech_minus.art"
+size = [32, 32]
+action = { sheet = { refund = { degree = 1 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "degree-name-1"
+parent = "sheet-technology"
+offset = [46, 125]
+size = [186, 19]
+binding = "sheet-value"
+sheet_value = { degree = 1 }
+font = "body"
+
+[[hud]]
+id = "degree-requirement-1"
+parent = "sheet-technology"
+offset = [46, 142]
+size = [186, 15]
+binding = "sheet-value"
+sheet_value = { degree-requirement = 1 }
+font = "sheet-small"
+
+[[hud]]
+id = "known-degree-2"
+parent = "sheet-technology"
+offset = [8, 162]
+size = [32, 32]
+sheet_image = { degree = 2 }
+
+[[hud]]
+id = "buy-degree-2"
+parent = "sheet-technology"
+offset = [8, 162]
+image = "vfs:art/interface/spelltech_add.art"
+size = [32, 32]
+action = { sheet = { buy = { degree = 2 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-degree-2"
+parent = "sheet-technology"
+offset = [8, 162]
+image = "vfs:art/interface/spelltech_minus.art"
+size = [32, 32]
+action = { sheet = { refund = { degree = 2 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "degree-name-2"
+parent = "sheet-technology"
+offset = [46, 158]
+size = [186, 19]
+binding = "sheet-value"
+sheet_value = { degree = 2 }
+font = "body"
+
+[[hud]]
+id = "degree-requirement-2"
+parent = "sheet-technology"
+offset = [46, 175]
+size = [186, 15]
+binding = "sheet-value"
+sheet_value = { degree-requirement = 2 }
+font = "sheet-small"
+
+[[hud]]
+id = "known-degree-3"
+parent = "sheet-technology"
+offset = [8, 195]
+size = [32, 32]
+sheet_image = { degree = 3 }
+
+[[hud]]
+id = "buy-degree-3"
+parent = "sheet-technology"
+offset = [8, 195]
+image = "vfs:art/interface/spelltech_add.art"
+size = [32, 32]
+action = { sheet = { buy = { degree = 3 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-degree-3"
+parent = "sheet-technology"
+offset = [8, 195]
+image = "vfs:art/interface/spelltech_minus.art"
+size = [32, 32]
+action = { sheet = { refund = { degree = 3 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "degree-name-3"
+parent = "sheet-technology"
+offset = [46, 191]
+size = [186, 19]
+binding = "sheet-value"
+sheet_value = { degree = 3 }
+font = "body"
+
+[[hud]]
+id = "degree-requirement-3"
+parent = "sheet-technology"
+offset = [46, 208]
+size = [186, 15]
+binding = "sheet-value"
+sheet_value = { degree-requirement = 3 }
+font = "sheet-small"
+
+[[hud]]
+id = "known-degree-4"
+parent = "sheet-technology"
+offset = [8, 228]
+size = [32, 32]
+sheet_image = { degree = 4 }
+
+[[hud]]
+id = "buy-degree-4"
+parent = "sheet-technology"
+offset = [8, 228]
+image = "vfs:art/interface/spelltech_add.art"
+size = [32, 32]
+action = { sheet = { buy = { degree = 4 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-degree-4"
+parent = "sheet-technology"
+offset = [8, 228]
+image = "vfs:art/interface/spelltech_minus.art"
+size = [32, 32]
+action = { sheet = { refund = { degree = 4 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "degree-name-4"
+parent = "sheet-technology"
+offset = [46, 224]
+size = [186, 19]
+binding = "sheet-value"
+sheet_value = { degree = 4 }
+font = "body"
+
+[[hud]]
+id = "degree-requirement-4"
+parent = "sheet-technology"
+offset = [46, 241]
+size = [186, 15]
+binding = "sheet-value"
+sheet_value = { degree-requirement = 4 }
+font = "sheet-small"
+
+[[hud]]
+id = "known-degree-5"
+parent = "sheet-technology"
+offset = [8, 261]
+size = [32, 32]
+sheet_image = { degree = 5 }
+
+[[hud]]
+id = "buy-degree-5"
+parent = "sheet-technology"
+offset = [8, 261]
+image = "vfs:art/interface/spelltech_add.art"
+size = [32, 32]
+action = { sheet = { buy = { degree = 5 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-degree-5"
+parent = "sheet-technology"
+offset = [8, 261]
+image = "vfs:art/interface/spelltech_minus.art"
+size = [32, 32]
+action = { sheet = { refund = { degree = 5 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "degree-name-5"
+parent = "sheet-technology"
+offset = [46, 257]
+size = [186, 19]
+binding = "sheet-value"
+sheet_value = { degree = 5 }
+font = "body"
+
+[[hud]]
+id = "degree-requirement-5"
+parent = "sheet-technology"
+offset = [46, 274]
+size = [186, 15]
+binding = "sheet-value"
+sheet_value = { degree-requirement = 5 }
+font = "sheet-small"
+
+[[hud]]
+id = "known-degree-6"
+parent = "sheet-technology"
+offset = [8, 294]
+size = [32, 32]
+sheet_image = { degree = 6 }
+
+[[hud]]
+id = "buy-degree-6"
+parent = "sheet-technology"
+offset = [8, 294]
+image = "vfs:art/interface/spelltech_add.art"
+size = [32, 32]
+action = { sheet = { buy = { degree = 6 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-degree-6"
+parent = "sheet-technology"
+offset = [8, 294]
+image = "vfs:art/interface/spelltech_minus.art"
+size = [32, 32]
+action = { sheet = { refund = { degree = 6 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "degree-name-6"
+parent = "sheet-technology"
+offset = [46, 290]
+size = [186, 19]
+binding = "sheet-value"
+sheet_value = { degree = 6 }
+font = "body"
+
+[[hud]]
+id = "degree-requirement-6"
+parent = "sheet-technology"
+offset = [46, 307]
+size = [186, 15]
+binding = "sheet-value"
+sheet_value = { degree-requirement = 6 }
+font = "sheet-small"
+
+[[hud]]
+id = "known-spell-0"
+parent = "sheet-magick"
+offset = [18, 82]
+size = [32, 32]
+sheet_image = { spell = 0 }
+
+[[hud]]
+id = "buy-spell-0"
+parent = "sheet-magick"
+offset = [18, 82]
+image = "vfs:art/interface/spelltech_add.art"
+size = [32, 32]
+action = { sheet = { buy = { spell = 0 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-spell-0"
+parent = "sheet-magick"
+offset = [18, 82]
+image = "vfs:art/interface/spelltech_minus.art"
+size = [32, 32]
+action = { sheet = { refund = { spell = 0 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "spell-name-0"
+parent = "sheet-magick"
+offset = [59, 75]
+size = [173, 19]
+binding = "sheet-value"
+sheet_value = { spell = 0 }
+font = "body"
+
+[[hud]]
+id = "spell-requirement-0"
+parent = "sheet-magick"
+offset = [59, 92]
+size = [173, 15]
+binding = "sheet-value"
+sheet_value = { requirement = 0 }
+font = "sheet-small"
+
+[[hud]]
+id = "known-spell-1"
+parent = "sheet-magick"
+offset = [18, 130]
+size = [32, 32]
+sheet_image = { spell = 1 }
+
+[[hud]]
+id = "buy-spell-1"
+parent = "sheet-magick"
+offset = [18, 130]
+image = "vfs:art/interface/spelltech_add.art"
+size = [32, 32]
+action = { sheet = { buy = { spell = 1 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-spell-1"
+parent = "sheet-magick"
+offset = [18, 130]
+image = "vfs:art/interface/spelltech_minus.art"
+size = [32, 32]
+action = { sheet = { refund = { spell = 1 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "spell-name-1"
+parent = "sheet-magick"
+offset = [59, 123]
+size = [173, 19]
+binding = "sheet-value"
+sheet_value = { spell = 1 }
+font = "body"
+
+[[hud]]
+id = "spell-requirement-1"
+parent = "sheet-magick"
+offset = [59, 140]
+size = [173, 15]
+binding = "sheet-value"
+sheet_value = { requirement = 1 }
+font = "sheet-small"
+
+[[hud]]
+id = "known-spell-2"
+parent = "sheet-magick"
+offset = [18, 177]
+size = [32, 32]
+sheet_image = { spell = 2 }
+
+[[hud]]
+id = "buy-spell-2"
+parent = "sheet-magick"
+offset = [18, 177]
+image = "vfs:art/interface/spelltech_add.art"
+size = [32, 32]
+action = { sheet = { buy = { spell = 2 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-spell-2"
+parent = "sheet-magick"
+offset = [18, 177]
+image = "vfs:art/interface/spelltech_minus.art"
+size = [32, 32]
+action = { sheet = { refund = { spell = 2 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "spell-name-2"
+parent = "sheet-magick"
+offset = [59, 170]
+size = [173, 19]
+binding = "sheet-value"
+sheet_value = { spell = 2 }
+font = "body"
+
+[[hud]]
+id = "spell-requirement-2"
+parent = "sheet-magick"
+offset = [59, 187]
+size = [173, 15]
+binding = "sheet-value"
+sheet_value = { requirement = 2 }
+font = "sheet-small"
+
+[[hud]]
+id = "known-spell-3"
+parent = "sheet-magick"
+offset = [18, 225]
+size = [32, 32]
+sheet_image = { spell = 3 }
+
+[[hud]]
+id = "buy-spell-3"
+parent = "sheet-magick"
+offset = [18, 225]
+image = "vfs:art/interface/spelltech_add.art"
+size = [32, 32]
+action = { sheet = { buy = { spell = 3 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-spell-3"
+parent = "sheet-magick"
+offset = [18, 225]
+image = "vfs:art/interface/spelltech_minus.art"
+size = [32, 32]
+action = { sheet = { refund = { spell = 3 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "spell-name-3"
+parent = "sheet-magick"
+offset = [59, 218]
+size = [173, 19]
+binding = "sheet-value"
+sheet_value = { spell = 3 }
+font = "body"
+
+[[hud]]
+id = "spell-requirement-3"
+parent = "sheet-magick"
+offset = [59, 235]
+size = [173, 15]
+binding = "sheet-value"
+sheet_value = { requirement = 3 }
+font = "sheet-small"
+
+[[hud]]
+id = "known-spell-4"
+parent = "sheet-magick"
+offset = [18, 272]
+size = [32, 32]
+sheet_image = { spell = 4 }
+
+[[hud]]
+id = "buy-spell-4"
+parent = "sheet-magick"
+offset = [18, 272]
+image = "vfs:art/interface/spelltech_add.art"
+size = [32, 32]
+action = { sheet = { buy = { spell = 4 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "refund-spell-4"
+parent = "sheet-magick"
+offset = [18, 272]
+image = "vfs:art/interface/spelltech_minus.art"
+size = [32, 32]
+action = { sheet = { refund = { spell = 4 } } }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "spell-name-4"
+parent = "sheet-magick"
+offset = [59, 265]
+size = [173, 19]
+binding = "sheet-value"
+sheet_value = { spell = 4 }
+font = "body"
+
+[[hud]]
+id = "spell-requirement-4"
+parent = "sheet-magick"
+offset = [59, 282]
+size = [173, 15]
+binding = "sheet-value"
+sheet_value = { requirement = 4 }
+font = "sheet-small"
+
+[[hud]]
+id = "schematic-book"
+image = "vfs:art/interface/schematic_base.art"
+size = [800, 400]
+anchor = "center"
+sheet_panel = true
+sheet_page = "schematics"
+capture = true
+
+[[hud]]
+id = "schematic-lens"
+parent = "schematic-book"
+offset = [50, 26]
+size = [89, 89]
+binding = "schematic-lens"
+
+[[hud]]
+id = "schematic-prev"
+parent = "schematic-book"
+offset = [204, 16]
+image = "vfs:art/interface/schm_larrow.art"
+size = [18, 22]
+action = { sheet = "previous" }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "schematic-next"
+parent = "schematic-book"
+offset = [687, 16]
+image = "vfs:art/interface/schm_rarrow.art"
+size = [18, 22]
+action = { sheet = "next" }
+pressed_frame = 1
+hover_frame = 2
+
+[[hud]]
+id = "combine"
+parent = "schematic-book"
+offset = [76, 324]
+image = "vfs:art/interface/combinebutt.art"
+size = [51, 51]
+action = { sheet = "combine" }
+pressed_frame = 1
+
+[[hud]]
+id = "schematic-learned"
+parent = "schematic-book"
+offset = [29, 160]
+image = "vfs:art/interface/bgrn_but.art"
+size = [37, 36]
+
+[[hud]]
+id = "schematic-tab-0"
+parent = "schematic-book"
+offset = [707, 17]
+image = "vfs:art/interface/anatomical_tab.art"
+size = [27, 40]
+action = { sheet = { discipline = 0 } }
+pressed_frame = 1
+selected_frame = 1
+
+[[hud]]
+id = "schematic-tab-1"
+parent = "schematic-book"
+offset = [707, 62]
+image = "vfs:art/interface/chemistry_tab.art"
+size = [27, 40]
+action = { sheet = { discipline = 1 } }
+pressed_frame = 1
+selected_frame = 1
+
+[[hud]]
+id = "schematic-tab-2"
+parent = "schematic-book"
+offset = [707, 107]
+image = "vfs:art/interface/electrical_tab.art"
+size = [27, 40]
+action = { sheet = { discipline = 2 } }
+pressed_frame = 1
+selected_frame = 1
+
+[[hud]]
+id = "schematic-tab-3"
+parent = "schematic-book"
+offset = [707, 152]
+image = "vfs:art/interface/explosives_tab.art"
+size = [27, 40]
+action = { sheet = { discipline = 3 } }
+pressed_frame = 1
+selected_frame = 1
+
+[[hud]]
+id = "schematic-tab-4"
+parent = "schematic-book"
+offset = [707, 197]
+image = "vfs:art/interface/gunsmithy_tab.art"
+size = [27, 40]
+action = { sheet = { discipline = 4 } }
+pressed_frame = 1
+selected_frame = 1
+
+[[hud]]
+id = "schematic-tab-5"
+parent = "schematic-book"
+offset = [707, 242]
+image = "vfs:art/interface/mechanical_tab.art"
+size = [27, 40]
+action = { sheet = { discipline = 5 } }
+pressed_frame = 1
+selected_frame = 1
+
+[[hud]]
+id = "schematic-tab-6"
+parent = "schematic-book"
+offset = [707, 287]
+image = "vfs:art/interface/smithy_tab.art"
+size = [29, 41]
+action = { sheet = { discipline = 6 } }
+
+[[hud]]
+id = "schematic-tab-7"
+parent = "schematic-book"
+offset = [707, 332]
+image = "vfs:art/interface/theraputics_tab.art"
+size = [29, 41]
+action = { sheet = { discipline = 7 } }
+
+[[hud]]
+id = "recipe-title"
+parent = "schematic-book"
+offset = [261, 22]
+size = [414, 30]
+binding = "sheet-value"
+sheet_value = "recipe"
+font = "journal-heading"
+
+[[hud]]
+id = "recipe-description"
+parent = "schematic-book"
+offset = [219, 66]
+size = [466, 77]
+binding = "sheet-value"
+sheet_value = "description"
+font = "journal"
+wrap = true
+
+[[hud]]
+id = "recipe-art"
+parent = "schematic-book"
+offset = [240, 146]
+size = [295, 226]
+sheet_image = "illustration"
+
+[[hud]]
+id = "component-status-0"
+parent = "schematic-book"
+offset = [579, 181]
+size = [99, 67]
+sheet_image = {availability = 0}
+
+[[hud]]
+id = "component-0"
+parent = "schematic-book"
+offset = [579, 181]
+size = [99, 67]
+sheet_image = {component = 0}
+
+[[hud]]
+id = "component-status-1"
+parent = "schematic-book"
+offset = [579, 277]
+size = [99, 67]
+sheet_image = {availability = 1}
+
+[[hud]]
+id = "component-1"
+parent = "schematic-book"
+offset = [579, 277]
+size = [99, 67]
+sheet_image = {component = 1}

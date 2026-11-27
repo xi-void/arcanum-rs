@@ -72,3 +72,5 @@ save/load content rectangles and interface ART IDs 329, 745–748.
 The pause labels use `Morph30Font.ART` (327). Slot text uses
 `Flare12Font.ART` (229). The confirmation geometry comes from TIG's
 `window.c`. Each asset is resolved through the existing VFS.
+
+Version-1 saves also carry manual attribute and vital investments, health damage, all basic and technological skill ranks and training, colleges, degrees, base alignment, cumulative experience and unspent points. Earlier saves retain Haggle, the existing aptitude counters and known abilities. Missing newer fields take their original empty defaults. Loading rebuilds equipped effects from the winning item and rule resources. Consumed crafting components retain stable identities and stay unavailable after a map change or restart. The current sheet visit’s refundable purchases expire when the sheet closes or a game is loaded.

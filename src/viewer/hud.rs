@@ -2,6 +2,7 @@
 mod dialogue;
 mod inventory;
 mod journal;
+pub(super) mod sheet;
 use super::ThemeSource;
 use arcanum_rs::{
     art::{DecodedFrame, SpriteFrame},
@@ -29,7 +30,11 @@ pub(super) enum Action {
     ToggleInventory,
     ToggleSpells,
     CastCantrip,
+    SpellCollege(usize),
     ToggleJournal,
+    ToggleCharacter,
+    ToggleSchematics,
+    Sheet(sheet::Control),
     JournalQuests,
     JournalPrevious,
     JournalNext,
@@ -80,6 +85,7 @@ struct Theme {
     route_color: Option<Color>,
     selected_route_color: Option<Color>,
     journal: Option<journal::Style>,
+    sheet: Option<sheet::Style>,
     #[serde(default)]
     fonts: BTreeMap<String, Font>,
     #[serde(default)]
@@ -127,6 +133,11 @@ pub(super) enum Binding {
     ContainerThumb,
     InventoryLens,
     JournalLens,
+    SheetLens,
+    SchematicLens,
+    SheetValue,
+    HealthFill,
+    HealthValue,
     JournalLeft,
     JournalRight,
     JournalLeftHeader,
@@ -160,7 +171,9 @@ impl Binding {
     fn is_label(self) -> bool {
         matches!(
             self,
-            Self::FatigueValue
+            Self::SheetValue
+                | Self::HealthValue
+                | Self::FatigueValue
                 | Self::MapTitle
                 | Self::MapWest
                 | Self::MapSouth
@@ -234,10 +247,18 @@ struct Element {
     #[serde(default)]
     journal_panel: bool,
     #[serde(default)]
+    sheet_panel: bool,
+    sheet_page: Option<sheet::Page>,
+    sheet_value: Option<sheet::Value>,
+    sheet_image: Option<sheet::Image>,
+    aptitude_travel: Option<i32>,
+    skill_gauge: Option<usize>,
+    #[serde(default)]
     dialogue_only: bool,
     #[serde(default)]
     spell_panel: bool,
     required_conveyance: Option<u32>,
+    spell_slot: Option<usize>,
     response: Option<usize>,
     hover_text_color: Option<Color>,
     disabled_text_color: Option<Color>,
@@ -641,10 +662,15 @@ pub(crate) struct Hud {
     panel_band: Rect,
     external_panel: Option<[u32; 2]>,
     shared_band: Option<(Rect, u32)>,
+    sheet: sheet::Sheet,
+    sheet_style: Option<sheet::Style>,
+    health_percent: u32,
     fatigue_percent: u32,
     fatigue_revision: Option<u64>,
     spells_open: bool,
-    spell_level: u32,
+    college_levels: [u32; 16],
+    spell_college: usize,
+    loaded_college: Option<usize>,
     inventory: InventoryPanel,
     journal: journal::Journal,
     journal_style: Option<journal::Style>,
@@ -942,10 +968,15 @@ impl Hud {
             },
             external_panel: None,
             shared_band: None,
+            sheet: sheet::Sheet::default(),
+            sheet_style: theme.sheet,
+            health_percent: 100,
             fatigue_percent: 100,
             fatigue_revision: None,
             spells_open: false,
-            spell_level: 0,
+            college_levels: [0; 16],
+            spell_college: 0,
+            loaded_college: None,
             inventory: InventoryPanel::default(),
             journal: journal::Journal::default(),
             journal_style: theme.journal,
@@ -956,6 +987,7 @@ impl Hud {
     }
 
     pub fn reset_character(&mut self) {
+        self.close_sheet();
         self.fatigue_revision = None;
         self.close_spells();
     }
@@ -964,7 +996,14 @@ impl Hud {
             return;
         }
         self.fatigue_revision = Some(world.inventory_revision());
-        let (current, maximum) = world.fatigue();
+        let stats = world.character_statistics();
+        let (current, maximum) = (stats.current_fatigue, stats.max_fatigue);
+        self.health_percent = (stats.current_health.saturating_mul(100) / stats.max_health.max(1))
+            .clamp(0, 100) as u32;
+        self.set_label(
+            Binding::HealthValue,
+            &format!("{:03}", stats.current_health),
+        );
         self.fatigue_percent = if maximum <= 0 {
             0
         } else {
@@ -983,11 +1022,51 @@ impl Hud {
         self.toggle_spells();
         true
     }
-    pub fn set_spell_level(&mut self, level: u32) {
-        if self.spell_level != level {
-            self.spell_level = level;
+    pub fn choose_college(&mut self, i: usize) {
+        if self.college_levels.get(i).is_some_and(|&n| n > 0) {
+            self.spell_college = i;
             self.clear_layout();
         }
+    }
+    pub fn refresh_spellbook(
+        &mut self,
+        reader: &mut arcanum_rs::content::world::InventoryReader,
+        world: &InteractiveWorld,
+    ) {
+        let levels = world.college_levels();
+        if levels != self.college_levels {
+            self.college_levels = levels;
+            if levels[self.spell_college] == 0 {
+                self.spell_college = levels.iter().position(|&n| n > 0).unwrap_or(0);
+            }
+            self.loaded_college = None;
+            self.clear_layout();
+        }
+        if !self.spells_open || self.loaded_college == Some(self.spell_college) {
+            return;
+        }
+        let Some(style) = &self.sheet_style else {
+            return;
+        };
+        let rules = world.progression_rules();
+        for c in &mut self.components {
+            let Some(row) = c
+                .config
+                .spell_slot
+                .filter(|&r| r < levels[self.spell_college] as usize)
+            else {
+                continue;
+            };
+            let id = self.spell_college * 5 + row;
+            c.config.hover_message = rules.spells.get(id).map(|s| s.name.clone());
+            let art = style.spell_icon_bases[self.spell_college] + 1 + row as i32;
+            if let Some(path) = rules.interface.get(&art) {
+                c.art = reader
+                    .sheet_art(path, 0)
+                    .unwrap_or_else(|_| generated_frame("empty", sprite([1, 1], [0; 4])));
+            }
+        }
+        self.loaded_college = Some(self.spell_college);
     }
     pub fn layout(&mut self, size: (u32, u32)) {
         self.layout_group(size, None, None);
@@ -1065,6 +1144,13 @@ impl Hud {
                 widest = widest.max(e.size[0]);
                 continue;
             }
+            if e.sheet_panel {
+                if self.sheet.open {
+                    middle = middle.max(e.size[1]);
+                    widest = widest.max(e.size[0]);
+                }
+                continue;
+            }
             if e.journal_panel {
                 if self.journal.open {
                     middle = middle.max(e.size[1]);
@@ -1113,7 +1199,8 @@ impl Hud {
         for component in &self.components {
             let parent = component.parent.map_or_else(
                 || {
-                    let area = if component.config.inventory_panel
+                    let area = if component.config.sheet_panel
+                        || component.config.inventory_panel
                         || component.config.dialogue_only
                         || component.config.journal_panel
                     {
@@ -1126,18 +1213,23 @@ impl Hud {
                 |id| bounds[id],
             );
             let placement = parent.and_then(|(parent, clip)| {
-                if self.map_view.is_some_and(|mode| {
-                    !component.config.map_views.is_empty()
-                        && !component.config.map_views.contains(&mode)
-                }) || (component.config.spell_panel
-                    && (!self.spells_open
-                        || self.dialogue_open
-                        || panel.is_some()
-                        || self.journal.open))
+                if !self.sheet.visible(&component.config)
+                    || self.map_view.is_some_and(|mode| {
+                        !component.config.map_views.is_empty()
+                            && !component.config.map_views.contains(&mode)
+                    })
+                    || (component.config.spell_panel
+                        && (!self.spells_open
+                            || self.dialogue_open
+                            || panel.is_some()
+                            || self.journal.open
+                            || self.sheet.open))
                     || component
                         .config
                         .required_conveyance
-                        .is_some_and(|n| n > self.spell_level)
+                        .is_some_and(|n| n > self.college_levels[0])
+                    || matches!(component.config.action,Some(Action::SpellCollege(i)) if self.college_levels.get(i).copied().unwrap_or(0)==0)
+                    || component.config.spell_slot.is_some_and(|r|r>=self.college_levels[self.spell_college] as usize)
                     || component.config.hidden
                     || (component.config.dialogue_only && !self.dialogue_open)
                     || (component.config.journal_panel && !self.journal.open)
@@ -1157,7 +1249,12 @@ impl Hud {
                 {
                     return None;
                 }
-                let rect = layout_rect(&component.config, parent, scale);
+                let mut rect = layout_rect(&component.config, parent, scale);
+                if let Some(travel) = component.config.aptitude_travel {
+                    rect.y -=
+                        (i64::from(self.sheet.aptitude) * i64::from(travel) * i64::from(scale)
+                            / 10000) as i32;
+                }
                 Some((rect, rect.intersect(clip)?))
             });
             bounds.push(placement);
@@ -1200,7 +1297,7 @@ impl Hud {
             .filter(|(c, _)| {
                 matches!(
                     c.config.action,
-                    Some(Action::ToggleSpells | Action::CastCantrip)
+                    Some(Action::ToggleSpells | Action::CastCantrip | Action::SpellCollege(_))
                 )
             })
             .filter_map(|(c, p)| {
@@ -1208,7 +1305,7 @@ impl Hud {
                 Some((&c.config.id, [r.x, r.y, r.w as i32, r.h as i32]))
             })
             .collect();
-        serde_json::json!({"spell_controls":spell_controls,"spell_panel":self.spells_open,"journal":self.journal_diagnostic(),"context_message":label(Binding::InventoryHover),
+        serde_json::json!({"character_sheet":self.sheet_diagnostic(),"spell_controls":spell_controls,"spell_panel":self.spells_open,"journal":self.journal_diagnostic(),"context_message":label(Binding::InventoryHover),
             "npc_context":label(Binding::NpcContext),"dialogue_responses":responses,"dialogue_scroll":self.dialogue_layout.diagnostics(),
             "map_status":label(Binding::MapStatus),"scale_percent":self.scale,"effective_scale_percent":self.effective_scale,"inventory":self.inventory_diagnostics(),"fonts":self.font_profiles,"image_references":images,
             "focused":control(self.focus),"hovered":control(self.hover),"pressed":control(self.pressed)})
@@ -1536,9 +1633,18 @@ impl Hud {
         let config = &self.components[index].config;
         config.action.filter(|action| {
             !config.disabled
+                && (config.spell_slot.is_none()
+                    || self.spell_college == 0 && config.spell_slot == Some(1))
                 && Some(*action) != self.unavailable_action
                 && (!matches!(action, Action::ToggleSpells | Action::CastCantrip)
                     || !self.inventory_open() && !self.dialogue_open)
+                && (!self.sheet.open
+                    || matches!(
+                        action,
+                        Action::ToggleCharacter | Action::ToggleSchematics | Action::Sheet(_)
+                    ))
+                && (!matches!(action, Action::ToggleCharacter | Action::ToggleSchematics)
+                    || self.has_sheet() && !self.dialogue_open)
                 && (*action != Action::ToggleInventory || self.has_inventory())
                 && (!self.journal.open
                     || matches!(
@@ -1576,6 +1682,8 @@ impl Hud {
                 }
                 if component.config.binding == Some(Binding::ContainerThumb)
                     || (p.live_asset.is_none()
+                        && component.config.sheet_image.is_none()
+                        && component.config.spell_slot.is_none()
                         && component.config.image.is_none()
                         && component.config.fill.is_none()
                         && component.config.hover_fill.is_none()
@@ -1599,7 +1707,9 @@ impl Hud {
                     None
                 };
                 let selected = (action.is_some()
-                    && (action == self.selected_action
+                    && (self.sheet.selected(action)
+                        || action == Some(Action::SpellCollege(self.spell_college))
+                        || action == self.selected_action
                         || action == self.active_action
                         || (action == Some(Action::ToggleInventory) && self.inventory_open())
                         || (matches!(
@@ -1624,8 +1734,27 @@ impl Hud {
                     .or(highlighted)
                     .or(p.live_asset.as_ref())
                     .unwrap_or(&component.art);
-                if component.config.binding == Some(Binding::FatigueFill) {
-                    if self.fatigue_percent == 0 {
+                if matches!(
+                    component.config.sheet_image,
+                    Some(sheet::Image::Component(_))
+                ) {
+                    return Some(overlay(asset, inventory::equipment_icon(p, asset), p.rect));
+                }
+                if let Some(row) = component.config.skill_gauge {
+                    let mut clip = p.rect;
+                    clip.w = clip.w * self.sheet.levels.get(row).copied().unwrap_or(0) / 20;
+                    return (clip.w > 0).then(|| overlay(asset, p.full, clip));
+                }
+                if matches!(
+                    component.config.binding,
+                    Some(Binding::FatigueFill | Binding::HealthFill)
+                ) {
+                    let percent = if component.config.binding == Some(Binding::HealthFill) {
+                        self.health_percent
+                    } else {
+                        self.fatigue_percent
+                    };
+                    if percent == 0 {
                         return None;
                     }
                     // CE draws the liquid surface eight original pixels above the fill line.
@@ -1633,7 +1762,7 @@ impl Hud {
                         .parent
                         .and_then(|i| self.placed[i].as_ref())
                         .map_or(p.full.h, |parent| parent.full.h);
-                    let empty = track - track * self.fatigue_percent / 100;
+                    let empty = track - track * percent / 100;
                     let extra = p.full.h.saturating_sub(track);
                     let rect = Rect {
                         y: p.full.y + empty as i32 - extra as i32,
@@ -1653,7 +1782,7 @@ fn parse(source: &str) -> Result<Theme, Box<dyn Error>> {
     }
     let theme: Theme = toml::from_str(source)?;
     if theme.name.trim().is_empty()
-        || theme.hud.len() > 128
+        || theme.hud.len() > 512
         || theme.fonts.len() > 16
         || theme
             .fit_viewport
@@ -1683,7 +1812,8 @@ fn parse(source: &str) -> Result<Theme, Box<dyn Error>> {
             || e.cell.is_some()
                 != matches!(e.binding, Some(Binding::Backpack | Binding::ContainerGrid))
             || (e.inventory_panel && e.journal_panel)
-            || ((e.inventory_panel || e.journal_panel)
+            || e.sheet_value.is_some() != (e.binding == Some(Binding::SheetValue))
+            || ((e.inventory_panel || e.journal_panel || e.sheet_panel)
                 && (e.parent.is_some()
                     || !matches!(e.anchor, Anchor::Center)
                     || e.offset != [0, 0]
@@ -1710,7 +1840,7 @@ fn parse(source: &str) -> Result<Theme, Box<dyn Error>> {
                 * (1 + variants + u32::from(hover_fill && e.hover_frame.is_none()));
         }
     }
-    if pixels > 2 * 1024 * 1024
+    if pixels > 4 * 1024 * 1024
         || theme.hud.iter().filter(|e| e.inventory_panel).count() > 1
         || theme.hud.iter().filter(|e| e.journal_panel).count() > 1
         || theme.fonts.values().any(|font| {
@@ -2260,7 +2390,7 @@ mod tests {
         for scale in [100, 125, 150, 200] {
             let mut hud = Hud::load(&source, &mut game, Some(scale)).unwrap();
             hud.layout((1920, 1080));
-            assert_eq!(hud.draws(false).count(), 33);
+            assert_eq!(hud.draws(false).count(), 35);
             assert_eq!(hud.scale(), scale);
             let effective = u32::from(scale).min(180);
             assert_eq!(hud.effective_scale, effective);
@@ -2269,7 +2399,10 @@ mod tests {
             assert_eq!(button.x as u32, left + 4 * effective / 100);
             assert_eq!(button.y as u32, 2 * effective / 100);
             assert_eq!(button.w, 34 * effective / 100);
-            assert_eq!(hud.hit((button.x as u32, button.y as u32)), Hit::Panel);
+            assert_eq!(
+                hud.hit((button.x as u32, button.y as u32)),
+                Hit::Button(Action::ToggleCharacter)
+            );
             let map = hud.placed[4].as_ref().unwrap().rect;
             assert_eq!(
                 hud.hit((map.x as u32, map.y as u32)),
@@ -2291,6 +2424,8 @@ mod tests {
             }
             assert_eq!(hud.hit((left - 1, 5)), Hit::World);
             hud.advance_focus(false);
+            assert_eq!(hud.focused_action(), Some(Action::ToggleCharacter));
+            hud.advance_focus(false);
             assert_eq!(hud.focused_action(), Some(Action::ToggleJournal));
             hud.advance_focus(false);
             assert_eq!(hud.focused_action(), Some(Action::OpenMap));
@@ -2299,7 +2434,7 @@ mod tests {
             hud.layout((1920, 1080));
             let (page, _) = hud.bounds(Binding::JournalLeft).unwrap();
             assert_eq!(hud.hit((page.x as u32, page.y as u32)), Hit::Panel);
-            assert!(hud.draws(false).count() > 33);
+            assert!(hud.draws(false).count() > 35);
         }
     }
 

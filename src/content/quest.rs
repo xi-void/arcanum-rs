@@ -73,6 +73,17 @@ pub struct Ledger {
 }
 
 impl Ledger {
+    pub(super) fn new_completions<'a>(
+        &'a self,
+        previous: &'a Self,
+    ) -> impl Iterator<Item = i32> + 'a {
+        self.player.iter().filter_map(move |(&id, r)| {
+            (r.status() == Status::Completed
+                && previous.status(id, false) != Some(Status::Completed))
+            .then_some(id)
+        })
+    }
+
     pub(super) fn status(&self, id: i32, global: bool) -> Option<Status> {
         valid_id(id).then(|| {
             if global {
@@ -263,7 +274,7 @@ impl Catalog {
                 json!({"entry": entry, "last_change": record.origin,
                 "original_rules": self.rules.as_ref().and_then(|table| table.mes.get(entry.id)),
                 "unimplemented_completion_effects": (entry.status == Status::Completed)
-                    .then_some(["experience", "alignment", "reaction", "sound"])})
+                    .then_some(["reaction", "sound"])})
             })
             .collect();
         json!({"entries": entries, "sources": self.sources(), "errors": self.errors,

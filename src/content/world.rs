@@ -41,7 +41,9 @@ pub use debug::{DebugCollision, DebugObject};
 mod prefetch;
 pub use super::jumps::Destination;
 pub use interaction::{DoorStates, SavedDoors};
-pub use inventory::{InventoryContents, InventoryEntry, InventoryReader, Objects};
+pub use inventory::{
+    InventoryContents, InventoryEntry, InventoryReader, Objects, SchematicComponent,
+};
 pub use lighting::DynamicLightState;
 pub use prefetch::{DeveloperAction, InteractiveWorld, PrefetchStats, SoundEvent};
 
@@ -3700,9 +3702,9 @@ mod tests {
         use crate::{
             art::DecodedFrame,
             content::Source,
-            vfs::{Policy, Storage},
+            vfs::{MountId, Storage},
         };
-        let mount_id = Vfs::new(Policy::Ordered).mount_directory(".").unwrap();
+        let mount_id = MountId::GENERATED;
         let fixture = |hotspot_x| {
             Arc::new(LoadedFrame {
                 source: Source {

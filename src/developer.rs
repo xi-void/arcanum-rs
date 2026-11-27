@@ -21,6 +21,7 @@ pub enum Request {
     Fps,
     Sectors,
     Objects(ObjectFilter),
+    Progression,
     Inventory(String),
     ItemOwner(String),
     Pickup(String, Option<usize>),
@@ -315,6 +316,12 @@ const COMMANDS: &[Command] = &[
         }
     ),
     query!(
+        "progression",
+        "progression",
+        "Inspect statistics, alignment, investments, prerequisites and rule sources.",
+        |a| a.is_empty().then_some(Request::Progression)
+    ),
+    query!(
         "itemowner",
         "itemowner ITEM_ID",
         "Inspect an original item's current placement and provenance.",
@@ -584,6 +591,15 @@ impl Command {
                 "character",
                 "abilities",
                 "counters",
+            ],
+            "progression" => &[
+                "wield_effects",
+                "statistics",
+                "skills",
+                "colleges",
+                "spells",
+                "degrees",
+                "sources",
             ],
             "itemowner" => &[
                 "id",

@@ -317,8 +317,9 @@ impl DoorStates {
         hour: u8,
         access: bool,
         from: Tile,
-        scripts: &mut State,
+        context: (&mut State, &mut super::inventory::Session),
     ) -> Result<bool, String> {
+        let (scripts, inventory) = context;
         if self
             .poses
             .get(&door.id)
@@ -356,6 +357,7 @@ impl DoorStates {
                     script.source.virtual_path, result.statement
                 ));
             }
+            inventory.apply_quest_rewards(&staged.quests, &scripts.quests)?;
             *scripts = staged;
         }
         self.poses.insert(
@@ -905,9 +907,14 @@ impl SectorCache {
                         .map(|()| Some(destination)),
                     );
                 }
-                let result =
-                    self.door_states
-                        .change(door, tick, self.hour, access, tile, &mut self.scripts);
+                let result = self.door_states.change(
+                    door,
+                    tick,
+                    self.hour,
+                    access,
+                    tile,
+                    (&mut self.scripts, &mut self.inventory),
+                );
                 let offset = match &result {
                     Ok(true) => Some(0),
                     Ok(false) => Some(1),
@@ -1056,7 +1063,14 @@ mod tests {
         assert_eq!(travel(&states), None);
         assert!(
             states
-                .change(door, Duration::ZERO, 15, false, tile, &mut State::default())
+                .change(
+                    door,
+                    Duration::ZERO,
+                    15,
+                    false,
+                    tile,
+                    (&mut State::default(), &mut Default::default())
+                )
                 .unwrap()
         );
         assert!(door.draw(&states, Duration::ZERO).0.decoded.frame_count > 1);
@@ -1075,7 +1089,7 @@ mod tests {
                     15,
                     false,
                     tile,
-                    &mut State::default()
+                    (&mut State::default(), &mut Default::default())
                 )
                 .unwrap()
         );
@@ -1111,7 +1125,7 @@ mod tests {
                 15,
                 false,
                 tile,
-                &mut State::default()
+                (&mut State::default(), &mut Default::default())
             ),
             Err("door is locked".into())
         );
@@ -1125,7 +1139,7 @@ mod tests {
                     15,
                     false,
                     tile,
-                    &mut State::default()
+                    (&mut State::default(), &mut Default::default())
                 )
                 .unwrap()
         );

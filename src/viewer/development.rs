@@ -552,6 +552,7 @@ impl developer::Runtime for Viewer<'_> {
                 | Request::Position
                 | Request::Sectors
                 | Request::Objects(_)
+                | Request::Progression
                 | Request::Inventory(_)
                 | Request::ItemOwner(_)
                 | Request::Resource(..)
@@ -712,6 +713,7 @@ impl Viewer<'_> {
                 data["map"] = map_state;
                 data
             }
+            Request::Progression => world.progression_report(),
             Request::Inventory(owner) => world
                 .inspect_inventory(&mut dev.vfs, &owner)
                 .map_err(|err| Failure::new("inventory_unavailable", err))?,

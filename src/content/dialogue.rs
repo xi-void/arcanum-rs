@@ -1,5 +1,6 @@
 //! Original DLG conditions, effects and dialogue lifecycle.
 
+mod training;
 use super::{
     Source,
     character::CharacterStatistics,
@@ -119,6 +120,8 @@ impl EntryContext {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Response {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service: Option<training::Service>,
     pub id: Option<i32>,
     pub text: String,
     pub next: i32,
@@ -339,6 +342,9 @@ impl Conversation {
         {
             return Err(ResponseRejection::Condition);
         }
+        if matches!(response.service, Some(training::Service::Expert { .. })) {
+            return Ok(response.next);
+        }
         match effects(&response.effect) {
             Some(effects) => {
                 self.apply_effects(&effects, scripts, response.id.unwrap_or(self.turn.line))
@@ -372,12 +378,37 @@ impl Conversation {
     ) -> Result<bool, ResponseRejection> {
         let mut staged = scripts.clone();
         let previous = self.state.clone();
-        let destination = match selection {
+        let service = match selection {
+            Selection::Response(index) => self
+                .turn
+                .responses
+                .get(index)
+                .and_then(|r| r.service.clone()),
+            _ => None,
+        };
+        let mut destination = match selection {
             Selection::Response(index) => self.select(index, stats, &mut staged)?,
             Selection::AfterBarter(line) => line,
         };
         let result = (|| {
             let mut continuation = None;
+            if let Some(service) = service {
+                if let training::Service::Expert {
+                    skill,
+                    destination: success,
+                } = service
+                    && stats.skills[skill].level >= 9
+                    && stats.skills[skill].training >= 1
+                {
+                    destination = success;
+                } else {
+                    let turn = self
+                        .training_turn(vfs, service, destination, stats, &mut staged)
+                        .map_err(ResponseRejection::Effect)?;
+                    finish(vfs, &mut staged).map_err(ResponseRejection::Effect)?;
+                    return Ok(Some(turn));
+                }
+            }
             let next = match destination {
                 ..0 => {
                     let mut context = self.context.invocation(
@@ -491,6 +522,39 @@ impl Conversation {
                     }
                     continue;
                 }
+                Effect::Training(i, t) => {
+                    scripts
+                        .interaction
+                        .as_mut()
+                        .ok_or("Training context unavailable")?
+                        .train(i, t)?;
+                    continue;
+                }
+                Effect::Reaction(change) => {
+                    scripts
+                        .interaction
+                        .as_mut()
+                        .ok_or("Reaction context unavailable")?
+                        .react(change)?;
+                    continue;
+                }
+                Effect::Alignment(change) => {
+                    scripts
+                        .interaction
+                        .as_mut()
+                        .ok_or("Alignment context unavailable")?
+                        .align(change);
+                    continue;
+                }
+                Effect::Experience(level) => {
+                    scripts
+                        .interaction
+                        .as_mut()
+                        .ok_or("Experience context unavailable")?
+                        .operations
+                        .push(super::script::Transfer::QuestExperience(level));
+                    continue;
+                }
                 Effect::Item(n) => {
                     let facts = scripts
                         .interaction
@@ -503,14 +567,12 @@ impl Conversation {
             };
             let applied = if let Slot::Quest(id) = slot {
                 super::quest::Status::decode(value).and_then(|status| {
-                    scripts
-                        .quests
-                        .set_player(id, status, scripts.game_minute, || super::quest::Origin {
-                            resource: source.virtual_path.clone(),
-                            mount: source.to_string(),
-                            line: line as usize,
-                            object: attachment.owner.clone(),
-                        })
+                    scripts.set_player_quest(id, status, || super::quest::Origin {
+                        resource: source.virtual_path.clone(),
+                        mount: source.to_string(),
+                        line: line as usize,
+                        object: attachment.owner.clone(),
+                    })
                 })
             } else {
                 scripts.write(attachment, slot, value)
@@ -540,6 +602,9 @@ impl Conversation {
         let speaker_effects = effects(&line.effect);
         if let Some(effects) = &speaker_effects {
             self.apply_effects(effects, scripts, id)?;
+            if let Some(f) = &scripts.interaction {
+                condition_state.reaction = f.reaction;
+            }
             condition_state.unresolved.retain(|slot| {
                 !effects
                     .iter()
@@ -653,6 +718,7 @@ impl Conversation {
             let text = match directive(&response.text) {
                 Some(code) => {
                     let start = match code {
+                        't' if training::Service::offer(&response.text).is_some() => 500,
                         'b' => 300,
                         'y' => 1,
                         'n' => 100,
@@ -678,7 +744,8 @@ impl Conversation {
             if turn.responses.len() == 5 {
                 continue;
             }
-            let supported_effect = effects(&response.effect).is_some();
+            let expert = training::Service::expert(&response.effect);
+            let supported_effect = expert.is_some() || effects(&response.effect).is_some();
             let supported_link = response.next >= 0
                 || continuation_position(response.next)
                     .is_some_and(|pc| pc < self.script.code().statements.len());
@@ -700,6 +767,7 @@ impl Conversation {
                 });
             }
             turn.responses.push(Response {
+                service: expert.or_else(|| training::Service::offer(&response.text)),
                 barter: response.text.eq_ignore_ascii_case("b:"),
                 id: Some(response.id),
                 text: substitute(text, &self.speaker, response.id, &mut turn.dependencies),
@@ -714,6 +782,7 @@ impl Conversation {
             && let Some(text) = self.generic(400)
         {
             turn.responses.push(Response {
+                service: None,
                 barter: false,
                 id: None,
                 text: text.to_owned(),
@@ -889,6 +958,10 @@ fn state_operands(code: &str, raw: &str) -> Option<(Slot, i32)> {
 
 #[derive(Clone, Copy)]
 enum Effect {
+    Training(usize, u32),
+    Experience(i32),
+    Alignment(super::character::progression::Alignment),
+    Reaction(super::character::progression::Alignment),
     Write(Slot, i32),
     Gold(i32),
     Item(i32),
@@ -901,6 +974,15 @@ fn effects(raw: &str) -> Option<Vec<Effect>> {
         .map(|effect| {
             let effect = effect.trim();
             match effect.get(..2)?.to_ascii_lowercase().as_str() {
+                "tr" => {
+                    let (id, tier) = skill_operands(&effect[2..])?;
+                    Some(Effect::Training(id, tier.try_into().ok()?))
+                }
+                "re" => super::character::progression::Alignment::parse(&effect[2..])
+                    .map(Effect::Reaction),
+                "al" => super::character::progression::Alignment::parse(&effect[2..])
+                    .map(Effect::Alignment),
+                "xp" => Some(Effect::Experience(effect[2..].trim().parse().ok()?)),
                 "$$" => Some(Effect::Gold(effect[2..].trim().parse().ok()?)),
                 "in" => Some(Effect::Item(effect[2..].trim().parse().ok()?)),
                 _ => {
@@ -915,6 +997,13 @@ fn effects(raw: &str) -> Option<Vec<Effect>> {
 fn legacy_reaction(raw: &str) -> bool {
     raw.get(..2).is_some_and(|op| op.eq_ignore_ascii_case("re"))
         && raw[2..].trim().parse::<i32>().is_ok()
+}
+
+fn skill_operands(args: &str) -> Option<(usize, i32)> {
+    let mut parts = args.split_ascii_whitespace();
+    let skill = parts.next()?.parse::<usize>().ok().filter(|&i| i < 16)?;
+    let value = parts.next()?.parse().ok()?;
+    parts.next().is_none().then_some((skill, value))
 }
 
 fn conditions(
@@ -944,7 +1033,22 @@ fn conditions(
         let raw = rest[..end].trim_end_matches(|ch: char| ch == ',' || ch.is_ascii_whitespace());
         let code = code.to_ascii_lowercase();
         let args = raw[2..].trim();
-        let result = if matches!(
+        let result = if matches!(code.as_str(), "tr" | "sk") {
+            skill_operands(args).map(|(i, n)| {
+                let s = scripts
+                    .interaction
+                    .as_ref()
+                    .map_or(stats.skills[i], |f| f.skills[i]);
+                threshold(
+                    i64::from(if code == "tr" {
+                        s.training as i32
+                    } else {
+                        s.level
+                    }),
+                    n,
+                )
+            })
+        } else if matches!(
             code.as_str(),
             "gf" | "gv" | "lf" | "lc" | "qu" | "qa" | "qb"
         ) {
@@ -979,7 +1083,21 @@ fn conditions(
                         "re" => state.reaction?,
                         "me" if matches!(n, 0 | 1) => return Some(state.met == (n == 1)),
                         "pe" => stats.attributes[5],
-                        "al" => stats.base[19],
+                        "al" | "na" => {
+                            let alignment = scripts
+                                .interaction
+                                .as_ref()
+                                .and_then(|f| f.stats[19])
+                                .unwrap_or(stats.alignment);
+                            if code == "na" {
+                                return Some(if n < 0 {
+                                    alignment <= n
+                                } else {
+                                    i64::from(alignment) >= -i64::from(n)
+                                });
+                            }
+                            alignment
+                        }
                         "ma" => stats.aptitude,
                         "ta" => -stats.aptitude,
                         "le" => -stats.level,

@@ -49,6 +49,7 @@ pub(super) enum Place {
     Equipped(EquipmentSlot),
     Merged(OriginalId),
     Spent,
+    Consumed,
     Retired,
 }
 
@@ -65,6 +66,7 @@ impl Place {
             Self::Equipped(slot) => json!({"kind":"equipped","slot":slot}),
             Self::Retired => json!({"kind":"restocked"}),
             Self::Spent => json!({"kind":"spent"}),
+            Self::Consumed => json!({"kind":"consumed"}),
             Self::Merged(id) => json!({"kind":"merged","into":id.key()}),
             Self::Ground(map, tile) => json!({"kind":"world","map":map,"tile":tile}),
         }

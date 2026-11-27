@@ -75,6 +75,13 @@ pub struct State {
 pub(super) struct Interaction {
     pub reaction: Option<i32>,
     pub aptitude: i32,
+    pub alignment_base: i32,
+    pub alignment_modifier: crate::content::character::ModifierSum,
+    pub reaction_modifiers: [crate::content::character::ModifierSum; 2],
+    pub quest_levels: Option<Arc<BTreeMap<i32, (i32, i32)>>>,
+    pub skills: [crate::content::character::SkillRank; 16],
+    pub stats: [Option<i32>; 28],
+    pub vitals: [[i32; 2]; 2],
     pub spell_flags: u32,
     pub gold: [i64; 2],
     pub items: Vec<(u8, u32, String)>,
@@ -84,11 +91,47 @@ pub(super) struct Interaction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Transfer {
+    Training(usize, u32),
+    QuestExperience(i32),
+    Reaction(i32),
+    Heal { fatigue: bool, amount: i32 },
+    Alignment(crate::content::character::progression::Alignment),
     Gold { actor: u8, delta: i64 },
     Item { id: String, from: u8, to: u8 },
 }
 
 impl Interaction {
+    pub fn align(&mut self, change: crate::content::character::progression::Alignment) {
+        self.alignment_base = change.apply(self.alignment_base);
+        self.stats[19] = Some(
+            self.alignment_modifier
+                .apply(self.alignment_base)
+                .clamp(-1000, 1000),
+        );
+        self.operations.push(Transfer::Alignment(change));
+    }
+    pub fn react(
+        &mut self,
+        change: crate::content::character::progression::Alignment,
+    ) -> Result<(), String> {
+        let before = self
+            .reaction
+            .ok_or("Trainer or speaker reaction unavailable")?;
+        let delta = change.value(before).saturating_sub(before);
+        if delta != 0 {
+            let delta = self.reaction_modifiers[usize::from(delta > 0)].apply(delta);
+            self.reaction = Some(before.saturating_add(delta));
+            self.operations.push(Transfer::Reaction(delta));
+        }
+        Ok(())
+    }
+    pub fn train(&mut self, skill: usize, tier: u32) -> Result<(), String> {
+        let rank = self.skills.get_mut(skill).ok_or("Unknown training skill")?;
+        crate::content::character::progression::validate_training(rank, tier)?;
+        rank.training = tier;
+        self.operations.push(Transfer::Training(skill, tier));
+        Ok(())
+    }
     pub fn adjust(&mut self, actor: u8, delta: i64) -> Result<(), String> {
         let balance = self.gold[usize::from(actor)] + delta;
         if !(0..=i64::from(i32::MAX)).contains(&balance) {
@@ -173,6 +216,30 @@ impl Slot {
 }
 
 impl State {
+    pub(super) fn set_player_quest(
+        &mut self,
+        id: i32,
+        requested: Status,
+        origin: impl FnOnce() -> Origin,
+    ) -> Option<()> {
+        let old = self.quests.status(id, false)?;
+        self.quests
+            .set_player(id, requested, self.game_minute, origin)?;
+        if old < Status::Completed
+            && requested == Status::Completed
+            && let Some(facts) = self.interaction.as_mut()
+            && let Some(levels) = &facts.quest_levels
+        {
+            let &(level, adjustment) = levels.get(&id)?;
+            facts.operations.push(Transfer::QuestExperience(level));
+            if self.quests.status(id, false) == Some(Status::Completed) {
+                facts.align(crate::content::character::progression::Alignment::Add(
+                    adjustment,
+                ));
+            }
+        }
+        Some(())
+    }
     pub(super) fn initialize_random(&mut self) {
         self.random.get_or_insert_with(Random::fresh);
     }
@@ -482,7 +549,7 @@ impl Code {
     }
 }
 
-fn path(vfs: &Vfs, id: i32) -> Result<String, String> {
+pub(super) fn path(vfs: &Vfs, id: i32) -> Result<String, String> {
     let prefix = format!("scr/{id:05}");
     let paths: Vec<_> = vfs
         .paths_with_prefix(&prefix)
@@ -814,20 +881,18 @@ impl Code {
                         return Err(unresolved());
                     };
                     if pc_quest {
-                        state
-                            .quests
-                            .set_player(id, status, state.game_minute, || Origin {
-                                resource: source.virtual_path.clone(),
-                                mount: source.to_string(),
-                                line: pc,
-                                object: attachment.owner.clone(),
-                            });
+                        state.set_player_quest(id, status, || Origin {
+                            resource: source.virtual_path.clone(),
+                            mount: source.to_string(),
+                            line: pc,
+                            object: attachment.owner.clone(),
+                        });
                     } else {
                         state.quests.set_global(id, status);
                     }
                     None
                 }
-                29 | 33 => {
+                29 | 33 | 47 => {
                     let facts = view.state().interaction.as_ref().ok_or_else(unresolved)?;
                     let result = match action.opcode {
                         29 if actor(action.focus(0)) == Some(1)
@@ -838,6 +903,10 @@ impl Code {
                         33 if actor(action.focus(1)) == Some(0) && value(action, 0) == Some(16) => {
                             Some(facts.aptitude)
                         }
+                        47 if actor(action.focus(1)) == Some(0) => value(action, 0)
+                            .and_then(|i| facts.skills.get(i as usize).map(|s| s.level)),
+                        33 if actor(action.focus(1)) == Some(0) => value(action, 0)
+                            .and_then(|i| facts.stats.get(i as usize).copied().flatten()),
                         _ => None,
                     }
                     .ok_or_else(unresolved)?;
@@ -848,6 +917,63 @@ impl Code {
                         &mut temporaries,
                     )
                     .ok_or_else(unresolved)?;
+                    None
+                }
+                107 | 108 if actor(action.focus(0)) == Some(0) => {
+                    let pair = view
+                        .state()
+                        .interaction
+                        .as_ref()
+                        .ok_or_else(unresolved)?
+                        .vitals[usize::from(action.opcode == 108)];
+                    for (i, n) in pair.into_iter().enumerate() {
+                        view.assign(
+                            attachment,
+                            action.operand(i + 1).ok_or_else(unresolved)?,
+                            n,
+                            &mut temporaries,
+                        )
+                        .ok_or_else(unresolved)?;
+                    }
+                    None
+                }
+                75 | 76 if actor(action.focus(0)) == Some(0) => {
+                    let amount = value(action, 1)
+                        .filter(|&n| n >= 0)
+                        .ok_or_else(unresolved)?;
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    let facts = state.interaction.as_mut().ok_or_else(unresolved)?;
+                    let fatigue = action.opcode == 76;
+                    let pool = &mut facts.vitals[usize::from(fatigue)];
+                    pool[0] = pool[0].saturating_add(amount).min(pool[1]);
+                    facts.operations.push(Transfer::Heal { fatigue, amount });
+                    None
+                }
+                137 if actor(action.focus(1)) == Some(0) && value(action, 0) == Some(19) => {
+                    let n = value(action, 2).ok_or_else(unresolved)?;
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    state
+                        .interaction
+                        .as_mut()
+                        .ok_or_else(unresolved)?
+                        .align(crate::content::character::progression::Alignment::Add(n));
+                    None
+                }
+                63 if actor(action.focus(0)) == Some(0) => {
+                    let amount = value(action, 1).ok_or_else(unresolved)?;
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    state
+                        .interaction
+                        .as_mut()
+                        .ok_or_else(unresolved)?
+                        .operations
+                        .push(Transfer::QuestExperience(amount));
                     None
                 }
                 35 | 41 => {
@@ -937,6 +1063,143 @@ impl Code {
             operation: None,
             reason: "script execution budget exhausted".into(),
         })
+    }
+}
+
+/// A reversible equipment SCR loop. Decode both entry points and operands
+/// before representing its Add/Remove multiplicity as a derived modifier.
+pub(super) struct WieldEffect {
+    pub id: i32,
+    strength: i32,
+    power_ratio: bool,
+    pub sources: [Source; 2],
+}
+impl WieldEffect {
+    pub fn load(vfs: &mut Vfs, attachments: [(i32, Local); 2]) -> Result<Self, String> {
+        let [(on, initial), (off, _)] = attachments;
+        let wear = Script::load(vfs, on)?;
+        let unwear = Script::load(vfs, off)?;
+        let unsupported = || {
+            format!(
+                "Unsupported wield behavior in {} or {}",
+                wear.source, unwear.source
+            )
+        };
+        let decode = || {
+            wear.code.check_flags().ok()?;
+            unwear.code.check_flags().ok()?;
+            let [
+                scale,
+                save,
+                done,
+                add,
+                decrement,
+                jump,
+                restore,
+                empty,
+                remove,
+                reduce,
+                again,
+            ] = wear.code.statements.as_slice()
+            else {
+                return None;
+            };
+            let [call, ret] = unwear.code.statements.as_slice() else {
+                return None;
+            };
+            if wear
+                .code
+                .statements
+                .iter()
+                .chain(&unwear.code.statements)
+                .any(|s| s.otherwise.opcode != 0)
+            {
+                return None;
+            }
+            let op = |s: &Statement, condition: u32, action: u32| {
+                s.condition.opcode == condition && s.action.opcode == action
+            };
+            let var = |op: &Operation, idx: usize, kind: u8, n: i32| {
+                op.types[idx] == kind && op.values[idx] == n
+            };
+            let val = |op: &Operation, idx| match op.operand(idx)? {
+                Operand::Literal(v) => Some(v),
+                Operand::State(Slot::Counter(i)) => initial.counter(i),
+                _ => None,
+            };
+            let power_ratio = scale.action.opcode == 91;
+            if !op(scale, 0, if power_ratio { 91 } else { 80 })
+                || scale.action.focus(1) != 1
+                || scale.action.focus(2) != 0
+                || (!power_ratio && scale.action.focus(3) != 0)
+                || !var(&scale.action, if power_ratio { 3 } else { 4 }, 0, 0)
+            {
+                return None;
+            }
+            let strength = val(&scale.action, 0)?;
+            let id = val(&add.action, 1)?;
+            let copy =
+                |s: &Statement| op(s, 0, 10) && var(&s.action, 0, 2, 0) && var(&s.action, 1, 0, 0);
+            let stop = |s: &Statement| {
+                op(s, 4, 2) && var(&s.condition, 0, 2, 0) && s.condition.literal(1) == Some(0)
+            };
+            let dec = |s: &Statement| {
+                op(s, 0, 12)
+                    && var(&s.action, 0, 2, 0)
+                    && var(&s.action, 1, 2, 0)
+                    && s.action.literal(2) == Some(1)
+            };
+            let branch = |s: &Statement, to| op(s, 0, 3) && s.action.literal(0) == Some(to);
+            if !(0..=255).contains(&strength)
+                || !copy(save)
+                || !copy(restore)
+                || !stop(done)
+                || !stop(empty)
+                || !dec(decrement)
+                || !dec(reduce)
+                || !branch(jump, 2)
+                || !branch(again, 7)
+                || !op(add, 0, 77)
+                || add.action.focus(0) != 0
+                || add.action.literal(2) != Some(5)
+                || !op(remove, 0, 78)
+                || remove.action.focus(0) != 0
+                || val(&remove.action, 1) != Some(id)
+                || !op(call, 0, 81)
+                || call.action.focus(0) != 1
+                || call.action.literal(1) != Some(24)
+                || call.action.literal(2) != Some(6)
+                || !op(ret, 0, 2)
+            {
+                return None;
+            }
+            Some((id, strength, power_ratio))
+        };
+        let (id, strength, power_ratio) = decode().ok_or_else(unsupported)?;
+        Ok(Self {
+            id,
+            strength,
+            power_ratio,
+            sources: [wear.source, unwear.source],
+        })
+    }
+    pub fn count(&self, complexity: i32, aptitude: i32) -> usize {
+        let c = i64::from(complexity);
+        let a = i64::from(aptitude);
+        let ratio = if self.power_ratio {
+            if c == 0 {
+                100
+            } else {
+                100 * ((c + a) / 2).clamp(c.min(0), c.max(0)) / c
+            }
+        } else {
+            100 - if c.signum() * a.signum() < 0 {
+                a.abs()
+            } else {
+                0
+            }
+        };
+        ((i64::from(self.strength) * ratio + if self.power_ratio { 50 } else { 0 }) / 100) as usize
     }
 }
 

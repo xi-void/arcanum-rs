@@ -930,7 +930,7 @@ impl Hud {
     }
 }
 
-fn equipment_icon(placement: &Placement, asset: &LoadedFrame) -> Rect {
+pub(super) fn equipment_icon(placement: &Placement, asset: &LoadedFrame) -> Rect {
     let frame = &asset.decoded.frame;
     let scale = placement
         .scale
