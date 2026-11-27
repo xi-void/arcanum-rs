@@ -266,6 +266,49 @@ pub(super) fn can_reach_container(
     })
 }
 
+/// Trace a tile ray across wall and portal edges without treating occupied floor as opaque.
+/// A portal may itself be selected from either side of its boundary.
+pub(super) fn sight(
+    from: Tile,
+    to: Tile,
+    portal: bool,
+    cell: impl Fn(Tile) -> Option<Cell>,
+) -> bool {
+    let length = from.0.abs_diff(to.0).max(from.1.abs_diff(to.1));
+    if length == 0 {
+        return true;
+    }
+    let axis = |a: u32, b: u32, i: u32| {
+        let delta = i64::from(b) - i64::from(a);
+        (i64::from(a)
+            + (delta.signum()
+                * ((delta.unsigned_abs() * u64::from(i) + u64::from(length / 2))
+                    / u64::from(length)) as i64)) as u32
+    };
+    let mut prev = from;
+    for i in 1..=length {
+        let next = (axis(from.0, to.0, i), axis(from.1, to.1, i));
+        let Some(dir) = DIRECTIONS.iter().position(|&(dx, dy)| {
+            prev.0.checked_add_signed(dx) == Some(next.0)
+                && prev.1.checked_add_signed(dy) == Some(next.1)
+        }) else {
+            return false;
+        };
+        if !(portal && next == to)
+            && step(prev, dir as u8, |t| {
+                let mut c = cell(t)?;
+                c.blocked = false;
+                c.mobiles = 0;
+                Some(c)
+            }) != Some(next)
+        {
+            return false;
+        }
+        prev = next
+    }
+    true
+}
+
 #[cfg(test)]
 pub(super) fn test_cell(blocked: bool) -> Cell {
     Cell {
@@ -379,47 +422,4 @@ mod tests {
         );
         assert_eq!(collision.cell(tile).portals, [0, 0, 1, 0]);
     }
-}
-
-/// Trace a tile ray across wall and portal edges without treating occupied floor as opaque.
-/// A portal may itself be selected from either side of its boundary.
-pub(super) fn sight(
-    from: Tile,
-    to: Tile,
-    portal: bool,
-    cell: impl Fn(Tile) -> Option<Cell>,
-) -> bool {
-    let length = from.0.abs_diff(to.0).max(from.1.abs_diff(to.1));
-    if length == 0 {
-        return true;
-    }
-    let axis = |a: u32, b: u32, i: u32| {
-        let delta = i64::from(b) - i64::from(a);
-        (i64::from(a)
-            + (delta.signum()
-                * ((delta.unsigned_abs() * u64::from(i) + u64::from(length / 2))
-                    / u64::from(length)) as i64)) as u32
-    };
-    let mut prev = from;
-    for i in 1..=length {
-        let next = (axis(from.0, to.0, i), axis(from.1, to.1, i));
-        let Some(dir) = DIRECTIONS.iter().position(|&(dx, dy)| {
-            prev.0.checked_add_signed(dx) == Some(next.0)
-                && prev.1.checked_add_signed(dy) == Some(next.1)
-        }) else {
-            return false;
-        };
-        if !(portal && next == to)
-            && step(prev, dir as u8, |t| {
-                let mut c = cell(t)?;
-                c.blocked = false;
-                c.mobiles = 0;
-                Some(c)
-            }) != Some(next)
-        {
-            return false;
-        }
-        prev = next
-    }
-    true
 }

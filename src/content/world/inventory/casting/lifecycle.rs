@@ -208,33 +208,33 @@ impl InventoryReader {
     }
     pub(super) fn end_spell(&mut self, w: &mut InteractiveWorld, index: usize, now: Duration) {
         let run = w.cache.inventory.magick.active[index].clone();
-        if let Ok(program) = w.cache.inventory.program(run.spell) {
-            if !run.ending {
-                self.apply_phase(w, &run, &program, Phase::End, now);
-                let r = &mut w.cache.inventory.magick.active[index];
-                r.ending = true;
-                r.due = None;
-                r.callback = None;
-                r.bindings.clear();
-                for spawn in &mut r.summons {
-                    spawn.visuals.clear()
-                }
-                for s in &run.summons {
-                    for c in program.components.iter().filter(|c| c.phase == Phase::End) {
-                        if let Operation::Eye {
-                            index: slot,
-                            add,
-                            play,
-                        } = &c.operation
+        if let Ok(program) = w.cache.inventory.program(run.spell)
+            && !run.ending
+        {
+            self.apply_phase(w, &run, &program, Phase::End, now);
+            let r = &mut w.cache.inventory.magick.active[index];
+            r.ending = true;
+            r.due = None;
+            r.callback = None;
+            r.bindings.clear();
+            for spawn in &mut r.summons {
+                spawn.visuals.clear()
+            }
+            for s in &run.summons {
+                for c in program.components.iter().filter(|c| c.phase == Phase::End) {
+                    if let Operation::Eye {
+                        index: slot,
+                        add,
+                        play,
+                    } = &c.operation
+                    {
+                        let entry = run.spell as i32 * 10 + slot;
+                        if *add {
+                            self.attach_eye(w, s.id, entry, play, now);
+                        } else if let Some(Aim::Object(k)) =
+                            Self::subject_aim(w, &Subject::Mobile(s.id))
                         {
-                            let entry = run.spell as i32 * 10 + slot;
-                            if *add {
-                                self.attach_eye(w, s.id, entry, play, now);
-                            } else if let Some(Aim::Object(k)) =
-                                Self::subject_aim(w, &Subject::Mobile(s.id))
-                            {
-                                w.cache.stop_effect(Some(k), entry);
-                            }
+                            w.cache.stop_effect(Some(k), entry);
                         }
                     }
                 }

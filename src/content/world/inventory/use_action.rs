@@ -161,7 +161,7 @@ impl InventoryReader {
         };
         match result {
             Ok((message, result)) => {
-                world.ability.message = message.into();
+                world.ability.message = message;
                 world.ability.last = Some(result);
             }
             Err(e) => world.ability.reject(method, &e),
