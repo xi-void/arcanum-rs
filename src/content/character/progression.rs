@@ -100,8 +100,8 @@ impl ProgressionRules {
         };
         let xp = load("rules/xp_level.mes")?;
         rules.thresholds.push(0);
-        // CE's playable cap is 50. Its level 51 entry is the terminal XP ceiling.
-        for level in 2..=51 {
+        // The final contiguous level is the XP ceiling. Installations can extend the table.
+        for level in 2.. {
             let Some(value) = xp.get(level) else { break };
             let threshold = value.trim().parse()?;
             if threshold <= *rules.thresholds.last().unwrap() {
@@ -210,8 +210,7 @@ impl ProgressionRules {
         Ok(rules)
     }
     pub(super) fn next_threshold(&self, level: i32) -> Option<i32> {
-        (1..50)
-            .contains(&level)
+        (level >= 1 && (level as usize) < self.thresholds.len().saturating_sub(1))
             .then(|| self.thresholds.get(level as usize).copied())
             .flatten()
     }
@@ -397,7 +396,7 @@ impl Character {
             .copied()
             .unwrap_or(i32::MAX);
         self.base[18] = (i64::from(self.base[18]) + flat + i64::from(amount) * percent / 100)
-            .clamp(0, i64::from(cap)) as i32;
+            .clamp(0, i64::from(cap.max(self.base[18]))) as i32;
         while rules
             .progression
             .next_threshold(self.base[17])
@@ -497,6 +496,12 @@ mod tests {
         assert_eq!((pc.base[17], pc.base[21]), (5, 10));
         pc.gain_experience(i32::MAX, &rules);
         assert_eq!((pc.base[17], pc.base[18], pc.base[21]), (50, 5000, 56));
+        rules.progression.thresholds.extend([5100, 5200]);
+        pc.gain_experience(150, &rules);
+        assert_eq!((pc.base[17], pc.base[18]), (52, 5150));
+        pc.base[18] = 7000;
+        pc.gain_experience(30, &rules);
+        assert_eq!(pc.base[18], 7000);
     }
     #[test]
     fn alignment_uses_base_for_choices_and_effect_limits_for_checks() {

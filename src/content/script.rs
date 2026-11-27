@@ -22,6 +22,7 @@ pub(crate) enum Event {
     Unlock,
     Use,
     BuyObject,
+    Dying,
     Dialogue,
 }
 
@@ -91,6 +92,7 @@ pub(super) struct Interaction {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Transfer {
+    Attack,
     Training(usize, u32),
     QuestExperience(i32),
     Reaction(i32),
@@ -406,6 +408,7 @@ impl Invocation<'_> {
 pub(crate) enum Actor {
     Player,
     Item(u32),
+    Mobile,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -705,7 +708,7 @@ impl Code {
                 |op: &Operation, index| read(op.operand(index), &view, attachment, &temporaries);
             // Buy-object predicates receive the offered item as triggerer.
             let actor = |focus| {
-                if focus == 0 && matches!(input.triggerer, Actor::Item(_)) {
+                if focus == 0 && !matches!(input.triggerer, Actor::Player) {
                     None
                 } else {
                     actor(focus)
@@ -775,7 +778,7 @@ impl Code {
                 10 if cond.focus(0) == 1 && matches!(cond.focus(1), 0 | 21) => input.met,
                 20 if cond.focus(0) == 0 => match input.triggerer {
                     Actor::Item(name) => value(cond, 1).map(|n| i64::from(n) == i64::from(name)),
-                    Actor::Player => None,
+                    Actor::Player | Actor::Mobile => None,
                 },
                 18 if [cond.focus(0), cond.focus(1)] == [1, 0] => input.follows_player,
                 45 => sector_operand(value(cond, 0), value(cond, 1)).and_then(|id| {
@@ -974,6 +977,22 @@ impl Code {
                         .ok_or_else(unresolved)?
                         .operations
                         .push(Transfer::QuestExperience(amount));
+                    None
+                }
+                36 if matches!(
+                    (actor(action.focus(0)), actor(action.focus(1))),
+                    (Some(0), Some(1)) | (Some(1), Some(0))
+                ) =>
+                {
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    state
+                        .interaction
+                        .as_mut()
+                        .ok_or_else(unresolved)?
+                        .operations
+                        .push(Transfer::Attack);
                     None
                 }
                 35 | 41 => {

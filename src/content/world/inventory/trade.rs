@@ -748,9 +748,15 @@ impl InteractiveWorld {
             2 => substitute.clone().ok_or("Missing substitute inventory"),
             _ => Err("Invalid script actor"),
         };
+        let combat = facts
+            .operations
+            .contains(&Transfer::Attack)
+            .then(|| parse_id(npc))
+            .transpose()?;
         self.exchange(|world| {
             for operation in facts.operations {
                 match operation {
+                    Transfer::Attack => (),
                     Transfer::Heal { fatigue, amount } => {
                         let inv = &mut world.cache.inventory;
                         let damage = if fatigue {
@@ -806,6 +812,9 @@ impl InteractiveWorld {
                 }
             }
             world.cache.update_character_movement();
+            if let Some(id) = combat {
+                world.cache.inventory.combat.provoked = Some(id);
+            }
             Ok(())
         })
     }

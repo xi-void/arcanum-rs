@@ -1,9 +1,18 @@
 name = "Classic"
+spell_cursor = "vfs:art/interface/spellcur.art"
 scale = 125
 
 [fonts.body]
 source = "vfs:art/interface/flare12font.art"
 color = [255, 255, 255, 255]
+
+[fonts.health]
+source = "vfs:art/interface/flare12font.art"
+color = [255, 56, 56, 255]
+
+[fonts.fatigue]
+source = "vfs:art/interface/flare12font.art"
+color = [80, 144, 255, 255]
 
 [fonts.counters]
 source = "vfs:art/interface/cloister18font.art"
@@ -328,7 +337,33 @@ parent = "bottom"
 offset = [86, 16]
 size = [39, 39]
 image = "vfs:art/interface/combat_button.art"
-disabled = true
+action = "toggle-combat"
+
+[[hud]]
+id = "action-points"
+anchor = "bottom"
+offset = [0, -158]
+size = [356, 30]
+image = "vfs:art/interface/ap_bar.art"
+turn_panel = true
+capture = true
+
+[[hud]]
+id = "available-ap"
+parent = "action-points"
+offset = [0, 10]
+size = [11, 12]
+image = "vfs:art/interface/ap_green.art"
+ap_offsets = [22, 35, 48, 61, 74, 93, 106, 119, 132, 145, 164, 177, 190, 203, 216, 235, 248, 261, 274, 287]
+
+[[hud]]
+id = "end-turn"
+parent = "action-points"
+offset = [320, 9]
+size = [31, 15]
+image = "vfs:art/interface/endturn_but.art"
+pressed_frame = 1
+action = "end-turn"
 
 [[hud]]
 id = "skills"
@@ -1005,6 +1040,72 @@ size = [383, 84]
 binding = "npc-context"
 font = "body"
 wrap = true
+
+[[hud]]
+id = "npc-health-empty"
+parent = "bottom"
+offset = [290, 105]
+size = [235, 11]
+binding = "npc-health-empty"
+image = "vfs:art/interface/meshealthbar_empty.art"
+
+[[hud]]
+id = "npc-health"
+parent = "bottom"
+offset = [290, 105]
+size = [235, 11]
+binding = "npc-health"
+image = "vfs:art/interface/meshealthbar_full.art"
+
+[[hud]]
+id = "npc-poison-empty"
+parent = "bottom"
+offset = [290, 105]
+size = [235, 11]
+binding = "npc-poison-empty"
+image = "vfs:art/interface/mespoisonedbar_empty.art"
+
+[[hud]]
+id = "npc-poison"
+parent = "bottom"
+offset = [290, 105]
+size = [235, 11]
+binding = "npc-poison"
+image = "vfs:art/interface/mespoisonedbar_full.art"
+
+[[hud]]
+id = "npc-fatigue-empty"
+parent = "bottom"
+offset = [290, 123]
+size = [235, 11]
+binding = "npc-fatigue-empty"
+image = "vfs:art/interface/mesfatiguebar_empty.art"
+
+[[hud]]
+id = "npc-fatigue"
+parent = "bottom"
+offset = [290, 123]
+size = [235, 11]
+binding = "npc-fatigue"
+image = "vfs:art/interface/mesfatiguebar_full.art"
+
+[[hud]]
+id = "npc-hp-text"
+parent = "bottom"
+offset = [525, 105]
+size = [56, 18]
+binding = "npc-hp-text"
+font = "health"
+align = "right"
+
+[[hud]]
+id = "npc-ft-text"
+parent = "bottom"
+offset = [525, 123]
+size = [56, 18]
+binding = "npc-ft-text"
+font = "fatigue"
+align = "right"
 
 [[hud]]
 id = "dialogue-response-1"

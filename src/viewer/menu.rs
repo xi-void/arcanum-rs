@@ -10,6 +10,8 @@ pub(crate) struct Settings {
     pub lighting: bool,
     pub shadows: bool,
     pub run: bool,
+    pub difficulty: arcanum_rs::content::Difficulty,
+    pub turn_based: bool,
     pub audio: crate::app_config::Audio,
 }
 
@@ -21,6 +23,8 @@ impl Default for Settings {
             lighting: true,
             shadows: true,
             run: false,
+            difficulty: Default::default(),
+            turn_based: false,
             audio: Default::default(),
         }
     }

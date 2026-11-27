@@ -1,6 +1,6 @@
 # Arcanum-RS — Known Issues
 
-Baseline: M76-R with M77-R college spell execution. Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
+Baseline includes M78-R combat integration. Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
 
 ## Triage
 
@@ -12,18 +12,24 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 
 ## Open issues
 
+### COMBAT-001 — Remaining combat compatibility
+
+- **Priority P2. Status open.** The stock CE skill rolls, armor and resistance, AP costs, NPC-first turn list, critical damage bonuses and base XP pool rules underpin both combat modes. Detailed critical locations, equipment damage and dropped weapons, special critical-chart injuries, ambient light penalties and tactical NPC spell and weapon selection still need coverage. Real-time attack intervals use weapon cost and actor speed. NPCs and summons play the directional walking, attack and death sequences available for their current models. The resolver supports ordinary and torso deaths with the original fallback. Additional injury-specific death variants depend on critical-chart support.
+- Followers need recruitment, commands, party travel and party XP distribution. An allied summon can fight using its current form and ownership. Encounters use original hostility, sight, faction and supported script attachments. Some original dying and encounter scripts use operations beyond the script interpreter, reported by `rpc combat`.
+- **Installed regression baseline.** Three existing checks fail on this installation at the same assertions on the pre-M78 revision: the Bates lighting composition, the dining-room mobile shadow probe and the Kna Tha rabbit position. The dropped-item eviction check used an obsolete render-order number. Its assertion now follows the item's original identity through the rendered pickup target.
+
 ### PROG-001 — Remaining character and ability execution
 
 - **Priority** P2. **Status** Deferred.
 - The Classic spellbook executes the installed programs for the 16 colleges through the casting and progression systems. Remaining spell dependencies are tracked in MAG-001.
 - The learned schematic book supports the 56 degree recipes through the installed recipe and inventory definitions. Found schematics, followers supplying components, powered-device use and consumable effects need further runtime support. Conditional equipment scripts outside the supported reversible effect operations report the winning script when blocked.
-- Manual point allocation, original skill training tiers, dialogue and quest experience operate for the player. Automatic leveling schemes, combat XP, kill and pickpocket alignment changes, follower attitude AI and college mastery quests depend on those gameplay systems. Some background and item effect operators remain outside the statistic subset and appear in character diagnostics.
+- Manual point allocation, original skill training tiers, dialogue, quest and combat XP, and kill alignment operate for the player. Automatic leveling schemes, pickpocket alignment, follower attitude AI and college mastery quests remain deferred. Some background and item effect operators remain outside the statistic subset and appear in character diagnostics.
 
 ### MAG-001 — Spell interactions with combat, party and environmental systems
 
 - **Priority** P1. **Status** Open for full M77-R acceptance.
-- The interpreter reads all 80 original programs. Living targets, resistance, health and fatigue, movement, temporary effects, summons, forms and dispel use session-owned state. The combat and party schedulers still need to consume attack, fear, hostility, paralysis, control and follower flags. Summons retain their identities and original placement on return to a map. Nightmare can set fleeing, Dominate Will and Control Beast can set control, and Hardened Hands can modify attack statistics. Autonomous flight, commanded attacks and unarmed hit resolution need the combat scheduler. Summoned followers still need party travel to accompany the caster between maps.
-- Damage to carried and loose items has a persistent structural-damage field. Disintegrate can damage or destroy a portable item. Removing an immovable object, updating its collision and running its destruction script require the breakable-world-object lifecycle. The player renderer reads sinkable terrain and the water-walking flag set by Body of Air and Body of Water. Native shore transitions, NPC wading and water shadows remain unverified. Detect Traps needs trap instances and their discovery state. Player transformations store or drop worn gear according to available backpack space and re-equip previously worn items still carried. For authored NPCs, integrating equipped armor into resistance, restoring a complete NPC loadout after transformation and choosing the best combat weapon remain open.
+- The interpreter reads all 80 original programs. Living targets, resistance, health and fatigue, movement, temporary effects, summons, forms and dispel use session-owned state. Combat consumes fear, hostility, paralysis and control flags. Controlled actors and summons select nearby hostile participants. Unarmed strikes use the current form and applicable equipment bonuses. Summons retain their identities and original placement on return to a map. Summoned followers still need party travel to accompany the caster between maps.
+- Damage to carried and loose items has a persistent structural-damage field. Disintegrate can damage or destroy a portable item. Removing an immovable object, updating its collision and running its destruction script require the breakable-world-object lifecycle. The player renderer reads sinkable terrain and the water-walking flag set by Body of Air and Body of Water. Native shore transitions, NPC wading and water shadows remain unverified. Detect Traps needs trap instances and their discovery state. Player transformations store or drop worn gear according to available backpack space and re-equip previously worn items still carried. For authored NPCs, the combat resolver reads equipped armor and resistance. Full NPC loadout restoration after a transformation and tactical weapon selection remain open.
 - Spell-specific results from the native input checks, including maintained state and renderer provenance, are available in the local M77-R visual captures. Representative casts covered every college. The original gate still resists Unlocking Cantrip at aptitude 10 and opens at 20 for ten fatigue each. A controlled summon and the player each receive one Regenerate binding, with its caster EyeCandy on the player.
 
 ### DLG-001 — Dialogue requires unimplemented script and game state
@@ -89,7 +95,7 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 - **Priority:** P2 | **Status:** Deferred
 - Key checks read carried keys and authored key-ring entries. Automatic collection into rings, follower key sharing and forced entry remain outside the playable subset.
 - Pick Locks and Unlocking Cantrip change the original lock bit. Ordinary use still checks jam, magical hold and original Unlock and Use scripts. A successful Cantrip on a jammed lock leaves it jammed.
-- Lock attempts expose the authored guard notification, loudness and outcome. NPC sight, hearing, Catching Thief scripts and combat reactions still require the AI system. Fate-point spending, difficulty settings beyond Normal, timed equipment enchantments and party-assisted skill use are deferred. The pick delay represents the original work interval. Lockpicking still lacks a dedicated character pose. Cantrip uses its original caster and target EyeCandy. Other spell execution and character dependencies are tracked in MAG-001 and PROG-001.
+- Lock attempts expose the authored guard notification, loudness and outcome. Guard hearing, Catching Thief scripts and responses to lock attempts remain deferred. Fate-point spending, difficulty adjustments for lockpicking, timed equipment enchantments and party-assisted skill use are deferred. The pick delay represents the original work interval. Lockpicking still lacks a dedicated character pose. Cantrip uses its original caster and target EyeCandy. Other spell execution and character dependencies are tracked in MAG-001 and PROG-001.
 - Unsupported script operations still refuse access. Bates Mansion's pedestrian gate has key ID 64 and Unlock script 1151. With global flag 1024 set, the script requests attachment removal at statement 1. The engine reports that dependency even with the right key. Its timed gate-control branch also needs the event scheduler. Container Use and Unlock checks support read-only predicates.
 
 ### TRADE-001 — Merchant service and equipment dependencies
@@ -253,6 +259,8 @@ These are planned capabilities, not regressions. Implement in their own mileston
 - **Use action:** the inventory Use box accepts original lockpicks. Other targeted items need their own gameplay mechanics.
 
 ## Regression watchlist — previously corrected
+
+- **COMBAT-002. Resolved.** NPC and summon steps previously changed tile without a walking pose. Kree bandits, the Crash Site wolf and an Orcish Champion now use their directional walking and falling ART. A saved wolf fall resumed after a full restart and stayed on its last frame after a second F8 during the player's turn. Spell targeting remains active across casts until cancelled. Native right-button release restored the ordinary pointer. Quench Life completed its callback once during turn-based combat.
 
 These are not open defects. Retain focused regression coverage and reopen only if reproduced.
 

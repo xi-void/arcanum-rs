@@ -2,7 +2,10 @@
 use super::*;
 
 impl InventoryReader {
-    pub(super) fn subject_aim(w: &InteractiveWorld, subject: &Subject) -> Option<Aim> {
+    pub(in crate::content::world::inventory) fn subject_aim(
+        w: &InteractiveWorld,
+        subject: &Subject,
+    ) -> Option<Aim> {
         match subject{
             Subject::Player=>Some(Aim::Player),
             Subject::Item(id)=>Some(Aim::Item(*id)),
@@ -117,7 +120,10 @@ impl InventoryReader {
         if (has(play, "callback") || has(play, "end_callback"))
             && let Some(due) = until
         {
-            run.callback = Some(run.callback.unwrap_or(due).max(due))
+            run.callback = Some(run.callback.unwrap_or(due).max(due));
+            run.callback_left = Some(run.callback_left.unwrap_or_default().max(
+                Duration::from_millis(due.saturating_sub(w.game_second) * 125),
+            ));
         }
         fx["entry"] = json!(entry);
         fx["owner"] = json!(id);
@@ -216,6 +222,7 @@ impl InventoryReader {
             r.ending = true;
             r.due = None;
             r.callback = None;
+            r.callback_left = None;
             r.bindings.clear();
             for spawn in &mut r.summons {
                 spawn.visuals.clear()
@@ -350,13 +357,33 @@ impl InventoryReader {
                 let channel = if fire { Channel::Fire } else { Channel::Normal };
                 let amount = channel.after_resistance(damage, &t.resistance);
                 let total = amount.saturating_mul(i32::try_from(pulses).unwrap_or(i32::MAX));
-                w.cache.inventory.change_vitals(&mut t, channel, total);
+                let before = t.hp;
+                let inv = &mut w.cache.inventory;
+                inv.change_vitals(&mut t, channel, total);
+                inv.note_death(&t, before, Some(emitter));
+                inv.combat_reward(&t, before);
                 changed |= total != 0;
             }
         }
         changed
     }
     pub fn tick_magick(&mut self, w: &mut InteractiveWorld, now: u64, elapsed: Duration) -> bool {
+        let dt = w
+            .cache
+            .inventory
+            .magick
+            .animation_tick
+            .replace(elapsed)
+            .map_or(Duration::ZERO, |last| elapsed.saturating_sub(last));
+        for r in &mut w.cache.inventory.magick.active {
+            if let Some(left) = &mut r.callback_left {
+                *left = left.saturating_sub(dt);
+                if left.is_zero() {
+                    r.callback = Some(now);
+                    r.callback_left = None;
+                }
+            }
+        }
         let mut changed = false;
         while let Some((index, due)) = w
             .cache
@@ -365,7 +392,15 @@ impl InventoryReader {
             .active
             .iter()
             .enumerate()
-            .filter_map(|(i, r)| Some((i, [r.callback, r.due].into_iter().flatten().min()?)))
+            .filter_map(|(i, r)| {
+                Some((
+                    i,
+                    [r.callback.filter(|_| r.callback_left.is_none()), r.due]
+                        .into_iter()
+                        .flatten()
+                        .min()?,
+                ))
+            })
             .filter(|(_, d)| *d <= now)
             .min_by_key(|(_, d)| *d)
         {
@@ -376,7 +411,7 @@ impl InventoryReader {
                 .inventory
                 .program(run.spell)
                 .expect("validated spell");
-            if run.callback == Some(due) {
+            if run.callback == Some(due) && run.callback_left.is_none() {
                 if run.ending {
                     self.end_spell(w, index, elapsed);
                     continue;
@@ -395,6 +430,21 @@ impl InventoryReader {
                     }
                 }
                 self.apply_phase(w, &run, &p, Phase::Callback, elapsed);
+                for binding in &run.bindings {
+                    if binding.destroy
+                        && let Subject::Mobile(id) = binding.target
+                    {
+                        let inv = &mut w.cache.inventory;
+                        if let Some(d) = inv.magick.actors.get_mut(&id.key()) {
+                            d.decayed = true;
+                            d.decay_at = None;
+                        }
+                        for c in inv.state.changes.values_mut().filter(|c|matches!(&c.place, Place::WornBy(_,owner,_) | Place::Owned(Owner::OriginalObject(_,owner)) if *owner==id)){
+                            c.place=Place::Retired;
+                            c.slot=None;
+                        }
+                    }
+                }
                 w.cache.inventory.magick.active[index].callback = None;
                 if run.due.is_none()
                     && (run.summons.is_empty()
@@ -482,31 +532,31 @@ impl InventoryReader {
                 .magick
                 .active
                 .iter()
-                .flat_map(|r| &r.summons)
-                .filter_map(|s| {
+                .flat_map(|r| r.summons.iter().map(move |s| (r, s)))
+                .filter_map(|(run, s)| {
                     let Aim::Object(k) = Self::subject_aim(w, &Subject::Mobile(s.id))? else {
                         return None;
                     };
-                    Some((Some(k), s.visuals.clone()))
+                    Some((Some(k), s.visuals.clone(), run.callback, run.callback_left))
                 })
                 .collect();
-            for b in w
+            for (run, b) in w
                 .cache
                 .inventory
                 .magick
                 .active
                 .iter()
-                .flat_map(|r| &r.bindings)
-                .filter(|b| !b.visuals.is_empty())
+                .flat_map(|r| r.bindings.iter().map(move |b| (r, b)))
+                .filter(|(_, b)| !b.visuals.is_empty())
             {
                 let k = match Self::subject_aim(w, &b.target) {
                     Some(Aim::Object(k)) => Some(k),
                     Some(Aim::Player) => None,
                     _ => continue,
                 };
-                owners.push((k, b.visuals.clone()));
+                owners.push((k, b.visuals.clone(), run.callback, run.callback_left));
             }
-            for (k, visuals) in owners {
+            for (k, visuals, callback, remaining) in owners {
                 for v in visuals
                     .into_iter()
                     .filter(|v| v.until.is_none_or(|end| end > now))
@@ -522,15 +572,20 @@ impl InventoryReader {
                         } else {
                             Cue::Forward
                         };
-                        self.spell_eye(w, v.entry, k, elapsed + delay, cue);
+                        let (_, fx) = self.spell_eye(w, v.entry, k, elapsed + delay, cue);
                         if let Some(f) = w.cache.effects.get_mut(&(k, v.entry)) {
-                            f.configure(
-                                v.reverse,
-                                v.initial,
+                            let age = if callback.is_some()
+                                && callback == v.until
+                                && let Some(left) = remaining
+                                && let Some(ms) = fx["duration_ms"].as_u64()
+                            {
+                                Duration::from_millis(ms).saturating_sub(left)
+                            } else {
                                 Duration::from_millis(
                                     now.saturating_sub(v.start).saturating_mul(125),
-                                ),
-                            );
+                                )
+                            };
+                            f.configure(v.reverse, v.initial, age);
                         }
                     }
                 }
@@ -553,5 +608,141 @@ impl InventoryReader {
             changed |= removed || before != w.cache.effects.len();
         }
         changed
+    }
+}
+
+impl State {
+    pub(in crate::content::world::inventory) fn following_summons(
+        &self,
+        map: &str,
+        inv: &super::super::State,
+    ) -> Vec<(OriginalId, Tile)> {
+        self.active
+            .iter()
+            .filter(|r| !r.ending)
+            .flat_map(|r| &r.summons)
+            .filter(|s| {
+                s.map == map
+                    && !s.hidden
+                    && !self.down(s.id)
+                    && self.art.get(&s.model_key(inv)).is_some_and(|m| m.actor)
+            })
+            .map(|s| (s.id, s.tile))
+            .collect()
+    }
+}
+
+impl InventoryReader {
+    pub(in crate::content::world::inventory) fn finish_bodies(
+        &mut self,
+        w: &mut InteractiveWorld,
+        now: Duration,
+    ) -> bool {
+        // critter_notify_killed interrupts the owning summon. Finish its ART fall before
+        // dispatching the spell's existing End / End_Callback and disposal transactions.
+        let endings: Vec<_> = w
+            .cache
+            .inventory
+            .magick
+            .active
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| {
+                !r.ending
+                    && r.summons.iter().any(|s| {
+                        w.cache.inventory.magick.down(s.id)
+                            && !w.cache.inventory.combat.falling(s.id, now)
+                    })
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let mut changed = !endings.is_empty();
+        for index in endings.into_iter().rev() {
+            self.end_spell(w, index, now)
+        }
+        let due: Vec<_> = w
+            .cache
+            .inventory
+            .magick
+            .actors
+            .iter()
+            .filter(|(_, d)| d.dead && d.decay_at.is_some_and(|at| at <= w.game_second))
+            .filter_map(|(k, _)| parse_id(k).ok())
+            .collect();
+        for id in due {
+            let Some(Aim::Object(k)) = Self::subject_aim(w, &Subject::Mobile(id)) else {
+                continue;
+            };
+            let Some(tile) = w.cache.target(k).map(|t| t.tile) else {
+                continue;
+            };
+            match self.decay_body(w, id, tile) {
+                Ok(()) => {
+                    let d = w.cache.inventory.magick.actors.get_mut(&id.key()).unwrap();
+                    d.decayed = true;
+                    d.decay_at = None;
+                    changed = true;
+                }
+                Err(reason) => w
+                    .cache
+                    .inventory
+                    .combat
+                    .log(json!({"event":"decay_unavailable","actor":id,"reason":reason})),
+            }
+        }
+        if changed {
+            w.cache.inventory.revision += 1;
+            w.refresh_spell_state();
+        }
+        changed
+    }
+    fn decay_body(
+        &mut self,
+        w: &mut InteractiveWorld,
+        id: OriginalId,
+        tile: Tile,
+    ) -> Result<(), String> {
+        self.prepare_gear(w, id)?;
+        let owner = Owner::OriginalObject(w.map.clone(), id);
+        let coins = self.corpse_coins(w, id)?;
+        let inv = &w.cache.inventory;
+        let mut records = w.records(&mut self.vfs);
+        let mut items = records.layout(&inv.state, &owner, None)?.items;
+        for c in inv
+            .state
+            .changes
+            .values()
+            .filter(|c| matches!(c.place,Place::WornBy(_,who,_) if who==id))
+        {
+            items.insert(c.item.id, c.item.clone());
+        }
+        let gold = coins.map(|(item, quantity)| {
+            items.insert(item.id, item);
+            quantity
+        });
+        let mut drops = Vec::new();
+        for item in items.into_values() {
+            let keep = item.flags & ITEM_NO_DISPLAY == 0
+                && item.effective.appearance.spell_flags.unwrap_or(0) & 0x4000 == 0;
+            let art = keep
+                .then(|| records.ground_art(&item, tile, w.reference))
+                .transpose()?;
+            drops.push((item, art));
+        }
+        if let Some(amount) = gold {
+            w.adjust_npc_gold(&mut self.vfs, &id.key(), -i64::from(amount))?;
+            w.cache.inventory.state.next_generated += 1;
+        }
+        for (item, art) in drops {
+            let inv = &mut w.cache.inventory;
+            let place = if let Some(art) = art {
+                inv.ground.insert(item.id, art);
+                Place::Ground(w.map.clone(), tile)
+            } else {
+                Place::Retired
+            };
+            inv.state.put(item, place, None);
+        }
+        Ok(())
     }
 }

@@ -6,6 +6,7 @@ use super::super::read_bounded;
 use crate::sector::objects::ItemStats;
 
 pub(super) mod casting;
+pub(super) mod combat;
 mod crafting;
 pub use crafting::SchematicComponent;
 mod equipment;
@@ -28,6 +29,8 @@ const CLICK_THROUGH: u32 = 0x800;
 
 #[derive(Default)]
 pub(super) struct Session {
+    pub(super) combat: combat::Combat,
+    difficulty: crate::content::Difficulty,
     wielded: BTreeMap<
         OriginalId,
         (
@@ -36,6 +39,7 @@ pub(super) struct Session {
         ),
     >,
     purchases: Vec<crate::content::character::progression::Investment>,
+    game_second: u64,
     skill_random: crate::random::Random,
     pub(super) magick: casting::State,
     recharges: BTreeMap<String, use_action::Recharge>,
@@ -651,7 +655,14 @@ impl InventoryReader {
         let owner = if let Some(t) = trading {
             t.stock.clone()
         } else {
-            target.map_or(Owner::Player, |id| Owner::Container(world.map.clone(), id))
+            match target {
+                Some(id) if world.corpse_tile(id).is_some() => {
+                    world.check_corpse(id)?;
+                    Owner::OriginalObject(world.map.clone(), id)
+                }
+                Some(id) => Owner::Container(world.map.clone(), id),
+                None => Owner::Player,
+            }
         };
         let mut records = world.records(&mut self.vfs);
         let container = if let Owner::Container(_, id) = &owner {
@@ -787,7 +798,9 @@ impl InteractiveWorld {
         }
         let id = parse_id(key)?;
         Ok(
-            if self.mobile_index.get().and_then(|index| index.category(id)) == Some(16) {
+            if self.mobile_index.get().and_then(|index| index.category(id)) == Some(16)
+                || self.cache.inventory.magick.owns_spawn(&self.map, id)
+            {
                 Owner::OriginalObject(self.map.clone(), id)
             } else {
                 Owner::Container(self.map.clone(), id)
@@ -957,6 +970,9 @@ impl InteractiveWorld {
         hour: u8,
         quantity: Option<u32>,
     ) -> Result<Value, String> {
+        if self.unconscious() {
+            return Err("Player is incapacitated".into());
+        }
         let id = parse_id(key)?;
         let mut records = self.records(vfs);
         let state = &self.cache.inventory.state;
@@ -1010,13 +1026,12 @@ impl InteractiveWorld {
             }
             Move::Drop => return Err("Only player-owned items can be dropped".into()),
             Move::Transfer(from, to, slot) | Move::Exchange(from, to, slot) => {
-                if !authorized
-                    && matches!(
-                        (&from, &to),
-                        (Owner::OriginalObject(..), _) | (_, Owner::OriginalObject(..))
-                    )
-                {
-                    return Err("NPC transfers require trade or script authorization".into());
+                if !authorized {
+                    for owner in [&from, &to] {
+                        if let Owner::OriginalObject(_, npc) = owner {
+                            self.check_corpse(*npc)?;
+                        }
+                    }
                 }
                 if current != Place::Owned(from) {
                     return Err("Item does not belong to the specified source".into());
@@ -1062,8 +1077,7 @@ impl InteractiveWorld {
                         }
                         Some(container)
                     }
-                    Owner::OriginalObject(..) if authorized => None,
-                    Owner::OriginalObject(..) => return Err("Unsupported inventory owner".into()),
+                    Owner::OriginalObject(..) => None,
                 };
                 Some(records.layout(state, owner, container.as_ref())?)
             }
@@ -1195,11 +1209,17 @@ impl InteractiveWorld {
             return Err("Take all is unavailable while trading".into());
         }
         let id = parse_id(target)?;
-        let source = Owner::Container(self.map.clone(), id);
+        let source = self.inventory_owner(target)?;
         let mut records = self.records(vfs);
-        let container = records.container(id)?;
-        container.check_access(self, id, self.cache.hour)?;
-        let loot = records.layout(&self.cache.inventory.state, &source, Some(&container))?;
+        let container = if matches!(source, Owner::OriginalObject(..)) {
+            self.check_corpse(id)?;
+            None
+        } else {
+            let c = records.container(id)?;
+            c.check_access(self, id, self.cache.hour)?;
+            Some(c)
+        };
+        let loot = records.layout(&self.cache.inventory.state, &source, container.as_ref())?;
         let mut slots: Vec<_> = loot.grid.items.into_iter().collect();
         slots.sort_unstable_by_key(|(_, (slot, _))| *slot);
         let mut remaining = 0;
@@ -1338,6 +1358,7 @@ impl InteractiveWorld {
     pub fn inherit_object_state(&mut self, previous: &mut Self) {
         self.met_npcs = std::mem::take(&mut previous.met_npcs);
         self.cache.inventory = std::mem::take(&mut previous.cache.inventory);
+        self.cache.inventory.combat.new_map();
         self.restore_script_state(std::mem::take(&mut previous.cache.scripts));
         if let (Some(player), Some(old)) = (&mut self.cache.player, &previous.cache.player) {
             player.appearance = Arc::clone(&old.appearance);
@@ -1522,12 +1543,17 @@ mod tests {
         let on_ground = world.inspect_item_owner(&mut data, id).unwrap();
         assert_eq!(on_ground["current"]["tile"], json!(tile));
         let rendered_count = |world: &InteractiveWorld| {
-            let change = &world.cache.inventory.state.changes[&parse_id(id).unwrap()];
+            let id = parse_id(id).unwrap();
             world
                 .cache
                 .ordered
                 .iter()
-                .filter(|r| r.key.1.5 == usize::MAX - change.order)
+                .filter(|r| {
+                    matches!(
+                        world.cache.dropped_targets.get(&r.key).map(|target| &target.action),
+                        Some(interaction::Action::Pickup(picked)) if *picked == id
+                    )
+                })
                 .count()
         };
         assert_eq!(rendered_count(&world), 1);

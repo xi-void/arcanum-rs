@@ -310,6 +310,16 @@ pub(crate) struct ItemStats {
     pub magic_armor_class: Option<i32>,
     pub resistance: Option<[Option<i32>; 5]>,
     pub magic_resistance: Option<[Option<i32>; 5]>,
+    pub damage: [[i32; 5]; 3],
+    pub range: i32,
+    pub magic_hit: i32,
+    pub magic_speed: i32,
+    pub magic_range: i32,
+    pub magic_strength: i32,
+    pub consumption: i32,
+    pub missile: Option<u32>,
+    pub magic_critical: [i32; 2],
+    pub unarmed_bonus: i32,
     pub weapon_hit_bonus: Option<i32>,
     pub weapon_speed: Option<i32>,
     pub weapon_min_strength: Option<i32>,
@@ -377,6 +387,20 @@ impl ItemStats {
             (5 | 7 | 14, 96) => self.equipment_flags = scalar,
             (5 | 7, 97) => self.paper_doll_art = scalar,
             (5, 98) => self.weapon_hit_bonus = signed,
+            (5, 99) => self.magic_hit = signed.unwrap_or_default(),
+            (5, 100..=102) => {
+                self.damage[field - 100] = int_array(value).map(Option::unwrap_or_default)
+            }
+            (5, 104) => self.magic_speed = signed.unwrap_or_default(),
+            (5, 105) => self.range = signed.unwrap_or_default(),
+            (5, 106) => self.magic_range = signed.unwrap_or_default(),
+            (5, 108) => self.magic_strength = signed.unwrap_or_default(),
+            (5, 109) => self.ammo_type = scalar,
+            (5, 110) => self.consumption = signed.unwrap_or_default(),
+            (5, 111) => self.missile = scalar.filter(|n| *n != u32::MAX),
+            (5, 114) => self.magic_critical[0] = signed.unwrap_or_default(),
+            (5, 117) => self.magic_critical[1] = signed.unwrap_or_default(),
+            (7, 104) => self.unarmed_bonus = signed.unwrap_or_default(),
             (5, 103) => self.weapon_speed = signed,
             (5, 107) => self.weapon_min_strength = signed,
             (7, 98) => self.armor_class = signed,
@@ -415,7 +439,11 @@ pub(crate) struct PrototypeDefaults {
     pub resistance: Option<[Option<i32>; 5]>,
     pub hp: [i32; 2],
     pub fatigue: [i32; 2],
+    pub faction: i32,
     pub npc_flags: Option<u32>,
+    pub xp: [i32; 2],
+    pub natural_damage: [i32; 10],
+    pub npc_ammo: [u32; 4],
     pub npc_damage: [i32; 2],
     pub npc_unknown_description: Option<u32>,
     pub reaction_base: Option<i32>,
@@ -483,6 +511,9 @@ pub(crate) fn prototype_defaults(
     let mut inventory_scripts = false;
     let mut buy_script = Default::default();
     let mut hp = [0; 2];
+    let mut xp = [0; 2];
+    let mut natural_damage = [0; 10];
+    let mut npc_ammo = [0; 4];
     let mut npc_damage = [0; 2];
     let mut npc_unknown_description = None;
     let mut fatigue = [0; 2];
@@ -493,7 +524,7 @@ pub(crate) fn prototype_defaults(
         match index {
             22 => description = value.scalar(),
             23 => original_art = value.scalar(),
-            25 if category == 15 => armor_class = value.scalar().map(|v| v as i32),
+            25 if matches!(category, 15 | NPC) => armor_class = value.scalar().map(|v| v as i32),
             26..=27 if matches!(category, 15 | NPC) => {
                 hp[index - 26] = value.scalar().unwrap_or_default() as i32
             }
@@ -527,6 +558,7 @@ pub(crate) fn prototype_defaults(
     let mut portrait = 0;
     let mut background = None;
     let (mut merchant_gold, mut retail, mut substitute, mut inventory_source) = (0, 0, None, None);
+    let mut faction = 0;
     let (mut npc_flags, mut reaction_base, mut npc_leader, mut social_class) =
         (None, None, None, None);
     let mut degrees = [0; 8];
@@ -565,17 +597,23 @@ pub(crate) fn prototype_defaults(
         }
     }
     if category == NPC {
-        for index in (67..=96).chain(128..=144) {
+        for index in (67..=96).chain(128..=151) {
             if field_type(category, index).is_some() {
                 let value = read_value(&mut reader, index, category)?;
                 match index {
                     70..=71 => fatigue[index - 70] = value.scalar().unwrap_or_default() as i32,
+                    67 => basic_skills = int_array(value).map(|n| n.unwrap_or_default() as u32),
+                    68 => tech_skills = int_array(value).map(|n| n.unwrap_or_default() as u32),
+                    133..=134 => xp[index - 133] = value.scalar().unwrap_or_default() as i32,
+                    79..=82 => npc_ammo[index - 79] = value.scalar().unwrap_or_default(),
+                    151 => natural_damage = int_array(value).map(Option::unwrap_or_default),
                     72 => npc_damage[1] = value.scalar().unwrap_or_default() as i32,
                     78 => merchant_gold = value.scalar().unwrap_or_default(),
                     85 => inventory_source = value.scalar(),
                     141 => retail = value.scalar().unwrap_or_default() as i32,
                     142 => substitute = value.reference(),
                     86 => npc_unknown_description = value.scalar(),
+                    140 => faction = value.scalar().unwrap_or(0) as i32,
                     128 => npc_flags = value.scalar(),
                     129 => npc_leader = value.reference(),
                     143 => reaction_base = value.scalar().map(|v| v as i32),
@@ -590,9 +628,9 @@ pub(crate) fn prototype_defaults(
         subtype_flags = read_value(&mut reader, 64, category)?.scalar();
         if let Some(item) = &mut item {
             let last = match category {
-                5 => 107,
+                5 => 117,
                 6 => 98,
-                7 => 101,
+                7 => 105,
                 8 => 97,
                 11 => 96,
                 14 => 97,
@@ -634,7 +672,11 @@ pub(crate) fn prototype_defaults(
         resistance,
         hp,
         fatigue,
+        faction,
         npc_flags,
+        xp,
+        natural_damage,
+        npc_ammo,
         npc_damage,
         npc_unknown_description,
         reaction_base,

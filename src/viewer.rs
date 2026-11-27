@@ -256,7 +256,7 @@ pub fn show_stream(
         wake: proxy.clone(),
         doors: std::collections::BTreeMap::new(),
     });
-    let world = world
+    let mut world = world
         .into_interactive(
             move || {
                 let _ = proxy.send_event(());
@@ -264,6 +264,8 @@ pub fn show_stream(
             trace,
         )
         .map_err(|error| format!("cannot start sector preparation worker: {error}"))?;
+    world.set_difficulty(startup.settings.difficulty);
+    world.set_turn_based(startup.settings.turn_based);
     world.follow_player(Duration::ZERO, &mut camera);
     run_content(
         title,
@@ -369,6 +371,7 @@ fn run_content(
         saves: save::Store::user(),
         paused_for: Duration::ZERO,
         clock_paused_for: Duration::ZERO,
+        turn_clock: None,
         map_since: None,
         clock,
         developer,
@@ -417,6 +420,7 @@ struct Viewer<'a> {
     saves: Result<save::Store, String>,
     paused_for: Duration,
     clock_paused_for: Duration,
+    turn_clock: Option<Duration>,
     map_since: Option<Instant>,
     clock: Option<Clock>,
     developer: Option<Developer>,
@@ -535,11 +539,36 @@ impl Viewer<'_> {
     }
 
     fn game_elapsed(&self, now: Instant) -> Duration {
+        self.turn_clock
+            .unwrap_or_else(|| self.wall_game_elapsed(now))
+    }
+
+    fn wall_game_elapsed(&self, now: Instant) -> Duration {
         self.pause
             .as_ref()
             .map_or(now, |(_, paused)| *paused)
             .saturating_duration_since(self.epoch)
             .saturating_sub(self.clock_paused_for)
+    }
+
+    fn sync_turn_clock(&mut self, now: Instant) {
+        let ViewContent::Stream { world, .. } = &mut self.content else {
+            return;
+        };
+        let rounds = world.take_elapsed_combat_rounds();
+        let active = world.combat_ap().is_some();
+        if let Some(clock) = self.clock.as_mut() {
+            clock.step_combat(rounds);
+        }
+        let wall = self.wall_game_elapsed(now);
+        match (self.turn_clock, active) {
+            (None, true) => self.turn_clock = Some(wall),
+            (Some(start), false) => {
+                self.clock_paused_for += wall.saturating_sub(start);
+                self.turn_clock = None;
+            }
+            _ => {}
+        }
     }
 
     fn change_location(&mut self, target: Destination, facing: u8) -> Result<(), String> {
@@ -635,6 +664,7 @@ impl Viewer<'_> {
         {
             audio.voice(None);
         }
+        next.set_difficulty(self.settings.difficulty);
         **world = next;
         if let Some(hud) = hud {
             hud.close_inventory();
@@ -748,7 +778,26 @@ impl Viewer<'_> {
         {
             audio.volumes(current.audio);
         }
+        if let ViewContent::Stream { world, .. } = &mut self.content {
+            if current.difficulty != previous.difficulty {
+                world.set_difficulty(current.difficulty);
+            }
+            if current.turn_based != previous.turn_based {
+                world.set_turn_based(current.turn_based);
+            }
+        }
         if let Some(preferences) = &mut self.preferences {
+            if current.difficulty != previous.difficulty {
+                let value = match current.difficulty {
+                    arcanum_rs::content::Difficulty::Easy => "easy",
+                    arcanum_rs::content::Difficulty::Normal => "normal",
+                    arcanum_rs::content::Difficulty::Hard => "hard",
+                };
+                preferences.set("gameplay", "difficulty", value);
+            }
+            if current.turn_based != previous.turn_based {
+                preferences.set("gameplay", "turn_based", current.turn_based);
+            }
             for (key, value, old) in [
                 ("effects", current.audio.effects, previous.audio.effects),
                 ("voice", current.audio.voice, previous.audio.voice),
@@ -827,7 +876,15 @@ impl Viewer<'_> {
             ) {
                 hud.close_spells();
             }
-            world.cancel_ability();
+            if !matches!(
+                action,
+                hud::Action::EndTurn
+                    | hud::Action::ToggleCombat
+                    | hud::Action::ToggleRun
+                    | hud::Action::ResetZoom
+            ) {
+                world.cancel_ability();
+            }
         }
         match action {
             hud::Action::ToggleSpells
@@ -916,6 +973,16 @@ impl Viewer<'_> {
             hud::Action::JournalPrevious | hud::Action::JournalNext => {
                 if let ViewContent::Stream { hud: Some(hud), .. } = &mut self.content {
                     hud.turn_journal(action == hud::Action::JournalPrevious);
+                }
+            }
+            hud::Action::EndTurn => {
+                if let ViewContent::Stream { world, .. } = &mut self.content {
+                    world.end_combat_turn();
+                }
+            }
+            hud::Action::ToggleCombat => {
+                if let ViewContent::Stream { world, .. } = &mut self.content {
+                    world.toggle_combat();
                 }
             }
             hud::Action::ToggleInventory => {
@@ -1187,7 +1254,9 @@ impl Viewer<'_> {
             .as_ref()
             .map_or_else(Instant::now, |(_, paused)| *paused);
         self.clock_paused_for = clock_start.saturating_duration_since(self.epoch);
+        self.turn_clock = None;
         self.clock = Some(Clock::from_save(state.clock));
+        self.sync_turn_clock(clock_start);
         if self.map_since.is_some() {
             self.close_map(event_loop);
         }
@@ -1391,7 +1460,13 @@ impl Viewer<'_> {
         {
             if let Some((tile, town)) = world.player_map_position() {
                 if let Some(travel) = travel {
-                    map.observe(&travel.map, tile, town, world.script_state());
+                    map.observe(
+                        &travel.map,
+                        tile,
+                        town,
+                        world.script_state(),
+                        world.combat_blocks_travel(),
+                    );
                 }
                 if *trace {
                     eprintln!("Map player tile {tile:?}, town map {town}");
@@ -1649,7 +1724,7 @@ impl Viewer<'_> {
         let clock = self
             .clock
             .as_ref()
-            .filter(|_| self.pause.is_none())
+            .filter(|_| self.pause.is_none() && self.turn_clock.is_none())
             .map(|clock| real_now + clock.until_next_hour(self.game_elapsed(real_now)));
         let travel = match &self.content {
             ViewContent::Stream {
@@ -1665,18 +1740,32 @@ impl Viewer<'_> {
                     ..
                 },
                 Some(clock),
-            ) if self.pause.is_none() && self.map_since.is_none() => world
-                .next_stock_minute()
-                .map(|minute| real_now + clock.until_minute(minute, self.game_elapsed(real_now))),
+            ) if self.pause.is_none() && self.map_since.is_none() && self.turn_clock.is_none() => {
+                world.next_stock_minute().map(|minute| {
+                    real_now + clock.until_minute(minute, self.game_elapsed(real_now))
+                })
+            }
             _ => None,
         };
         let ability_deadline = match (&self.clock, &self.content) {
             (Some(clock), ViewContent::Stream { world, .. })
-                if self.pause.is_none() && self.map_since.is_none() =>
+                if self.pause.is_none()
+                    && self.map_since.is_none()
+                    && self.turn_clock.is_none() =>
             {
                 world
                     .next_ability_second()
                     .map(|due| real_now + clock.until_second(due, self.game_elapsed(real_now)))
+            }
+            _ => None,
+        };
+        let combat_deadline = match &self.content {
+            ViewContent::Stream { world, .. }
+                if self.pause.is_none() && self.map_since.is_none() =>
+            {
+                world
+                    .combat_wait(self.play_elapsed(real_now))
+                    .map(|d| real_now + d)
             }
             _ => None,
         };
@@ -1685,6 +1774,13 @@ impl Viewer<'_> {
             .into_iter()
             .chain(self.navigation.deadline())
             .chain(self.player_deadline)
+            .chain(match &self.content {
+                ViewContent::Stream { hud: Some(hud), .. } if self.pause.is_none() => {
+                    hud.cursor_delay().map(|d| real_now + d)
+                }
+                _ => None,
+            })
+            .chain(combat_deadline)
             .chain(clock)
             .chain(stock)
             .chain(ability_deadline)
@@ -1818,6 +1914,7 @@ impl ApplicationHandler for Viewer<'_> {
         if self.pause.is_some() {
             return;
         }
+        self.sync_turn_clock(now);
         let game_elapsed = self.game_elapsed(now);
         if self.map_since.is_some() {
             if let ViewContent::Stream {
@@ -1882,6 +1979,15 @@ impl ApplicationHandler for Viewer<'_> {
                 }
                 if world.playing() {
                     redraw |= world.advance_effects(elapsed);
+                    if !*waiting
+                        && !view.occluded
+                        && let Some(reader) = inventory_reader.as_mut()
+                    {
+                        redraw |= reader.tick_combat(world, elapsed);
+                        if world.player_moving() && self.player_deadline.is_none() {
+                            self.player_deadline = Some(now)
+                        }
+                    }
                     if self.player_deadline.is_some_and(|deadline| now >= deadline) {
                         if !*waiting && !view.occluded {
                             let before = camera.position();
@@ -1990,6 +2096,7 @@ impl ApplicationHandler for Viewer<'_> {
                     .set_title(&format!("Arcanum-RS | Travel unavailable: {error}"));
             }
         }
+        self.sync_turn_clock(now);
         self.update_control_flow(event_loop);
     }
 
@@ -2019,6 +2126,23 @@ impl ApplicationHandler for Viewer<'_> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let cursor_time = self.play_elapsed(Instant::now());
+        if let Some(view) = &self.view
+            && let ViewContent::Stream {
+                world,
+                hud: Some(hud),
+                ..
+            } = &mut self.content
+        {
+            hud.update_spell_cursor(
+                &view.window,
+                event_loop,
+                self.pause.is_none()
+                    && self.map_since.is_none()
+                    && world.selected_spell().is_some(),
+                cursor_time,
+            );
+        }
         // Map changes and native loads can make an existing deadline immediately due.
         let play = self.game_elapsed(Instant::now());
         if self.pause.is_none()
@@ -2278,6 +2402,26 @@ impl ApplicationHandler for Viewer<'_> {
                 && key.state.is_pressed()
                 && !key.repeat
             {
+                if !hud.inventory_open() && world.conversation().is_none() {
+                    let handled = match &key.logical_key {
+                        Key::Character(c) if c.eq_ignore_ascii_case("r") => {
+                            world.toggle_combat();
+                            true
+                        }
+                        Key::Named(NamedKey::Space) => {
+                            world.toggle_turn_based();
+                            true
+                        }
+                        Key::Character(c) if c.eq_ignore_ascii_case("e") => world.end_combat_turn(),
+                        Key::Named(NamedKey::Enter) => world.end_combat_turn(),
+                        _ => false,
+                    };
+                    if handled {
+                        view.window.request_redraw();
+                        self.update_control_flow(event_loop);
+                        return;
+                    }
+                }
                 if key.logical_key == Key::Named(NamedKey::Tab) {
                     hud.advance_focus(*shift);
                     view.window.request_redraw();
@@ -2740,7 +2884,7 @@ impl Viewer<'_> {
                 self.record_settings(previous);
             }
             WindowEvent::MouseInput {
-                state: ElementState::Pressed,
+                state: ElementState::Released,
                 button: MouseButton::Right,
                 ..
             } => {
@@ -2945,10 +3089,10 @@ impl Viewer<'_> {
                         .pause
                         .as_ref()
                         .map_or_else(Instant::now, |(_, paused)| *paused);
-                    clock.hours(
+                    clock.hours(self.turn_clock.unwrap_or_else(|| {
                         now.saturating_duration_since(self.epoch)
-                            .saturating_sub(self.clock_paused_for),
-                    )
+                            .saturating_sub(self.clock_paused_for)
+                    }))
                 });
                 let mut deadline = None;
                 let result = match &mut self.content {
@@ -3016,13 +3160,20 @@ impl Viewer<'_> {
                             travel.as_ref(),
                             world.player_map_position(),
                         ) {
-                            map_ui.observe(&travel.map, tile, town, world.script_state());
+                            map_ui.observe(
+                                &travel.map,
+                                tile,
+                                town,
+                                world.script_state(),
+                                world.combat_blocks_travel(),
+                            );
                             if let Some(hud) = hud {
                                 hud.set_travel_available(map_ui.can_travel());
                             }
                         }
                         if let (Some(hud), Some(reader)) = (hud.as_mut(), inventory_reader.as_mut())
                         {
+                            hud.set_combat_ap(world.combat_ap());
                             hud.refresh_inventory(reader, world);
                         }
                         view.redraw_stream(
@@ -3052,7 +3203,13 @@ impl Viewer<'_> {
                                     travel.as_ref(),
                                     world.player_map_position(),
                                 ) {
-                                    map_ui.observe(&travel.map, tile, town, world.script_state());
+                                    map_ui.observe(
+                                        &travel.map,
+                                        tile,
+                                        town,
+                                        world.script_state(),
+                                        world.combat_blocks_travel(),
+                                    );
                                     if let Some(hud) = hud
                                         && hud.set_travel_available(map_ui.can_travel())
                                     {
@@ -3242,14 +3399,18 @@ impl WindowSurface {
         if world.conversation().is_none()
             && let Some(hud) = hud.as_deref_mut()
         {
-            let context = inventory_reader.and_then(|reader| reader.npc_context(world));
+            let (context, gauges) = inventory_reader.map_or((None, None), |r| {
+                (r.npc_context(world), r.hovered_vitals(world))
+            });
+            hud.set_npc_gauges(gauges);
+            let combat_message = world.combat_status();
             let sheet_message = hud.sheet_open().then(|| hud.sheet_message().to_owned());
             hud.set_label(
                 hud::Binding::NpcContext,
                 if let Some(message) = sheet_message.as_deref() {
                     message
-                } else if world.ability_message().is_empty() {
-                    context.as_deref().unwrap_or("")
+                } else if context.is_some() || world.ability_message().is_empty() {
+                    context.as_deref().unwrap_or(&combat_message)
                 } else {
                     world.ability_message()
                 },

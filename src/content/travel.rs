@@ -77,6 +77,12 @@ impl Clock {
         self.hour_offset = self.hour_offset.saturating_add(offset);
     }
 
+    pub fn step_combat(&mut self, rounds: u64) {
+        self.phase_ms = self
+            .phase_ms
+            .saturating_add(rounds.saturating_mul(REAL_HOUR / 3600));
+    }
+
     pub fn step_travel(&mut self, steps: usize) {
         self.travel_hours = self.travel_hours.saturating_add(steps as u64);
     }

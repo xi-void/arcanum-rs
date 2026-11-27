@@ -3,7 +3,7 @@ mod dialogue;
 mod inventory;
 mod journal;
 pub(super) mod sheet;
-use super::ThemeSource;
+use super::{ActiveEventLoop, Duration, ThemeSource, Window};
 use arcanum_rs::{
     art::{DecodedFrame, SpriteFrame},
     content::{
@@ -25,6 +25,8 @@ type Color = [u8; 4];
 pub(super) enum Action {
     Pause,
     ToggleRun,
+    ToggleCombat,
+    EndTurn,
     ResetZoom,
     OpenMap,
     ToggleInventory,
@@ -81,6 +83,7 @@ enum Align {
 struct Theme {
     name: String,
     author: Option<String>,
+    spell_cursor: Option<String>,
     #[serde(default = "default_scale")]
     scale: u16,
     fit_viewport: Option<[u32; 2]>,
@@ -148,6 +151,14 @@ pub(super) enum Binding {
     JournalRightFooter,
     InventoryHover,
     NpcContext,
+    NpcHealth,
+    NpcFatigue,
+    NpcPoison,
+    NpcHealthEmpty,
+    NpcFatigueEmpty,
+    NpcPoisonEmpty,
+    NpcHpText,
+    NpcFtText,
     DialogueText,
     DialogueResponse,
     InventoryGold,
@@ -181,6 +192,8 @@ impl Binding {
                 | Self::MapSouth
                 | Self::MapStatus
                 | Self::PlaceLabel
+                | Self::NpcHpText
+                | Self::NpcFtText
                 | Self::NpcContext
                 | Self::DialogueText
                 | Self::DialogueResponse
@@ -244,6 +257,10 @@ struct Element {
     #[serde(default)]
     map_views: Vec<MapView>,
     travel_available: Option<bool>,
+    #[serde(default)]
+    turn_panel: bool,
+    #[serde(default)]
+    ap_offsets: Vec<i32>,
     #[serde(default)]
     inventory_panel: bool,
     #[serde(default)]
@@ -661,6 +678,12 @@ pub(crate) struct Hud {
     focus: Option<usize>,
     map_view: Option<MapView>,
     travel_available: bool,
+    combat_ap: Option<i32>,
+    npc_gauges: Option<([u32; 2], bool)>,
+    cursor_frames: Vec<winit::window::CustomCursorSource>,
+    native_cursors: Vec<winit::window::CustomCursor>,
+    cursor_period: Duration,
+    cursor_frame: Option<usize>,
     effective_scale: u32,
     panel_band: Rect,
     external_panel: Option<[u32; 2]>,
@@ -946,7 +969,30 @@ impl Hud {
             source.path().display(),
             scale
         );
+        let mut cursor_frames = Vec::new();
+        let mut cursor_period = Duration::from_secs(1);
+        if let Some(path) = &theme.spell_cursor {
+            let first = resource(game, &mut files, path, 0)?;
+            let count = first.decoded.frame_count;
+            cursor_period =
+                Duration::from_millis(1000 / first.decoded.frames_per_second.clamp(1, 1000) as u64);
+            for i in 0..count {
+                let f = resource(game, &mut files, path, i)?.decoded.frame;
+                cursor_frames.push(winit::window::CustomCursor::from_rgba(
+                    f.pixels.into_flattened(),
+                    f.width.try_into()?,
+                    f.height.try_into()?,
+                    f.hotspot.0.clamp(0, f.width as i32 - 1) as u16,
+                    f.hotspot.1.clamp(0, f.height as i32 - 1) as u16,
+                )?);
+            }
+        }
         Ok(Self {
+            cursor_frames,
+            native_cursors: Vec::new(),
+            cursor_period,
+            cursor_frame: None,
+            npc_gauges: None,
             components,
             font_profiles,
             placed: Vec::new(),
@@ -963,6 +1009,7 @@ impl Hud {
             focus: None,
             map_view: None,
             travel_available: false,
+            combat_ap: None,
             effective_scale: 0,
             panel_band: Rect {
                 x: 0,
@@ -1154,6 +1201,14 @@ impl Hud {
         let panel = self.inventory.view();
         let mut top = 0;
         let mut bottom = 0;
+        let mut turn_bottom = 0;
+        let show_turn = self.combat_ap.is_some()
+            && !self.spells_open
+            && panel.is_none()
+            && !self.sheet.open
+            && !self.journal.open
+            && !self.dialogue_open
+            && external_panel.is_none();
         let [mut widest, mut middle] = external_panel.unwrap_or([1, 0]);
         if self.dialogue_open {
             let dialogue_height = self
@@ -1173,6 +1228,13 @@ impl Hud {
             .filter(|c| c.parent.is_none() && !c.config.hidden && !c.config.dialogue_only)
         {
             let e = &c.config;
+            if e.turn_panel {
+                if show_turn {
+                    widest = widest.max(e.size[0]);
+                    turn_bottom = turn_bottom.max(e.size[1].saturating_add_signed(-e.offset[1]));
+                }
+                continue;
+            }
             if e.inventory_panel {
                 // Reserve the full gameplay layout even while inventory is closed.
                 middle = middle.max(e.size[1]);
@@ -1210,7 +1272,7 @@ impl Hud {
         let scale = shared_band.map(|(_, scale)| scale).unwrap_or_else(|| {
             u32::from(self.scale)
                 .min(size.0.saturating_mul(100) / widest)
-                .min(size.1.saturating_mul(100) / (top + bottom + middle).max(1))
+                .min(size.1.saturating_mul(100) / (top + (bottom + middle).max(turn_bottom)).max(1))
                 .min(fit)
         });
         self.effective_scale = scale;
@@ -1223,7 +1285,7 @@ impl Hud {
             return;
         }
         let top = top * scale / 100;
-        let bottom = bottom * scale / 100;
+        let bottom = bottom.max(turn_bottom) * scale / 100;
         let band = Rect {
             y: viewport.y + top as i32,
             h: viewport.h.saturating_sub(top + bottom),
@@ -1248,7 +1310,8 @@ impl Hud {
                 |id| bounds[id],
             );
             let placement = parent.and_then(|(parent, clip)| {
-                if !self.sheet.visible(&component.config)
+                if component.config.turn_panel && !show_turn
+                    || !self.sheet.visible(&component.config)
                     || self.map_view.is_some_and(|mode| {
                         !component.config.map_views.is_empty()
                             && !component.config.map_views.contains(&mode)
@@ -1348,7 +1411,7 @@ impl Hud {
             })
             .collect();
         serde_json::json!({"character_sheet":self.sheet_diagnostic(),"spell_controls":spell_controls,"spell_panel":self.spells_open,"journal":self.journal_diagnostic(),"context_message":label(Binding::InventoryHover),
-            "npc_context":label(Binding::NpcContext),"dialogue_responses":responses,"dialogue_scroll":self.dialogue_layout.diagnostics(),
+            "npc_context":label(Binding::NpcContext),"npc_gauges":self.npc_gauges,"spell_cursor_frame":self.cursor_frame,"dialogue_responses":responses,"dialogue_scroll":self.dialogue_layout.diagnostics(),
             "map_status":label(Binding::MapStatus),"scale_percent":self.scale,"effective_scale_percent":self.effective_scale,"inventory":self.inventory_diagnostics(),"fonts":self.font_profiles,"image_references":images,
             "focused":control(self.focus),"hovered":control(self.hover),"pressed":control(self.pressed)})
     }
@@ -1364,6 +1427,61 @@ impl Hud {
         }
     }
 
+    pub(super) fn update_spell_cursor(
+        &mut self,
+        window: &Window,
+        event_loop: &ActiveEventLoop,
+        selected: bool,
+        now: Duration,
+    ) {
+        if selected && !self.cursor_frames.is_empty() {
+            self.native_cursors.extend(
+                self.cursor_frames
+                    .drain(..)
+                    .map(|s| event_loop.create_custom_cursor(s)),
+            )
+        }
+        let frame = (selected && !self.native_cursors.is_empty()).then(|| {
+            ((now.as_millis() / self.cursor_period.as_millis()) % self.native_cursors.len() as u128)
+                as usize
+        });
+        if self.cursor_frame != frame {
+            self.cursor_frame = frame;
+            if let Some(i) = frame {
+                window.set_cursor(self.native_cursors[i].clone())
+            } else {
+                window.set_cursor(winit::window::CursorIcon::Default)
+            }
+        }
+    }
+    pub(super) fn cursor_delay(&self) -> Option<Duration> {
+        self.cursor_frame.map(|_| self.cursor_period)
+    }
+    pub(super) fn set_npc_gauges(
+        &mut self,
+        gauges: Option<arcanum_rs::content::world::HoveredVitals>,
+    ) {
+        self.npc_gauges = gauges.map(|g| (g.percent, g.poisoned));
+        if let Some(g) = gauges {
+            for (i, binding) in [Binding::NpcHpText, Binding::NpcFtText]
+                .into_iter()
+                .enumerate()
+            {
+                let label = if g.allied {
+                    format!("{}/{}", g.values[2 * i], g.values[2 * i + 1])
+                } else {
+                    format!("{}%", g.percent[i])
+                };
+                self.set_label(binding, &label);
+            }
+        }
+    }
+    pub(super) fn set_combat_ap(&mut self, ap: Option<i32>) {
+        if self.combat_ap.is_some() != ap.is_some() {
+            self.clear_layout();
+        }
+        self.combat_ap = ap;
+    }
     pub(super) fn set_travel_available(&mut self, available: bool) -> bool {
         if self.travel_available == available {
             return false;
@@ -1726,7 +1844,8 @@ impl Hud {
                 {
                     return None;
                 }
-                if component.config.binding == Some(Binding::ContainerThumb)
+                if !component.config.ap_offsets.is_empty()
+                    || component.config.binding == Some(Binding::ContainerThumb)
                     || (p.live_asset.is_none()
                         && component.config.sheet_image.is_none()
                         && component.config.spell_slot.is_none()
@@ -1787,6 +1906,41 @@ impl Hud {
                 ) {
                     return Some(overlay(asset, inventory::equipment_icon(p, asset), p.rect));
                 }
+                if let Some(
+                    b @ (Binding::NpcHealth
+                    | Binding::NpcFatigue
+                    | Binding::NpcPoison
+                    | Binding::NpcHealthEmpty
+                    | Binding::NpcFatigueEmpty
+                    | Binding::NpcPoisonEmpty
+                    | Binding::NpcHpText
+                    | Binding::NpcFtText),
+                ) = component.config.binding
+                {
+                    let (pct, poison) = self.npc_gauges?;
+                    if self.dialogue_open
+                        || self.spells_open
+                        || self.inventory_open()
+                        || self.sheet.open
+                        || self.journal.open
+                    {
+                        return None;
+                    }
+                    if matches!(b, Binding::NpcHealth | Binding::NpcHealthEmpty) && poison
+                        || matches!(b, Binding::NpcPoison | Binding::NpcPoisonEmpty) && !poison
+                    {
+                        return None;
+                    }
+                    if matches!(
+                        b,
+                        Binding::NpcHealth | Binding::NpcPoison | Binding::NpcFatigue
+                    ) {
+                        let value = pct[usize::from(b == Binding::NpcFatigue)];
+                        let mut clip = p.full;
+                        clip.w = (clip.w * value).div_ceil(100);
+                        return Some(overlay(asset, p.full, clip.intersect(p.rect)?));
+                    }
+                }
                 if let Some(row) = component.config.skill_gauge {
                     let mut clip = p.rect;
                     clip.w = clip.w * self.sheet.levels.get(row).copied().unwrap_or(0) / 20;
@@ -1819,6 +1973,37 @@ impl Hud {
                 }
                 Some(overlay(asset, p.full, p.rect))
             })
+            .chain(
+                self.components
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, component)| {
+                        if component.config.ap_offsets.is_empty() {
+                            return None;
+                        }
+                        let place = self.placed.get(i)?.as_ref()?;
+                        let parent = self.placed.get(component.parent?)?.as_ref()?;
+                        Some(
+                            component
+                                .config
+                                .ap_offsets
+                                .iter()
+                                .take(self.combat_ap.unwrap_or(0).max(0) as usize)
+                                .filter_map(move |offset| {
+                                    let rect = Rect {
+                                        x: place.full.x + offset * place.scale as i32 / 100,
+                                        ..place.full
+                                    };
+                                    Some(overlay(
+                                        &component.art,
+                                        rect,
+                                        rect.intersect(parent.rect)?,
+                                    ))
+                                }),
+                        )
+                    })
+                    .flatten(),
+            )
             .chain(self.inventory_draws())
     }
 }
@@ -1840,7 +2025,9 @@ fn parse(source: &str) -> Result<Theme, Box<dyn Error>> {
     }
     let mut pixels = 0;
     for e in &theme.hud {
-        if e.id.is_empty()
+        if e.ap_offsets.iter().any(|n| !(0..=4096).contains(n))
+            || (!e.ap_offsets.is_empty() && e.parent.is_none())
+            || e.id.is_empty()
             || e.size.iter().any(|&v| !(1..=1024).contains(&v))
             || e.offset.iter().any(|v| v.unsigned_abs() > 4096)
             || (e.image.is_none()

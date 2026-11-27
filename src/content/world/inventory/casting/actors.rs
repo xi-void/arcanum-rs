@@ -30,6 +30,10 @@ pub(super) fn npc_character(
                 .unwrap_or(*base),
         )
     }
+    pc.basic_skills = std::array::from_fn(|i| array(67, i, defaults.basic_skills[i] as i32) as u32);
+    pc.tech_skills = std::array::from_fn(|i| array(68, i, defaults.tech_skills[i] as i32) as u32);
+    pc.base_ac = scalar(25, defaults.armor_class.unwrap_or(0));
+    pc.critter_flags2 = scalar(65, defaults.appearance.critter_flags2.unwrap_or(0) as i32) as u32;
     pc.hp = std::array::from_fn(|i| scalar(26 + i, defaults.hp[i]));
     pc.fatigue = std::array::from_fn(|i| scalar(70 + i, defaults.fatigue[i]));
     pc.health_damage = scalar(28, defaults.npc_damage[0]);
@@ -59,11 +63,11 @@ impl Session {
         self.magick
             .active
             .iter()
-            .flat_map(|r| [r.due, r.callback])
+            .flat_map(|r| [r.due, r.callback.filter(|_| r.callback_left.is_none())])
             .flatten()
             .min()
     }
-    pub(super) fn program(&self, id: usize) -> Result<Arc<Program>, String> {
+    pub(in crate::content::world) fn program(&self, id: usize) -> Result<Arc<Program>, String> {
         self.rules
             .progression
             .spells
@@ -174,13 +178,15 @@ impl Session {
                 .into_iter()
                 .find(|r| r.id == id && !r.conflict && r.tile == Some(placement.source))
                 .ok_or("Displaced mobile original record mismatch")?;
-            let frame = standing(
-                vfs,
-                &mut frames,
-                r.current_art
+            let frame = standing(vfs, &mut frames, {
+                let art = r
+                    .current_art
                     .value()
-                    .ok_or("Displaced mobile ART unavailable")?,
-            )?;
+                    .ok_or("Displaced mobile ART unavailable")?;
+                self.magick
+                    .facing(id)
+                    .map_or(art, |dir| (art & !(7 << 11)) | u32::from(dir) << 11)
+            })?;
             moved.insert(id, (Arc::new(r), frame));
         }
         self.magick.moved = moved;
@@ -220,10 +226,40 @@ impl Session {
             temporary: self.magick.effects(&Subject::Mobile(id), &self.rules),
             ..Rules::default()
         };
-        let stats = pc.statistics(&rules, Some(0), 0, [0; 5], false);
+        let stats = self.npc_statistics(id, &pc, &rules);
         (pc, stats)
     }
-    pub(super) fn change_vitals(&mut self, t: &mut Target, channel: Channel, delta: i32) {
+    pub(in crate::content::world::inventory) fn npc_statistics(
+        &self,
+        id: OriginalId,
+        pc: &Character,
+        rules: &Rules,
+    ) -> CharacterStatistics {
+        let mut armor = 0;
+        let mut resistance = [0; 5];
+        let aptitude = pc.aptitude(rules);
+        for c in self.state.changes.values().filter(|c| {
+            pc.spell_flags & 0x2003c == 0
+                && matches!(c.place,Place::WornBy(_,who,_) if who==id)
+                && c.item.category == 7
+        }) {
+            let item = &c.item.stats;
+            armor += i64::from(item.armor_class.unwrap_or_default())
+                + item.adjust_magic(item.magic_armor_class, aptitude);
+            for (i, r) in resistance.iter_mut().enumerate() {
+                *r += i64::from(item.resistance.unwrap_or_default()[i].unwrap_or(0))
+                    + item.adjust_magic(item.magic_resistance.unwrap_or_default()[i], aptitude);
+            }
+        }
+        pc.statistics(rules, Some(0), armor, resistance, false)
+    }
+    pub(in crate::content::world::inventory) fn change_vitals(
+        &mut self,
+        t: &mut Target,
+        channel: Channel,
+        delta: i32,
+    ) {
+        let previously_alive = t.hp < t.maximum;
         let v = match channel {
             Channel::Poison => &mut t.poison,
             Channel::Fatigue => &mut t.fatigue,
@@ -233,7 +269,16 @@ impl Session {
         match &t.subject {
             Subject::Player => match channel {
                 Channel::Poison => self.character.base[24] = *v,
-                Channel::Fatigue => self.character.fatigue_damage = *v,
+                Channel::Fatigue => {
+                    self.character.fatigue_damage = *v;
+                    if *v > 0 {
+                        self.character
+                            .recover_at
+                            .get_or_insert(self.game_second.saturating_add(80));
+                    } else {
+                        self.character.recover_at = None;
+                    }
+                }
                 _ => self.character.health_damage = *v,
             },
             Subject::Mobile(id) => {
@@ -261,8 +306,31 @@ impl Session {
                 let d = self.magick.actors.entry(id.key()).or_default();
                 match channel {
                     Channel::Poison => d.poison = Some(*v),
-                    Channel::Fatigue => d.fatigue = Some(*v),
-                    _ => d.health = Some(*v),
+                    Channel::Fatigue => {
+                        d.fatigue = Some(*v);
+                        if *v > 0 && t.critter & 0x04000004 == 0 {
+                            d.heal_rate = t.stats.as_ref().map_or(1, |s| s.heal_rate.max(1));
+                            d.recover_at
+                                .get_or_insert(self.game_second.saturating_add(80));
+                        } else {
+                            d.recover_at = None;
+                        }
+                    }
+                    _ => {
+                        d.health = Some(*v);
+                        d.dead = *v >= t.maximum && t.maximum > 0;
+                        if d.dead && previously_alive {
+                            // CE combat_dmg selects the torso death for untargeted hits over 20 HP.
+                            d.death_anim = Some(if delta > 20 { 18 } else { 7 });
+                            d.decay_at = (t.critter2 & 0x40 == 0)
+                                .then(|| self.game_second.saturating_add(86400));
+                            self.combat.falls.insert(*id);
+                        } else if !d.dead {
+                            d.death_anim = None;
+                            d.decay_at = None;
+                            self.combat.falls.remove(id);
+                        }
+                    }
                 }
             }
             Subject::Item(id)
@@ -330,6 +398,47 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harm_difficulty_after_resistance_and_once_only_kill_rewards() {
+        use crate::content::Difficulty;
+        let table = crate::mes::Mes::parse_text(concat!(
+            "{1000}{AoE: Tgt_Object}{1001}{Cost: 5}",
+            "{1005}{[Begin], Type: Damage, DmgType: Dmg_Normal, Dmg: 3-40, Dmg_Flags: Scaled}"
+        ))
+        .unwrap();
+        let harm = Program::decode(&table, 0).unwrap();
+        for (difficulty, strike, casts) in [
+            (Difficulty::Easy, 43, 3),
+            (Difficulty::Normal, 29, 4),
+            (Difficulty::Hard, 22, 6),
+        ] {
+            let mut inv = Session {
+                difficulty,
+                ..Default::default()
+            };
+            let id = OriginalId {
+                kind: 2,
+                payload: [1; 16],
+            };
+            let mut t = Target::new(Subject::Mobile(id), (0, 0), None, Kind::Actor);
+            t.maximum = 112;
+            t.alignment = 50;
+            t.resistance[0] = 28;
+            t.worth = [160, 160];
+            for n in 1..=casts {
+                apply_vital(&mut inv, &mut t, &harm.components[0], 100, 0);
+                assert_eq!(t.hp, n * strike);
+                assert_eq!(inv.magick.down(id), n == casts);
+            }
+            let xp = inv.character.base[18];
+            assert_eq!(xp, 192);
+            assert!(inv.character.base[19] < 0);
+            assert_eq!(inv.combat_reward(&t, t.hp), 0);
+            apply_vital(&mut inv, &mut t, &harm.components[0], 100, 0);
+            assert_eq!(inv.character.base[18], xp);
+        }
+    }
 
     #[test]
     fn elemental_damage_survives_reload_and_full_healing_reverses_actor_damage() {

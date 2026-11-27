@@ -45,6 +45,8 @@ Set `game_data` in `config.toml` to your Arcanum installation directory, then ru
 by its absolute path. An executable on your `PATH` can be launched with
 `arcanum-rs`. [Configuration reference](docs/APPLICATION_CONFIG.md)
 
+Press **R** or click the sword button to ready an attack. Click an actor to approach and strike with the equipped weapon or bare hands. Hostile actors can initiate combat. **Space** switches between real-time and turn-based combat. During your turn, click to move, attack, or select a spell and its target. Press **E** or **Enter**, or click the end-turn button beside the green AP lights, to pass. Click a fallen actor to approach and loot the body. **F7** saves and **F8** loads the newest slot.
+
 **Left-click** a destination on the floor to walk there, or **Shift + left-click**
 to run there. A new click replaces the route after the current step reaches
 the next tile center. Left-click an original door or staircase to approach

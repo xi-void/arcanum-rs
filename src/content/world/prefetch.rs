@@ -278,7 +278,7 @@ pub struct InteractiveWorld {
     pub(super) dialogue: Option<super::super::dialogue::Conversation>,
     pub(super) met_npcs: BTreeSet<(String, String)>,
     pub(super) dialogue_status: Option<serde_json::Value>,
-    container_request: Option<crate::sector::objects::OriginalId>,
+    pub(super) container_request: Option<crate::sector::objects::OriginalId>,
     pickup_request: Option<crate::sector::objects::OriginalId>,
     route_goal: Option<((u32, u32), bool)>,
     wait_for_door: Option<Duration>,
@@ -662,11 +662,12 @@ impl InteractiveWorld {
             i64::from(x) + i64::from(screen.0) - i64::from(size.0 / 2),
             i64::from(y) + i64::from(screen.1) - i64::from(size.1 / 2),
         );
-        let selection = self.ability.selected.take();
-        self.cancel_player_route();
-        if let Some(method) = selection {
-            if self.unconscious() {
-                self.ability.reject(method, "Unconscious from fatigue");
+        if self.ability.selected.is_some() && self.ability.casting.is_some() {
+            return;
+        }
+        if let Some(method) = self.cancel_route_keep_spell() {
+            if let Some(reason) = self.incapacity() {
+                self.ability.reject(method, reason);
                 return;
             }
             if let abilities::Method::Spell(id) = method {
@@ -678,7 +679,13 @@ impl InteractiveWorld {
                     true,
                     super::super::scenery::order(player.tile, player.offset, false, usize::MAX),
                 );
-                let hit_self = picked.is_none_or(|k| k < player_key)
+                let self_allowed = self.cache.inventory.program(id).is_ok_and(|p| {
+                    !p.targets
+                        .iter()
+                        .any(|s| s == "tgt_obj_no_self" || s == "tgt_obj_no_t_pc")
+                });
+                let hit_self = self_allowed
+                    && picked.is_none_or(|k| k < player_key)
                     && interaction::hits_scaled(
                         SpriteDraw {
                             frame: &self
@@ -726,11 +733,26 @@ impl InteractiveWorld {
             }
             return;
         }
-        if self.unconscious() {
-            self.notice = Some("Unconscious from fatigue".into());
+        if let Some(reason) = self.incapacity() {
+            self.notice = Some(reason.into());
             return;
         }
         self.ability.clear_feedback();
+        if let Some(key) = self.cache.pick(point, self.reference, elapsed)
+            && self.combat_click(key)
+        {
+            return;
+        }
+        if let Err(reason) =
+            self.cache
+                .inventory
+                .combat
+                .check(None, 1, self.character_statistics().current_fatigue)
+        {
+            self.notice = Some(reason);
+            return;
+        }
+
         if !self.cache.collision_disabled
             && let Some(key) = self.cache.pick(point, self.reference, elapsed)
         {
@@ -804,7 +826,15 @@ impl InteractiveWorld {
         }
     }
 
+    pub(super) fn cancel_route_keep_spell(&mut self) -> Option<abilities::Method> {
+        let selected = self.ability.selected.take();
+        self.cancel_player_route();
+        self.ability.selected = selected.filter(|m| !m.is_skill());
+        selected
+    }
+
     pub fn cancel_player_route(&mut self) {
+        self.cache.inventory.combat.request = None;
         self.cache.remove_cast_overlay();
         self.ability.cancel();
         self.pending_use = None;
@@ -856,7 +886,7 @@ impl InteractiveWorld {
                 _ => None,
             });
         serde_json::json!({
-            "ability": self.ability.diagnostic(), "magick":self.cache.inventory.magick.report(),
+            "combat":self.combat_report(),"ability": self.ability.diagnostic(), "magick":self.cache.inventory.magick.report(),
             "spell_effects":self.cache.effect_report(), "spell_models":self.cache.spell_models(),
             "hovered_lock":self.cache.hover.and_then(|k| self.lock_id(k)).map(|id|id.label()),
             "hovered_item":hovered_item,
@@ -995,7 +1025,7 @@ impl InteractiveWorld {
                 return true;
             }
             match self.cache.target(key).map(|target| &target.action) {
-                Some(interaction::Action::Npc(_)) => {
+                Some(interaction::Action::Npc(_) | interaction::Action::Summon(_)) => {
                     self.npc_request = Some(key);
                     return true;
                 }

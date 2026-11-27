@@ -10,6 +10,14 @@ use crate::{
 };
 use serde_json::json;
 
+#[derive(Clone, Copy)]
+pub struct HoveredVitals {
+    pub percent: [u32; 2],
+    pub poisoned: bool,
+    pub allied: bool,
+    pub values: [i64; 4],
+}
+
 type Tile = (u32, u32);
 
 pub(super) fn in_range(a: Tile, b: Tile) -> bool {
@@ -60,7 +68,10 @@ impl SectorCache {
 
 impl InteractiveWorld {
     pub fn hovered_npc(&self) -> Option<String> {
-        Some(self.cache.npc(self.cache.hover?)?.0.id.key())
+        match self.cache.target(self.cache.hover?)?.action {
+            interaction::Action::Npc(id) | interaction::Action::Summon(id) => Some(id.key()),
+            _ => None,
+        }
     }
 
     pub fn conversation(&self) -> Option<&Conversation> {
@@ -115,7 +126,7 @@ impl InteractiveWorld {
 }
 
 impl super::inventory::InventoryReader {
-    pub fn npc_context(&self, world: &InteractiveWorld) -> Option<String> {
+    pub fn npc_context(&mut self, world: &InteractiveWorld) -> Option<String> {
         let (resident, _) = world.cache.npc(world.cache.hover?)?;
         let name = self.npc_name(
             resident,
@@ -123,6 +134,9 @@ impl super::inventory::InventoryReader {
                 .met_npcs
                 .contains(&(world.map.clone(), resident.id.key())),
         );
+        if let Some(combat) = self.combat_target_hint(world, world.cache.hover?) {
+            return Some(format!("{name}  {combat}"));
+        }
         if world.player_flags().0 & 0x80 != 0
             && let Some(proto) = resident.prototype.as_ref()
         {
@@ -136,7 +150,11 @@ impl super::inventory::InventoryReader {
         Some(name)
     }
 
-    fn npc_name(&self, resident: &mobile::population::Resident, known: bool) -> String {
+    pub(in crate::content::world) fn npc_name(
+        &self,
+        resident: &mobile::population::Resident,
+        known: bool,
+    ) -> String {
         let object = resident.instance();
         let description = object
             .field(22)
@@ -173,6 +191,12 @@ impl super::inventory::InventoryReader {
         world: &mut InteractiveWorld,
     ) -> Option<Result<(), String>> {
         let key = world.npc_request.take()?;
+        if let Some(interaction::Action::Npc(id) | interaction::Action::Summon(id)) =
+            world.cache.target(key).map(|t| &t.action)
+            && world.corpse_tile(*id).is_some()
+        {
+            return Some(self.open_corpse(world, *id));
+        }
         let result = self.open_npc_dialogue(world, key);
         if let Err(error) = &result
             && world.dialogue_status.is_none()

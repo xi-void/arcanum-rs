@@ -8,6 +8,7 @@ impl SectorCache {
         };
         let state = &self.inventory.magick;
         self.sync_spell_fx = true;
+        let flat = |id| state.down(id) && !self.inventory.combat.falling(id, self.effect_time);
         self.door_states.spell_holds = state
             .active
             .iter()
@@ -21,11 +22,20 @@ impl SectorCache {
             .active
             .iter()
             .flat_map(|r| &r.summons)
-            .filter(|s| s.blocks && &s.map == map)
+            .filter(|s| s.blocks && &s.map == map && !flat(s.id))
             .map(|s| s.tile)
             .collect();
         self.door_states.vacated.clear();
-        if !state.offsets.is_empty() {
+        for sector in &self.active {
+            for r in self.entries[sector].0.mobiles.iter().filter(|r| {
+                r.category == 16 && r.blocks && flat(r.id) && !state.moved.contains_key(&r.id)
+            }) {
+                if let Some(tile) = r.tile {
+                    *self.door_states.vacated.entry(tile).or_default() += 1;
+                }
+            }
+        }
+        if !state.offsets.is_empty() || state.actors.values().any(|d| d.decayed) {
             self.ordered.retain(|r| {
                 let id = self
                     .entries
@@ -38,16 +48,24 @@ impl SectorCache {
                             None
                         }
                     });
-                !id.is_some_and(|id| state.moved.contains_key(&id))
+                !id.is_some_and(|id| {
+                    state.moved.contains_key(&id)
+                        || state.actors.get(&id.key()).is_some_and(|d| d.decayed)
+                })
             });
             for (id, (resident, frame)) in &state.moved {
                 let p = &state.offsets[&id.key()];
-                if &p.map != map {
+                if &p.map != map || state.actors.get(&id.key()).is_some_and(|d| d.decayed) {
+                    if &p.map == map && resident.blocks {
+                        *self.door_states.vacated.entry(p.source).or_default() += 1;
+                    }
                     continue;
                 }
                 if resident.blocks {
                     *self.door_states.vacated.entry(p.source).or_default() += 1;
-                    self.door_states.summons.insert(p.tile);
+                    if !flat(*id) {
+                        self.door_states.summons.insert(p.tile);
+                    }
                 }
                 if !self.active.contains(&tile_sector_id(p.tile)) {
                     continue;
@@ -65,7 +83,15 @@ impl SectorCache {
                         usize::MAX - 2 - 2 * p.sequence as usize,
                     ),
                 );
-                let mut raster = Raster::new(key, frame, anchor);
+                let appearance = mobile::population::Effective::new(
+                    &resident.instance(),
+                    resident.prototype.as_deref(),
+                )
+                .appearance;
+                let scale = appearance.scale.unwrap_or(100).max(1) as u32;
+                let mut raster = Raster::scaled(key, frame, anchor, scale);
+                raster.facing = state.facing(*id);
+                raster.actor_art = resident.current_art.value();
                 raster.object_light = ObjectLight::Point;
                 self.dropped_targets.insert(
                     key,

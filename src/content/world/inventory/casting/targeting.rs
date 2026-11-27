@@ -2,13 +2,22 @@
 use super::*;
 
 impl InventoryReader {
-    pub(super) fn target(&mut self, w: &InteractiveWorld, aim: Aim) -> Result<Target, String> {
+    pub(in crate::content::world::inventory) fn target(
+        &mut self,
+        w: &InteractiveWorld,
+        aim: Aim,
+    ) -> Result<Target, String> {
         let at = w.cache.player.as_ref().ok_or("Caster unavailable")?.tile();
         let inv = &w.cache.inventory;
         match aim {
             Aim::Player | Aim::Destination(_) => {
                 let mut t = Target::new(Subject::Player, at, None, Kind::Actor);
                 t.actor(&inv.character, &inv.statistics());
+                // CE object_set_gender_and_race initializes the player voice bank.
+                t.sound = inv.character.sound_effect.or_else(|| {
+                    let stats = t.stats.as_ref()?;
+                    Some(10 * (stats.gender + 2 * stats.race + 1))
+                });
                 let (s, c) = inv.magick.flags(&t.subject);
                 t.spell |= s;
                 t.critter |= c;
@@ -39,8 +48,22 @@ impl InventoryReader {
                         .defaults;
                     let (pc, stats) = inv.npc_vitals(r.id, d, &r.instance());
                     let mut t = Target::new(Subject::Mobile(r.id), tile, Some(key), Kind::Actor);
+                    let instance = r.instance();
+                    t.worth = std::array::from_fn(|i| {
+                        instance
+                            .field(133 + i)
+                            .and_then(FieldValue::scalar)
+                            .map_or(d.xp[i], |n| n as i32)
+                    });
+                    t.natural = instance.field(151).map_or(d.natural_damage, |v| {
+                        std::array::from_fn(|i| {
+                            v.array_entry(i)
+                                .map_or(0, |b| i32::from_le_bytes(b.try_into().unwrap()))
+                        })
+                    });
                     t.actor(&pc, &stats);
                     let f = r.instance().appearance();
+                    t.sound = f.sound_effect.or(d.appearance.sound_effect);
                     t.material = f.material.or(d.appearance.material);
                     t.object_flags = f.flags.or(d.appearance.flags).unwrap_or(0);
                     return Ok(t);
@@ -59,6 +82,7 @@ impl InventoryReader {
                         Some(key),
                         if cat == 16 { Kind::Actor } else { Kind::Item },
                     );
+                    t.sound = d.appearance.sound_effect;
                     t.material = d.appearance.material;
                     t.object_flags = d.appearance.flags.unwrap_or(0);
                     let mut pc = npc_character(&d, None);
@@ -67,33 +91,8 @@ impl InventoryReader {
                         temporary: inv.magick.effects(&t.subject, &inv.rules),
                         ..Rules::default()
                     };
-                    let mut armor = 0;
-                    let mut resistance = [0; 5];
-                    for item in inv
-                        .state
-                        .changes
-                        .values()
-                        .filter(|c| {
-                            matches!(c.place, Place::WornBy(_,actor,_) if actor==id)
-                                && c.item.category == 7
-                        })
-                        .map(|c| &c.item.stats)
-                    {
-                        armor += i64::from(item.armor_class.unwrap_or_default())
-                            + item.adjust_magic(item.magic_armor_class, pc.aptitude(&rules));
-                        for (n, value) in resistance.iter_mut().enumerate() {
-                            *value +=
-                                i64::from(item.resistance.unwrap_or_default()[n].unwrap_or(0))
-                                    + item.adjust_magic(
-                                        item.magic_resistance.unwrap_or_default()[n],
-                                        pc.aptitude(&rules),
-                                    );
-                        }
-                    }
-                    t.actor(
-                        &pc,
-                        &pc.statistics(&rules, Some(0), armor, resistance, false),
-                    );
+                    t.natural = d.natural_damage;
+                    t.actor(&pc, &inv.npc_statistics(id, &pc, &rules));
                     t.spell |= s.spell_flags | 0x4000;
                     t.critter |= s.critter_flags;
                     return Ok(t);

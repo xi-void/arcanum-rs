@@ -76,6 +76,7 @@ pub(crate) struct MapUi {
     world_id: i32,
     world_available: bool,
     travel_map: Result<TravelMap, String>,
+    combat_blocked: bool,
     can_travel: bool,
     spell_selection: bool,
     waypoints: Vec<Waypoint>,
@@ -134,6 +135,7 @@ impl MapUi {
             world_id: 0,
             world_available: false,
             travel_map,
+            combat_blocked: false,
             can_travel: false,
             spell_selection: false,
             waypoints: Vec::new(),
@@ -250,12 +252,16 @@ impl MapUi {
         tile: Point,
         town_id: u32,
         scripts: &crate::content::script::State,
+        combat_blocked: bool,
     ) {
         let blocks_changed = self
             .travel_map
             .as_mut()
             .is_ok_and(|map| map.observe_blocks(scripts));
+        let status_changed = self.combat_blocked != combat_blocked;
+        self.combat_blocked = combat_blocked;
         if !blocks_changed
+            && !status_changed
             && self
                 .origin_map
                 .as_ref()
@@ -315,13 +321,15 @@ impl MapUi {
             };
         }
         let overworld = current.is_some_and(|map| map.id == self.atlas.start_map);
-        self.can_travel = current.is_some_and(|map| {
-            self.atlas
-                .travel_available_from(self.world_id, map.id, town_id)
-        }) && self
-            .travel_map
-            .as_ref()
-            .is_ok_and(|data| data.can_depart(tile));
+        self.can_travel = !combat_blocked
+            && current.is_some_and(|map| {
+                self.atlas
+                    .travel_available_from(self.world_id, map.id, town_id)
+            })
+            && self
+                .travel_map
+                .as_ref()
+                .is_ok_and(|data| data.can_depart(tile));
         if (new_area || new_sector) && overworld && self.town.is_some() {
             // The overworld sector origin is in the same coordinates as GameArea.
             self.atlas.discover_near((tile.0 & !63, tile.1 & !63));

@@ -61,7 +61,38 @@ pub(super) struct Sample<'a> {
     pub asset: &'a Arc<LoadedFrame>,
 }
 
-fn tile_period(
+pub(super) fn gait_period(art: u32, speed: i32, running: bool, authored: Duration) -> Duration {
+    if speed == 8 {
+        return authored;
+    }
+    // CE sub_437990 shortens the stride cadence for dwarven and small humanoid bodies.
+    let offset = if art >> 28 == 2 && matches!((art >> 24) & 7, 1 | 2) {
+        4
+    } else {
+        0
+    };
+    let (normal, low, high) = if running { (20, 8, 30) } else { (17, 6, 30) };
+    let fps = if speed < 8 {
+        low + speed.max(0) * (normal - low) / 8
+    } else {
+        normal + speed.min(30) * (high - normal) / 30
+    };
+    Duration::from_millis(1000 / (fps + offset) as u64)
+}
+
+pub(super) fn stride_offset(
+    delta: (i32, i32),
+    elapsed: Duration,
+    duration: Duration,
+) -> (i32, i32) {
+    let ratio = elapsed.min(duration).as_secs_f64() / duration.as_secs_f64();
+    (
+        (f64::from(delta.0) * ratio).round() as i32,
+        (f64::from(delta.1) * ratio).round() as i32,
+    )
+}
+
+pub(super) fn tile_period(
     direction: u8,
     offsets: impl Iterator<Item = (i32, i32)>,
     frame_period: Duration,
@@ -189,6 +220,9 @@ impl Player {
         }
     }
 
+    pub(super) fn route_running(&self) -> bool {
+        self.route_runs && self.can_run
+    }
     pub(super) fn is_running(&self) -> bool {
         self.running
     }
@@ -288,23 +322,7 @@ impl Player {
             let running = self.route_runs && self.can_run;
             let gait = self.appearance.directions[usize::from(direction)].gait(running);
             // CE anim.c sub_437990 adjusts authored cadence only when speed differs from 8.
-            let offset = if matches!((self.appearance.art >> 24) & 7, 1 | 2) {
-                4
-            } else {
-                0
-            };
-            let (normal, low, high) = if running { (20, 8, 30) } else { (17, 6, 30) };
-            let period = match self.speed {
-                8 => gait.frame_period,
-                speed => {
-                    let fps = if speed < 8 {
-                        low + speed * (normal - low) / 8
-                    } else {
-                        normal + speed.min(30) * (high - normal) / 30
-                    };
-                    Duration::from_millis(1000 / (fps + offset) as u64)
-                }
-            };
+            let period = gait_period(self.appearance.art, self.speed, running, gait.frame_period);
             if !continuing || direction != self.facing || running != self.running {
                 self.phase_cycles = 0.0;
             } else {
@@ -351,11 +369,8 @@ impl Player {
         } else {
             self.tile
         };
-        let ratio = elapsed.as_secs_f64() / step.duration.as_secs_f64();
-        let anchor = (
-            origin.0 + (f64::from(to.0 - origin.0) * ratio).round() as i32,
-            origin.1 + (f64::from(to.1 - origin.1) * ratio).round() as i32,
-        );
+        let offset = stride_offset((to.0 - origin.0, to.1 - origin.1), elapsed, step.duration);
+        let anchor = (origin.0 + offset.0, origin.1 + offset.1);
         let c = center(tile);
         let gait = direction.gait(self.running);
         let phase = self.phase_cycles

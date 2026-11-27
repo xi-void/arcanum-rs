@@ -511,6 +511,15 @@ impl Conversation {
         for &effect in writes {
             let (slot, value) = match effect {
                 Effect::Write(slot, value) => (slot, value),
+                Effect::Attack => {
+                    scripts
+                        .interaction
+                        .as_mut()
+                        .ok_or("Missing combat actor")?
+                        .operations
+                        .push(super::script::Transfer::Attack);
+                    continue;
+                }
                 Effect::Gold(n) => {
                     let facts = scripts
                         .interaction
@@ -958,6 +967,7 @@ fn state_operands(code: &str, raw: &str) -> Option<(Slot, i32)> {
 
 #[derive(Clone, Copy)]
 enum Effect {
+    Attack,
     Training(usize, u32),
     Experience(i32),
     Alignment(super::character::progression::Alignment),
@@ -974,6 +984,7 @@ fn effects(raw: &str) -> Option<Vec<Effect>> {
         .map(|effect| {
             let effect = effect.trim();
             match effect.get(..2)?.to_ascii_lowercase().as_str() {
+                "co" => Some(Effect::Attack),
                 "tr" => {
                     let (id, tier) = skill_operands(&effect[2..])?;
                     Some(Effect::Training(id, tier.try_into().ok()?))

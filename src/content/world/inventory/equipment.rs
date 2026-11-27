@@ -86,7 +86,7 @@ impl Session {
             })
     }
 
-    pub(super) fn statistics(&self) -> CharacterStatistics {
+    pub(in crate::content::world) fn statistics(&self) -> CharacterStatistics {
         let mut armor = 0;
         let mut resistance = [0; 5];
         let mut incomplete = false;
@@ -447,6 +447,7 @@ impl SectorCache {
             inventory.character.degrees = defaults.degrees;
             inventory.character.health_damage = defaults.npc_damage[0];
             inventory.character.background = defaults.background.unwrap_or_default();
+            inventory.character.sound_effect = defaults.appearance.sound_effect;
             inventory.character.original_palette =
                 defaults.original_art.map_or(0, |art| (art >> 4) & 3);
             inventory.character.base_ac = defaults.armor_class.unwrap_or_default();
@@ -583,6 +584,9 @@ impl InteractiveWorld {
         incoming: Option<&str>,
         requested: Option<usize>,
     ) -> Result<Value, String> {
+        if self.unconscious() {
+            return Err("Player is incapacitated".into());
+        }
         let player = self.cache.player.as_ref().ok_or("Player is unavailable")?;
         let inventory = &self.cache.inventory;
         if incoming.is_some() && self.cache.player_spell_flags() & 0x2003c != 0 {

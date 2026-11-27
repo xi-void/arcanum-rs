@@ -93,7 +93,7 @@ impl Model {
         r
     }
 }
-fn clip(
+pub(super) fn clip(
     vfs: &mut Vfs,
     cache: &mut FrameCache,
     pose: &mobile::Pose,
