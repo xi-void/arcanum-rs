@@ -217,7 +217,11 @@ Launch the configured executable, create a character, allocate all five points, 
 
 The twelve passenger heartbeats (1781–1792) check their respective pre-generated character flags before choosing to hide or kill the placed NPC. The callback range is 30 tiles. Other bodies already carry lethal damage and an authored flat pose. Click Isaac Zapruder at (92942, 82586) for the Crash Site Camera and Thermometer, and Wilhemina Carpenter at (92939, 82609) for her note to Jared. The item identities come from their original inventories. A custom character saved after visiting both bodies had twelve dead passengers. In a separate campaign, selecting Merwin Tumblebrook set flag 2350 and script 1781 switched off his placed counterpart.
 
-With follow off, scroll away with the arrow keys or screen edges, click reachable ground, and use Home while the player is moving. The camera stays there as the player continues. Wheel up to zoom, F5 to toggle follow, and F7/F8 to save and reload an independently panned view. The cave entrance at (92910, 82598) and its return both center once on arrival.
+With follow off, scroll away with WASD, the arrow keys or screen edges, click reachable ground, and use Home while the player is moving. The camera stays there as the player continues. Wheel up to zoom, F5 to toggle follow, and F7/F8 to save and reload an independently panned view. The cave entrance at (92910, 82598) and its return both center once on arrival.
+
+For scroll speed checks, inspect `pos.result.camera` for the configured `keyboard_scroll_speed`, `edge_scroll_speed`, `zoom`, `projected` position and `view_ready`. Multiply the change in projected coordinates by world zoom to obtain displacement in screen pixels. Measure with a ready view and compare the player tile before and after. Hold two directions together, release one, and repeat at a passive HUD edge. Use the native name fields and developer console to check modal input.
+
+M81-R used an isolated copy of a Crash Site save on Intel HD 520 Vulkan. At 1280×720 and 1× zoom, holding W+D for half a second panned 107 pixels right and 107 up with the default settings. At 1920×1080, a 900-pixel/s keyboard rate and a 600-pixel/s edge rate survived a full process restart along with 3× zoom. Reloading restored a camera offset of (−103, 0) relative to the player. Ground clicks reached the picked tile at both 2× and 3×. For the cave round trip, RPC positioned the player near the entrance and native clicks activated both portals.
 
 ## Native NPC dialogue
 

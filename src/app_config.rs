@@ -92,6 +92,8 @@ impl Audio {
     }
 }
 
+pub(crate) const DEFAULT_SCROLL_SPEED: u16 = 300;
+
 #[derive(Deserialize)]
 #[serde(default)]
 pub(crate) struct Camera {
@@ -99,6 +101,8 @@ pub(crate) struct Camera {
     pub follow: bool,
     pub edge_scroll: bool,
     pub keyboard_pan: bool,
+    pub keyboard_scroll_speed: u16,
+    pub edge_scroll_speed: u16,
     #[cfg(feature = "windowed")]
     pub recenter_key: winit::keyboard::KeyCode,
 }
@@ -110,6 +114,8 @@ impl Default for Camera {
             follow: false,
             edge_scroll: true,
             keyboard_pan: true,
+            keyboard_scroll_speed: DEFAULT_SCROLL_SPEED,
+            edge_scroll_speed: DEFAULT_SCROLL_SPEED,
             #[cfg(feature = "windowed")]
             recenter_key: winit::keyboard::KeyCode::Home,
         }

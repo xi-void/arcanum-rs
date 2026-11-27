@@ -1405,6 +1405,16 @@ fn show_world(
     if playing && !(1..=3).contains(&config.camera.zoom) {
         return Err("camera.zoom (--zoom) expects 1, 2 or 3".into());
     }
+    for (setting, speed) in [
+        ("keyboard_scroll_speed", config.camera.keyboard_scroll_speed),
+        ("edge_scroll_speed", config.camera.edge_scroll_speed),
+    ] {
+        if !(1..=2400).contains(&speed) {
+            return Err(
+                format!("camera.{setting} expects 1 to 2400 screen pixels per second").into(),
+            );
+        }
+    }
     if playing
         && !no_mods
         && !config.mods.enabled.is_empty()
@@ -1672,6 +1682,8 @@ fn show_world(
                         follow: config.camera.follow,
                         edge_scroll: config.camera.edge_scroll,
                         keyboard_pan: config.camera.keyboard_pan,
+                        keyboard_scroll_speed: config.camera.keyboard_scroll_speed,
+                        edge_scroll_speed: config.camera.edge_scroll_speed,
                         recenter_key: config.camera.recenter_key,
                         lighting: config.display.lighting,
                         shadows: config.display.shadows,

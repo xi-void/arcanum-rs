@@ -707,6 +707,7 @@ impl Viewer<'_> {
                         "atlas_pixel":mapped.and_then(|tile|world_pixel(tile,map_ui.as_ref()?.world_width())),
                         "travel":map_ui.as_ref().map(|map|map.diagnostic())},
                     "camera":{"projected":camera.position(),"viewport":viewport,"zoom":self.settings.zoom,"follow":self.settings.follow,
+                        "keyboard_scroll_speed":self.settings.keyboard_scroll_speed,"edge_scroll_speed":self.settings.edge_scroll_speed,
                         "view_ready":last_presented.is_some() && !*waiting},
                     "streaming":world.stats(),
                     "ui":{"hud_theme":hud_theme,"map_theme":map_theme,"console_theme":console_theme,

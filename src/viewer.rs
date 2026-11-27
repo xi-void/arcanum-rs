@@ -443,7 +443,7 @@ const CAMERA_TICK: Duration = Duration::from_millis(16);
 #[derive(Default)]
 struct Navigation {
     held: u8,
-    edge: u8,
+    velocity: (f64, f64),
     sampled_at: Option<Instant>,
     remainder: (f64, f64),
 }
@@ -464,75 +464,82 @@ impl Navigation {
         Some(1 << index)
     }
 
-    fn direction(&self) -> (i32, i32) {
-        let held = self.held | (self.held >> 4) | self.edge;
-        let axis = |neg, pos| i32::from(held & pos != 0) - i32::from(held & neg != 0);
-        (axis(1, 2), axis(4, 8))
-    }
-
-    fn set_key(&mut self, bit: u8, pressed: bool, now: Instant) {
-        let prior = self.direction();
+    fn set_key(&mut self, bit: u8, pressed: bool) {
         if pressed {
             self.held |= bit;
         } else {
             self.held &= !bit;
         }
-        self.restart_if_changed(prior, now);
     }
 
-    fn set_edge(&mut self, point: Option<(u32, u32)>, size: PhysicalSize<u32>, now: Instant) {
-        let prior = self.direction();
-        self.edge = point.map_or(0, |(x, y)| {
+    fn edges(point: Option<(u32, u32)>, size: PhysicalSize<u32>) -> u8 {
+        point.map_or(0, |(x, y)| {
             u8::from(x < 5)
                 | (u8::from(x >= size.width.saturating_sub(5)) << 1)
                 | (u8::from(y < 5) << 2)
                 | (u8::from(y >= size.height.saturating_sub(5)) << 3)
-        });
-        self.restart_if_changed(prior, now);
+        })
     }
 
-    fn restart_if_changed(&mut self, prior: (i32, i32), now: Instant) {
-        let after = self.direction();
-        if after != prior {
-            self.remainder = (0., 0.);
-            self.sampled_at = (after != (0, 0)).then_some(now);
+    fn pan_velocity(&self, edge: u8, settings: Settings, fast: bool) -> (f64, f64) {
+        let keys = self.held | (self.held >> 4);
+        let speed = |bit| {
+            let keyboard = if keys & bit != 0 {
+                settings.keyboard_scroll_speed
+            } else {
+                0
+            };
+            let edge = if edge & bit != 0 {
+                settings.edge_scroll_speed
+            } else {
+                0
+            };
+            f64::from(keyboard.max(edge))
+        };
+        let axis = |negative, positive| match (speed(negative), speed(positive)) {
+            (0., pos) => pos,
+            (neg, 0.) => -neg,
+            _ => 0.,
+        };
+        let (x, y) = (axis(1, 2), axis(4, 8));
+        let length = x.hypot(y);
+        if length == 0. {
+            return (0., 0.);
         }
+        let boost = if fast { 10. / 3. } else { 1. };
+        let pixels_per_second = (x.abs().max(y.abs()) * boost).min(4000.);
+        let scale = pixels_per_second / (length * f64::from(settings.zoom));
+        (x * scale, y * scale)
     }
 
     fn deadline(&self) -> Option<Instant> {
         self.sampled_at.map(|last| last + CAMERA_TICK)
     }
 
-    fn advance(&mut self, now: Instant, fast: bool, blocked: bool) -> (i32, i32) {
-        let Some(last) = self.sampled_at.replace(now) else {
-            return (0, 0);
-        };
-        if blocked {
-            self.remainder = (0., 0.);
+    fn advance(&mut self, now: Instant, velocity: (f64, f64), waiting: bool) -> (i32, i32) {
+        // Resume from the first ready frame without integrating a sector load.
+        if waiting {
+            self.velocity = (0., 0.);
+            self.sampled_at = None;
             return (0, 0);
         }
-        let (x, y) = self.direction();
-        let speed = if fast { 1000. } else { 300. };
-        let distance = speed
-            * now
-                .saturating_duration_since(last)
-                .min(Duration::from_millis(100))
-                .as_secs_f64()
-            / if x != 0 && y != 0 {
-                std::f64::consts::SQRT_2
-            } else {
-                1.
-            };
-        // These quanta preserve exact integer steps in both inverse isometric axes.
-        let axis = |sign, quantum: f64, remainder: &mut f64| {
-            let value = *remainder + f64::from(sign) * distance;
-            let step = (value / quantum).trunc() * quantum;
-            *remainder = value - step;
-            step as i32
+        if velocity == self.velocity && self.deadline().is_none_or(|due| now < due) {
+            return (0, 0);
+        }
+        let elapsed = self.sampled_at.map_or(Duration::ZERO, |last| now - last);
+        let previous = std::mem::replace(&mut self.velocity, velocity);
+        self.sampled_at = (velocity != (0., 0.)).then_some(now);
+        // Bound catch-up after a stall, while still allowing a slow frame to pan.
+        let seconds = elapsed.min(Duration::from_millis(250)).as_secs_f64();
+        let axis = |speed, remainder: &mut f64| {
+            let value: f64 = *remainder + speed * seconds;
+            let pixels = value.round_ties_even();
+            *remainder = value - pixels;
+            pixels as i32
         };
         (
-            axis(x, 4., &mut self.remainder.0),
-            axis(y, 2., &mut self.remainder.1),
+            axis(previous.0, &mut self.remainder.0),
+            axis(previous.1, &mut self.remainder.1),
         )
     }
 }
@@ -2087,7 +2094,6 @@ impl ApplicationHandler for Viewer<'_> {
             if let ViewContent::Stream {
                 world,
                 camera,
-                shift,
                 direction,
                 waiting,
                 hud,
@@ -2227,21 +2233,6 @@ impl ApplicationHandler for Viewer<'_> {
                             .then(|| now + world.player_wait(elapsed).unwrap_or(CAMERA_TICK));
                     }
                 }
-                if self
-                    .navigation
-                    .deadline()
-                    .is_some_and(|deadline| now >= deadline)
-                {
-                    let delta = self
-                        .navigation
-                        .advance(now, *shift, *waiting || view.occluded);
-                    let size = view.window.inner_size();
-                    if delta != (0, 0) && camera.pan(delta, logical_size(size, self.settings.zoom))
-                    {
-                        *direction = delta;
-                        redraw = true;
-                    }
-                }
             }
             if redraw {
                 view.window.request_redraw();
@@ -2289,8 +2280,20 @@ impl ApplicationHandler for Viewer<'_> {
         if self.movie.is_some() {
             return;
         }
-        if let (Some(view), ViewContent::Stream { world, hud, .. }) = (&self.view, &self.content)
-            && world.playing()
+        if let (
+            Some(view),
+            ViewContent::Stream {
+                world,
+                hud,
+                camera,
+                direction,
+                waiting,
+                shift,
+                explore,
+                ..
+            },
+        ) = (&self.view, &mut self.content)
+            && (world.playing() || *explore)
         {
             let before = self.navigation.deadline();
             let modal = self.pause.is_some()
@@ -2305,11 +2308,20 @@ impl ApplicationHandler for Viewer<'_> {
             if modal || self.settings.follow {
                 self.navigation = Navigation::default();
             } else {
-                self.navigation.set_edge(
-                    self.cursor.filter(|_| self.settings.edge_scroll),
-                    view.window.inner_size(),
-                    Instant::now(),
+                let size = view.window.inner_size();
+                let cursor = self
+                    .cursor
+                    .filter(|_| world.playing() && self.settings.edge_scroll);
+                let velocity = self.navigation.pan_velocity(
+                    Navigation::edges(cursor, size),
+                    self.settings,
+                    *shift,
                 );
+                let delta = self.navigation.advance(Instant::now(), velocity, *waiting);
+                if delta != (0, 0) && camera.pan(delta, logical_size(size, self.settings.zoom)) {
+                    *direction = delta;
+                    view.window.request_redraw();
+                }
             }
             if before != self.navigation.deadline() {
                 self.update_control_flow(event_loop);
@@ -3057,6 +3069,28 @@ impl Viewer<'_> {
         let Some(view) = self.view.as_mut().filter(|view| view.window.id() == id) else {
             return;
         };
+        if let WindowEvent::KeyboardInput {
+            event: key,
+            is_synthetic: false,
+            ..
+        } = &event
+            && let Some(bit) = Navigation::key(&key.logical_key)
+            && let ViewContent::Stream { world, explore, .. } = &self.content
+        {
+            let pan_enabled = if world.playing() {
+                self.settings.keyboard_pan
+                    && !self.settings.follow
+                    && key.physical_key != self.settings.recenter_key
+            } else {
+                *explore
+            };
+            if pan_enabled {
+                if !key.repeat {
+                    self.navigation.set_key(bit, key.state.is_pressed());
+                }
+                return;
+            }
+        }
         match event {
             WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } => {
                 if let ViewContent::Stream {
@@ -3183,25 +3217,6 @@ impl Viewer<'_> {
                     &mut self.content
                 {
                     *shift = false;
-                }
-            }
-            WindowEvent::KeyboardInput {
-                ref event,
-                is_synthetic: false,
-                ..
-            } if Navigation::key(&event.logical_key).is_some()
-                && matches!(&self.content, ViewContent::Stream { explore, world, .. } if
-                    (*explore && !world.playing()) || (world.playing() && !self.settings.follow &&
-                    self.settings.keyboard_pan && matches!(event.logical_key,Key::Named(_)))) =>
-            {
-                if !event.repeat {
-                    let now = Instant::now();
-                    self.navigation.set_key(
-                        Navigation::key(&event.logical_key).unwrap(),
-                        event.state.is_pressed(),
-                        now,
-                    );
-                    self.update_control_flow(event_loop);
                 }
             }
             WindowEvent::KeyboardInput {
@@ -3878,21 +3893,77 @@ mod tests {
     }
 
     #[test]
-    fn held_camera_pan_integrates_elapsed_time_and_waits_without_catching_up() {
-        let now = Instant::now();
+    fn pan_distance_is_independent_of_tick_spacing_and_zoom() {
+        let start = Instant::now();
+        for zoom in 1..=3 {
+            for interval_ms in [16, 40, 200] {
+                let mut motion = Navigation::default();
+                motion.set_key(Navigation::key(&Key::Character("d".into())).unwrap(), true);
+                let settings = Settings {
+                    zoom,
+                    keyboard_scroll_speed: 631,
+                    ..Default::default()
+                };
+                let velocity = motion.pan_velocity(0, settings, false);
+                let mut position = (0, 0);
+                for ms in (0..800).step_by(interval_ms).chain([800]) {
+                    let delta = motion.advance(start + Duration::from_millis(ms), velocity, false);
+                    position = (position.0 + delta.0, position.1 + delta.1);
+                }
+                assert!((f64::from(position.0) * f64::from(zoom) - 631. * 0.8).abs() <= 1.5);
+                assert_eq!(position.1, 0);
+                motion.advance(start + Duration::from_secs(4), velocity, true);
+                assert!(motion.deadline().is_none());
+                assert_eq!(
+                    motion.advance(start + Duration::from_secs(8), velocity, false),
+                    (0, 0)
+                );
+                let late = motion.advance(start + Duration::from_secs(10), velocity, false);
+                assert!((f64::from(late.0) * f64::from(zoom) - 631. * 0.25).abs() <= 3.);
+                assert_eq!(late.1, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn pan_combines_aliases_and_edges_without_stacking_speed() {
         let mut motion = Navigation::default();
-        assert!(motion.deadline().is_none());
-        motion.set_key(1 << 5, true, now); // D
-        motion.set_key(1 << 1, true, now); // Right also held
-        motion.set_key(1 << 5, false, now);
-        assert_eq!(motion.direction(), (1, 0));
-        let divide = |ms| Duration::from_millis(ms);
-        let a = motion.advance(now + divide(20), false, false);
-        let b = motion.advance(now + divide(40), false, false);
-        assert_eq!((a.0 + b.0, a.1 + b.1), (12, 0));
-        assert_eq!(motion.advance(now + divide(80), true, true), (0, 0));
-        assert_eq!(motion.advance(now + divide(100), true, false), (20, 0));
-        motion.set_key(1 << 1, false, now + divide(100));
+        let settings = Settings {
+            edge_scroll_speed: 600,
+            ..Default::default()
+        };
+        let right = Navigation::key(&Key::Named(NamedKey::ArrowRight)).unwrap();
+        let d = Navigation::key(&Key::Character("D".into())).unwrap();
+        motion.set_key(d, true);
+        motion.set_key(right, true);
+        motion.set_key(d, false);
+        assert_eq!(motion.pan_velocity(0, settings, false), (300., 0.));
+        assert_eq!(motion.pan_velocity(0, settings, true), (1000., 0.));
+        let edge = |p| Navigation::edges(Some(p), PhysicalSize::new(1280, 720));
+        assert_eq!(
+            motion.pan_velocity(edge((1279, 300)), settings, false),
+            (600., 0.)
+        );
+        assert_eq!(
+            motion.pan_velocity(edge((0, 300)), settings, false),
+            (0., 0.)
+        );
+        let (x, y) = motion.pan_velocity(edge((640, 0)), settings, false);
+        assert!((x.hypot(y) - 600.).abs() < 0.001 && y == -2. * x);
+        motion.set_key(Navigation::key(&Key::Character("w".into())).unwrap(), true);
+        let (x, y) = motion.pan_velocity(0, settings, false);
+        assert!((x.hypot(y) - 300.).abs() < 0.001 && y == -x);
+    }
+
+    #[test]
+    fn sub_tick_release_observes_elapsed_motion_then_goes_idle() {
+        let start = Instant::now();
+        let mut motion = Navigation::default();
+        motion.advance(start, (300., 0.), false);
+        assert_eq!(
+            motion.advance(start + Duration::from_millis(10), (0., 0.), false),
+            (3, 0)
+        );
         assert!(motion.deadline().is_none());
     }
 }
