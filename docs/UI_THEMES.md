@@ -261,6 +261,8 @@ Classic declares the sheet and book through the same HUD theme as the other pane
 
 ### Combat controls
 
+Classic reads the combat-mode choices from `mes/optionscombatmode.mes` through the VFS. IDs 0, 1 and 2 label real-time, ordinary turn-based and fast turn-based combat.
+
 HUD buttons can bind `action = "toggle-combat"` and `action = "end-turn"`. A component with `turn_panel = true` is visible during turn-based encounters when the spellbook and other panels are closed. A child image can specify `ap_offsets`, a list of horizontal pixel offsets. It draws one image per available player AP, up to the number of offsets. Classic supplies the original 20 lamps, AP bar and pressed end-turn frame in `ui/classic/theme.toml`. Layout, drawing and hit testing use the shared HUD scale.
 
 

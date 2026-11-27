@@ -980,7 +980,7 @@ mod tests {
         // through the current tile, and facing stay on the existing route.
         let player = world.cache.player.as_mut().unwrap();
         player.follow_route([1].into(), false);
-        player.update(Duration::ZERO, |_, _| Some((81, 102)));
+        player.update(Duration::ZERO, false, |_, _| Some((81, 102)));
         let tick = Duration::from_millis(70);
         let position = player.sample(tick).anchor;
         let facing = player.facing();

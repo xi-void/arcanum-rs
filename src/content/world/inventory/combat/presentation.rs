@@ -369,40 +369,54 @@ impl InventoryReader {
         to: Tile,
         now: Duration,
     ) -> Result<Duration, String> {
-        let weapon = if w.cache.inventory.combat.active() {
-            w.cache.inventory.weapon(Some(id), t).art
-        } else {
-            0
-        };
-        let clip = self.actor_clip(w, Some(id), weapon, dir, &[1])?;
         let key = t.key.ok_or("No actor raster")?;
-        let art = w
-            .cache
-            .npc(key)
-            .and_then(|(r, _)| r.current_art.value())
-            .or_else(|| w.cache.ordered.iter().find(|r| r.key == key)?.actor_art)
-            .unwrap_or(0);
-        let speed = t.stats.as_ref().and_then(|s| s.speed).unwrap_or(8);
-        let period = gait_period(art, speed, false, clip.period());
-        let duration = tile_period(
-            dir,
-            clip.frames.iter().map(|f| f.decoded.frame.offset),
-            period,
-        )
-        .ok_or_else(|| {
-            format!(
-                "Invalid directional stride in {} facing {dir}",
-                clip.frames[0].source.virtual_path
+        let gait = if w.cache.inventory.combat.instant_movement(Some(id)) {
+            None
+        } else {
+            let weapon = if w.cache.inventory.combat.active() {
+                w.cache.inventory.weapon(Some(id), t).art
+            } else {
+                0
+            };
+            let clip = self.actor_clip(w, Some(id), weapon, dir, &[1])?;
+            let art = w
+                .cache
+                .npc(key)
+                .and_then(|(r, _)| r.current_art.value())
+                .or_else(|| w.cache.ordered.iter().find(|r| r.key == key)?.actor_art)
+                .unwrap_or(0);
+            let speed = t.stats.as_ref().and_then(|s| s.speed).unwrap_or(8);
+            let period = gait_period(art, speed, false, clip.period());
+            let duration = tile_period(
+                dir,
+                clip.frames.iter().map(|f| f.decoded.frame.offset),
+                period,
             )
-        })?;
-        let delta = project_world_tile(to, t.tile).ok_or("Unprojectable actor step")?;
-        let phase = w
-            .cache
-            .inventory
-            .combat
-            .poses
-            .get(&Some(id))
-            .map_or(Duration::ZERO, |p| p.continuation(dir, now));
+            .ok_or_else(|| {
+                format!(
+                    "Invalid directional stride in {} facing {dir}",
+                    clip.frames[0].source.virtual_path
+                )
+            })?;
+            let delta = project_world_tile(to, t.tile).ok_or("Unprojectable actor step")?;
+            let phase = w
+                .cache
+                .inventory
+                .combat
+                .poses
+                .get(&Some(id))
+                .map_or(Duration::ZERO, |p| p.continuation(dir, now));
+            Some((
+                clip,
+                Action::Walk {
+                    delta,
+                    duration,
+                    period,
+                    phase,
+                },
+                duration,
+            ))
+        };
         // Prepare the original model's facing before committing the step, even in a temporary form.
         let standing = w
             .cache
@@ -422,20 +436,13 @@ impl InventoryReader {
             w.cache.inventory.magick.set_resident_frame(id, frame);
         }
         w.cache.activate(&w.cache.active.clone());
-        self.install_pose(
-            w,
-            Some(id),
-            dir,
-            now,
-            Action::Walk {
-                delta,
-                duration,
-                period,
-                phase,
-            },
-            Ok(clip),
-        );
-        Ok(duration)
+        if let Some((clip, action, duration)) = gait {
+            self.install_pose(w, Some(id), dir, now, action, Ok(clip));
+            Ok(duration)
+        } else {
+            w.cache.inventory.combat.poses.remove(&Some(id));
+            Ok(Duration::ZERO)
+        }
     }
 }
 

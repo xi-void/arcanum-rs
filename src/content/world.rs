@@ -43,6 +43,7 @@ pub use debug::{DebugCollision, DebugObject};
 mod prefetch;
 pub use super::jumps::Destination;
 pub use interaction::{DoorStates, SavedDoors};
+pub use inventory::combat::CombatMode;
 pub use inventory::{
     CreationBuild, CreationCatalog, InventoryContents, InventoryEntry, InventoryReader, Objects,
     SchematicComponent,
@@ -1997,25 +1998,29 @@ impl SectorCache {
         let player = self.player.as_mut()?;
         let cost = if player.route_running() { 1 } else { 2 };
         let inventory = &mut self.inventory;
-        player.update(now, |tile, facing| {
-            if inventory.combat.timed() {
-                inventory
-                    .combat
-                    .check(None, cost, inventory.statistics().current_fatigue)
-                    .ok()?;
-            }
-            let next = if self.collision_disabled {
-                Self::unrestricted_step(entries, tile, facing)
-            } else {
-                collision::step(tile, facing, |tile| {
-                    Self::player_cell(entries, states, tile)
-                })
-            };
-            if next.is_some() {
-                inventory.pay_combat_ap(None, cost)
-            }
-            next
-        });
+        player.update(
+            now,
+            inventory.combat.instant_movement(None),
+            |tile, facing| {
+                if inventory.combat.timed() {
+                    inventory
+                        .combat
+                        .check(None, cost, inventory.statistics().current_fatigue)
+                        .ok()?;
+                }
+                let next = if self.collision_disabled {
+                    Self::unrestricted_step(entries, tile, facing)
+                } else {
+                    collision::step(tile, facing, |tile| {
+                        Self::player_cell(entries, states, tile)
+                    })
+                };
+                if let Some(to) = next {
+                    inventory.pay_movement_ap(None, tile, to, cost);
+                }
+                next
+            },
+        );
         let anchor = player.sample(now).anchor;
         self.update_character_sector();
         Some(anchor)
@@ -3553,7 +3558,7 @@ mod tests {
         eprintln!("Bates authored entry {spawn:?} to {target:?}: detour has {planned} steps");
         let mut visited = vec![spawn];
         for tick in 0..=planned {
-            player.update(Duration::from_secs(tick as u64 * 2), |tile, dir| {
+            player.update(Duration::from_secs(tick as u64 * 2), false, |tile, dir| {
                 collision::step(tile, dir, cell)
             });
             if tick != 0 {

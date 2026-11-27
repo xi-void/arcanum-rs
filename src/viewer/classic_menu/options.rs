@@ -121,7 +121,7 @@ impl Row {
         }
     }
 
-    fn value(self, settings: menu::Settings) -> String {
+    fn value(self, settings: menu::Settings, combat_modes: &Mes) -> String {
         let on = |enabled| if enabled { "On" } else { "Off" };
         match self {
             Self::Disabled(_, value) => value.to_owned(),
@@ -131,12 +131,10 @@ impl Row {
                 arcanum_rs::content::Difficulty::Hard => "Hard",
             }
             .to_owned(),
-            Self::Mode => (if settings.turn_based {
-                "Turn-Based"
-            } else {
-                "Real-Time"
-            })
-            .to_owned(),
+            Self::Mode => combat_modes
+                .get(settings.combat_mode.choice() as i32)
+                .unwrap_or_default()
+                .to_owned(),
             Self::Run => on(settings.run).to_owned(),
             Self::Lighting => on(settings.lighting).to_owned(),
             Self::Shadows => on(settings.shadows).to_owned(),
@@ -156,7 +154,11 @@ impl Row {
                 settings.difficulty =
                     [Easy, Normal, Hard][(settings.difficulty as i8 + step).rem_euclid(3) as usize];
             }
-            Self::Mode => settings.turn_based = !settings.turn_based,
+            Self::Mode => {
+                let choice = (settings.combat_mode.choice() as i8 + step).rem_euclid(3);
+                settings.combat_mode.turn_based = choice != 0;
+                settings.combat_mode.fast_turn_based = choice == 2;
+            }
             Self::Run => settings.run = !settings.run,
             Self::Lighting => settings.lighting = !settings.lighting,
             Self::Shadows => settings.shadows = !settings.shadows,
@@ -186,6 +188,7 @@ pub(in crate::viewer) struct Options {
 pub(super) struct Theme {
     pub(super) layout: OptionsLayout,
     strings: Mes,
+    combat_modes: Mes,
     pub(super) heading_font: hud::MenuFont,
     pub(super) value_font: hud::MenuFont,
     background: Asset,
@@ -231,6 +234,7 @@ impl Theme {
             |name| Ok::<_, Box<dyn Error>>([load(name, 0)?, load(name, 1)?, load(name, 2)?]);
         let arrows = [arrows(&layout.decrease)?, arrows(&layout.increase)?];
         Ok(Self {
+            combat_modes: load_mes(vfs, "mes/optionscombatmode.mes")?.mes,
             strings: load_mes(vfs, &layout.strings)?.mes,
             heading_font: hud::MenuFont::load(
                 vfs,
@@ -417,7 +421,7 @@ impl Classic {
                 self.draw_text(
                     out,
                     rect,
-                    row.value(settings),
+                    row.value(settings, &self.options.combat_modes),
                     if row.enabled() {
                         Style::OptionValue
                     } else {

@@ -14,7 +14,7 @@ pub(crate) struct Settings {
     pub shadows: bool,
     pub run: bool,
     pub difficulty: arcanum_rs::content::Difficulty,
-    pub turn_based: bool,
+    pub combat_mode: arcanum_rs::content::world::CombatMode,
     pub audio: crate::app_config::Audio,
 }
 
@@ -30,7 +30,7 @@ impl Default for Settings {
             shadows: true,
             run: false,
             difficulty: Default::default(),
-            turn_based: false,
+            combat_mode: Default::default(),
             audio: Default::default(),
         }
     }

@@ -72,6 +72,7 @@ quit` closes the session cleanly.
 
 ## State and capture
 
+- `combat` reports the effective mode and retained turn-based speed, current turn and AP, participants, projectiles, poses and recent decisions. Movement events include source and destination tiles, AP and whether the actor skipped its gait. See the [native combat comparisons](AGENT_WORKFLOW.md#combat).
 - `inventory [OWNER]` reports the grid and items for `player` or a container
   GUID. Player results include `equipment`, `character`, `abilities` and `counters`.
   `abilities` reports effective Pick Locks, signed aptitude, college levels, mastery, current fatigue and recovery. Equipped mana stores report current charge and recharge time.

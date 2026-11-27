@@ -13,6 +13,28 @@ mod scripts;
 
 type Actor = Option<OriginalId>;
 
+/// CE stores these switches independently. Space changes only the first one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CombatMode {
+    pub turn_based: bool,
+    pub fast_turn_based: bool,
+}
+
+impl CombatMode {
+    pub fn choice(self) -> usize {
+        if self.turn_based {
+            1 + usize::from(self.fast_turn_based)
+        } else {
+            0
+        }
+    }
+
+    fn name(self) -> &'static str {
+        ["real_time", "turn_based", "fast_turn_based"][self.choice()]
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct Participant {
     actor: Actor,
@@ -26,7 +48,8 @@ struct Participant {
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(in crate::content::world) struct Combat {
     pub(in crate::content::world) armed: bool,
-    turn_based: bool,
+    #[serde(flatten)]
+    mode: CombatMode,
     party: Vec<Participant>,
     turn: usize,
     round: u64,
@@ -49,6 +72,8 @@ pub(in crate::content::world) struct Combat {
     #[serde(skip)]
     next_scan: Duration,
     #[serde(skip)]
+    movement_due: bool,
+    #[serde(skip)]
     message: String,
     #[serde(skip)]
     history: std::collections::VecDeque<Value>,
@@ -69,7 +94,7 @@ pub(in crate::content::world) struct Combat {
     #[serde(skip)]
     indicator: Option<Result<Arc<presentation::Indicator>, String>>,
     #[serde(skip)]
-    scan_context: Option<(Tile, usize)>,
+    scan_context: Option<(Tile, usize, usize)>,
 }
 
 fn distance(a: Tile, b: Tile) -> u32 {
@@ -141,6 +166,7 @@ impl Combat {
         self.history.push_back(event);
     }
     pub(in crate::content::world) fn leave(&mut self) {
+        self.movement_due = false;
         self.armed = false;
         self.provoked = None;
         self.focus = None;
@@ -170,8 +196,14 @@ impl Combat {
         self.message.clear();
     }
     pub(in crate::content::world) fn timed(&self) -> bool {
-        self.turn_based && !self.party.is_empty()
+        self.mode.turn_based && !self.party.is_empty()
     }
+    // CE sub_4B8040 permits the current actor to skip turning and gait.
+    // Attacks, spell action frames and projectile flights use their own clocks.
+    pub(in crate::content::world) fn instant_movement(&self, actor: Actor) -> bool {
+        self.timed() && self.mode.fast_turn_based && self.party[self.turn].actor == actor
+    }
+
     pub(in crate::content::world) fn check(
         &self,
         actor: Actor,
@@ -200,13 +232,17 @@ impl Combat {
         if !self.timed() {
             return;
         }
-        self.request = None;
         self.turn = (self.turn + 1) % self.party.len();
         if self.turn == 0 {
             self.elapsed_rounds = self.elapsed_rounds.saturating_add(1);
             self.round = self.round.saturating_add(1)
         }
+        self.begin_subturn();
+    }
+    fn begin_subturn(&mut self) {
+        self.request = None;
         self.ap = self.party[self.turn].speed.max(5);
+        self.log(json!({"event":"turn_started","actor":subject(self.party[self.turn].actor),"round":self.round,"ap":self.ap}));
     }
     fn join(
         &mut self,
@@ -269,14 +305,59 @@ impl InteractiveWorld {
     pub fn set_difficulty(&mut self, value: crate::content::Difficulty) {
         self.cache.inventory.difficulty = value;
     }
+    pub fn combat_mode(&self) -> CombatMode {
+        self.cache.inventory.combat.mode
+    }
+
+    pub fn set_combat_mode(&mut self, mode: CombatMode) -> bool {
+        let previous = self.combat_mode();
+        if mode == previous {
+            return true;
+        }
+        if previous.turn_based != mode.turn_based {
+            // CE cannot interrupt a priority-four casting goal on the player.
+            // Released weapon missiles already own their AP and ammunition.
+            if self.ability.casting.is_some() {
+                self.cache.inventory.combat.message =
+                    "Finish the current action before switching combat mode".into();
+                return false;
+            }
+            self.cancel_route_keep_spell();
+        }
+        let c = &mut self.cache.inventory.combat;
+        c.mode = mode;
+        if !previous.turn_based && c.timed() {
+            // CE combat_turn_based_start begins round one at the head of the
+            // initiative list, even when the encounter began in real time.
+            c.round = 1;
+            c.turn = 0;
+            c.begin_subturn();
+        }
+        c.message = [
+            "Real-time combat",
+            "Turn-based combat",
+            "Fast turn-based combat",
+        ][mode.choice()]
+        .into();
+        true
+    }
     pub fn set_turn_based(&mut self, enabled: bool) {
-        if self.cache.inventory.combat.turn_based != enabled {
-            self.toggle_turn_based();
+        self.set_combat_mode(CombatMode {
+            turn_based: enabled,
+            ..self.combat_mode()
+        });
+    }
+
+    pub fn toggle_turn_based(&mut self) {
+        let mode = self.combat_mode();
+        if mode.turn_based || !self.unconscious() {
+            self.set_turn_based(!mode.turn_based);
         }
     }
+
     pub fn combat_report(&self) -> Value {
         let c = &self.cache.inventory.combat;
-        json!({"difficulty":self.cache.inventory.difficulty,"armed":c.armed,"mode":if c.turn_based{"turn_based"}else{"real_time"},"participants":c.party,"round":c.round,"turn":c.party.get(c.turn).map(|p|subject(p.actor)), "ap":c.ap,"target":c.focus.map(OriginalId::key),"message":c.message,"history":c.history,"poses":c.pose_report(self.cache.effect_time),"projectiles":c.shots,"experience_pools":c.pools})
+        json!({"difficulty":self.cache.inventory.difficulty,"armed":c.armed,"mode":c.mode.name(),"fast_turn_based":c.mode.fast_turn_based,"participants":c.party,"round":c.round,"turn":c.party.get(c.turn).map(|p|subject(p.actor)), "ap":c.ap,"target":c.focus.map(OriginalId::key),"message":c.message,"history":c.history,"poses":c.pose_report(self.cache.effect_time),"projectiles":c.shots,"experience_pools":c.pools})
     }
     pub fn take_elapsed_combat_rounds(&mut self) -> u64 {
         std::mem::take(&mut self.cache.inventory.combat.elapsed_rounds)
@@ -329,29 +410,39 @@ impl InteractiveWorld {
             c.message = "You cannot exit combat-mode when under attack".into();
         }
     }
-    pub fn toggle_turn_based(&mut self) {
-        self.cancel_route_keep_spell();
-        let c = &mut self.cache.inventory.combat;
-        // Changing mode never restores points during an encounter.
-        c.turn_based = !c.turn_based;
-        c.message = if c.turn_based {
-            "Turn-based combat"
-        } else {
-            "Real-time combat"
-        }
-        .into();
+    fn turn_action_pending(&self, actor: Actor) -> bool {
+        self.cache
+            .inventory
+            .combat
+            .shots
+            .iter()
+            .any(|s| s.from == actor)
+            || self.cache.inventory.magick.animation_callback_pending()
+            || (actor.is_none()
+                && (self.ability.casting.is_some()
+                    || self.cache.player.as_ref().is_some_and(Player::in_stride)))
     }
+
     pub fn end_combat_turn(&mut self) -> bool {
-        let c = &mut self.cache.inventory.combat;
+        let c = &self.cache.inventory.combat;
         if !c.timed() || c.party[c.turn].actor.is_some() || self.ability.casting.is_some() {
             return false;
         }
-        c.next_turn();
+        if self.turn_action_pending(None) {
+            // Yield the remaining points now. The scheduler hands off after the
+            // paid stride, missile impact or spell callback completes.
+            self.cache.inventory.combat.ap = 0;
+        } else {
+            self.cache.inventory.combat.next_turn();
+        }
         self.cancel_route_keep_spell();
         true
     }
     pub fn combat_wait(&self, now: Duration) -> Option<Duration> {
         let c = &self.cache.inventory.combat;
+        if c.movement_due {
+            return Some(Duration::ZERO);
+        }
         let tick = c
             .last_tick
             .map_or(Duration::ZERO, |last| last + Duration::from_millis(80));
@@ -505,11 +596,11 @@ impl InventoryReader {
     }
     fn scan_combat(&mut self, w: &mut InteractiveWorld, now: Duration, at: Tile) {
         let c = &mut w.cache.inventory.combat;
-        if now < c.next_scan {
+        let context = (at, w.cache.ordered.len(), c.party.len());
+        if now < c.next_scan && !(c.timed() && c.scan_context != Some(context)) {
             return;
         }
         c.next_scan = now + Duration::from_millis(300);
-        let context = (at, w.cache.ordered.len());
         if c.party.is_empty() && c.scan_context == Some(context) {
             return;
         }
@@ -609,6 +700,33 @@ impl InventoryReader {
         }
     }
     pub fn tick_combat(&mut self, w: &mut InteractiveWorld, now: Duration) -> bool {
+        let mut changed = self.tick_combat_once(w, now);
+        // CE's AGbeginAnimMove finishes the affordable path before presentation.
+        // Re-enter the ordinary scheduler at the same instant after each paid NPC
+        // step, so occupancy, target selection and AP are checked at every tile.
+        while w.cache.inventory.combat.movement_due
+            && !w.cache.inventory.combat.instant_movement(None)
+            && w.cache.inventory.combat.ap > 0
+        {
+            changed |= self.tick_combat_once(w, now);
+        }
+        changed
+    }
+
+    pub fn continue_fast_player_route(&mut self, w: &mut InteractiveWorld, now: Duration) -> bool {
+        let c = &w.cache.inventory.combat;
+        if w.transition.is_some() || !c.movement_due || !c.instant_movement(None) || c.ap == 0 {
+            return false;
+        }
+        self.tick_combat(w, now);
+        w.cache.inventory.combat.instant_movement(None)
+            && w.cache
+                .player
+                .as_ref()
+                .is_some_and(Player::has_planned_steps)
+    }
+
+    fn tick_combat_once(&mut self, w: &mut InteractiveWorld, now: Duration) -> bool {
         let mut ready = Vec::new();
         w.cache.inventory.combat.sounds.retain(|(due, s, f)| {
             if *due <= now {
@@ -632,7 +750,9 @@ impl InventoryReader {
             .values()
             .any(|p| p.needs_redraw(w.cache.inventory.combat.last_tick, now));
         let previous = w.cache.inventory.combat.last_tick;
-        if previous.is_some_and(|n| now.saturating_sub(n) < Duration::from_millis(60))
+        let movement_due = std::mem::take(&mut w.cache.inventory.combat.movement_due);
+        if !movement_due
+            && previous.is_some_and(|n| now.saturating_sub(n) < Duration::from_millis(60))
             && w.cache.inventory.combat.request.is_none()
         {
             return redraw_motion;
@@ -779,7 +899,10 @@ impl InventoryReader {
             if c.timed() && c.party[c.turn].actor != actor {
                 continue;
             }
-            if w.ability.casting.is_some() && actor.is_none() && !unable {
+            if (c.timed() && w.turn_action_pending(actor)
+                || actor.is_none() && w.ability.casting.is_some())
+                && !unable
+            {
                 continue;
             }
             if c.timed() && (c.ap <= 0 || unable) {
@@ -952,7 +1075,9 @@ impl InventoryReader {
                 {
                     p.wait_ms = duration.as_millis().min(u128::from(u64::MAX)) as u64;
                 }
-                w.cache.inventory.combat.spend(cost);
+                w.cache
+                    .inventory
+                    .pay_movement_ap(source, attacker.tile, to, cost);
             } else {
                 let p = w.cache.player.as_mut().unwrap();
                 if !p.moving() {
@@ -1052,6 +1177,21 @@ impl Target {
 }
 
 impl Session {
+    pub(in crate::content::world) fn pay_movement_ap(
+        &mut self,
+        actor: Actor,
+        from: Tile,
+        to: Tile,
+        cost: i32,
+    ) {
+        if self.combat.timed() {
+            self.pay_combat_ap(actor, cost);
+            let instant = self.combat.instant_movement(actor);
+            self.combat.movement_due = instant;
+            self.combat.log(json!({"event":"move","actor":subject(actor),"from":from,"to":to,"cost":cost,"ap":self.combat.ap,"instant":instant}));
+        }
+    }
+
     pub(in crate::content::world) fn pay_combat_ap(&mut self, actor: Actor, cost: i32) {
         if self.combat.timed() && actor.is_none() && self.combat.ap < cost {
             self.character.fatigue_damage = self.character.fatigue_damage.saturating_add(2);
@@ -1105,12 +1245,42 @@ mod tests {
         assert!(approach_step((2, 1), dest, cell).is_none());
     }
     #[test]
+    fn fast_gait_belongs_only_to_the_active_actor_and_survives_reload() {
+        let mut combat = Combat::default();
+        let mut legacy = serde_json::to_value(&combat).unwrap();
+        legacy["turn_based"] = json!(true);
+        legacy.as_object_mut().unwrap().remove("fast_turn_based");
+        combat = serde_json::from_value(legacy).unwrap();
+        assert_eq!(combat.mode.name(), "turn_based");
+
+        let foe = Some(opponent());
+        combat.mode.fast_turn_based = true;
+        assert!(!combat.instant_movement(None));
+        combat.join(opponent(), 7, false, 0, 9, None);
+        combat.spend(2);
+        assert!(combat.instant_movement(None));
+        assert!(!combat.instant_movement(foe));
+        combat.mode.turn_based = false;
+        let mut restored: Combat =
+            serde_json::from_value(serde_json::to_value(&combat).unwrap()).unwrap();
+        assert_eq!(restored.mode.name(), "real_time");
+        assert!(!restored.instant_movement(None));
+        restored.mode.turn_based = true;
+        assert_eq!((restored.mode.name(), restored.ap), ("fast_turn_based", 7));
+        restored.next_turn();
+        assert!(restored.instant_movement(foe));
+        assert!(!restored.instant_movement(None));
+        restored.leave();
+        assert!(!restored.instant_movement(foe));
+    }
+
+    #[test]
     fn opening_actor_turn_reload_and_fatigue_overspend() {
         let mut inv = Session::default();
         let c = &mut inv.combat;
         let id = opponent();
         let foe = Some(id);
-        c.turn_based = true;
+        c.mode.turn_based = true;
         c.join(id, 7, false, 0, 9, None);
         assert_eq!(c.party[c.turn].actor, None);
         assert!(c.check(foe, 1, 50).is_err());
@@ -1133,7 +1303,10 @@ mod tests {
     #[test]
     fn reinforcements_preserve_the_current_subturn_and_act_before_the_next_player_turn() {
         let mut c = Combat {
-            turn_based: true,
+            mode: CombatMode {
+                turn_based: true,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let first = opponent();
