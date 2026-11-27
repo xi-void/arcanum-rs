@@ -443,6 +443,7 @@ const CAMERA_TICK: Duration = Duration::from_millis(16);
 #[derive(Default)]
 struct Navigation {
     held: u8,
+    edge: u8,
     sampled_at: Option<Instant>,
     remainder: (f64, f64),
 }
@@ -464,7 +465,7 @@ impl Navigation {
     }
 
     fn direction(&self) -> (i32, i32) {
-        let held = self.held | (self.held >> 4);
+        let held = self.held | (self.held >> 4) | self.edge;
         let axis = |neg, pos| i32::from(held & pos != 0) - i32::from(held & neg != 0);
         (axis(1, 2), axis(4, 8))
     }
@@ -476,6 +477,21 @@ impl Navigation {
         } else {
             self.held &= !bit;
         }
+        self.restart_if_changed(prior, now);
+    }
+
+    fn set_edge(&mut self, point: Option<(u32, u32)>, size: PhysicalSize<u32>, now: Instant) {
+        let prior = self.direction();
+        self.edge = point.map_or(0, |(x, y)| {
+            u8::from(x < 5)
+                | (u8::from(x >= size.width.saturating_sub(5)) << 1)
+                | (u8::from(y < 5) << 2)
+                | (u8::from(y >= size.height.saturating_sub(5)) << 3)
+        });
+        self.restart_if_changed(prior, now);
+    }
+
+    fn restart_if_changed(&mut self, prior: (i32, i32), now: Instant) {
         let after = self.direction();
         if after != prior {
             self.remainder = (0., 0.);
@@ -635,6 +651,10 @@ impl Viewer<'_> {
             return Err("World transition is unavailable".into());
         };
         let size = view.window.inner_size();
+        let offset = match &mode {
+            LocationMode::Save { state, .. } if !self.settings.follow => state.camera_offset,
+            _ => None,
+        };
         let saved_scripts = match &mode {
             LocationMode::Save { state, .. } => Some(&state.scripts),
             _ => None,
@@ -700,6 +720,9 @@ impl Viewer<'_> {
         self.reset_audio |= restoring || fresh;
         *camera = next_camera;
         world.follow_player(Duration::ZERO, camera);
+        if let Some(delta) = offset.filter(|d| *d != (0, 0)) {
+            camera.pan(delta, logical_size(size, self.settings.zoom));
+        }
         *last_presented = None;
         *last_viewport = (0, 0);
         *waiting = false;
@@ -830,6 +853,9 @@ impl Viewer<'_> {
                 if value != old {
                     preferences.set("audio", key, i64::from(value));
                 }
+            }
+            if current.follow != previous.follow {
+                preferences.set("camera", "follow", current.follow);
             }
             if current.zoom != previous.zoom {
                 preferences.set("camera", "zoom", i64::from(current.zoom));
@@ -1228,6 +1254,7 @@ impl Viewer<'_> {
         doors.insert(travel.map.clone(), world.door_states().for_save());
         let mut state = save::State {
             map: travel.map.clone(),
+            camera_offset: world.camera_offset(camera, tile),
             tile,
             facing,
             clock,
@@ -1431,10 +1458,16 @@ impl Viewer<'_> {
                     if event.repeat && !menu.editing() {
                         return true;
                     }
-                    menu.key(&event.logical_key, event.text.as_deref(), theme, store)
+                    menu.key(
+                        &event.logical_key,
+                        self.audio.as_ref(),
+                        event.text.as_deref(),
+                        theme,
+                        store,
+                    )
                 }
                 WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } => {
-                    if menu.hover(self.cursor, physical, scale, theme) {
+                    if menu.hover(self.cursor, physical, scale, theme, self.audio.as_ref()) {
                         view.window.request_redraw();
                     }
                     return true;
@@ -1444,13 +1477,15 @@ impl Viewer<'_> {
                     button: MouseButton::Left,
                     ..
                 } => {
-                    menu.hover(self.cursor, physical, scale, theme);
-                    if state.is_pressed()
-                        && menu.has_hover()
-                        && let Some(audio) = &self.audio
-                    {
-                        audio.effect(3027, false);
-                    }
+                    menu.hover(self.cursor, physical, scale, theme, self.audio.as_ref());
+                    menu.pointer_sound(
+                        if state.is_pressed() {
+                            audio::ButtonEvent::Down
+                        } else {
+                            audio::ButtonEvent::Up
+                        },
+                        self.audio.as_ref(),
+                    );
                     menu.mouse(
                         state.is_pressed(),
                         (self.cursor, physical, scale),
@@ -1834,6 +1869,21 @@ impl Viewer<'_> {
                 }
                 _ => None,
             })
+            .chain(match &self.content {
+                ViewContent::Stream {
+                    world,
+                    waiting: false,
+                    ..
+                } if self.pause.is_none()
+                    && self.map_since.is_none()
+                    && self.view.as_ref().is_some_and(|v| !v.occluded) =>
+                {
+                    world
+                        .heartbeat_wait(self.play_elapsed(real_now))
+                        .map(|d| real_now + d)
+                }
+                _ => None,
+            })
             .chain(combat_deadline)
             .chain(clock)
             .chain(stock)
@@ -2043,6 +2093,27 @@ impl ApplicationHandler for Viewer<'_> {
                         && !view.occluded
                         && let Some(reader) = inventory_reader.as_mut()
                     {
+                        let talking = world.conversation().is_some();
+                        redraw |= reader.tick_heartbeats(
+                            world,
+                            elapsed,
+                            logical_size(view.window.inner_size(), self.settings.zoom),
+                        );
+                        if !talking && world.conversation().is_some() {
+                            if let Some(hud) = hud.as_mut().filter(|h| h.supports_dialogue()) {
+                                hud.close_inventory();
+                                hud.cancel_press();
+                                self.navigation = Navigation::default();
+                                world.update_hover(None, (0, 0), camera, elapsed);
+                                if let Some(audio) = &self.audio {
+                                    audio.voice(
+                                        world.conversation().and_then(|c| c.turn.voice.as_deref()),
+                                    );
+                                }
+                            } else {
+                                world.close_dialogue("theme_has_no_dialogue_components");
+                            }
+                        }
                         redraw |= reader.tick_combat(world, elapsed);
                         if world.player_moving() && self.player_deadline.is_none() {
                             self.player_deadline = Some(now)
@@ -2128,7 +2199,8 @@ impl ApplicationHandler for Viewer<'_> {
                         self.player_deadline = (!view.occluded && world.player_moving())
                             .then(|| now + world.player_wait(elapsed).unwrap_or(CAMERA_TICK));
                     }
-                } else if self
+                }
+                if self
                     .navigation
                     .deadline()
                     .is_some_and(|deadline| now >= deadline)
@@ -2137,7 +2209,8 @@ impl ApplicationHandler for Viewer<'_> {
                         .navigation
                         .advance(now, *shift, *waiting || view.occluded);
                     let size = view.window.inner_size();
-                    if delta != (0, 0) && camera.pan(delta, (size.width, size.height)) {
+                    if delta != (0, 0) && camera.pan(delta, logical_size(size, self.settings.zoom))
+                    {
                         *direction = delta;
                         redraw = true;
                     }
@@ -2188,6 +2261,32 @@ impl ApplicationHandler for Viewer<'_> {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.movie.is_some() {
             return;
+        }
+        if let (Some(view), ViewContent::Stream { world, hud, .. }) = (&self.view, &self.content)
+            && world.playing()
+        {
+            let before = self.navigation.deadline();
+            let modal = self.pause.is_some()
+                || self.map_since.is_some()
+                || world.conversation().is_some()
+                || view.occluded
+                || !view.window.has_focus()
+                || self.developer.as_ref().is_some_and(Developer::console_open)
+                || hud.as_ref().is_some_and(|h| {
+                    h.inventory_open() || h.sheet_open() || h.journal_open() || h.is_pressed()
+                });
+            if modal || self.settings.follow {
+                self.navigation = Navigation::default();
+            } else {
+                self.navigation.set_edge(
+                    self.cursor.filter(|_| self.settings.edge_scroll),
+                    view.window.inner_size(),
+                    Instant::now(),
+                );
+            }
+            if before != self.navigation.deadline() {
+                self.update_control_flow(event_loop);
+            }
         }
         let cursor_time = self.epoch.elapsed();
         if let Some(view) = &self.view
@@ -2249,15 +2348,20 @@ impl ApplicationHandler for Viewer<'_> {
             world.take_sounds().for_each(drop);
             return;
         };
-        if self.pause.as_ref().is_some_and(|(m, _)| m.front.is_some()) {
-            world.take_sounds().for_each(drop);
-            return;
-        }
-        if let Some((map, sector, hour)) = world.sound_location() {
+        let front = self.pause.as_ref().and_then(|(m, _)| m.front);
+        if front.is_none()
+            && let Some((map, sector, hour)) = world.sound_location()
+        {
             audio.location(map, sector, hour, std::mem::take(&mut self.reset_audio));
         }
         for sound in world.take_sounds() {
             match sound {
+                SoundEvent::Inventory(id) => {
+                    if front.is_none() || front == Some(classic_menu::Screen::Shop) {
+                        audio.effect(id, false);
+                    }
+                }
+                _ if front.is_some() => {}
                 SoundEvent::Effect(id) => audio.effect(id, true),
                 SoundEvent::EffectVariant {
                     preferred,
@@ -2265,6 +2369,9 @@ impl ApplicationHandler for Viewer<'_> {
                 } => audio.variant(preferred, fallback),
                 SoundEvent::Footstep { surface, armor } => audio.footstep(surface, armor),
             }
+        }
+        if front.is_some() {
+            return;
         }
         let container = hud.as_ref().and_then(|hud| hud.container_sound());
         let previous = self
@@ -3048,8 +3155,10 @@ impl Viewer<'_> {
                 ref event,
                 is_synthetic: false,
                 ..
-            } if matches!(&self.content, ViewContent::Stream { explore: true, world, .. } if !world.playing())
-                && Navigation::key(&event.logical_key).is_some() =>
+            } if Navigation::key(&event.logical_key).is_some()
+                && matches!(&self.content, ViewContent::Stream { explore, world, .. } if
+                    (*explore && !world.playing()) || (world.playing() && !self.settings.follow &&
+                    self.settings.keyboard_pan && matches!(event.logical_key,Key::Named(_)))) =>
             {
                 if !event.repeat {
                     let now = Instant::now();
@@ -3125,13 +3234,19 @@ impl Viewer<'_> {
                     }
                 }
                 if matches!(&self.content, ViewContent::Stream { world, .. } if world.playing()) {
-                    if matches!(&event.logical_key, Key::Character(key) if key == "0") {
+                    if event.logical_key == Key::Named(NamedKey::F5) && !event.repeat {
+                        let previous = self.settings;
+                        self.settings.follow = !self.settings.follow;
+                        self.navigation = Navigation::default();
+                        view.window.request_redraw();
+                        self.record_settings(previous);
+                    } else if matches!(&event.logical_key, Key::Character(key) if key == "0") {
                         let previous = self.settings;
                         self.settings.zoom = 1;
                         view.window.request_redraw();
                         self.record_settings(previous);
                     } else if !self.settings.follow
-                        && event.logical_key == Key::Named(NamedKey::Home)
+                        && event.physical_key == self.settings.recenter_key
                         && let ViewContent::Stream { world, camera, .. } = &mut self.content
                     {
                         world.follow_player(play_elapsed, camera);

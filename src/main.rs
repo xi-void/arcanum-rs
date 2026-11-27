@@ -1670,6 +1670,9 @@ fn show_world(
                     settings: viewer::Settings {
                         zoom: config.camera.zoom,
                         follow: config.camera.follow,
+                        edge_scroll: config.camera.edge_scroll,
+                        keyboard_pan: config.camera.keyboard_pan,
+                        recenter_key: config.camera.recenter_key,
                         lighting: config.display.lighting,
                         shadows: config.display.shadows,
                         run: config.input.run,

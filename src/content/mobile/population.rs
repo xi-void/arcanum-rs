@@ -341,6 +341,7 @@ impl Effective {
             unlock_script: explicit.unlock_script.or(defaults.unlock_script),
             unlock_local: explicit.unlock_local.or(defaults.unlock_local),
             dying: explicit.dying.or(defaults.dying),
+            heartbeat: explicit.heartbeat.or(defaults.heartbeat),
             dialog_script: explicit.dialog_script.or(defaults.dialog_script),
             dialog_local_flags: explicit.dialog_local_flags.or(defaults.dialog_local_flags),
             dialog_local_counters: explicit

@@ -44,6 +44,7 @@ pub struct AppearanceFields {
     pub use_script: Option<i32>,
     pub unlock_script: Option<i32>,
     pub(crate) unlock_local: Option<crate::content::script::Local>,
+    pub(crate) heartbeat: Option<[(i32, crate::content::script::Local); 2]>,
     pub(crate) dying: Option<(i32, crate::content::script::Local)>,
     pub dialog_script: Option<i32>,
     pub dialog_local_flags: Option<u32>,
@@ -637,6 +638,15 @@ impl Fields {
                 Default::default(),
                 crate::content::script::Local::from_attachment,
             ));
+            self.appearance.heartbeat = Some([10, 19].map(|slot| {
+                (
+                    script(slot),
+                    value.array_entry(slot).map_or(
+                        Default::default(),
+                        crate::content::script::Local::from_attachment,
+                    ),
+                )
+            }));
             self.appearance.dying = Some((
                 script(12),
                 value.array_entry(12).map_or(

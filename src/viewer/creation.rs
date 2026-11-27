@@ -264,7 +264,7 @@ impl Viewer<'_> {
             let scale = self.ui_scale();
             let theme = self.pause_theme.as_ref().unwrap();
             let menu = &mut self.pause.as_mut().unwrap().0;
-            menu.hover(self.cursor, physical, scale, theme);
+            menu.hover(self.cursor, physical, scale, theme, self.audio.as_ref());
             let nav = menu.over_navigation();
             let ViewContent::Stream {
                 world,
@@ -320,14 +320,21 @@ impl Viewer<'_> {
                     } else if let Some(p) = point {
                         match (button, state) {
                             (MouseButton::Left, ElementState::Pressed) => {
-                                if screen == Screen::Allocate
-                                    || hud.begin_inventory_drag(p).is_none()
+                                if screen == Screen::Shop
+                                    && let Some(id) = hud.begin_inventory_drag(p)
                                 {
-                                    hud.press(p);
+                                    if let Some(audio) = &self.audio {
+                                        audio.effect(id, false);
+                                    }
+                                } else if hud.press(p) {
+                                    audio::ButtonSound::Artwork
+                                        .play(audio::ButtonEvent::Down, self.audio.as_ref());
                                 }
                             }
                             (MouseButton::Left, ElementState::Released) => {
                                 if let Some(action) = hud.release(p) {
+                                    audio::ButtonSound::Artwork
+                                        .play(audio::ButtonEvent::Up, self.audio.as_ref());
                                     match action {
                                         hud::Action::Sheet(_) => {
                                             hud.sheet_action(action, world, reader)

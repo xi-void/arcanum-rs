@@ -23,6 +23,8 @@ pub(crate) enum Event {
     Use,
     BuyObject,
     Dying,
+    FirstHeartbeat,
+    Heartbeat,
     Dialogue,
 }
 
@@ -58,6 +60,12 @@ pub struct State {
     pub(super) sector_toggles: BTreeMap<String, BTreeSet<u64>>,
     #[serde(skip)]
     pub(super) sector_map: Option<Arc<(String, BTreeSet<u64>)>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) detached: BTreeMap<String, BTreeSet<Event>>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(super) switched_off: BTreeSet<String>,
+    #[serde(skip)]
+    pub(super) heartbeat: Option<HeartbeatContext>,
     flags: BTreeMap<i32, bool>,
     variables: BTreeMap<i32, i32>,
     attachments: BTreeMap<String, BTreeMap<Event, Local>>,
@@ -75,6 +83,18 @@ pub struct State {
     pub(super) game_minute: u64,
     #[serde(skip)]
     pub(super) interaction: Option<Interaction>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct HeartbeatContext {
+    pub vicinity: Vec<Actor>,
+    pub action: Option<ActorAction>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ActorAction {
+    Kill,
+    CallDialogue(usize),
 }
 
 /// The staged read view for a single SCR/DLG invocation. Operations commit with its state writes.
@@ -439,7 +459,7 @@ impl Invocation<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Actor {
     Player,
@@ -498,7 +518,7 @@ pub(super) struct Code {
 pub(super) struct Statement {
     pub condition: Operation,
     pub action: Operation,
-    otherwise: Operation,
+    pub(super) otherwise: Operation,
 }
 
 pub(super) struct Operation {
@@ -720,6 +740,7 @@ impl Code {
         let mut pc = input.position;
         let attachment = input.attachment;
         let mut temporaries = [0; 10];
+        let mut loop_state: Option<(usize, usize)> = None;
         for _ in 0..STEP_BUDGET {
             let fault = |reason| Fault {
                 statement: Some(pc),
@@ -881,6 +902,115 @@ impl Code {
                 {
                     let line = value(action, 0).filter(|&n| n > 0).ok_or_else(unresolved)?;
                     Some(Outcome::Dialogue { line })
+                }
+                5 if view.state().heartbeat.is_some() => {
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    state
+                        .detached
+                        .entry(attachment.owner.clone())
+                        .or_default()
+                        .insert(attachment.event);
+                    None
+                }
+                18 if action.focus(0) == 8 && loop_state.is_none() => {
+                    let actors = &view
+                        .state()
+                        .heartbeat
+                        .as_ref()
+                        .ok_or_else(unresolved)?
+                        .vicinity;
+                    if actors.is_empty() {
+                        pc = self
+                            .statements
+                            .iter()
+                            .enumerate()
+                            .skip(pc + 1)
+                            .find(|(_, r)| r.condition.opcode == 0 && r.action.opcode == 19)
+                            .map(|(n, _)| n)
+                            .ok_or_else(unresolved)?;
+                    } else {
+                        loop_state = Some((pc + 1, 0));
+                    }
+                    None
+                }
+                19 => {
+                    let (start, index) = loop_state.take().ok_or_else(unresolved)?;
+                    let actors = &view
+                        .state()
+                        .heartbeat
+                        .as_ref()
+                        .ok_or_else(unresolved)?
+                        .vicinity;
+                    if index + 1 < actors.len() {
+                        loop_state = Some((start, index + 1));
+                        pc = start;
+                        continue;
+                    }
+                    None
+                }
+                34 if action.focus(0) == 10 => {
+                    let (_, i) = loop_state.ok_or_else(unresolved)?;
+                    let actor = view
+                        .state()
+                        .heartbeat
+                        .as_ref()
+                        .and_then(|h| h.vicinity.get(i))
+                        .ok_or_else(unresolved)?;
+                    let kind = match actor {
+                        Actor::Player => 15,
+                        Actor::Mobile => 16,
+                        _ => return Err(unresolved()),
+                    };
+                    view.assign(
+                        attachment,
+                        action.operand(1).ok_or_else(unresolved)?,
+                        kind,
+                        &mut temporaries,
+                    )
+                    .ok_or_else(unresolved)?;
+                    None
+                }
+                56 if action.focus(0) == 1 && view.state().heartbeat.is_some() => {
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    if !state.switched_off.remove(&attachment.owner) {
+                        state.switched_off.insert(attachment.owner.clone());
+                    }
+                    None
+                }
+                58 | 81 if action.focus(0) == 1 && view.state().heartbeat.is_some() => {
+                    let effect = if action.opcode == 58 {
+                        ActorAction::Kill
+                    } else {
+                        let trigger = match action.focus(3) {
+                            21 => Some(&Actor::Player),
+                            10 => loop_state.and_then(|(_, i)| {
+                                view.state().heartbeat.as_ref()?.vicinity.get(i)
+                            }),
+                            _ => None,
+                        };
+                        if value(action, 1) != Some(9) || trigger != Some(&Actor::Player) {
+                            return Err(unresolved());
+                        }
+                        ActorAction::CallDialogue(
+                            usize::try_from(value(action, 2).ok_or_else(unresolved)?)
+                                .map_err(|_| unresolved())?,
+                        )
+                    };
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    let action = &mut state.heartbeat.as_mut().unwrap().action;
+                    if action.replace(effect).is_some() {
+                        return Err(fault(
+                            "Multiple actor action requests in one heartbeat are unsupported"
+                                .into(),
+                        ));
+                    }
+                    None
                 }
                 8 | 9 | 100 | 101 => {
                     let index = value(action, 0).ok_or_else(unresolved)?;
@@ -1647,6 +1777,58 @@ mod tests {
             locations: [None; 2],
             met: None,
         }
+    }
+
+    #[test]
+    #[ignore = "requires installed Crash Site scripts"]
+    fn installed_heartbeat_vicinity_and_starting_flags_drive_original_actor_actions() {
+        let root = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+        let mut vfs = Vfs::from_game(root, crate::vfs::Policy::Ce).unwrap();
+        let mut owner = attachment("placed NPC", Event::Heartbeat);
+        owner.initial = Local::default();
+        owner.script = 1100;
+        let program = Script::load(&mut vfs, owner.script).unwrap();
+        let invoke = |program: &Script, owner: &Attachment, state: &mut State, nearby| {
+            state.heartbeat = Some(HeartbeatContext {
+                vicinity: nearby,
+                action: None,
+            });
+            let mut input = invocation(owner);
+            input.triggerer = Actor::Mobile;
+            program.execute(&input, state).unwrap();
+            state.heartbeat.take().unwrap().action
+        };
+        let mut state = State::default();
+        assert_eq!(invoke(&program, &owner, &mut state, vec![]), None);
+        assert_eq!(
+            invoke(&program, &owner, &mut state, vec![Actor::Mobile]),
+            None
+        );
+        assert!(state.detached.is_empty());
+        assert_eq!(
+            invoke(
+                &program,
+                &owner,
+                &mut state,
+                vec![Actor::Mobile, Actor::Player]
+            ),
+            Some(ActorAction::CallDialogue(4))
+        );
+        assert!(state.detached[&owner.owner].contains(&owner.event));
+
+        owner.script = 1781;
+        let program = Script::load(&mut vfs, owner.script).unwrap();
+        let mut state = State::default();
+        assert_eq!(
+            invoke(&program, &owner, &mut state, vec![]),
+            Some(ActorAction::Kill)
+        );
+        assert!(state.switched_off.is_empty());
+        state.set_global_flag(2350).unwrap();
+        assert_eq!(invoke(&program, &owner, &mut state, vec![]), None);
+        let loaded: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(loaded.switched_off.contains(&owner.owner));
+        assert!(loaded.detached[&owner.owner].contains(&owner.event));
     }
 
     #[test]

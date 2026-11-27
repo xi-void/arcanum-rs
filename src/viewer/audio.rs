@@ -176,6 +176,10 @@ impl Tables {
         let schemes = index
             .entries()
             .filter_map(|(id, raw)| {
+                // Explicit silent slots in the original SchemeIndex have no list.
+                if raw.trim().starts_with("<<") && raw.trim().ends_with(">>") {
+                    return Some((id, Vec::new()));
+                }
                 let base: i32 = raw.split_once('#')?.1.trim().parse().ok()?;
                 let end = base.checked_add(100)?;
                 let entries = (base..end)
@@ -310,6 +314,37 @@ struct Played {
     mount: String,
 }
 
+/// Original TIG button event bindings. Modal OK/Cancel and passive fields
+/// have no bindings. Keyboard shortcuts use gsound ID 0 for artwork.
+#[derive(Clone, Copy)]
+pub(super) enum ButtonSound {
+    Artwork,
+    Morph,
+}
+#[derive(Clone, Copy)]
+pub(super) enum ButtonEvent {
+    Enter,
+    Down,
+    Up,
+    Shortcut,
+}
+
+impl ButtonSound {
+    pub(super) fn play(self, event: ButtonEvent, audio: Option<&Audio>) {
+        let id = match (self, event) {
+            (Self::Artwork, ButtonEvent::Down) => 3000,
+            (Self::Artwork, ButtonEvent::Up) => 3001,
+            (Self::Artwork, ButtonEvent::Shortcut) => 0,
+            (Self::Morph, ButtonEvent::Enter) => 3026,
+            (Self::Morph, ButtonEvent::Down | ButtonEvent::Shortcut) => 3027,
+            _ => return,
+        };
+        if let Some(audio) = audio {
+            audio.effect(id, false);
+        }
+    }
+}
+
 enum Command {
     MovieSink(mpsc::Sender<Sink>),
     Variant(i32, i32),
@@ -323,6 +358,7 @@ enum Command {
     Voice(Option<String>),
     Pause(bool),
     MainMenu,
+    Cinematic,
     Effect {
         id: i32,
         world: bool,
@@ -399,6 +435,11 @@ impl Audio {
         let (send, receive) = mpsc::channel();
         self.send(Command::MovieSink(send));
         receive.recv().ok()
+    }
+
+    pub(super) fn cinematic(&mut self) {
+        self.location = None;
+        self.send(Command::Cinematic);
     }
 
     pub(super) fn main_menu(&mut self) {
@@ -564,11 +605,29 @@ impl Mixer<'_> {
                     clip.apply_volume(levels);
                 }
             }
-            Command::MainMenu => {
+            Command::Cinematic => {
                 self.paused = true;
                 self.map.clear();
                 self.clips.retain(|clip| !clip.world);
                 self.set_schemes([0; 2], true);
+            }
+            Command::MainMenu => {
+                // CE opens the SHOPPING_MAP while the front end is active. Its
+                // sector supplies both schemes through ordinary map resources.
+                self.paused = true;
+                match self.menu_location() {
+                    Ok((map, schemes, hour)) => {
+                        self.clips.retain(|clip| !clip.world || clip.looping);
+                        self.map = map;
+                        self.hour = hour;
+                        self.set_schemes(schemes, false);
+                    }
+                    Err(error) => {
+                        eprintln!("Main menu audio: {error}");
+                        self.clips.retain(|clip| !clip.world);
+                        self.set_schemes([0; 2], true);
+                    }
+                }
             }
             Command::Pause(paused) => {
                 self.paused = paused;
@@ -594,6 +653,19 @@ impl Mixer<'_> {
             }
         }
         self.publish();
+    }
+
+    fn menu_location(&mut self) -> Result<(String, [i32; 2], u8), Box<dyn std::error::Error>> {
+        let catalog = content::maps::Catalog::load(&mut self.vfs)?;
+        let map = match catalog.shopping()? {
+            Some(shop) => shop,
+            None => catalog.new_game()?,
+        };
+        let schemes = map
+            .entry_sound_schemes(&mut self.vfs)?
+            .unwrap_or_else(|| map_scheme(&mut self.vfs, &map.directory));
+        let hour = content::travel::starting_hour(&mut self.vfs)?;
+        Ok((map.directory.clone(), schemes, hour))
     }
 
     fn set_schemes(&mut self, mut next: [i32; 2], reset: bool) {

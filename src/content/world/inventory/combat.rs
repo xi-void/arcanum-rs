@@ -370,6 +370,9 @@ impl InteractiveWorld {
         {
             return Some((self.cache.effect_time + Duration::from_millis(40)).saturating_sub(now));
         }
+        if self.dialogue.is_some() || self.trade.is_some() {
+            return None;
+        }
         if !c.party.is_empty() && (!c.timed() || c.party[c.turn].actor.is_some() || c.ap == 0) {
             return Some(tick.saturating_sub(now));
         }
@@ -439,6 +442,28 @@ impl InteractiveWorld {
 }
 
 impl InventoryReader {
+    pub(in crate::content::world) fn script_kill(
+        &mut self,
+        w: &mut InteractiveWorld,
+        id: OriginalId,
+        now: Duration,
+    ) -> Result<(), String> {
+        let mut target = self.fighter(w, Some(id))?;
+        let before = target.hp;
+        if before >= target.maximum {
+            return Ok(());
+        }
+        w.cache
+            .inventory
+            .change_vitals(&mut target, Channel::Normal, 32000 - before);
+        w.cache.inventory.magick.set_death_animation(id, 7);
+        self.downed_pose(w, Some(id), now, true);
+        // SAT_KILL invokes the dying attachment with a null killer.
+        self.dispatch_dying_script(w, id, None);
+        w.cache.inventory.revision += 1;
+        Ok(())
+    }
+
     fn fighter(&mut self, w: &InteractiveWorld, id: Actor) -> Result<Target, String> {
         let aim = Self::subject_aim(w, &subject(id)).ok_or("Actor is outside the active map")?;
         let t = self.target(w, aim)?;
@@ -524,7 +549,10 @@ impl InventoryReader {
             let spell = character.spell_flags;
             let ally = spell & 0x08000000 != 0;
             if s.current_health <= 0 {
-                candidates.push((id, false, true));
+                // A placed flat corpse already supplies its exact ART pose and frame.
+                if o.appearance().flags.or(d.appearance.flags).unwrap_or(0) & 4 == 0 {
+                    candidates.push((id, false, true));
+                }
                 continue;
             }
             let faction = o
@@ -619,9 +647,6 @@ impl InventoryReader {
                 w.cache.inventory.combat.message = e
             }
         }
-        if w.dialogue.is_some() || w.trade.is_some() {
-            return false;
-        }
         let mut settled = false;
         for p in w.cache.inventory.combat.poses.values_mut() {
             settled |= p.settle(now)
@@ -653,6 +678,10 @@ impl InventoryReader {
         }
         self.run_dying_scripts(w);
         let cleanup = self.finish_bodies(w, now) || settled || restored;
+        if w.dialogue.is_some() || w.trade.is_some() {
+            w.cache.inventory.combat.last_tick = Some(now);
+            return redraw_motion || cleanup;
+        }
         self.scan_combat(w, now, at);
         let c = &mut w.cache.inventory.combat;
         let dt = c.last_tick.replace(now).map_or(0, |last| {

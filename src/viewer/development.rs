@@ -191,6 +191,10 @@ impl Developer {
         self.scale = scale;
     }
 
+    pub(super) fn console_open(&self) -> bool {
+        self.console.open
+    }
+
     pub(super) fn console_frame(
         &mut self,
         size: (u32, u32),
@@ -713,7 +717,7 @@ impl Viewer<'_> {
                         "save_directory":self.saves.as_ref().ok().map(|store| store.directory()),"reload_generation":dev.reloads,"reload_status":dev.reload_status,
                         "selected":dev.selected.map(InteractiveWorld::debug_selection_id)},
                     "dialogue":world.dialogue_diagnostic(),
-                    "scripts":world.script_state(),
+                    "scripts":world.script_state(),"npc_events":world.heartbeat_report(),
                     "quests":inventory_reader.as_ref().map(|reader| reader.quest_catalog.diagnostic(
                         &world.script_state().quests, world.character_statistics().attributes[4])),
                     "audio":self.audio.as_ref().map(|audio| audio.diagnostic(self.settings.audio)),

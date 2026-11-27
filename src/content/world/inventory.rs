@@ -1209,7 +1209,7 @@ impl InteractiveWorld {
         if world_changed {
             self.cache.activate(&self.cache.active.clone());
         }
-        self.queue_sound(super::SoundEvent::Effect(sound));
+        self.queue_sound(super::SoundEvent::Inventory(sound));
         Ok(result)
     }
 

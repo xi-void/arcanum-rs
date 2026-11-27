@@ -185,6 +185,8 @@ TIG `font.c` distinguishes the glyph rectangle from the horizontal
 advance. Its source-alpha blit in `art.c` reads palette red through
 `tig_color_alpha` in `color.h`.
 
+Both Classic menus use `menu_color` for ordinary lettering, `menu_hover_color` for mouse or keyboard selection and `menu_disabled_color` for inactive entries. The original Morph relief draws `menu_shadow_color` one source pixel above and left and adds `menu_highlight_color` one source pixel below and right. These RGBA values live in the pause package and apply to both menus. The glyphs start at the configured `pause_y` and center on `pause_center`. The `pause_hit_width` controls pointer input independently of text width.
+
 The HUD, atlas and Classic menus use the same glyph measurement and
 rasterizer. Vulkan draws the prepared UI after the world pass. Theme
 packages own the layout and assets. Gameplay owns settings and actions.

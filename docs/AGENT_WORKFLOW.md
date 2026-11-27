@@ -211,6 +211,14 @@ Use an OS audio monitor or listen to the output when confirming samples reach
 the device. For location tests, check the output again after
 `coc` or a native load and after `settime` changes the game hour.
 
+## Crash Site opening
+
+Launch the configured executable, create a character, allocate all five points, finish shopping, and confirm. After the opening movies, wait for Virgil without clicking him. In the installed campaign his placed mobile uses dialogue script 1324 and overrides its heartbeat with `scr/01100prestonradcliffeheartbeat.scr`. It enumerates nearby critters, calls its own dialogue attachment at statement 4 with the player as triggerer, and detaches. The first line is 1. `pos.npc_events` records the most recent distinct callbacks, winning resource, result and any rejection. `pos.scripts.detached` and `switched_off` are saved with the original identities.
+
+The twelve passenger heartbeats (1781–1792) check their respective pre-generated character flags before choosing to hide or kill the placed NPC. The callback range is 30 tiles. Other bodies already carry lethal damage and an authored flat pose. Click Isaac Zapruder at (92942, 82586) for the Crash Site Camera and Thermometer, and Wilhemina Carpenter at (92939, 82609) for her note to Jared. The item identities come from their original inventories. A custom character saved after visiting both bodies had twelve dead passengers. In a separate campaign, selecting Merwin Tumblebrook set flag 2350 and script 1781 switched off his placed counterpart.
+
+With follow off, scroll away with the arrow keys or screen edges, click reachable ground, and use Home while the player is moving. The camera stays there as the player continues. Wheel up to zoom, F5 to toggle follow, and F7/F8 to save and reload an independently panned view. The cave entrance at (92910, 82598) and its return both center once on arrival.
+
 ## Native NPC dialogue
 
 Use `rpc objects category npc` to locate original NPCs and see their effective
@@ -333,8 +341,7 @@ Restore uses the normal location loader and expects the same UI packages and
 declared VFS mods. It restores map, tile, facing, game hour, collision bypass,
 zoom, UI scale, render toggles, diagnostic overlays, and the selected record
 when available. Camera coordinates, viewport dimensions, and cached-sector
-references are recorded for context. The camera follows the player after
-restore and the window keeps its current size. Snapshots cover reproduction
+references are recorded for context. Snapshot restore centers the camera on arrival and respects the configured follow mode. The window keeps its current size. Snapshots cover reproduction
 context. Door changes, inventory and ground-item state, pending interactions,
 travel progress, script state, cache ordering, and exact animation phase are outside the
 restore scope. A restore within the running session preserves current inventory

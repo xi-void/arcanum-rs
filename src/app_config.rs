@@ -96,13 +96,21 @@ impl Audio {
 pub(crate) struct Camera {
     pub zoom: u8,
     pub follow: bool,
+    pub edge_scroll: bool,
+    pub keyboard_pan: bool,
+    #[cfg(feature = "windowed")]
+    pub recenter_key: winit::keyboard::KeyCode,
 }
 
 impl Default for Camera {
     fn default() -> Self {
         Self {
             zoom: 1,
-            follow: true,
+            follow: false,
+            edge_scroll: true,
+            keyboard_pan: true,
+            #[cfg(feature = "windowed")]
+            recenter_key: winit::keyboard::KeyCode::Home,
         }
     }
 }

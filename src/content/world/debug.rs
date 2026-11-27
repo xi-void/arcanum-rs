@@ -147,6 +147,10 @@ impl InteractiveWorld {
                 .filter(|issue| issue.record == Some(record))
                 .collect::<Vec<_>>()
         );
+        if mobile.is_some_and(|entry| self.cache.scripts.switched_off.contains(&entry.id.key())) {
+            result["rendering"] = json!({"state":"switched_off"});
+            return result;
+        }
         result["rendering"] = json!({"state":"no_raster"});
         let Some(raster) = raster else { return result };
         let key = raster.key;
@@ -177,6 +181,7 @@ impl InteractiveWorld {
             ),
             None => result["effective"]["authored_frame"]
                 .as_u64()
+                .or_else(|| result["effective"]["authored_pose"]["frame"].as_u64())
                 .map(|f| f as usize),
         };
         result["tile"] = json!(tile);

@@ -1,5 +1,9 @@
 //! Classic in-play menu and the shared save/load shell.
-use super::{ThemeSource, hud, menu};
+use super::{
+    ThemeSource,
+    audio::{Audio, ButtonEvent, ButtonSound},
+    hud, menu,
+};
 mod creation;
 mod options;
 use arcanum_rs::{
@@ -44,6 +48,9 @@ struct Layout {
     selected_color: [u8; 4],
     menu_color: [u8; 4],
     menu_hover_color: [u8; 4],
+    menu_shadow_color: Option<[u8; 4]>,
+    menu_highlight_color: Option<[u8; 4]>,
+    menu_disabled_color: Option<[u8; 4]>,
     pause_labels: [i32; 5],
     pause_center: u32,
     pause_y: [u32; 5],
@@ -140,6 +147,9 @@ enum Style {
     Selected,
     Pause,
     PauseHover,
+    PauseDisabled,
+    PauseShadow,
+    PauseHighlight,
     OptionHeading,
     OptionInactive,
     OptionInactiveValue,
@@ -305,7 +315,22 @@ impl Classic {
         if self.text.len() >= 256 {
             self.text.clear();
         }
-        let key = (text, [rect[2], rect[3]], style);
+        // mainmenu_ui_refresh_text measures Morph labels independently of
+        // their buttons. The configured Y is the top of the ART glyph frame.
+        let title = matches!(
+            style,
+            Style::Pause
+                | Style::PauseShadow
+                | Style::PauseHighlight
+                | Style::PauseDisabled
+                | Style::PauseHover
+        );
+        let bounds = if title {
+            self.layout.canvas
+        } else {
+            [rect[2], rect[3]]
+        };
+        let key = (text, bounds, style);
         let asset = self
             .text
             .entry(key)
@@ -316,6 +341,24 @@ impl Classic {
                     }
                     Style::Selected => (&self.font, self.layout.selected_color),
                     Style::Pause => (&self.menu_font, self.layout.menu_color),
+                    Style::PauseShadow => (
+                        &self.menu_font,
+                        self.layout
+                            .menu_shadow_color
+                            .unwrap_or(self.options.layout.nav_shadow_color),
+                    ),
+                    Style::PauseHighlight => (
+                        &self.menu_font,
+                        self.layout
+                            .menu_highlight_color
+                            .unwrap_or(self.options.layout.nav_highlight_color),
+                    ),
+                    Style::PauseDisabled => (
+                        &self.menu_font,
+                        self.layout
+                            .menu_disabled_color
+                            .unwrap_or(self.layout.menu_color),
+                    ),
                     Style::PauseHover => (&self.menu_font, self.layout.menu_hover_color),
                     Style::OptionHeading => (
                         &self.options.heading_font,
@@ -340,29 +383,43 @@ impl Classic {
                         (&self.menu_font, self.options.layout.nav_highlight_color)
                     }
                 };
-                hud::generated_frame(
-                    "pause/text",
-                    font.render(
-                        text,
-                        *bounds,
-                        color,
-                        matches!(style, Style::Message | Style::Wrapped),
-                    ),
-                )
+                let mut frame = font.render(
+                    text,
+                    *bounds,
+                    color,
+                    matches!(style, Style::Message | Style::Wrapped),
+                );
+                if matches!(style, Style::PauseHighlight) {
+                    hud::additive_glyph_coverage(&mut frame);
+                }
+                hud::generated_frame("pause/text", frame)
             });
         let sprite = &asset.decoded.frame;
-        let x = rect[0]
-            + if centered {
-                rect[2].saturating_sub(sprite.width) / 2
-            } else {
-                0
-            };
-        let y = if matches!(style, Style::Message) {
+        let x = if title {
+            (rect[0] + rect[2] / 2).saturating_sub(sprite.width / 2)
+        } else {
+            rect[0]
+                + if centered {
+                    rect[2].saturating_sub(sprite.width) / 2
+                } else {
+                    0
+                }
+        };
+        let y = if title || matches!(style, Style::Message) {
             rect[1]
         } else {
             rect[1] + rect[3].saturating_sub(sprite.height) / 2
         };
-        out.push_clipped(asset, [x, y, sprite.width, sprite.height], rect);
+        out.parts.push((
+            Arc::clone(asset),
+            [x, y, sprite.width, sprite.height],
+            if title {
+                [0, 0, bounds[0], bounds[1]]
+            } else {
+                rect
+            },
+            matches!(style, Style::PauseHighlight),
+        ));
     }
 
     fn draw_message(&mut self, out: &mut Frame, rect: Rect, message: &str) {
@@ -441,18 +498,32 @@ impl Classic {
             for index in 0..menu.labels(&self.layout).len() {
                 let id = menu.labels(&self.layout)[index];
                 let control = Control::Pause(index);
-                let style = if menu.hover == Some(control) || menu.focus == Some(index) {
+                let [x, y, w, h] = self.rect(control);
+                let text = self.label(id, "");
+                self.draw_text(
+                    &mut out,
+                    [x.saturating_sub(1), y.saturating_sub(1), w, h],
+                    text.clone(),
+                    Style::PauseShadow,
+                    true,
+                );
+                self.draw_text(
+                    &mut out,
+                    [x + 1, y + 1, w, h],
+                    text.clone(),
+                    Style::PauseHighlight,
+                    true,
+                );
+                let style = if menu.confirm.is_some() {
+                    Style::PauseDisabled
+                } else if menu.hover == Some(control)
+                    || (menu.hover.is_none() && menu.focus == Some(index))
+                {
                     Style::PauseHover
                 } else {
                     Style::Pause
                 };
-                self.draw_text(
-                    &mut out,
-                    self.rect(control),
-                    self.label(id, ""),
-                    style,
-                    true,
-                );
+                self.draw_text(&mut out, self.rect(control), text, style, true);
             }
         }
         if menu.front.is_some()
@@ -666,7 +737,7 @@ impl Transform {
 
 pub(super) struct Frame {
     transform: Transform,
-    parts: Vec<(Asset, Rect, Rect)>,
+    parts: Vec<(Asset, Rect, Rect, bool)>,
     options_lens: Option<(Rect, Asset)>,
     backdrop: Option<(Asset, [f32; 4])>,
 }
@@ -677,7 +748,7 @@ impl Frame {
     }
 
     fn push_clipped(&mut self, asset: &Asset, rect: Rect, clip: Rect) {
-        self.parts.push((Arc::clone(asset), rect, clip));
+        self.parts.push((Arc::clone(asset), rect, clip, false));
     }
 
     pub(super) fn lens_size(&self) -> Option<(u32, u32)> {
@@ -696,6 +767,7 @@ impl Frame {
                     asset,
                     rect: self.transform.rect(*rect),
                     clip: self.transform.rect(*rect),
+                    additive: false,
                 })
         })
     }
@@ -707,12 +779,18 @@ impl Frame {
                 asset,
                 rect: *rect,
                 clip: *rect,
+                additive: false,
             })
-            .chain(self.parts.iter().map(|(asset, rect, clip)| OverlayDraw {
-                asset,
-                rect: self.transform.rect(*rect),
-                clip: self.transform.rect(*clip),
-            }))
+            .chain(
+                self.parts
+                    .iter()
+                    .map(|(asset, rect, clip, additive)| OverlayDraw {
+                        asset,
+                        rect: self.transform.rect(*rect),
+                        clip: self.transform.rect(*clip),
+                        additive: *additive,
+                    }),
+            )
     }
 }
 
@@ -734,6 +812,22 @@ enum Control {
     ThumbBottom,
     Yes,
     No,
+}
+
+impl Control {
+    fn button_sound(self) -> Option<ButtonSound> {
+        match self {
+            Self::Pause(_) => Some(ButtonSound::Morph),
+            Self::Arrow(_)
+            | Self::Next
+            | Self::Back
+            | Self::Delete
+            | Self::Info
+            | Self::Up
+            | Self::Down => Some(ButtonSound::Artwork),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -991,6 +1085,7 @@ impl Menu {
         size: Point,
         scale: u16,
         theme: &Classic,
+        audio: Option<&Audio>,
     ) -> bool {
         let transform = theme.transform(size, scale);
         let next = self.hit(point, transform, theme);
@@ -1018,7 +1113,11 @@ impl Menu {
         {
             self.move_scroll_thumb(y, transform, theme);
         }
-        next != std::mem::replace(&mut self.hover, next) || self.top != previous_top || desc_changed
+        let changed = next != std::mem::replace(&mut self.hover, next);
+        if changed {
+            self.pointer_sound(ButtonEvent::Enter, audio);
+        }
+        changed || self.top != previous_top || desc_changed
     }
 
     fn move_scroll_thumb(&mut self, y: u32, transform: Transform, theme: &Classic) {
@@ -1053,10 +1152,17 @@ impl Menu {
     pub(super) fn key(
         &mut self,
         key: &Key,
+        audio: Option<&Audio>,
         text: Option<&str>,
         theme: &Classic,
         store: Result<&save::Store, &str>,
     ) -> Command {
+        let activate = |menu: &mut Self, control: Control| {
+            if let Some(sound) = control.button_sound() {
+                sound.play(ButtonEvent::Shortcut, audio);
+            }
+            menu.activate(control, theme, store)
+        };
         if self.front == Some(Screen::Identity) && self.identity.editing {
             match key {
                 Key::Named(NamedKey::Escape) => {
@@ -1094,7 +1200,7 @@ impl Menu {
         if let Some(front) = self.front.filter(|_| self.slots_screen.is_none()) {
             if front.character() {
                 return if *key == Key::Named(NamedKey::Enter) {
-                    self.activate(Control::Next, theme, store)
+                    activate(self, Control::Next)
                 } else {
                     Command::Stay
                 };
@@ -1108,7 +1214,7 @@ impl Menu {
             if let Key::Character(c) = key
                 && let Some(i) = keys.find(c.to_ascii_lowercase().as_str())
             {
-                return self.activate(Control::Pause(i), theme, store);
+                return activate(self, Control::Pause(i));
             }
         }
         let step = match key {
@@ -1128,13 +1234,13 @@ impl Menu {
             } else if *key == Key::Named(NamedKey::Enter)
                 && let Some(index) = self.focus
             {
-                return self.activate(Control::Pause(index), theme, store);
+                return activate(self, Control::Pause(index));
             }
         } else {
             match key {
-                Key::Named(NamedKey::Enter) => return self.activate(Control::Next, theme, store),
+                Key::Named(NamedKey::Enter) => return activate(self, Control::Next),
                 Key::Named(NamedKey::Delete) => {
-                    return self.activate(Control::Delete, theme, store);
+                    return activate(self, Control::Delete);
                 }
                 Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown) if self.count() != 0 => {
                     let index = self
@@ -1160,8 +1266,13 @@ impl Menu {
         Command::Stay
     }
 
-    pub(super) fn has_hover(&self) -> bool {
-        self.hover.is_some()
+    pub(super) fn pointer_sound(&self, event: ButtonEvent, audio: Option<&Audio>) {
+        if let Some(control) = self.hover
+            && (!matches!(event, ButtonEvent::Up) || self.down == Some(control))
+            && let Some(sound) = control.button_sound()
+        {
+            sound.play(event, audio);
+        }
     }
 
     pub(super) fn editing(&self) -> bool {
@@ -1236,5 +1347,37 @@ impl Frame {
 impl Classic {
     pub(super) fn creation_message(&mut self, frame: &mut Frame, message: &str) {
         self.draw_message(frame, self.layout.message, message);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires installed Arcanum data"]
+    fn morph_label_keeps_its_final_glyph_outside_a_narrow_button() {
+        let mut game = Vfs::from_game(
+            std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR"),
+            Policy::Ce,
+        )
+        .unwrap();
+        let mut theme = Classic::load(&ThemeSource::embedded_pause(), &mut game).unwrap();
+        theme.layout.pause_hit_width = 100;
+        let menu = Menu::main();
+        let hit = theme.rect(Control::Pause(0));
+        let title = theme.label(menu.labels(&theme.layout)[0], "");
+        let reference =
+            theme
+                .menu_font
+                .render(&title, theme.layout.canvas, theme.layout.menu_color, false);
+        assert!(reference.width > hit[2]);
+        let frame = theme.render(&menu, theme.layout.canvas, 100, Default::default());
+        let (face, rect, clip, _) = &frame.parts[3]; // Background, shadow, relief, face.
+        assert_eq!(face.decoded.frame.pixels, reference.pixels);
+        assert_eq!(rect[0] + rect[2] / 2, theme.layout.pause_center);
+        assert_eq!(rect[1], hit[1]);
+        assert!(clip[0] <= rect[0] && clip[0] + clip[2] >= rect[0] + reference.width);
+        assert_eq!(theme.rect(Control::Pause(0)), hit);
     }
 }

@@ -46,6 +46,8 @@ merged-stack links. Generated IDs retain the allocator state. Door IDs use
 the original map directory, sector and record index. The engine rebuilds
 sector caches and GPU resources from the installed data during restoration.
 
+The optional `camera_offset` stores the view center relative to the saved player tile, in projected world pixels. Independent cameras restore that offset at the current zoom. Older slots center on arrival. Continuous follow and the camera controls are user preferences. Script-detached attachments and switched-off actors are saved by original object identity, including one-shot opening conversations. The runtime recreates pending NPC heartbeat timers on map activation.
+
 The optional `scripts` field stores committed global flags and variables and
 local state keyed by original object identity and attachment point. Earlier
 version 1 files lack this field and initialize globals to zero and locals from

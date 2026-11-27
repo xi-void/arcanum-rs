@@ -8,6 +8,7 @@ impl SectorCache {
         };
         let state = &self.inventory.magick;
         self.sync_spell_fx = true;
+        let off = &self.scripts.switched_off;
         let flat = |id| state.down(id) && !self.inventory.combat.falling(id, self.effect_time);
         self.door_states.spell_holds = state
             .active
@@ -28,14 +29,18 @@ impl SectorCache {
         self.door_states.vacated.clear();
         for sector in &self.active {
             for r in self.entries[sector].0.mobiles.iter().filter(|r| {
-                r.category == 16 && r.blocks && flat(r.id) && !state.moved.contains_key(&r.id)
+                r.category == 16
+                    && r.blocks
+                    && (flat(r.id) || off.contains(&r.id.key()))
+                    && !state.moved.contains_key(&r.id)
             }) {
                 if let Some(tile) = r.tile {
                     *self.door_states.vacated.entry(tile).or_default() += 1;
                 }
             }
         }
-        if !state.offsets.is_empty() || state.actors.values().any(|d| d.decayed) {
+        if !off.is_empty() || !state.offsets.is_empty() || state.actors.values().any(|d| d.decayed)
+        {
             self.ordered.retain(|r| {
                 let id = self
                     .entries
@@ -49,13 +54,17 @@ impl SectorCache {
                         }
                     });
                 !id.is_some_and(|id| {
-                    state.moved.contains_key(&id)
+                    off.contains(&id.key())
+                        || state.moved.contains_key(&id)
                         || state.actors.get(&id.key()).is_some_and(|d| d.decayed)
                 })
             });
             for (id, (resident, frame)) in &state.moved {
                 let p = &state.offsets[&id.key()];
-                if &p.map != map || state.actors.get(&id.key()).is_some_and(|d| d.decayed) {
+                if &p.map != map
+                    || off.contains(&id.key())
+                    || state.actors.get(&id.key()).is_some_and(|d| d.decayed)
+                {
                     if &p.map == map && resident.blocks {
                         *self.door_states.vacated.entry(p.source).or_default() += 1;
                     }

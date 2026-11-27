@@ -432,6 +432,11 @@ impl State {
     pub(super) fn has_corpses(&self) -> bool {
         self.actors.values().any(|a| a.dead && !a.decayed)
     }
+    pub(super) fn set_death_animation(&mut self, id: OriginalId, animation: u8) {
+        if let Some(actor) = self.actors.get_mut(&id.key()) {
+            actor.death_anim = Some(animation);
+        }
+    }
     pub(super) fn death_anim(&self, id: OriginalId) -> u8 {
         self.actors
             .get(&id.key())

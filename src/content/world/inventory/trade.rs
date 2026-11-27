@@ -603,6 +603,9 @@ impl InteractiveWorld {
             } else {
                 i64::from(worth) * i64::from(units) - total
             };
+            if profit < 0 && total > 0 {
+                world.queue_sound(super::super::SoundEvent::Inventory(8158));
+            }
             if profit > 50
                 && world
                     .trade

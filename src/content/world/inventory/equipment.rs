@@ -829,7 +829,7 @@ impl InteractiveWorld {
         inventory.revision += 1;
         self.cache.update_character_movement();
         if let Some(id) = sound {
-            self.queue_sound(super::super::SoundEvent::Effect(id));
+            self.queue_sound(super::super::SoundEvent::Inventory(id));
         }
         Ok(
             json!({"slot":slot,"equipped":equipped,"unequipped":unequipped,"statistics":self.character_statistics()}),

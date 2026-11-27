@@ -62,8 +62,7 @@ Click the logbook icon or press **L** to read Quests. Turn spreads with the arro
 **Escape** opens the Classic pause menu. Choose Save Game, Load Game,
 Options, Quit Game or Continue. **F7** writes the quicksave and **F8** loads
 the newest save. [Native savegames](docs/SAVEGAMES.md)
-The camera follows the character by default, and original sectors load in the
-background. The default spawn is the original Zephyr crash site, resolved
+The camera stays where you place it. Use the screen edges or arrow keys to pan, **Home** to center on the player and **F5** to toggle and save continuous following. Original sectors load in the background. The default spawn is the original Zephyr crash site, resolved
 from the game's `START_MAP` metadata. Click the nearby cave entrance to
 enter, then click the exit inside to return. Use `arcanum-rs play --map 5011` for Bates Mansion or
 `arcanum-rs play --map "k'na tha" --center 383 928` for K’na Tha.

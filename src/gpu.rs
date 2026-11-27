@@ -49,6 +49,7 @@ pub struct OverlayDraw<'a> {
     pub asset: &'a Arc<LoadedFrame>,
     pub rect: [f32; 4],
     pub clip: [f32; 4],
+    pub additive: bool,
 }
 
 impl<'a> OverlayDraw<'a> {
@@ -60,6 +61,7 @@ impl<'a> OverlayDraw<'a> {
             asset,
             rect,
             clip: rect,
+            additive: false,
         }
     }
 }
@@ -405,9 +407,18 @@ impl Compositor {
                 None,
             )
         });
-        let overlay = overlay
-            .into_iter()
-            .map(|draw| (draw.asset, Blend::SourceOver, None, Some(draw)));
+        let overlay = overlay.into_iter().map(|draw| {
+            (
+                draw.asset,
+                if draw.additive {
+                    Blend::Add
+                } else {
+                    Blend::SourceOver
+                },
+                None,
+                Some(draw),
+            )
+        });
         for (asset, blend, world, overlay) in world.chain(overlay) {
             if self.draws.len() == MAX_DRAWS {
                 return Err("GPU frame exceeds the draw limit".into());

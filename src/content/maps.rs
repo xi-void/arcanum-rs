@@ -166,6 +166,24 @@ impl Catalog {
 }
 
 impl Map {
+    /// Sound schemes applied when the original engine opens the entry sector.
+    pub fn entry_sound_schemes(&self, vfs: &mut Vfs) -> Result<Option<[i32; 2]>, Box<dyn Error>> {
+        let id = super::world::tile_sector_id(self.map_list_center);
+        let path = format!("maps/{}/{id}.sec", self.directory);
+        let bytes = match read_bounded(vfs, &path, crate::sector::MAX_INPUT_BYTES) {
+            Ok((_, bytes)) => bytes,
+            Err(super::Error::Resource {
+                error: crate::vfs::Error::NotFound(_),
+                ..
+            }) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let floor = crate::sector::decode_floor(&bytes)?;
+        let schemes =
+            crate::sector::objects::sector_properties(&bytes, floor.tile_offset)?.sound_schemes;
+        Ok((schemes != [0; 2]).then_some(schemes))
+    }
+
     pub fn files(&self, vfs: &mut Vfs) -> Result<MapFiles, Box<dyn Error>> {
         let prefix = format!("maps/{}/", self.directory);
         let mut sectors = BTreeSet::new();

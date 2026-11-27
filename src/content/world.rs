@@ -33,6 +33,7 @@ mod debug;
 mod scan;
 pub use scan::{ScanOptions, compatibility_scan};
 mod abilities;
+mod heartbeat;
 mod interaction;
 mod inventory;
 mod npc;

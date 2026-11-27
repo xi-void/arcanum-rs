@@ -2227,6 +2227,7 @@ fn overlay(asset: &Arc<LoadedFrame>, rect: Rect, clip: Rect) -> OverlayDraw<'_> 
     OverlayDraw {
         asset,
         rect: pixels(rect),
+        additive: false,
         clip: pixels(clip),
     }
 }
@@ -2458,6 +2459,17 @@ fn reduced_coverage(glyph: &SpriteFrame, x: u32, y: u32, w: u32, h: u32) -> u8 {
     ((sum + area / 2) / area) as u8
 }
 
+/// TIG's additive ART blit adds palette intensity times the font tint.
+/// The Vulkan additive pipeline sums RGB directly, independent of alpha.
+pub(super) fn additive_glyph_coverage(frame: &mut SpriteFrame) {
+    for pixel in &mut frame.pixels {
+        let coverage = u16::from(pixel[3]);
+        for component in &mut pixel[..3] {
+            *component = ((u16::from(*component) * coverage + 127) / 255) as u8;
+        }
+    }
+}
+
 pub(super) fn blend_glyph(dst: &mut Color, color: Color, coverage: u8) {
     let alpha = (u32::from(color[3]) * u32::from(coverage) + 127) / 255;
     if alpha == 0 {
@@ -2554,6 +2566,15 @@ mod tests {
         scale_into(&source, &mut frame, Some([1, 0, 2, 1])).unwrap();
         assert_eq!(frame.pixels, source.pixels[1..]);
         assert!(scale_into(&source, &mut frame, Some([2, 0, 2, 1])).is_err());
+    }
+
+    #[test]
+    fn additive_font_pass_weights_the_highlight_by_palette_coverage() {
+        let mut frame = sprite([3, 1], [100, 60, 40, 255]);
+        frame.pixels[0][3] = 0;
+        frame.pixels[1][3] = 64;
+        additive_glyph_coverage(&mut frame);
+        assert_eq!(frame.pixels, [[0; 4], [25, 15, 10, 64], [100, 60, 40, 255]]);
     }
 
     #[test]

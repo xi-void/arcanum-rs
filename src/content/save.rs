@@ -32,6 +32,8 @@ pub struct Metadata {
 pub struct State {
     pub map: String,
     pub tile: (u32, u32),
+    #[serde(default)]
+    pub camera_offset: Option<(i32, i32)>,
     pub facing: u8,
     pub clock: (u64, u64),
     pub objects: Objects,
@@ -350,6 +352,7 @@ mod tests {
         let state = State {
             map: "fixture".into(),
             tile: (32, 32),
+            camera_offset: Some((80, 20)),
             facing: 4,
             clock: (29, 3_000),
             scripts,

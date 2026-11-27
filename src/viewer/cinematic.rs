@@ -435,6 +435,7 @@ impl Playback {
         let rect = [(size.0 as f32 - w) * 0.5, (size.1 as f32 - h) * 0.5, w, h];
         Some(OverlayDraw {
             asset: &self.asset,
+            additive: false,
             rect,
             clip: rect,
         })
@@ -469,6 +470,11 @@ impl Viewer<'_> {
         events: &ActiveEventLoop,
     ) {
         self.movie = None;
+        if !ids.is_empty()
+            && let Some(audio) = &mut self.audio
+        {
+            audio.cinematic();
+        }
         if let ViewContent::Stream {
             inventory_reader: Some(reader),
             ..
@@ -503,6 +509,8 @@ impl Viewer<'_> {
         }
         if after == Destination::Game {
             self.menu_action(MenuCommand::EnterGame, events);
+        } else if let Some(audio) = &mut self.audio {
+            audio.main_menu();
         }
         self.update_control_flow(events);
     }
