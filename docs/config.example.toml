@@ -6,6 +6,7 @@ game_data = "/path/to/Arcanum"
 [gameplay]
 difficulty = "normal"  # easy, normal or hard
 turn_based = false
+fast_turn_based = false  # Skip the active actor’s gait when turn-based combat is enabled.
 
 [window]
 width = 1280

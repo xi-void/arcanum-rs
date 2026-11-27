@@ -271,7 +271,7 @@ pub struct InteractiveWorld {
     player_started: bool,
     gait_frame: Option<usize>,
     pub(super) sounds: std::collections::VecDeque<SoundEvent>,
-    transition: Option<(Destination, u8)>,
+    pub(super) transition: Option<(Destination, u8)>,
     pending_use: Option<WorldOrder>,
     pub(super) ability: abilities::UseState,
     pub(super) game_second: u64,
@@ -990,6 +990,17 @@ impl InteractiveWorld {
         let Some(anchor) = self.cache.update_player(now) else {
             return false;
         };
+        if self.combat_ap() == Some(0)
+            && self
+                .cache
+                .player
+                .as_ref()
+                .is_some_and(Player::has_planned_steps)
+        {
+            // Only the paid step belongs to this turn. Drop its unreachable
+            // continuation (including an interaction at the end of the path).
+            self.cancel_route_keep_spell();
+        }
         let pose = self.cache.player.as_ref().unwrap().sample(now);
         let camera_changed = camera.is_some_and(|camera| {
             let previous = camera.position();

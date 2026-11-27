@@ -270,7 +270,7 @@ pub fn show_stream(
         )
         .map_err(|error| format!("cannot start sector preparation worker: {error}"))?;
     world.set_difficulty(startup.settings.difficulty);
-    world.set_turn_based(startup.settings.turn_based);
+    world.set_combat_mode(startup.settings.combat_mode);
     world.follow_player(Duration::ZERO, &mut camera);
     run_content(
         title,
@@ -706,7 +706,7 @@ impl Viewer<'_> {
         }
         next.set_difficulty(self.settings.difficulty);
         if fresh {
-            next.set_turn_based(self.settings.turn_based);
+            next.set_combat_mode(self.settings.combat_mode);
             self.clock = next.game_clock();
         }
         **world = next;
@@ -818,6 +818,14 @@ impl Viewer<'_> {
         self.menu_action(MenuCommand::Stay, event_loop);
     }
 
+    fn record_combat_mode(&mut self, mode: arcanum_rs::content::world::CombatMode) {
+        self.settings.combat_mode = mode;
+        if let Some(preferences) = &mut self.preferences {
+            preferences.set("gameplay", "turn_based", mode.turn_based);
+            preferences.set("gameplay", "fast_turn_based", mode.fast_turn_based);
+        }
+    }
+
     fn record_settings(&mut self, previous: Settings) {
         let current = self.settings;
         if current.audio != previous.audio
@@ -825,13 +833,10 @@ impl Viewer<'_> {
         {
             audio.volumes(current.audio);
         }
-        if let ViewContent::Stream { world, .. } = &mut self.content {
-            if current.difficulty != previous.difficulty {
-                world.set_difficulty(current.difficulty);
-            }
-            if current.turn_based != previous.turn_based {
-                world.set_turn_based(current.turn_based);
-            }
+        if current.difficulty != previous.difficulty
+            && let ViewContent::Stream { world, .. } = &mut self.content
+        {
+            world.set_difficulty(current.difficulty);
         }
         if let Some(preferences) = &mut self.preferences {
             if current.difficulty != previous.difficulty {
@@ -842,9 +847,7 @@ impl Viewer<'_> {
                 };
                 preferences.set("gameplay", "difficulty", value);
             }
-            if current.turn_based != previous.turn_based {
-                preferences.set("gameplay", "turn_based", current.turn_based);
-            }
+
             for (key, value, old) in [
                 ("effects", current.audio.effects, previous.audio.effects),
                 ("voice", current.audio.voice, previous.audio.voice),
@@ -1397,6 +1400,13 @@ impl Viewer<'_> {
         let size = view.window.inner_size();
         let physical = [size.width, size.height];
         let previous = self.settings;
+        let mut edited = previous;
+        if menu.front.is_none()
+            && let ViewContent::Stream { world, .. } = &self.content
+        {
+            edited.combat_mode = world.combat_mode();
+        }
+        let displayed_mode = edited.combat_mode;
         let store = self.saves.as_ref().map_err(String::as_str);
         if let WindowEvent::KeyboardInput { event, .. } = event
             && event.state.is_pressed()
@@ -1416,7 +1426,7 @@ impl Viewer<'_> {
                     options_done = options.key(&event.logical_key);
                 }
                 WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } => {
-                    if !options.hover(self.cursor, physical, scale, theme, &mut self.settings) {
+                    if !options.hover(self.cursor, physical, scale, theme, &mut edited) {
                         return true;
                     }
                 }
@@ -1434,7 +1444,7 @@ impl Viewer<'_> {
                         physical,
                         scale,
                         theme,
-                        &mut self.settings,
+                        &mut edited,
                     );
                     options_done = done;
                     if let Some(id) = effect
@@ -1516,6 +1526,16 @@ impl Viewer<'_> {
                 _ => return false,
             }
         };
+        self.settings = Settings {
+            combat_mode: previous.combat_mode,
+            ..edited
+        };
+        if edited.combat_mode != displayed_mode
+            && let ViewContent::Stream { world, .. } = &mut self.content
+            && world.set_combat_mode(edited.combat_mode)
+        {
+            self.record_combat_mode(edited.combat_mode);
+        }
         self.record_settings(previous);
         if options_done
             && let Some(preferences) = &mut self.preferences
@@ -2122,10 +2142,17 @@ impl ApplicationHandler for Viewer<'_> {
                     if self.player_deadline.is_some_and(|deadline| now >= deadline) {
                         if !*waiting && !view.occluded {
                             let before = camera.position();
-                            redraw |= world.advance_player(
-                                elapsed,
-                                self.settings.follow.then_some(&mut *camera),
-                            );
+                            loop {
+                                redraw |= world.advance_player(
+                                    elapsed,
+                                    self.settings.follow.then_some(&mut *camera),
+                                );
+                                if !inventory_reader.as_mut().is_some_and(|reader| {
+                                    reader.continue_fast_player_route(world, elapsed)
+                                }) {
+                                    break;
+                                }
+                            }
                             let after = camera.position();
                             if before != after {
                                 *direction = (after.0 - before.0, after.1 - before.1);
@@ -2617,8 +2644,15 @@ impl ApplicationHandler for Viewer<'_> {
                             true
                         }
                         Key::Named(NamedKey::Space) => {
+                            let previous = world.combat_mode();
                             world.toggle_turn_based();
-                            true
+                            let mode = world.combat_mode();
+                            view.window.request_redraw();
+                            if mode != previous {
+                                self.record_combat_mode(mode);
+                            }
+                            self.update_control_flow(event_loop);
+                            return;
                         }
                         Key::Character(c) if c.eq_ignore_ascii_case("e") => world.end_combat_turn(),
                         Key::Named(NamedKey::Enter) => world.end_combat_turn(),
@@ -3368,7 +3402,15 @@ impl Viewer<'_> {
                         let scale = hud.as_ref().map_or(self.pause_scale, |hud| hud.scale());
                         let menu = self.pause.as_ref().zip(self.pause_theme.as_mut()).map(
                             |((menu, _), theme)| {
-                                theme.render(menu, [size.width, size.height], scale, self.settings)
+                                theme.render(
+                                    menu,
+                                    [size.width, size.height],
+                                    scale,
+                                    Settings {
+                                        combat_mode: world.combat_mode(),
+                                        ..self.settings
+                                    },
+                                )
                             },
                         );
                         if let (Some(map_ui), Some(travel), Some((tile, town))) = (

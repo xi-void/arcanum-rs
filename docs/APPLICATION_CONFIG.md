@@ -72,4 +72,14 @@ automatic socket and its directory. `--rpc SOCKET` selects an explicit path
 in an existing private directory for automation. Developer options are disabled
 by default. [Diagnostics protocol](MACHINE_DIAGNOSTICS.md)
 
-The Game options write `gameplay.difficulty` (`easy`, `normal`, or `hard`) and `gameplay.turn_based` (the default combat mode). Normal is the stock CE default. Difficulty applies immediately and carries over when loading a slot. On Easy, the local player's attack effectiveness and final HP damage increase by half. On Hard they decrease by a quarter. The damage adjustment follows armor and resistance. The current encounter mode is saved with the encounter.
+Classic Game Options sets the default combat mode with two switches. Both default to false.
+
+| Default Combat Mode | `gameplay.turn_based` | `gameplay.fast_turn_based` |
+| --- | --- | --- |
+| Real Time | false | false |
+| Turn Based | true | false |
+| Fast Turn Based | true | true |
+
+Space toggles only `turn_based`. Switching from fast combat to real time this way retains the fast preference for the next toggle. Loading a slot restores its saved mode independently of the new-game default.
+
+Game Options also writes `gameplay.difficulty` (`easy`, `normal` or `hard`). Normal is CE’s default difficulty. Difficulty applies immediately and carries over when loading a slot. On Easy, the local player's attack effectiveness and final HP damage increase by half. On Hard they decrease by a quarter. The damage adjustment follows armor and resistance.

@@ -1,6 +1,6 @@
 # Arcanum-RS — Known Issues
 
-Baseline includes M79-R character creation and cinematic playback. Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
+Baseline includes M80-R Fast Turn-Based combat. Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
 
 ## Triage
 
@@ -14,11 +14,11 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 
 - **M79 character sheet (P2, open).** The Classic sheet omits the player’s name.
 - **Moving shadows (P2, open).** NPC shadows can lose their anchor while the actor moves.
-- **Combat speed (P2, open).** Fast turn-based combat is missing. Configurable floating damage numbers are a separate optional future enhancement.
+- Configurable floating damage numbers remain an optional future enhancement.
 
 ### COMBAT-001 — Remaining combat compatibility
 
-- **Priority P2. Status open.** The stock CE skill rolls, armor and resistance, AP costs, NPC-first turn list, critical damage bonuses and base XP pool rules underpin both combat modes. The Born Under a Sign background supplies both critical severity modifiers. Its hit modifier feeds the original bonus-damage rolls. Its fumble modifier is retained for the remaining weapon and ammunition damage rules. Detailed critical locations, equipment damage and dropped weapons, special critical-chart injuries, ambient light penalties and tactical NPC spell and weapon selection still need coverage. Real-time attack intervals use weapon cost and actor speed. NPCs and summons play the directional walking, attack and death sequences available for their current models. The resolver supports ordinary and torso deaths with the original fallback. Additional injury-specific death variants depend on critical-chart support.
+- **Priority P2. Status open.** The stock CE skill rolls, armor and resistance, AP costs, NPC-first turn list, critical damage bonuses and base XP pool rules underpin real-time combat and both turn-based speeds. The Born Under a Sign background supplies both critical severity modifiers. Its hit modifier feeds the original bonus-damage rolls. Its fumble modifier is retained for the remaining weapon and ammunition damage rules. Detailed critical locations, equipment damage and dropped weapons, special critical-chart injuries, ambient light penalties and tactical NPC spell and weapon selection still need coverage. Real-time attack intervals use weapon cost and actor speed. NPCs and summons play the directional walking, attack and death sequences available for their current models. The resolver supports ordinary and torso deaths with the original fallback. Additional injury-specific death variants depend on critical-chart support. Ordinary combat currently sets facing directly when starting an action. CE also has a separate incremental rotation goal for ordinary turns. Fast turns use the final facing directly.
 - Followers need recruitment, commands, party travel and party XP distribution. An allied summon can fight using its current form and ownership. Encounters use original hostility, sight, faction and supported script attachments. Some original dying and encounter scripts use operations beyond the script interpreter, reported by `rpc combat`.
 - **Installed regression baseline.** The M79-R installed-data run reproduced the pre-M78 failures in the Bates lighting composition, the dining-room mobile shadow probe and the Kna Tha rabbit position. The other 74 installed checks passed, including the external VFS smoke check with its mod fixture. The dropped-item eviction assertion follows the item's original identity through the rendered pickup target.
 
@@ -259,6 +259,7 @@ These are planned capabilities, not regressions. Implement in their own mileston
 - **Classic main and pause lettering. Resolved.** Both menus use the original dark red face and bright selection. The relief uses the ART glyph coverage. Labels use their measured frame extents and configured top and center independently of the hitbox. Vulkan captures covered normal, hovered, keyboard-selected and modal-disabled entries. A narrowed external button at 120% effective scale retained the full label and its configured click area.
 
 - **UI-009. Resolved.** Quit Game returns to the original main menu after confirmation. Native checks covered loading the previous character, creating a second character and exiting from the main menu. Starting a new campaign copies the new character and owned items from the merchant session in transaction order. Merchant state, old character effects, quests and rumors stay with their original session.
+- **Combat speed (M80-R). Resolved.** Classic Options loads the original three mode labels. Fast turns skip the acting character’s movement frames. Paired native Kree encounters retained the turn order, AP, rolls, damage and summoned ally. [Combat verification](AGENT_WORKFLOW.md#combat)
 - **COMBAT-002. Resolved.** NPC and summon steps previously changed tile without a walking pose. Kree bandits, the Crash Site wolf and an Orcish Champion now use their directional walking and falling ART. A saved wolf fall resumed after a full restart and stayed on its last frame after a second F8 during the player's turn. Spell targeting remains active across casts until cancelled. Native right-button release restored the ordinary pointer. Quench Life completed its callback once during turn-based combat.
 
 These are not open defects. Retain focused regression coverage and reopen only if reproduced.

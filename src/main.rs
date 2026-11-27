@@ -1677,7 +1677,7 @@ fn show_world(
                         shadows: config.display.shadows,
                         run: config.input.run,
                         difficulty: config.gameplay.difficulty,
-                        turn_based: config.gameplay.turn_based,
+                        combat_mode: config.gameplay.combat_mode,
                         audio: config.audio.normalized(),
                     },
                     preferences,

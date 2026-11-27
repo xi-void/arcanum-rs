@@ -243,6 +243,14 @@ impl Player {
         self.tile
     }
 
+    pub(super) fn in_stride(&self) -> bool {
+        self.step.is_some()
+    }
+
+    pub(super) fn has_planned_steps(&self) -> bool {
+        !self.route.is_empty()
+    }
+
     pub(super) fn moving(&self) -> bool {
         self.step.is_some() || !self.route.is_empty()
     }
@@ -304,7 +312,12 @@ impl Player {
         self.route.clear();
     }
 
-    pub(super) fn update(&mut self, now: Duration, next: impl FnOnce(Tile, u8) -> Option<Tile>) {
+    pub(super) fn update(
+        &mut self,
+        now: Duration,
+        instant: bool,
+        next: impl FnOnce(Tile, u8) -> Option<Tile>,
+    ) {
         let mut start = now;
         let mut continuing = false;
         if let Some(step) = self.step {
@@ -319,7 +332,19 @@ impl Player {
             start = end.max(now.saturating_sub(Duration::from_millis(16)));
         }
         if let Some(direction) = self.route.pop_front() {
-            let running = self.route_runs && self.can_run;
+            let running = self.route_running();
+            let Some(to) = next(self.tile, direction) else {
+                self.facing = direction;
+                self.running = running;
+                self.cancel_route();
+                return;
+            };
+            if instant {
+                self.tile = to;
+                self.facing = direction;
+                self.running = running;
+                return;
+            }
             let gait = self.appearance.directions[usize::from(direction)].gait(running);
             // CE anim.c sub_437990 adjusts authored cadence only when speed differs from 8.
             let period = gait_period(self.appearance.art, self.speed, running, gait.frame_period);
@@ -333,17 +358,13 @@ impl Player {
             self.cycle_period = period * gait.frames.len() as u32;
             self.facing = direction;
             self.running = running;
-            if let Some(to) = next(self.tile, direction) {
-                self.step = Some(Step {
-                    to,
-                    start,
-                    duration: gait
-                        .tile_period
-                        .mul_f64(period.as_secs_f64() / gait.frame_period.as_secs_f64()),
-                });
-            } else {
-                self.cancel_route();
-            }
+            self.step = Some(Step {
+                to,
+                start,
+                duration: gait
+                    .tile_period
+                    .mul_f64(period.as_secs_f64() / gait.frame_period.as_secs_f64()),
+            });
         }
     }
 

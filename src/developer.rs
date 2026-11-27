@@ -309,7 +309,7 @@ const COMMANDS: &[Command] = &[
     query!(
         "combat",
         "combat",
-        "Inspect the encounter, turn, action points, attacks and projectiles.",
+        "Inspect combat mode, turn order, AP, movement, attacks and projectiles.",
         |a| a.is_empty().then_some(Request::Combat)
     ),
     query!(
@@ -591,6 +591,7 @@ impl Command {
             "combat" => &[
                 "armed",
                 "mode",
+                "fast_turn_based",
                 "participants",
                 "turn",
                 "round",

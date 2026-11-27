@@ -26,7 +26,8 @@ pub(crate) struct Config {
 #[serde(default)]
 pub(crate) struct Gameplay {
     pub difficulty: arcanum_rs::content::Difficulty,
-    pub turn_based: bool,
+    #[serde(flatten)]
+    pub combat_mode: arcanum_rs::content::world::CombatMode,
 }
 
 #[derive(Deserialize)]
