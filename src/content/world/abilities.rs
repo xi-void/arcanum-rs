@@ -226,6 +226,9 @@ impl InteractiveWorld {
             false
         }
     }
+    pub fn college_levels(&self) -> [u32; 16] {
+        self.cache.inventory.character.colleges
+    }
     pub fn conveyance_level(&self) -> u32 {
         self.cache.inventory.character.colleges[0]
     }

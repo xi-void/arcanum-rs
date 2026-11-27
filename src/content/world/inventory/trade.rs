@@ -296,7 +296,7 @@ impl InteractiveWorld {
             return Err("Gold is the currency".into());
         }
         let character = &self.cache.inventory.character;
-        let training = (character.haggle >> 6) & 3;
+        let training = (character.basic_skills[9] >> 6) & 3;
         if buying {
             if training < 3 && item.flags & 2 != 0 {
                 return Err("Merchant will not sell this item".into());
@@ -352,8 +352,8 @@ impl InteractiveWorld {
         }
         let stats = self.character_statistics();
         let level = crate::content::character::SkillValue::level(
-            character.haggle,
-            self.cache.inventory.rules.haggle(),
+            character.basic_skills[9],
+            self.cache.inventory.rules.skill_modifier(9),
             stats.attributes[6],
         );
         let haggle = (4 * level + 10 + if stats.attributes[4] >= 20 { 10 } else { 0 }).min(95);
@@ -469,12 +469,14 @@ impl InteractiveWorld {
         apply: impl FnOnce(&mut Self) -> Result<T, String>,
     ) -> Result<T, String> {
         let state = self.cache.inventory.state.clone();
+        let character = self.cache.inventory.character.clone();
         let accounts = self.cache.inventory.accounts.clone();
         let revision = self.cache.inventory.revision;
         let sounds = self.sounds.len();
         let result = apply(self);
         if result.is_err() {
             self.cache.inventory.state = state;
+            self.cache.inventory.character = character;
             self.cache.inventory.accounts = accounts;
             self.cache.inventory.revision = revision;
             self.sounds.truncate(sounds);
@@ -580,12 +582,7 @@ fn unit_price(
     let m = i128::from(retail);
     let h = i128::from(haggle);
     let cost = if buying {
-        let r = reaction.clamp(0, 100);
-        let factor = if r < 50 {
-            2 * (100 - r)
-        } else {
-            120 - 2 * r / 5
-        };
+        let factor = crate::content::character::service_price_percent(reaction);
         ((w + w * m * (100 - h) / 10000) * i128::from(factor) / 100)
             .max(w + 1)
             .max(3)
@@ -620,7 +617,38 @@ impl InteractiveWorld {
         let mut records = self.records(vfs);
         let terms = records.npc_inventory(id)?;
         let state = &self.cache.inventory.state;
+        let stats = self.character_statistics();
+        let mut values = stats.base.map(Some);
+        for (slot, attribute) in values.iter_mut().zip(stats.attributes) {
+            *slot = Some(attribute)
+        }
+        values[8..17].copy_from_slice(&[
+            Some(stats.carry_capacity),
+            Some(stats.damage_bonus),
+            Some(stats.ac_adjustment),
+            stats.speed,
+            Some(stats.heal_rate),
+            Some(stats.poison_recovery),
+            Some(stats.reaction_modifier),
+            Some(stats.max_followers),
+            Some(stats.aptitude),
+        ]);
+        values[19] = Some(stats.alignment);
         let mut facts = Interaction {
+            alignment_base: stats.base[19],
+            alignment_modifier: self.cache.inventory.rules.social(0),
+            reaction_modifiers: [
+                self.cache.inventory.rules.social(1),
+                self.cache.inventory.rules.social(2),
+            ],
+            quest_levels: Some(self.progression_rules().quest_levels.clone()),
+            vitals: [
+                [stats.current_health, stats.max_health],
+                [stats.current_fatigue, stats.max_fatigue],
+            ]
+            .map(|p| p.map(|n| n.clamp(i32::MIN.into(), i32::MAX.into()) as i32)),
+            stats: values,
+            skills: stats.skills,
             reaction,
             aptitude: self.character_statistics().aptitude,
             gold: [
@@ -723,6 +751,46 @@ impl InteractiveWorld {
         self.exchange(|world| {
             for operation in facts.operations {
                 match operation {
+                    Transfer::Heal { fatigue, amount } => {
+                        let inv = &mut world.cache.inventory;
+                        let damage = if fatigue {
+                            &mut inv.character.fatigue_damage
+                        } else {
+                            &mut inv.character.health_damage
+                        };
+                        *damage = damage.saturating_sub(amount).max(0);
+                        if fatigue && *damage == 0 {
+                            inv.character.recover_at = None;
+                        }
+                        inv.revision += 1;
+                    }
+                    Transfer::Reaction(n) => {
+                        world.adjust_npc_gold(vfs, npc, 0)?;
+                        let account = world
+                            .cache
+                            .inventory
+                            .accounts
+                            .get_mut(&world.map)
+                            .and_then(|row| row.get_mut(npc))
+                            .ok_or("Unresolved NPC reaction")?;
+                        account.reaction_delta = account.reaction_delta.saturating_add(n);
+                    }
+                    Transfer::Training(skill, tier) => {
+                        let stats = world.character_statistics();
+                        world.cache.inventory.character.train(skill, tier, &stats)?;
+                        world.cache.inventory.revision += 1;
+                    }
+                    Transfer::Alignment(change) => {
+                        let inv = &mut world.cache.inventory;
+                        inv.character.base[19] = change.apply(inv.character.base[19]);
+                        inv.revision += 1;
+                    }
+                    Transfer::QuestExperience(level) => {
+                        let inv = &mut world.cache.inventory;
+                        let xp = inv.rules.progression.reward(level)?;
+                        inv.character.gain_experience(xp, &inv.rules);
+                        inv.revision += 1;
+                    }
                     Transfer::Gold { actor: 0, delta } => world.adjust_player_gold(vfs, delta)?,
                     Transfer::Gold { actor: 1, delta } => world.adjust_npc_gold(vfs, npc, delta)?,
                     Transfer::Gold { .. } => return Err("Invalid currency owner".into()),
@@ -737,6 +805,7 @@ impl InteractiveWorld {
                     }
                 }
             }
+            world.cache.update_character_movement();
             Ok(())
         })
     }

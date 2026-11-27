@@ -301,6 +301,7 @@ pub(crate) struct ItemStats {
     pub weight: Option<i32>,
     pub magic_weight: Option<i32>,
     pub complexity: Option<i32>,
+    pub discipline: i32,
     pub unknown_description: Option<u32>,
     pub use_art: Option<u32>,
     pub equipment_flags: Option<u32>,
@@ -312,7 +313,7 @@ pub(crate) struct ItemStats {
     pub weapon_hit_bonus: Option<i32>,
     pub weapon_speed: Option<i32>,
     pub weapon_min_strength: Option<i32>,
-    pub wield_script: bool,
+    pub wield_scripts: [(i32, crate::content::script::Local); 2],
     pub quantity: Option<u32>,
     pub ammo_type: Option<u32>,
     pub spells: [Option<u32>; 5],
@@ -335,10 +336,15 @@ impl ItemStats {
         let signed = scalar.map(|v| v as i32);
         match (category, field) {
             (_, 31) => {
-                self.wield_script = [24, 25].into_iter().any(|slot| {
+                self.wield_scripts = [24, 25].map(|slot| {
                     value
                         .array_entry(slot)
-                        .is_some_and(|entry| entry[8..12] != [0; 4])
+                        .map_or_else(Default::default, |entry| {
+                            (
+                                i32::from_le_bytes(entry[8..12].try_into().unwrap()),
+                                crate::content::script::Local::from_attachment(entry),
+                            )
+                        })
                 })
             }
             (_, 21) => self.name = scalar.unwrap_or_default(),
@@ -350,6 +356,7 @@ impl ItemStats {
             (_, 67) => self.magic_weight = signed,
             (_, 72) => self.use_art = scalar,
             (_, 73) => self.complexity = signed,
+            (_, 74) => self.discipline = signed.unwrap_or_default(),
             (_, 75) => self.unknown_description = scalar,
             (_, 77..=81) => self.spells[field - 77] = scalar,
             (11, 96) => self.key_ids = signed.into_iter().collect(),
@@ -401,6 +408,7 @@ pub(crate) struct PrototypeDefaults {
     pub inventory_scripts: bool,
     pub item: Option<Box<ItemStats>>,
     pub character: Option<Box<[Option<i32>; 28]>>,
+    pub portrait: i32,
     pub background: Option<i32>,
     pub original_art: Option<u32>,
     pub armor_class: Option<i32>,
@@ -421,7 +429,8 @@ pub(crate) struct PrototypeDefaults {
     pub colleges: [u32; 16],
     pub mastery: Option<u32>,
     pub fatigue_damage: i32,
-    pub haggle: u32,
+    pub basic_skills: [u32; 12],
+    pub degrees: [u32; 8],
 }
 
 pub(crate) fn purchase_attachment(value: FieldValue<'_>) -> (i32, crate::content::script::Local) {
@@ -488,7 +497,9 @@ pub(crate) fn prototype_defaults(
             26..=27 if matches!(category, 15 | NPC) => {
                 hp[index - 26] = value.scalar().unwrap_or_default() as i32
             }
-            28 if category == NPC => npc_damage[0] = value.scalar().unwrap_or_default() as i32,
+            28 if matches!(category, 15 | NPC) => {
+                npc_damage[0] = value.scalar().unwrap_or_default() as i32
+            }
             30 if category == 15 => resistance = Some(int_array(value)),
             _ => {}
         }
@@ -513,11 +524,13 @@ pub(crate) fn prototype_defaults(
     } else {
         None
     };
+    let mut portrait = 0;
     let mut background = None;
-    let (mut merchant_gold, mut retail, mut substitute, mut inventory_source, mut haggle) =
-        (0, 0, None, None, 0);
+    let (mut merchant_gold, mut retail, mut substitute, mut inventory_source) = (0, 0, None, None);
     let (mut npc_flags, mut reaction_base, mut npc_leader, mut social_class) =
         (None, None, None, None);
+    let mut degrees = [0; 8];
+    let mut basic_skills = [0; 12];
     let mut tech_skills = [0; 4];
     let mut colleges = [0; 16];
     let mut mastery = None;
@@ -532,17 +545,19 @@ pub(crate) fn prototype_defaults(
                     68 => tech_skills = int_array(value).map(|x| x.unwrap_or_default() as u32),
                     69 => {
                         colleges = int_array(value).map(|x| x.unwrap_or_default() as u32);
+                        degrees = std::array::from_fn(|i| {
+                            value
+                                .array_entry(17 + i)
+                                .map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()))
+                        });
                         mastery = value
                             .array_entry(16)
                             .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
                             .filter(|n| *n < 16);
                     }
                     72 => fatigue_damage = value.scalar().unwrap_or_default() as i32,
-                    67 => {
-                        haggle = value
-                            .array_entry(9)
-                            .map_or(0, |v| u32::from_le_bytes(v.try_into().unwrap()))
-                    }
+                    67 => basic_skills = int_array(value).map(|x| x.unwrap_or_default() as u32),
+                    77 => portrait = value.scalar().unwrap_or(0) as i32,
                     132 => background = value.scalar().map(|v| v as i32),
                     _ => {}
                 }
@@ -613,6 +628,7 @@ pub(crate) fn prototype_defaults(
         item: item.map(Box::new),
         character,
         background,
+        portrait,
         original_art,
         armor_class,
         resistance,
@@ -628,7 +644,8 @@ pub(crate) fn prototype_defaults(
         merchant_gold,
         retail,
         substitute,
-        haggle,
+        basic_skills,
+        degrees,
         tech_skills,
         colleges,
         mastery,

@@ -11,6 +11,62 @@ impl Session {
             .find(|change| change.place == Place::Equipped(slot))
     }
 
+    pub(super) fn prepare_wield(
+        &self,
+        vfs: &mut Vfs,
+        item: &Item,
+    ) -> Result<
+        Option<(
+            crate::content::script::WieldEffect,
+            Arc<crate::content::character::Adjustments>,
+        )>,
+        String,
+    > {
+        if item.stats.wield_scripts.iter().all(|(id, _)| *id == 0) {
+            return Ok(None);
+        }
+        let program = crate::content::script::WieldEffect::load(vfs, item.stats.wield_scripts)?;
+        let effects = load_mes(vfs, "rules/effect.mes").map_err(|e| e.to_string())?;
+        let effect = effects
+            .mes
+            .get(program.id)
+            .ok_or_else(|| format!("Missing equipment effect {}", program.id))?;
+        Ok(Some((
+            program,
+            Arc::new(crate::content::character::Adjustments::parse(effect)?),
+        )))
+    }
+    pub(super) fn refresh_worn(&mut self) {
+        self.rules.worn = self
+            .state
+            .changes
+            .values()
+            .filter(|c| matches!(c.place, Place::Equipped(_)))
+            .flat_map(|c| {
+                c.item
+                    .stats
+                    .spells
+                    .iter()
+                    .map(|s| s.unwrap_or(10000))
+                    .take_while(|&s| s != 10000)
+            })
+            .filter_map(|s| self.rules.progression.worn_spells.get(&(s & 255)))
+            .flatten()
+            .cloned()
+            .collect();
+        let aptitude = self.aptitude();
+        for (id, (program, effect)) in &self.wielded {
+            if let Some(c) = self.state.changes.get(id)
+                && matches!(c.place, Place::Equipped(_))
+            {
+                let count = program.count(c.item.stats.complexity.unwrap_or(0), aptitude);
+                self.rules
+                    .worn
+                    .extend(std::iter::repeat_n(effect.clone(), count));
+            }
+        }
+    }
+
     pub(super) fn aptitude(&self) -> i32 {
         self.character.aptitude(&self.rules)
     }
@@ -45,7 +101,12 @@ impl Session {
         {
             let item = &change.item;
             let stats = &item.stats;
-            incomplete |= stats.spells.iter().flatten().any(|&spell| spell != 10_000)
+            incomplete |= stats
+                .spells
+                .iter()
+                .map(|s| s.unwrap_or(10000))
+                .take_while(|&s| s != 10000)
+                .any(|s| !self.rules.progression.worn_spells.contains_key(&(s & 255)))
                 || item.flags & 0x1e08 != 0;
             if item.category != 7 {
                 continue;
@@ -110,9 +171,6 @@ impl Session {
         }
         if self.character.background == 69 && stats.complexity.is_some_and(|value| value > 0) {
             return Err("Magick allergy prevents equipping magickal items".into());
-        }
-        if stats.wield_script {
-            return Err("Item requires an unsupported wield script".into());
         }
         let art = item
             .effective
@@ -191,7 +249,9 @@ impl Session {
             }
         }
         self.rules = Rules {
+            progression: crate::content::character::progression::ProgressionRules::load(vfs)?,
             terrain_flags,
+            worn: Vec::new(),
             race: self.character.race_effect().and_then(effect),
             gender: (self.character.gender() == 0)
                 .then(|| effect(330))
@@ -211,7 +271,7 @@ impl Session {
         self.character.body_art(fragment).map_err(str::to_owned)
     }
 
-    fn create_starting_item(
+    pub(super) fn create_starting_item(
         &mut self,
         vfs: &mut Vfs,
         frames: &mut FrameCache,
@@ -328,6 +388,7 @@ impl SectorCache {
     }
 
     pub(in crate::content::world) fn update_character_movement(&mut self) {
+        self.inventory.refresh_worn();
         if let Some(player) = &mut self.player {
             let statistics = self.inventory.statistics();
             player.speed = statistics.speed.unwrap_or(statistics.attributes[1]);
@@ -365,7 +426,10 @@ impl SectorCache {
                 defaults.appearance.critter_flags.unwrap_or_default();
             inventory.character.critter_flags2 =
                 defaults.appearance.critter_flags2.unwrap_or_default();
-            inventory.character.haggle = defaults.haggle;
+            inventory.character.portrait = defaults.portrait;
+            inventory.character.basic_skills = defaults.basic_skills;
+            inventory.character.degrees = defaults.degrees;
+            inventory.character.health_damage = defaults.npc_damage[0];
             inventory.character.background = defaults.background.unwrap_or_default();
             inventory.character.original_palette =
                 defaults.original_art.map_or(0, |art| (art >> 4) & 3);
@@ -378,6 +442,7 @@ impl SectorCache {
                 .map(Option::unwrap_or_default);
         }
         let backgrounds = load_mes(vfs, "rules/backgrnd.mes")?;
+        inventory.character.validate_progression()?;
         inventory.load_rules(vfs, &backgrounds)?;
         let block = inventory.character.background * 10;
         let background_value = |offset| {
@@ -439,13 +504,18 @@ impl SectorCache {
                 let art = inventory.body_art(Some(&item))?;
                 let appearance =
                     Appearance::load(vfs, frames, art).map_err(|error| error.to_string())?;
-                Ok::<_, String>((item, appearance))
+                let wield = inventory.prepare_wield(vfs, &item)?;
+                Ok::<_, String>((item, appearance, wield))
             };
-        let (item, appearance) = prepare(inventory, vfs, frames, description).or_else(|first| {
-            prepare(inventory, vfs, frames, jacket).map_err(|second| {
-                format!("Starting outfit unavailable ({first}); fallback jacket: {second}")
-            })
-        })?;
+        let (item, appearance, wield) =
+            prepare(inventory, vfs, frames, description).or_else(|first| {
+                prepare(inventory, vfs, frames, jacket).map_err(|second| {
+                    format!("Starting outfit unavailable ({first}); fallback jacket: {second}")
+                })
+            })?;
+        if let Some(effect) = wield {
+            inventory.wielded.insert(item.id, effect);
+        }
         inventory
             .state
             .put(item, Place::Equipped(EquipmentSlot::Armor), None);
@@ -568,9 +638,6 @@ impl InteractiveWorld {
         let backpack = Place::Owned(Owner::Player);
         let displaced = if let Some(item) = worn {
             check_removal(&item)?;
-            if item.stats.wield_script {
-                return Err("Item requires an unsupported unwield script".into());
-            }
             let mut records = self.records(vfs);
             let layout = records.layout(&inventory.state, &Owner::Player, None)?;
             let ignore = incoming.as_ref().map_or(item.id, |item| item.id);
@@ -601,6 +668,11 @@ impl InteractiveWorld {
         } else {
             None
         };
+        let program = incoming
+            .as_ref()
+            .map(|i| inventory.prepare_wield(vfs, i))
+            .transpose()?
+            .flatten();
         let sound = incoming
             .as_ref()
             .or(displaced.as_ref().map(|(item, _)| item))
@@ -611,9 +683,13 @@ impl InteractiveWorld {
             .map(|(item, cell)| (item.id.key(), *cell));
         let inventory = &mut self.cache.inventory;
         if let Some(item) = incoming {
+            if let Some(program) = program {
+                inventory.wielded.insert(item.id, program);
+            }
             inventory.state.put(item, Place::Equipped(slot), None);
         }
         if let Some((item, cell)) = displaced {
+            inventory.wielded.remove(&item.id);
             inventory.state.put(item, backpack, Some(cell));
         }
         if let Some(appearance) = appearance {
@@ -654,6 +730,87 @@ impl InventoryReader {
         quantity: u32,
     ) -> Result<Value, String> {
         world.transfer_quantity(&mut self.vfs, item, owners.0, owners.1, slot, quantity)
+    }
+}
+
+impl InteractiveWorld {
+    pub fn progression_report(&self) -> Value {
+        use crate::content::character::progression::{DEGREE_INT, SPELL_LEVEL, recipe_id};
+        let rules = self.progression_rules();
+        let stats = self.character_statistics();
+        let spells = rules.spells.iter().enumerate().map(|(id, spell)| {
+            let college = id / 5;
+            let rank = id % 5;
+            json!({
+                "id": id, "name": spell.name, "college": college, "rank": rank + 1,
+                "learned": stats.colleges[college] as usize > rank,
+                "required_level": SPELL_LEVEL[rank], "required_intelligence": 5,
+                "required_willpower": spell.willpower.as_ref().ok(), "issue": spell.willpower.as_ref().err(),
+                "point_cost": 1, "execution": if id == 1 { "unlocking_cantrip" } else { "unavailable" }
+            })
+        }).collect::<Vec<_>>();
+        let mut degrees = Vec::new();
+        for (index, discipline) in rules.disciplines.iter().enumerate() {
+            for rank in 1..=7 {
+                let id = recipe_id(index, rank).unwrap();
+                let recipe = rules.recipes.get(&id.0);
+                degrees.push(json!({
+                    "discipline": discipline, "rank": rank, "degree": rules.degree_titles[rank as usize],
+                    "name": recipe.and_then(|r| r.as_ref().ok()).map(|r| &r.title),
+                    "issue": recipe.and_then(|r| r.as_ref().err()), "recipe_id": id.0,
+                    "learned": stats.degrees[index] >= rank, "point_cost": 1,
+                    "required_intelligence": DEGREE_INT[rank as usize]
+                }));
+            }
+        }
+        let wield_effects = self.cache.inventory.wielded.iter().map(|(id, (program, _))| {
+            json!({"item": id.key(), "effect": program.id, "scripts": program.sources.each_ref().map(ToString::to_string)})
+        }).collect::<Vec<_>>();
+        json!({
+            "statistics": stats, "skills": rules.skills, "colleges": rules.colleges,
+            "spells": spells, "degrees": degrees, "wield_effects": wield_effects, "sources": rules.sources
+        })
+    }
+
+    pub fn progression_rules(&self) -> &crate::content::character::progression::ProgressionRules {
+        &self.cache.inventory.rules.progression
+    }
+
+    pub fn invest(
+        &mut self,
+        purchase: crate::content::character::progression::Investment,
+        undo: bool,
+    ) -> Result<(), String> {
+        let stats = self.character_statistics();
+        let session = &mut self.cache.inventory;
+        let history = if undo {
+            Some(
+                session
+                    .purchases
+                    .iter()
+                    .rposition(|p| *p == purchase)
+                    .ok_or("Only purchases made during this visit can be refunded")?,
+            )
+        } else {
+            None
+        };
+        session
+            .character
+            .invest(purchase, &session.rules.progression, &stats, undo)?;
+        if let Some(index) = history {
+            session.purchases.remove(index);
+        } else {
+            session.purchases.push(purchase);
+        }
+        session.revision += 1;
+        self.cache.update_character_movement();
+        Ok(())
+    }
+    pub fn refundable(&self, purchase: crate::content::character::progression::Investment) -> bool {
+        self.cache.inventory.purchases.contains(&purchase)
+    }
+    pub fn begin_advancement(&mut self) {
+        self.cache.inventory.purchases.clear();
     }
 }
 

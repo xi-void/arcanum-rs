@@ -504,6 +504,14 @@ pub fn compatibility_scan(
         ..Coverage::default()
     };
     let map_source = super::super::diagnostics::source(&catalog.source);
+    let progression = match crate::content::character::progression::ProgressionRules::load(&mut vfs)
+    {
+        Ok(r) => {
+            json!({"sources":r.sources,"spell_definitions":r.spells.iter().filter(|s|s.willpower.is_ok()).count(),
+            "degree_definitions":r.recipes.values().filter(|r|r.is_ok()).count(),"issues":r.spells.iter().filter_map(|s|s.willpower.as_ref().err()).chain(r.recipes.values().filter_map(|r|r.as_ref().err())).collect::<Vec<_>>() })
+        }
+        Err(e) => json!({"error":e.to_string()}),
+    };
     let quest_resources = super::super::quest::Catalog::load(&mut vfs).coverage();
     let mut groups = BTreeMap::new();
     let mut mobile_headers = MobileHeaders::default();
@@ -878,7 +886,7 @@ pub fn compatibility_scan(
     let (reads, art) = loader.stats();
     Ok(
         json!({"version":3,"map_catalog":map_source,"maps":scanned_maps,"coverage":coverage,"issues":issues,
-        "research":{"quest_resources":quest_resources,"mobile_headers":mobile_headers,"explicit_locations":locations,
+        "research":{"character_progression":progression,"quest_resources":quest_resources,"mobile_headers":mobile_headers,"explicit_locations":locations,
             "prepared_mobile_kinds":prepared_mobile_kinds,"prepared_mobile_examples":prepared_mobile_examples,
             "coverage_model":{"discovery":"counted_in_selected_vfs_scope","structural_decode":"partial",
                 "semantic_interpretation":"partial","prototype_and_art_resolution":"partial",

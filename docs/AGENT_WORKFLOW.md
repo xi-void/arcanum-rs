@@ -292,7 +292,7 @@ on the main map.
 
 ## Lockpicking and Unlocking Cantrip
 
-Use a character who carries lockpicks, or who knows the second spell of Conveyance. A new default PC has no purchased spells. Prepared native saves or a VFS replacement for the PC prototype can supply these prerequisites while progression UI is pending. Keep the player's real saves separate with `XDG_DATA_HOME`.
+Use a character who carries lockpicks, or who knows the second spell of Conveyance. A new default PC has no purchased spells. Press **C** and learn the first two Conveyance spells. A default human needs one additional point of Willpower for Unlocking Cantrip. Purchase Pick Locks on the technological skill tab and obtain an actual lockpick tool. Keep the player's real saves separate with `XDG_DATA_HOME`.
 
 Press **I**, drag Crude Lockpicks or Lockpicks from the backpack onto the inventory’s **Use** box, then click the door leaf or container. The PC approaches and works on the lock. For Cantrip, click **Spells** on the bottom bar, click the Unlocking Cantrip icon, then click the target. Escape or right-click cancels targeting. A second ordinary click uses the door or container after a successful unlock. The caster faces the target. Escape or right-click during the casting animation interrupts it without spending energy. The blue vial follows current fatigue. Brackets scale the HUD and its targeting controls together.
 
@@ -437,3 +437,15 @@ for count definitions, scope, and interpretation.
 7. Reproduce the same scenario through automation.
 8. Capture visual evidence only when relevant.
 9. Report remaining limitations.
+
+## Character progression and alignment
+
+Launch `target/release/arcanum-rs` with the installed game directory configured. Open the character sheet with **C** or its top-HUD button. The skill, technology and magick tabs share the point balance on the left. A minus control returns a purchase made during this visit, provided the change preserves prerequisites. **Escape** closes the sheet. **[** and **]** scale it with the HUD. Select a learned schematic in the book and click **Combine** with both components in the backpack. Use the bottom spell button to select a learned college and an executable spell.
+
+Use the `progression` RPC command for the character’s raw and effective values, skill training, XP threshold, signed aptitude and alignment, learned ranks, study requirements, wield scripts and winning MES sources. The `ui.hud.character_sheet` field of `pos` exposes physical controls and purchase or crafting feedback. `world-scan` reports structural spell and learned-schematic coverage in `research.character_progression`. Runtime crafting also resolves the ingredient and product prototypes.
+
+CE’s `stat.c`, `skill.c`, `spell.c`, `tech.c` and `level.c` supply the advancement, derived stat, expertise and unspent-point rules. `rules/spelllist.mes` entry `1000 + 50 × spell + 1` can override the Willpower threshold with its original `IQ:` field. Alignment uses stat 19 on the original −1000 to +1000 scale. The Classic dial displays one tenth of the effective value. DLG **AL** writes change base alignment, **AL** and **NA** conditions inspect effective alignment, and completed quests read their XP class and alignment adjustment from `rules/gamequest.mes`.
+
+For native checks, Doc Roberts offers apprentice Heal training near `coc 5000 90213 84148`. The generic beggar near `coc 5000 76135 48154` offers both a ten-coin donation and a hostile refusal. Reload the save before replaying alternative responses. Electrical degree 2 unlocks schematic **2410** in the tested installation. Copper Ring and Capacitor create a Charged Ring. Inspect Dexterity and speed before equipping it, after equipping it and after native loading. **F7** quicksaves and **F8** quickloads.
+
+M76-R native verification used installed resources on Intel HD 520 Vulkan at 1280×720 and 1920×1080. With the same tool, gate and roll of 14, untrained Pick Locks failed at effective level 0 and succeeded at level 8 after two rank purchases and a Dexterity increase. Unlocking Cantrip at aptitude 10 failed on the difficulty-20 gate and opened the difficulty-10 barrel. At aptitude 20 it opened the gate. At level 15 with the required attributes, the sheet purchased all five Temporal spells and all seven Therapeutics degrees for twelve points, reaching 100 expertise at Doctorate. A worn Charged Ring granted one Dexterity at aptitude −11 and two at −16, with the bonus reversing on refund. A ten-coin donation added 2 alignment and a hostile response subtracted 8. A quest reward granted 800 XP and the character point for reaching level 2. Isolated saves staged the tools, ingredients, positions, skill random stream and starting values. Purchases, training, quest and alignment choices, casts, lock attempts, crafting, equipping, saving and loading used native controls.

@@ -1,4 +1,6 @@
 //! Character calculations and equipment rules verified against CE's stat, critter and item code.
+pub mod progression;
+use progression::{KEY_STATS, ProgressionRules, SKILL_KEYS};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -154,6 +156,15 @@ const RESISTANCE: [&str; 5] = [
     "resistmagic",
 ];
 
+pub(super) fn service_price_percent(reaction: i32) -> i32 {
+    let r = reaction.clamp(0, 100);
+    if r < 50 {
+        2 * (100 - r)
+    } else {
+        120 - 2 * r / 5
+    }
+}
+
 /// The relevant additive clauses of a winning rules/effect.mes entry. Other
 /// clauses remain visible to diagnostics and are outside this rules slice.
 #[derive(Default, Debug)]
@@ -162,10 +173,14 @@ pub(crate) struct Adjustments {
     special: [i32; SPECIAL.len()],
     resistance: [i32; 5],
     heal_percent: i32,
-    picklock: i32,
+    skills: [i32; 16],
+    expertise: [i32; 8],
+    social: [Vec<Modifier>; 3],
+    xp_percent: i32,
+    xp_flat: i32,
     crithitchance: i32,
     critfailchance: i32,
-    haggle: i32,
+
     pub(crate) other: Vec<String>,
 }
 
@@ -183,14 +198,43 @@ impl Adjustments {
             };
             let key = key.to_ascii_lowercase();
             let value = value.trim();
-            let target = if key == "picklock" {
-                Some((&mut result.picklock, value))
+            if let Some(i) = ["alignment", "badreactionadj", "goodreactionadj"]
+                .iter()
+                .position(|&s| key == s)
+            {
+                if let Some(op) = Modifier::parse(value) {
+                    result.social[i].push(op)
+                } else {
+                    result.other.push(clause.to_owned())
+                }
+                continue;
+            }
+            let target = if let Some(i) = SKILL_KEYS.iter().position(|&name| name == key) {
+                Some((&mut result.skills[i], value))
+            } else if let Some(i) = [
+                "expertiseanatomical",
+                "expertisechemistry",
+                "expertiseelectric",
+                "expertiseexplosives",
+                "expertisegun_smithy",
+                "expertisemechanical",
+                "expertisesmithy",
+                "expertisetherapeutics",
+            ]
+            .iter()
+            .position(|&s| s == key)
+            {
+                Some((&mut result.expertise[i], value))
             } else if key == "crithitchance" {
                 Some((&mut result.crithitchance, value))
             } else if key == "critfailchance" {
                 Some((&mut result.critfailchance, value))
-            } else if key == "haggle" {
-                Some((&mut result.haggle, value))
+            } else if key == "xpgain" {
+                if value.ends_with('%') {
+                    Some((&mut result.xp_percent, value.trim_end_matches('%')))
+                } else {
+                    Some((&mut result.xp_flat, value))
+                }
             } else if key == "healrate" && value.ends_with('%') {
                 Some((&mut result.heal_percent, value.trim_end_matches('%')))
             } else {
@@ -234,6 +278,8 @@ impl Adjustments {
 
 #[derive(Default)]
 pub(crate) struct Rules {
+    pub(crate) progression: ProgressionRules,
+    pub(crate) worn: Vec<std::sync::Arc<Adjustments>>,
     pub(crate) race: Option<Adjustments>,
     pub(crate) gender: Option<Adjustments>,
     pub(crate) background: Option<Adjustments>,
@@ -242,31 +288,43 @@ pub(crate) struct Rules {
 }
 
 impl Rules {
+    pub(crate) fn social(&self, i: usize) -> ModifierSum {
+        let mut result = ModifierSum::default();
+        for op in self.modifiers().flat_map(|m| m.social[i].iter()) {
+            result.include(*op)
+        }
+        result
+    }
     pub(crate) fn pick_modifiers(&self) -> [i64; 3] {
         let mut sums = [0; 3];
         for effect in self.modifiers().chain(&self.encumbrance) {
-            for (sum, value) in
-                sums.iter_mut()
-                    .zip([effect.picklock, effect.crithitchance, effect.critfailchance])
-            {
+            for (sum, value) in sums.iter_mut().zip([
+                effect.skills[14],
+                effect.crithitchance,
+                effect.critfailchance,
+            ]) {
                 *sum += i64::from(value);
             }
         }
         sums
     }
 
-    pub(crate) fn haggle(&self) -> i64 {
+    pub(crate) fn skill_modifier(&self, skill: usize) -> i64 {
         self.modifiers()
             .chain(&self.encumbrance)
-            .map(|effect| i64::from(effect.haggle))
+            .map(|effect| i64::from(effect.skills[skill]))
             .sum()
     }
 
     fn modifiers(&self) -> impl Iterator<Item = &Adjustments> {
-        self.race.iter().chain(&self.gender).chain(&self.background)
+        self.race
+            .iter()
+            .chain(&self.gender)
+            .chain(&self.background)
+            .chain(self.worn.iter().map(AsRef::as_ref))
     }
 
-    fn stat(&self, index: usize) -> i64 {
+    pub(crate) fn stat(&self, index: usize) -> i64 {
         self.modifiers()
             .map(|effect| i64::from(effect.stats[index]))
             .sum()
@@ -286,7 +344,14 @@ pub(crate) struct Environment {
 pub(crate) struct Character {
     pub(crate) base: [i32; 28],
     #[serde(default)]
-    pub(crate) haggle: u32,
+    #[serde(skip_serializing, rename = "haggle")]
+    pub(crate) legacy_haggle: Option<u32>,
+    #[serde(default)]
+    pub(crate) basic_skills: [u32; 12],
+    #[serde(default)]
+    pub(crate) degrees: [u32; 8],
+    #[serde(default)]
+    pub(crate) health_damage: i32,
     #[serde(default)]
     pub(crate) tech_skills: [u32; 4],
     #[serde(default)]
@@ -304,6 +369,8 @@ pub(crate) struct Character {
     #[serde(default)]
     pub(crate) spell_flags: u32,
     pub(crate) background: i32,
+    #[serde(default)]
+    pub(crate) portrait: i32,
     pub(crate) original_palette: u32,
     pub(crate) base_ac: i32,
     pub(crate) base_resistance: [i32; 5],
@@ -326,7 +393,10 @@ impl Default for Character {
         base[26] = 1;
         Self {
             base,
-            haggle: 0,
+            legacy_haggle: None,
+            basic_skills: [0; 12],
+            degrees: [0; 8],
+            health_damage: 0,
             tech_skills: [0; 4],
             colleges: [0; 16],
             mastery: None,
@@ -337,6 +407,7 @@ impl Default for Character {
             spell_flags: 0,
             background: 0,
             original_palette: 0,
+            portrait: 0,
             base_ac: 0,
             base_resistance: [0; 5],
             hp: [0; 2],
@@ -349,6 +420,14 @@ impl Default for Character {
 
 #[derive(Debug, Serialize)]
 pub struct CharacterStatistics {
+    pub alignment: i32,
+    pub portrait: i32,
+    pub skills: [SkillRank; 16],
+    pub colleges: [u32; 16],
+    pub degrees: [u32; 8],
+    pub expertise: [i32; 8],
+    pub next_level_xp: Option<i32>,
+    pub current_health: i64,
     pub base: [i32; 28],
     pub attributes: [i32; 8],
     pub race: i32,
@@ -377,6 +456,13 @@ pub struct CharacterStatistics {
     pub defense: i32,
     pub resistance: [i32; 5],
     pub unresolved: Vec<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct SkillRank {
+    pub points: u32,
+    pub training: u32,
+    pub level: i32,
 }
 
 /// CE packs investment and training into one entry in the original skill array.
@@ -413,6 +499,28 @@ impl SkillValue {
 }
 
 impl Character {
+    pub(crate) fn validate_progression(&self) -> Result<(), String> {
+        if self.health_damage < 0
+            || self.degrees.iter().any(|&d| d > 7)
+            || self
+                .basic_skills
+                .iter()
+                .chain(&self.tech_skills)
+                .any(|&v| v & 63 > 5)
+            || self.base[18] < 0
+            || self.base[21] < 0
+            || self.fatigue_damage < 0
+            || self.colleges.iter().any(|&level| level > 5)
+            || self.mastery.is_some_and(|n| n >= 16)
+        {
+            return Err("Invalid character ability state".into());
+        }
+        Ok(())
+    }
+
+    fn rules_alignment(&self, rules: &Rules) -> i32 {
+        rules.social(0).apply(self.base[19]).clamp(-1000, 1000)
+    }
     pub(crate) fn race(&self) -> i32 {
         self.base[27]
     }
@@ -580,9 +688,8 @@ impl Character {
             unresolved.push("racial or gender effect entry unavailable");
         }
         if rules.modifiers().any(|m| !m.other.is_empty()) {
-            unresolved.push(
-                "racial, gender or background effects outside the supported statistic subset",
-            );
+            unresolved
+                .push("character or equipment effects outside the supported statistic subset");
         }
         if (62..=68).contains(&self.background) && self.environment.is_none() {
             unresolved.push("location and time dependent background modifiers are unavailable");
@@ -596,11 +703,41 @@ impl Character {
         if incomplete_equipment {
             unresolved.push("equipment results exclude triggered spells or item lighting");
         }
+        let max_health = i64::from(self.hp[0]) * 4
+            + i64::from(self.hp[1])
+            + i64::from(willpower + 2 * (strength + level) + 4)
+            + special(0);
         let max_fatigue = i64::from(self.fatigue[0]) * 4
             + i64::from(self.fatigue[1])
             + i64::from(willpower + 2 * (constitution + level) + 4)
             + special(1);
         CharacterStatistics {
+            portrait: self.portrait,
+            alignment: self.rules_alignment(rules),
+            skills: std::array::from_fn(|i| {
+                let packed = self.skill(i);
+                SkillRank {
+                    points: packed & 63,
+                    training: (packed >> 6) & 3,
+                    level: SkillValue::level(
+                        packed,
+                        rules.skill_modifier(i),
+                        attributes[KEY_STATS[i]],
+                    ),
+                }
+            }),
+            colleges: self.colleges,
+            degrees: self.degrees,
+            expertise: std::array::from_fn(|i| {
+                (i64::from(progression::expertise(self.degrees[i], attributes[4]))
+                    + rules
+                        .modifiers()
+                        .map(|e| i64::from(e.expertise[i]))
+                        .sum::<i64>())
+                .clamp(i32::MIN.into(), i32::MAX.into()) as i32
+            }),
+            next_level_xp: rules.progression.next_threshold(level),
+            current_health: max_health - i64::from(self.health_damage),
             base: self.base,
             attributes,
             race: self.race(),
@@ -645,10 +782,7 @@ impl Character {
             aptitude: self.aptitude(rules),
             age: adjusted(i64::from(self.base[25]), 25, 20, 1000),
             level,
-            max_health: i64::from(self.hp[0]) * 4
-                + i64::from(self.hp[1])
-                + i64::from(willpower + 2 * (strength + level) + 4)
-                + special(0),
+            max_health,
             max_fatigue,
             current_fatigue: max_fatigue - i64::from(self.fatigue_damage),
             pick_locks: SkillValue::pick_locks(
@@ -771,5 +905,76 @@ mod tests {
         assert_eq!(stats(4050).speed, Some(1));
         assert_eq!(stats(0).armor_class, 2);
         assert_eq!(stats(0).resistance, [3, 0, 0, 20, 0]);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Modifier {
+    Add(i32),
+    Multiply(i32),
+    Divide(i32),
+    Percent(i32),
+    Min(i32),
+    Max(i32),
+}
+impl Modifier {
+    fn parse(s: &str) -> Option<Self> {
+        Some(if let Some(n) = s.strip_prefix("min ") {
+            Self::Min(n.trim().parse().ok()?)
+        } else if let Some(n) = s.strip_prefix("max ") {
+            Self::Max(n.trim().parse().ok()?)
+        } else if let Some(n) = s.strip_suffix('%') {
+            Self::Percent(n.parse().ok()?)
+        } else if let Some(n) = s.strip_prefix('*') {
+            Self::Multiply(n.parse().ok()?)
+        } else if let Some(n) = s.strip_prefix('/') {
+            Self::Divide(n.parse().ok().filter(|&n| n != 0)?)
+        } else if s.starts_with(['+', '-']) {
+            Self::Add(s.parse().ok()?)
+        } else {
+            return None;
+        })
+    }
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ModifierSum {
+    add: i64,
+    percent: i64,
+    mul: i64,
+    div: i64,
+    min: i32,
+    max: i32,
+}
+impl Default for ModifierSum {
+    fn default() -> Self {
+        Self {
+            add: 0,
+            percent: 100,
+            mul: 1,
+            div: 1,
+            min: i32::MIN,
+            max: i32::MAX,
+        }
+    }
+}
+impl ModifierSum {
+    fn include(&mut self, op: Modifier) {
+        match op {
+            Modifier::Add(n) => self.add += i64::from(n),
+            Modifier::Percent(n) => self.percent += i64::from(n),
+            Modifier::Multiply(n) => self.mul = self.mul.saturating_mul(n.into()),
+            Modifier::Divide(n) => self.div = self.div.saturating_mul(n.into()),
+            Modifier::Min(n) => self.min = self.min.max(n),
+            Modifier::Max(n) => self.max = self.max.min(n),
+        }
+    }
+    /// CE effect_adjust_func applies percentage, product, division, addition and limits in that order.
+    pub(crate) fn apply(&self, n: i32) -> i32 {
+        (i64::from(n).saturating_mul(self.percent) / 100)
+            .saturating_mul(self.mul)
+            .saturating_div(self.div)
+            .saturating_add(self.add)
+            .max(self.min.into())
+            .min(self.max.into()) as i32
     }
 }

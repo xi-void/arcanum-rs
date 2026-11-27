@@ -51,6 +51,8 @@ the next tile center. Left-click an original door or staircase to approach
 and use it. **Mouse wheel** zooms from 1× to 3×. Press **0** to reset.
 Hover an NPC for their description and left-click to talk. Click a response
 to continue or press **Escape** to close the conversation. [NPC dialogue and voice packs](docs/DIALOGUE.md)
+Press **C** or click the character button to spend character points. The sheet shows skills, training, degrees, spells, aptitude and alignment. Open the schematic book to combine components for a learned degree. [Character controls and progression](docs/AGENT_WORKFLOW.md#character-progression-and-alignment)
+
 Click the logbook icon or press **L** to read Quests. Turn spreads with the arrows,
 **Page Up** or **Page Down**, or the wheel over a page. [Quest logbook](docs/QUESTS.md)
 **Escape** opens the Classic pause menu. Choose Save Game, Load Game,

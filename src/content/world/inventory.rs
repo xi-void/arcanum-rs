@@ -5,6 +5,8 @@ use super::super::player::Appearance;
 use super::super::read_bounded;
 use crate::sector::objects::ItemStats;
 
+mod crafting;
+pub use crafting::SchematicComponent;
 mod equipment;
 mod save;
 mod stock;
@@ -25,6 +27,14 @@ const CLICK_THROUGH: u32 = 0x800;
 
 #[derive(Default)]
 pub(super) struct Session {
+    wielded: BTreeMap<
+        OriginalId,
+        (
+            crate::content::script::WieldEffect,
+            Arc<crate::content::character::Adjustments>,
+        ),
+    >,
+    purchases: Vec<crate::content::character::progression::Investment>,
     skill_random: crate::random::Random,
     recharges: BTreeMap<String, use_action::Recharge>,
     state: State,
@@ -58,6 +68,25 @@ fn key_matches(lock: i32, key: i32) -> bool {
 }
 
 impl Session {
+    pub(super) fn apply_quest_rewards(
+        &mut self,
+        ledger: &crate::content::quest::Ledger,
+        previous: &crate::content::quest::Ledger,
+    ) -> Result<(), String> {
+        let amounts = ledger
+            .new_completions(previous)
+            .map(|id| self.rules.progression.quest_reward(id))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (amount, alignment) in amounts {
+            self.character.gain_experience(amount, &self.rules);
+            self.character.base[19] =
+                crate::content::character::progression::Alignment::Add(alignment)
+                    .apply(self.character.base[19]);
+            self.revision += 1;
+        }
+        Ok(())
+    }
+
     pub(super) fn matching_key(&self, lock_id: i32) -> Option<OriginalId> {
         if lock_id == 0 {
             return None;
@@ -543,6 +572,9 @@ pub struct InventoryEntry {
 }
 
 pub struct InventoryReader {
+    portraits: BTreeMap<i32, Result<Arc<LoadedFrame>, String>>,
+    schematic_reports:
+        BTreeMap<i32, Result<Arc<crate::content::schematics::SchematicReport>, String>>,
     pub(super) vfs: Vfs,
     pub(super) frames: FrameCache,
     pub(super) descriptions: Vec<super::super::LoadedMes>,
@@ -584,6 +616,8 @@ impl InventoryReader {
             descriptions,
             key_descriptions,
             quest_catalog,
+            portraits: BTreeMap::new(),
+            schematic_reports: BTreeMap::new(),
             cantrip,
             spell_fx,
         }
@@ -1054,7 +1088,11 @@ impl InteractiveWorld {
                 ground = Some(records.ground_art(&item, *tile, self.reference)?);
                 None
             }
-            Place::Equipped(_) | Place::Merged(_) | Place::Spent | Place::Retired => {
+            Place::Equipped(_)
+            | Place::Merged(_)
+            | Place::Consumed
+            | Place::Spent
+            | Place::Retired => {
                 return Err("Invalid transfer destination".into());
             }
         };

@@ -639,6 +639,7 @@ impl Viewer<'_> {
         if let Some(hud) = hud {
             hud.close_inventory();
             hud.close_journal();
+            hud.close_sheet();
             hud.reset_character();
         }
         self.sounding_container = None;
@@ -789,7 +790,11 @@ impl Viewer<'_> {
         if matches!(&self.content,ViewContent::Stream{world,..} if world.trading())
             && matches!(
                 action,
-                hud::Action::Pause | hud::Action::OpenMap | hud::Action::ToggleJournal
+                hud::Action::Pause
+                    | hud::Action::OpenMap
+                    | hud::Action::ToggleCharacter
+                    | hud::Action::ToggleSchematics
+                    | hud::Action::ToggleJournal
             )
         {
             return;
@@ -804,13 +809,16 @@ impl Viewer<'_> {
             ..
         } = &mut self.content
         {
-            if action != hud::Action::ToggleSpells {
+            if !matches!(
+                action,
+                hud::Action::ToggleSpells | hud::Action::SpellCollege(_)
+            ) {
                 hud.close_spells();
             }
             world.cancel_ability();
         }
         match action {
-            hud::Action::ToggleSpells | hud::Action::CastCantrip => {
+            hud::Action::ToggleSpells | hud::Action::CastCantrip | hud::Action::SpellCollege(_) => {
                 if let ViewContent::Stream {
                     world,
                     hud: Some(hud),
@@ -819,6 +827,8 @@ impl Viewer<'_> {
                 {
                     if action == hud::Action::ToggleSpells {
                         hud.toggle_spells();
+                    } else if let hud::Action::SpellCollege(i) = action {
+                        hud.choose_college(i);
                     } else {
                         world.select_cantrip();
                     }
@@ -828,6 +838,22 @@ impl Viewer<'_> {
             hud::Action::ToggleRun => self.settings.run = !self.settings.run,
             hud::Action::ResetZoom => self.settings.zoom = 1,
             hud::Action::OpenMap => self.open_map(event_loop),
+            hud::Action::ToggleCharacter
+            | hud::Action::ToggleSchematics
+            | hud::Action::Sheet(_) => {
+                if let ViewContent::Stream {
+                    world,
+                    hud: Some(hud),
+                    inventory_reader: Some(reader),
+                    ..
+                } = &mut self.content
+                {
+                    hud.sheet_action(action, world, reader);
+                    world.cancel_player_route();
+                    self.player_deadline = None;
+                    self.navigation = Navigation::default();
+                }
+            }
             hud::Action::ToggleJournal => {
                 if let ViewContent::Stream {
                     world,
@@ -2179,7 +2205,7 @@ impl ApplicationHandler for Viewer<'_> {
         {
             let view = self.view.as_ref().unwrap();
             let size = view.window.inner_size();
-            if let Some(reader) = inventory_reader {
+            if let Some(reader) = inventory_reader.as_deref_mut() {
                 hud.refresh_inventory(reader, world);
             }
             hud.layout((size.width, size.height));
@@ -2202,6 +2228,12 @@ impl ApplicationHandler for Viewer<'_> {
                 ) && let Some(action) = hud.focused_action()
                 {
                     self.hud_action(action, event_loop);
+                    return;
+                }
+                if matches!(&key.logical_key, Key::Character(ch) if ch.eq_ignore_ascii_case("c"))
+                    && hud.has_sheet()
+                {
+                    self.hud_action(hud::Action::ToggleCharacter, event_loop);
                     return;
                 }
                 if matches!(&key.logical_key, Key::Character(ch) if ch.eq_ignore_ascii_case("l"))
@@ -2357,7 +2389,7 @@ impl Viewer<'_> {
         else {
             return false;
         };
-        if !hud.journal_open() {
+        if !hud.journal_open() && !hud.sheet_open() {
             return false;
         }
         let view = self.view.as_ref().unwrap();
@@ -2392,8 +2424,14 @@ impl Viewer<'_> {
                     return true;
                 }
                 match &key.logical_key {
+                    Key::Named(NamedKey::Escape) if hud.sheet_open() => {
+                        action = Some(hud.close_sheet_action())
+                    }
+                    Key::Character(ch) if hud.sheet_open() && ch.eq_ignore_ascii_case("c") => {
+                        action = Some(hud::Action::ToggleCharacter)
+                    }
                     Key::Named(NamedKey::Escape) => action = Some(hud::Action::ToggleJournal),
-                    Key::Character(ch) if ch.eq_ignore_ascii_case("l") => {
+                    Key::Character(ch) if !hud.sheet_open() && ch.eq_ignore_ascii_case("l") => {
                         action = Some(hud::Action::ToggleJournal)
                     }
                     Key::Named(NamedKey::Tab) => hud.advance_focus(*shift),
@@ -2577,7 +2615,9 @@ impl Viewer<'_> {
                         self.cursor
                             .filter(|&point| {
                                 hud.as_ref().is_none_or(|hud| {
-                                    !hud.journal_open() && hud.hit(point) == hud::Hit::World
+                                    !hud.journal_open()
+                                        && !hud.sheet_open()
+                                        && hud.hit(point) == hud::Hit::World
                                 })
                             })
                             .map(|(x, y)| (x / u32::from(*last_zoom), y / u32::from(*last_zoom))),
@@ -2920,7 +2960,7 @@ impl Viewer<'_> {
                                 menu: menu.as_ref(),
                                 cursor: self.cursor,
                                 hud: hud.as_deref_mut(),
-                                inventory_reader: inventory_reader.as_deref(),
+                                inventory_reader: inventory_reader.as_deref_mut(),
                                 developer: self.developer.as_mut(),
                             },
                         )
@@ -3043,7 +3083,7 @@ struct FrameOptions<'a> {
     settings: Settings,
     menu: Option<&'a classic_menu::Frame>,
     hud: Option<&'a mut Hud>,
-    inventory_reader: Option<&'a InventoryReader>,
+    inventory_reader: Option<&'a mut InventoryReader>,
     developer: Option<&'a mut Developer>,
     cursor: Option<(u32, u32)>,
 }
@@ -3063,7 +3103,7 @@ impl WindowSurface {
             settings,
             menu,
             hud,
-            inventory_reader,
+            mut inventory_reader,
             mut developer,
             cursor,
         } = options;
@@ -3096,16 +3136,20 @@ impl WindowSurface {
                 )
             });
             hud.update_fatigue(world);
-            hud.set_spell_level(world.conveyance_level());
+
             hud.set_dialogue(world.conversation(), npc_at, (size.width, size.height));
-            if let Some(reader) = inventory_reader {
+            if let Some(reader) = inventory_reader.as_deref_mut() {
                 hud.refresh_journal(&reader.quest_catalog, world);
+                hud.refresh_sheet(reader, world);
+                hud.refresh_spellbook(reader, world);
+                hud.layout((size.width, size.height));
             }
             hud.hover(cursor);
         }
         let cursor = cursor.filter(|&point| {
-            hud.as_ref()
-                .is_none_or(|hud| !hud.journal_open() && hud.hit(point) == hud::Hit::World)
+            hud.as_ref().is_none_or(|hud| {
+                !hud.journal_open() && !hud.sheet_open() && hud.hit(point) == hud::Hit::World
+            })
         });
         if world.playing() {
             let scale = u32::from(zoom);
@@ -3122,9 +3166,12 @@ impl WindowSurface {
             && let Some(hud) = hud.as_deref_mut()
         {
             let context = inventory_reader.and_then(|reader| reader.npc_context(world));
+            let sheet_message = hud.sheet_open().then(|| hud.sheet_message().to_owned());
             hud.set_label(
                 hud::Binding::NpcContext,
-                if world.ability_message().is_empty() {
+                if let Some(message) = sheet_message.as_deref() {
+                    message
+                } else if world.ability_message().is_empty() {
                     context.as_deref().unwrap_or("")
                 } else {
                     world.ability_message()
@@ -3165,9 +3212,14 @@ impl WindowSurface {
             hud.set_lens_asset(hud::Binding::MerchantPortrait, Arc::clone(portrait));
         }
         if let Some(hud) = hud.as_deref_mut()
-            && let Some(binding) = [hud::Binding::InventoryLens, hud::Binding::JournalLens]
-                .into_iter()
-                .find(|&binding| hud.native_size(binding).is_some())
+            && let Some(binding) = [
+                hud::Binding::InventoryLens,
+                hud::Binding::JournalLens,
+                hud::Binding::SheetLens,
+                hud::Binding::SchematicLens,
+            ]
+            .into_iter()
+            .find(|&binding| hud.native_size(binding).is_some())
             && let Some([w, h]) = hud.native_size(binding)
         {
             let inset = self
@@ -3178,7 +3230,7 @@ impl WindowSurface {
             }
             let source = (w * 2, h * 2);
             let mut focused = camera.clone();
-            if binding == hud::Binding::JournalLens {
+            if binding != hud::Binding::InventoryLens {
                 world.follow_player(elapsed, &mut focused);
             }
             self.renderer.render_inset(

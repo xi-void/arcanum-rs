@@ -97,12 +97,10 @@ impl Objects {
         let mut session = Session::default();
         session.state.next_generated = self.next_generated;
         session.character = self.character.clone();
-        if session.character.fatigue_damage < 0
-            || session.character.colleges.iter().any(|&level| level > 5)
-            || session.character.mastery.is_some_and(|n| n >= 16)
-        {
-            return Err("Invalid saved character ability state".into());
+        if let Some(haggle) = session.character.legacy_haggle.take() {
+            session.character.basic_skills[9] = haggle;
         }
+        session.character.validate_progression()?;
         session.character.sector_aptitude = 0;
         let backgrounds = load_mes(vfs, "rules/backgrnd.mes")?;
         session.load_rules(vfs, &backgrounds)?;
@@ -184,6 +182,7 @@ impl Objects {
                     let art = records(vfs, map, None).ground_art(&item, *tile, *tile)?;
                     session.ground.insert(saved.id, art);
                 }
+                Place::Consumed if saved.slot.is_none() => {}
                 Place::Retired if saved.slot.is_none() => {}
                 Place::Spent
                     if item.category == 8 && saved.quantity == Some(0) && saved.slot.is_none() => {}
@@ -201,6 +200,12 @@ impl Objects {
             );
         }
 
+        for id in equipment.values() {
+            if let Some(entry) = session.prepare_wield(vfs, &session.state.changes[id].item)? {
+                session.wielded.insert(*id, entry);
+            }
+        }
+        session.refresh_worn();
         session.skill_random = self.skill_random;
         for (key, event) in &self.recharges {
             let id = parse_id(key)?;
@@ -256,10 +261,7 @@ impl Objects {
         for (map, accounts) in &self.accounts {
             let index = map_index(vfs, catalog, &mut indices, map)?;
             for (key, account) in accounts {
-                if index.category(parse_id(key)?) != Some(16)
-                    || account.gold > i32::MAX as u32
-                    || account.reaction_delta < 0
-                {
+                if index.category(parse_id(key)?) != Some(16) || account.gold > i32::MAX as u32 {
                     return Err("Invalid saved merchant account".into());
                 }
             }

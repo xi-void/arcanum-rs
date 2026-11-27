@@ -69,7 +69,7 @@ A DLG record contains seven brace-delimited fields in CE order.
 The parser accepts UTF-8 and Windows-1252, with CE-style `//` comments outside
 fields. Responses are the following records in numeric order until the next
 speaker line. The supported response tests use Charisma, Perception, alignment,
-aptitude, race, level, gold, initial reaction, whether the actors have met in
+aptitude, race, level, skill, training, gold, reaction, whether the actors have met in
 this session, and shared script state. The `gf`, `gv`, `lf`, and `lc` tests
 compare the addressed global flag, global variable, attachment flag, and
 attachment counter to the specified value. The same opcodes can write state
@@ -92,8 +92,7 @@ entry return remain deferred. Diagnostics retain the original return mode.
 Unresolved conditions hide the associated responses and identify their line
 IDs in diagnostics. A mixed effect list with an unsupported operation cannot
 commit a partial set of writes. The existing text fallback can display
-speaker lines with deferred gameplay effects. A standalone reaction change
-can still follow its literal text link with the skipped effect reported.
+speaker lines with deferred gameplay effects. Alignment, reaction, gold, training and quest rewards commit through the shared character and inventory transaction. Generated T/ET trainer choices use the installed dialogue and original skill tiers. Declining the fee leaves training and gold intact.
 Plain `G:` greetings use the original class or race tables and available
 character state. Several simple CE generic response directives use the installed `gd_*.mes`
 tables. More complex directives depend on their corresponding gameplay systems.
