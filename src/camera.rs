@@ -102,6 +102,17 @@ impl Camera {
         let (x, y) = (i64::from(proposal.0), i64::from(proposal.1));
         // Reserve enough room for all four viewport corners in each diagonal.
         let margin = i64::from(viewport.0.div_ceil(2)) + 2 * i64::from(viewport.1.div_ceil(2));
+        // An integer pixel inside the footprint already has an exact projection.
+        // Rounding both diagonal axes here would lose small pans or deflect them onto the other axis.
+        if [2 * y - x, 2 * y + x]
+            .into_iter()
+            .zip(self.axes)
+            .all(|(value, (low, high))| (low + margin..=high - margin).contains(&value))
+        {
+            let changed = self.position != proposal;
+            self.position = proposal;
+            return changed;
+        }
         let clamp = |coordinate: i64, (low, high): (i64, i64)| {
             // Multiples of four invert to integer pixel positions.
             let first = (low + margin + 3).div_euclid(4);
@@ -286,6 +297,16 @@ mod tests {
         assert!(camera.reset(size));
         assert_eq!(camera.position(), (0, 0));
         assert!(!camera.reset(size));
+    }
+
+    #[test]
+    fn single_pixel_pans_preserve_both_axes_and_survive_resize() {
+        let mut camera = Camera::new((31, 31), (0, 0), 64).unwrap();
+        for (delta, expected) in [((1, 0), (1, 0)), ((0, -1), (1, -1)), ((-1, 1), (0, 0))] {
+            assert!(camera.pan(delta, (800, 600)));
+            assert!(!camera.resize((801, 601)));
+            assert_eq!(camera.position(), expected);
+        }
     }
 
     #[test]

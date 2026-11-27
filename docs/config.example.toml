@@ -32,7 +32,9 @@ hud = "classic"  # "classic", "off", package directory or theme.toml.
 zoom = 1  # 1, 2 or 3.
 follow = false  # Home centers once. F5 toggles persistent player following.
 edge_scroll = true
-keyboard_pan = true  # Arrow keys, with Shift for faster scrolling.
+keyboard_pan = true  # WASD and arrow keys.
+keyboard_scroll_speed = 300  # Screen pixels per second, 1–2400.
+edge_scroll_speed = 300      # Same units and range. Shift accelerates either input.
 recenter_key = "Home"  # Physical key code, e.g. Home, End or KeyC.
 
 [input]

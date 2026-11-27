@@ -1,6 +1,6 @@
 # Arcanum-RS — Known Issues
 
-Baseline includes M80-R Fast Turn-Based combat. Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
+Baseline includes M81-R WASD Camera Controls and Configurable Scroll Speed. Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
 
 ## Triage
 
@@ -15,6 +15,19 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 - **M79 character sheet (P2, open).** The Classic sheet omits the player’s name.
 - **Moving shadows (P2, open).** NPC shadows can lose their anchor while the actor moves.
 - Configurable floating damage numbers remain an optional future enhancement.
+
+### CAM-002 — Camera scroll distance from the player
+
+- **Priority** P2. **Status** Needs reproduction.
+- The player reports that manual panning can continue far across the map after the player sprite leaves the viewport. They recall vanilla at 800×600 stopping the camera when the sprite reaches the viewport edge.
+- With follow off and the player stationary, pan in each direction in vanilla at 800×600 and record where scrolling stops relative to the sprite. Check the rule in CE, then compare viewport sizes and world zoom levels to determine what sets the boundary. Verify the rule before changing behavior. Preserve independent camera positioning and optional follow mode.
+
+### SAVE-001 — Zephyr passengers appear to die again on return to the Crash Site
+
+- **Status** Needs reproduction.
+- After loading a save and returning to the Crash Site, the player saw Zephyr passengers who had already become corpses appear to die again. The save may predate the recent New Game changes.
+- On a fresh campaign, record a passenger’s corpse state and the identity and owner of an item taken from the body. Leave the Crash Site, save, reload and return. Repeat with the older save if available. Compare the visible death animation with heartbeat and death script execution, persisted event and corpse state, and item ownership across load and map re-entry.
+- Escalate to **P0** if a fresh save shows state corruption or inventory duplication.
 
 ### COMBAT-001 — Remaining combat compatibility
 
@@ -238,8 +251,6 @@ The M61 rollback removed the first M62–M64 implementation. The following obser
 | --- | --- | --- | --- |
 | MAP-001 | P2 | Open Tarant's local map. An earlier build reported `townmap/tarant/tarant.tmi: invalid atlas tile grid`. | Decode and display the original local atlas through normal VFS precedence. |
 | MOVE-001 | P1 if ordinary movement is blocked | Click unobstructed ground at Crash Site; earlier logs repeatedly reported `cannot reach the destination`. It is unclear whether the clicked tiles were actually reachable. | Navigate to reachable destinations and reject genuinely blocked ones. |
-| MOVE-002 | P2 | If WASD character movement still exists, a single press previously triggered multiple steps. Confirm whether the optional binding has been removed. | Mouse navigation remains authoritative; no unintended movement from obsolete bindings. |
-| CAM-001 | P2 | Check edge scrolling over passive HUD areas and compare pan speed with CE. Earlier builds had slow scrolling and HUD edge suppression. | Responsive scrolling, with suppression only during interactions that require it. |
 | NPC-001 | P2 | Recheck Tulla Interior and previously unresolved scaled NPC/creature appearances against CE. | Resolve original appearance data through the generic mobile renderer. |
 | UI-002 | P2 | Inspect the top HUD time/sky display. M63-R screenshots show an empty pale field. Determine whether this is an inactive component or a rendering discrepancy. | Display the applicable original ART/state once its dependencies are available. |
 
@@ -253,6 +264,8 @@ These are planned capabilities, not regressions. Implement in their own mileston
 - **Use action:** the inventory Use box accepts original lockpicks. Other targeted items need their own gameplay mechanics.
 
 ## Regression watchlist — previously corrected
+
+- **CAM-001 and MOVE-002. Verified in M81-R.** WASD and arrows pan independently of the player. Scrolling works across the passive bottom HUD. The character name, save name and developer console accept WASD without moving the view. CE’s `scroll_speed_changed` uses 20 horizontal or 10 vertical pixels per normal isometric update. The playable engine uses a configurable screen-pixel rate in every direction. [Camera configuration](APPLICATION_CONFIG.md#settings-and-precedence)
 
 - **M79 opening events and camera. Resolved.** A fresh campaign opens Virgil’s authored dialogue from his heartbeat. Scripted passengers fall and the original flat corpse poses expose Isaac’s camera and Wilhemina’s note. The independent camera stays put while walking and across save/load, and centers on map arrival. [Native reproduction](AGENT_WORKFLOW.md#crash-site-opening).
 - **M79 menu music and creation sounds. Resolved.** The shopping map’s entry sector selects scheme 26 and the installed Arcanum theme. Native output captured the theme on launch, through creation and shopping, and again after returning from the Crash Site. Artwork buttons use the original press and release samples. At the merchant, picking up, buying and selling a dagger produced the item samples. Cancelling the drag and an unaffordable purchase produced no drop cue. A drag-purchased dagger was equipped after native save and load.

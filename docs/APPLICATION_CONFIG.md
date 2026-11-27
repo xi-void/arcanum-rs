@@ -23,7 +23,7 @@ arguments and work independently of the play configuration.
 | `display` | `lighting`, `shadows` | `--lighting-on`, `--lighting-off`, `--shadows`, `--no-shadows` |
 | `audio` | `effects`, `voice`, `music` (0–10, with 0 muted) | |
 | `ui` | `hud`, `map`, `pause`, `scale` | `--ui classic\|off\|PATH`, `--map-ui PATH`, `--ui-scale PERCENT` |
-| `camera` | `zoom`, `follow`, `edge_scroll`, `keyboard_pan`, `recenter_key` | `--zoom 1\|2\|3`, `--follow`, `--no-follow` |
+| `camera` | `zoom`, `follow`, `edge_scroll`, `keyboard_pan`, `keyboard_scroll_speed`, `edge_scroll_speed`, `recenter_key` | `--zoom 1\|2\|3`, `--follow`, `--no-follow` |
 | `input` | `run` | `--run`, `--walk-by-default` |
 | `developer` | `enabled`, `rpc`, `diagnostics`, `console_ui`, `map_reveal`, `discover_all` | `--debug`, `--no-debug`, `--rpc SOCKET`, `--no-rpc`, `--diagnostics DIRECTORY`, `--console-ui PATH`, `--map-reveal`, `--no-map-reveal`, `--discover-all`, `--no-discover-all` |
 | `mods` | `directory`, `enabled` | `--no-mods` or `--mods DIRECTORY ID …` at the end |
@@ -41,7 +41,9 @@ resolved within the package and original artwork read from the installed game.
 See [UI themes](UI_THEMES.md). Older M63 files use `ui.hud_scale` as a fallback
 when `ui.scale` is absent.
 
-The default camera stays in place during movement. Screen edges and arrow keys pan, Shift accelerates panning, and Home centers once. F5 toggles continuous tracking. Set `camera.recenter_key` to a physical key code such as `"Home"` or `"End"` to change the binding.
+The default camera stays in place during movement. WASD, arrow keys and screen edges pan. Home centers once. F5 toggles continuous tracking. Set `camera.recenter_key` to a physical key code such as `"Home"` or `"End"` to change the binding.
+
+Set `keyboard_scroll_speed` and `edge_scroll_speed` independently in `[camera]` and restart. Both accept whole numbers from 1 to 2400 and default to 300 screen pixels per second. For example, 900 crosses a 900-pixel distance in one second of uninterrupted scrolling at any world zoom. Shift multiplies either speed by 3⅓, up to 4000 screen pixels per second. Opposite directions cancel. Diagonals and overlapping inputs stay within the faster active speed. Set `keyboard_pan` or `edge_scroll` to false to disable that input. Sector loading suspends panning. A delayed update advances at most 250 ms of movement.
 
 ## Changes during play
 
