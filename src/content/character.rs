@@ -425,6 +425,8 @@ pub(crate) struct Character {
     pub(crate) background: i32,
     #[serde(default)]
     pub(crate) portrait: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sound_effect: Option<i32>,
     pub(crate) original_palette: u32,
     pub(crate) base_ac: i32,
     pub(crate) base_resistance: [i32; 5],
@@ -460,6 +462,7 @@ impl Default for Character {
             critter_flags2: 0,
             spell_flags: 0,
             background: 0,
+            sound_effect: None,
             original_palette: 0,
             portrait: 0,
             base_ac: 0,
@@ -472,7 +475,7 @@ impl Default for Character {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct CharacterStatistics {
     pub alignment: i32,
     pub portrait: i32,
@@ -520,7 +523,7 @@ pub struct SkillRank {
 }
 
 /// CE packs investment and training into one entry in the original skill array.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct SkillValue {
     pub points: u32,
     pub training: u32,
@@ -716,7 +719,7 @@ impl Character {
             charisma,
         ] = attributes;
         let carry_capacity = adjusted(i64::from(500 * strength), 8, 300, 10_000);
-        let level = adjusted(i64::from(self.base[17]), 17, 0, 51);
+        let level = adjusted(i64::from(self.base[17]), 17, 0, i64::from(i32::MAX));
         let special = |index: usize| {
             rules
                 .modifiers()
@@ -767,11 +770,13 @@ impl Character {
         }
         let max_health = i64::from(self.hp[0]) * 4
             + i64::from(self.hp[1])
-            + i64::from(willpower + 2 * (strength + level) + 4)
+            + i64::from(willpower + 2 * strength + 4)
+            + 2 * i64::from(level)
             + special(0);
         let max_fatigue = i64::from(self.fatigue[0]) * 4
             + i64::from(self.fatigue[1])
-            + i64::from(willpower + 2 * (constitution + level) + 4)
+            + i64::from(willpower + 2 * constitution + 4)
+            + 2 * i64::from(level)
             + special(1);
         CharacterStatistics {
             portrait: self.portrait,

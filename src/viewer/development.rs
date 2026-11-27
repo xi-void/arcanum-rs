@@ -553,6 +553,7 @@ impl developer::Runtime for Viewer<'_> {
                 | Request::Sectors
                 | Request::Objects(_)
                 | Request::Progression
+                | Request::Combat
                 | Request::Inventory(_)
                 | Request::ItemOwner(_)
                 | Request::Resource(..)
@@ -713,6 +714,7 @@ impl Viewer<'_> {
                 data["map"] = map_state;
                 data
             }
+            Request::Combat => world.combat_report(),
             Request::Progression => world.progression_report(),
             Request::Inventory(owner) => world
                 .inspect_inventory(&mut dev.vfs, &owner)

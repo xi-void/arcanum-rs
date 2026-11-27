@@ -36,6 +36,7 @@ mod abilities;
 mod interaction;
 mod inventory;
 mod npc;
+pub use npc::HoveredVitals;
 mod spell_fx;
 pub use debug::{DebugCollision, DebugObject};
 mod prefetch;
@@ -996,6 +997,7 @@ impl SectorCache {
         }
         self.project_inventory();
         self.project_spells();
+        self.restore_visible_corpses();
         self.ordered.sort_unstable_by_key(|draw| draw.key);
         self.walk_subject = required.iter().find_map(|id| {
             let (key, walk) = self.entries[id].0.walk.as_ref()?;
@@ -1796,7 +1798,15 @@ impl SectorCache {
                     .filter(move |_| self.raster_revealed(raster))
                     .filter_map(move |(_, fx)| fx.draw(front, elapsed, viewport, None))
             };
-            overlay(false).chain(draw).chain(overlay(true))
+            let ring = draw.as_ref().and_then(|_| {
+                self.inventory
+                    .combat
+                    .indicator(self, raster, viewport, elapsed)
+            });
+            ring.into_iter()
+                .chain(overlay(false))
+                .chain(draw)
+                .chain(overlay(true))
         })
     }
 
@@ -1866,7 +1876,12 @@ impl SectorCache {
         if self.roof_covered(pose.tile) {
             return None;
         }
-        let asset = self.form_asset(elapsed).unwrap_or(pose.asset);
+        let asset = self
+            .inventory
+            .combat
+            .pose(None, elapsed)
+            .or_else(|| self.form_asset(elapsed))
+            .unwrap_or(pose.asset);
         let draw = SpriteDraw {
             frame: &asset.decoded.frame,
             anchor: self.player_body_anchor(pose.tile, pose.anchor),
@@ -1978,14 +1993,26 @@ impl SectorCache {
         let entries = &self.entries;
         let states = &self.door_states;
         let player = self.player.as_mut()?;
+        let cost = if player.route_running() { 1 } else { 2 };
+        let inventory = &mut self.inventory;
         player.update(now, |tile, facing| {
-            if self.collision_disabled {
+            if inventory.combat.timed() {
+                inventory
+                    .combat
+                    .check(None, cost, inventory.statistics().current_fatigue)
+                    .ok()?;
+            }
+            let next = if self.collision_disabled {
                 Self::unrestricted_step(entries, tile, facing)
             } else {
                 collision::step(tile, facing, |tile| {
                     Self::player_cell(entries, states, tile)
                 })
+            };
+            if next.is_some() {
+                inventory.pay_combat_ap(None, cost)
             }
+            next
         });
         let anchor = player.sample(now).anchor;
         self.update_character_sector();

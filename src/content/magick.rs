@@ -73,6 +73,7 @@ pub(crate) enum Field {
 
 #[derive(Default, Clone, Debug, Serialize)]
 pub(crate) struct Program {
+    pub aggressive: bool,
     pub cost: i32,
     pub range: u32,
     pub targets: Vec<String>,
@@ -198,7 +199,16 @@ impl Program {
                     mask: 0x800,
                     on: true,
                 } => {
-                    dependencies.insert("combat_ai");
+                    if matches!(
+                        c.operation,
+                        Operation::Flag {
+                            field: Field::Critter,
+                            mask: 0x80,
+                            ..
+                        }
+                    ) {
+                        dependencies.insert("sleep_and_noise");
+                    }
                     if c.apply.iter().any(|a| a == "tgt_summoned") {
                         dependencies.insert("follower_ai_and_party_travel");
                     }
@@ -293,7 +303,8 @@ impl Program {
                     "disallowed_tsf" => p.disallowed_target = mask(v, Field::Spell)?,
                     "disallowed_tcf" => p.disallowed_critter = mask(v, Field::Critter)?,
                     "cancels_sf" => p.cancels = mask(v, Field::Spell)?,
-                    "info" | "iq" | "chargebegincost" => (),
+                    "info" => p.aggressive = v == "aggressive",
+                    "iq" | "chargebegincost" => (),
                     "no_reflect" => p.no_reflect = num::<u32>(v)? != 0,
                     k if k.starts_with("ai_") => (),
                     _ => {

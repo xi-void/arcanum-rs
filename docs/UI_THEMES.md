@@ -255,3 +255,10 @@ The Classic Spells button uses `toggle-spells` to open the college selector. The
 ### Character sheet and learned schematics
 
 Classic declares the sheet and book through the same HUD theme as the other panels. Use `sheet_panel` for a modal root and `sheet_page` for skills, technology, magick or schematics. `sheet_value`, `sheet_image`, `skill_gauge` and `aptitude_travel` bind components to the active character. The `[sheet]` table maps college and discipline icon IDs through the installed interface table. Sheet actions buy or refund an investment in the current group, select a page or discipline, navigate a learned recipe, or combine components. The spell menu uses `spell-college` actions and zero-based `spell_slot` components. See the Classic package for complete TOML declarations. All measurements use the parent’s reference-scale coordinate system.
+
+### Combat controls
+
+HUD buttons can bind `action = "toggle-combat"` and `action = "end-turn"`. A component with `turn_panel = true` is visible during turn-based encounters when the spellbook and other panels are closed. A child image can specify `ap_offsets`, a list of horizontal pixel offsets. It draws one image per available player AP, up to the number of offsets. Classic supplies the original 20 lamps, AP bar and pressed end-turn frame in `ui/classic/theme.toml`. Layout, drawing and hit testing use the shared HUD scale.
+
+
+For spell targeting, `spell_cursor` at the top of the HUD package names a cursor ART resource. Its frame rate, dimensions and hotspot drive the native pointer. Classic resolves `art/interface/spellcur.art` through the VFS. The optional bindings `npc-health`, `npc-poison` and `npc-fatigue` clip the corresponding full bar to the actor’s current percentage. Pair each bar with its `-empty` binding. `npc-hp-text` and `npc-ft-text` show the numeric values for allies and percentages for independent actors. Colors and layout come from the package fonts and components.

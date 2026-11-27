@@ -27,6 +27,7 @@ pub mod shadow;
 mod terrain;
 pub mod travel;
 pub(crate) mod vitals;
+pub use vitals::Difficulty;
 pub mod wall;
 pub mod world;
 

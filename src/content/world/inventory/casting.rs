@@ -17,6 +17,22 @@ pub(in crate::content::world) enum Subject {
 }
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 struct VitalChanges {
+    #[serde(default)]
+    dead: bool,
+    #[serde(default)]
+    facing: Option<u8>,
+    #[serde(default)]
+    death_anim: Option<u8>,
+    #[serde(default)]
+    decay_at: Option<u64>,
+    #[serde(default)]
+    decayed: bool,
+    #[serde(default)]
+    waypoint: Option<usize>,
+    #[serde(default)]
+    heal_rate: i32,
+    #[serde(default)]
+    recover_at: Option<u64>,
     health: Option<i32>,
     fatigue: Option<i32>,
     poison: Option<i32>,
@@ -45,6 +61,8 @@ struct Binding {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     overlays: Vec<i32>,
+    #[serde(default)]
+    destroy: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     visuals: Vec<Attachment>,
 }
@@ -63,6 +81,7 @@ impl Binding {
             maximum: 0,
             stun: None,
             overlays: vec![],
+            destroy: false,
             visuals: vec![],
         }
     }
@@ -102,6 +121,8 @@ struct Active {
     #[serde(default)]
     callback: Option<u64>,
     #[serde(default)]
+    callback_left: Option<Duration>,
+    #[serde(default)]
     ending: bool,
     #[serde(default)]
     center: Option<(String, Tile)>,
@@ -115,6 +136,8 @@ pub(in crate::content::world) struct State {
     moved: BTreeMap<OriginalId, (Arc<mobile::population::Resident>, Arc<LoadedFrame>)>,
     actors: BTreeMap<String, VitalChanges>,
     active: Vec<Active>,
+    #[serde(skip)]
+    animation_tick: Option<Duration>,
     #[serde(skip)]
     art: BTreeMap<ModelKey, Model>,
     #[serde(skip)]
@@ -146,31 +169,36 @@ struct Placement {
     tile: Tile,
     sequence: u64,
 }
-struct Target {
-    subject: Subject,
-    tile: Tile,
-    key: Option<WorldOrder>,
-    kind: Kind,
-    critter: u32,
-    spell: u32,
-    hp: i32,
-    fatigue: i32,
-    poison: i32,
-    maximum: i32,
+pub(super) struct Target {
+    pub(super) stats: Option<CharacterStatistics>,
+    pub(super) worth: [i32; 2],
+    pub(super) critter2: u32,
+    pub(super) natural: [i32; 10],
+    pub(super) subject: Subject,
+    pub(super) tile: Tile,
+    pub(super) key: Option<WorldOrder>,
+    pub(super) kind: Kind,
+    pub(super) critter: u32,
+    pub(super) spell: u32,
+    pub(super) hp: i32,
+    pub(super) fatigue: i32,
+    pub(super) poison: i32,
+    pub(super) maximum: i32,
     attributes: [i32; 8],
-    resistance: [i32; 5],
+    pub(super) resistance: [i32; 5],
     aptitude: i32,
     weight: Option<i32>,
-    material: Option<u32>,
+    pub(super) material: Option<u32>,
     item: Option<Item>,
-    object_flags: u32,
+    pub(super) object_flags: u32,
     flags: u32,
     difficulty: i32,
     notify: i32,
-    alignment: i32,
+    pub(super) alignment: i32,
+    pub(super) sound: Option<i32>,
 }
 #[derive(Clone, Copy, PartialEq)]
-enum Kind {
+pub(super) enum Kind {
     Actor,
     Portal,
     Container,
@@ -178,8 +206,12 @@ enum Kind {
     Item,
 }
 impl Target {
-    fn new(subject: Subject, tile: Tile, key: Option<WorldOrder>, kind: Kind) -> Self {
+    pub(super) fn new(subject: Subject, tile: Tile, key: Option<WorldOrder>, kind: Kind) -> Self {
         Self {
+            critter2: 0,
+            stats: None,
+            worth: [0; 2],
+            natural: [0; 10],
             subject,
             tile,
             key,
@@ -201,9 +233,12 @@ impl Target {
             difficulty: -1,
             notify: 0,
             alignment: 0,
+            sound: None,
         }
     }
     fn actor(&mut self, pc: &Character, stats: &CharacterStatistics) {
+        self.critter2 = pc.critter_flags2;
+        self.stats = Some(stats.clone());
         self.hp = pc.health_damage;
         self.fatigue = pc.fatigue_damage;
         self.poison = pc.base[24];
@@ -316,6 +351,14 @@ impl State {
             })
             .collect()
     }
+    pub(super) fn revived_or_decayed(&self, id: OriginalId) -> bool {
+        self.actors
+            .get(&id.key())
+            .is_some_and(|d| d.decayed || !d.dead && d.health.is_some())
+    }
+    pub(super) fn has_spawn(&self, id: OriginalId) -> bool {
+        self.spawn(id).is_some()
+    }
     fn spawn(&self, id: OriginalId) -> Option<&Spawn> {
         self.active
             .iter()
@@ -347,7 +390,108 @@ fn spawn_defaults(vfs: &mut Vfs, n: u32) -> Result<(u32, objects::PrototypeDefau
         objects::prototype_defaults(&bytes, id, category).map_err(|e| e.to_string())?,
     ))
 }
-fn standing(vfs: &mut Vfs, frames: &mut FrameCache, art: u32) -> Result<Arc<LoadedFrame>, String> {
+pub(super) fn motion_clip(
+    vfs: &mut Vfs,
+    frames: &mut FrameCache,
+    pose: &mobile::Pose,
+) -> Result<Arc<FrameLoop>, String> {
+    appearance::clip(vfs, frames, pose, true)
+}
+impl State {
+    pub(super) fn facing(&self, id: OriginalId) -> Option<u8> {
+        self.actors.get(&id.key())?.facing
+    }
+    pub(super) fn face(&mut self, id: OriginalId, dir: u8) {
+        self.actors.entry(id.key()).or_default().facing = Some(dir);
+        if let Some(spawn) = self
+            .active
+            .iter_mut()
+            .flat_map(|r| &mut r.summons)
+            .find(|s| s.id == id)
+        {
+            spawn.facing = dir
+        }
+    }
+    pub(super) fn set_resident_frame(&mut self, id: OriginalId, frame: Arc<LoadedFrame>) {
+        if let Some((_, current)) = self.moved.get_mut(&id) {
+            *current = frame;
+        }
+    }
+    pub(super) fn waypoint(&self, id: OriginalId) -> Option<usize> {
+        self.actors.get(&id.key())?.waypoint
+    }
+    pub(super) fn set_waypoint(&mut self, id: OriginalId, index: usize) {
+        self.actors.entry(id.key()).or_default().waypoint = Some(index)
+    }
+    pub(super) fn animation_callback_pending(&self) -> bool {
+        self.active.iter().any(|r| r.callback_left.is_some())
+    }
+    pub(in crate::content::world) fn destroying(&self, id: OriginalId) -> bool {
+        self.bindings(&Subject::Mobile(id)).any(|b| b.destroy)
+    }
+    pub(super) fn has_corpses(&self) -> bool {
+        self.actors.values().any(|a| a.dead && !a.decayed)
+    }
+    pub(super) fn death_anim(&self, id: OriginalId) -> u8 {
+        self.actors
+            .get(&id.key())
+            .and_then(|d| d.death_anim)
+            .unwrap_or(7)
+    }
+    pub(in crate::content::world) fn down(&self, id: OriginalId) -> bool {
+        self.actors.get(&id.key()).is_some_and(|d| d.dead)
+    }
+    pub(super) fn next_recovery(&self) -> Option<u64> {
+        self.actors.values().filter_map(|d| d.recover_at).min()
+    }
+    pub(super) fn recover(&mut self, now: u64) -> bool {
+        let mut changed = false;
+        for d in self
+            .actors
+            .values_mut()
+            .filter(|d| d.recover_at.is_some_and(|due| due <= now))
+        {
+            let due = d.recover_at.unwrap();
+            let ticks = (now - due) / 80 + 1;
+            let heal = ticks
+                .saturating_mul(d.heal_rate.max(1) as u64)
+                .min(i32::MAX as u64) as i32;
+            let left = d.fatigue.unwrap_or(0).saturating_sub(heal).max(0);
+            d.fatigue = Some(left);
+            d.recover_at =
+                (left > 0 && !d.dead).then(|| due.saturating_add(ticks.saturating_mul(80)));
+            changed = true;
+        }
+        changed
+    }
+    pub(super) fn combat_summons(
+        &self,
+        inventory: &super::State,
+        map: &str,
+        at: Tile,
+    ) -> Vec<OriginalId> {
+        self.active
+            .iter()
+            .flat_map(|r| &r.summons)
+            .filter(|s| {
+                s.map == map
+                    && !s.hidden
+                    && s.tile.0.abs_diff(at.0).max(s.tile.1.abs_diff(at.1)) <= 12
+                    && self
+                        .art
+                        .get(&s.model_key(inventory))
+                        .is_some_and(|m| m.actor)
+                    && !self.down(s.id)
+            })
+            .map(|s| s.id)
+            .collect()
+    }
+}
+pub(super) fn standing(
+    vfs: &mut Vfs,
+    frames: &mut FrameCache,
+    art: u32,
+) -> Result<Arc<LoadedFrame>, String> {
     appearance::standing_pose(vfs, art)?
         .load(vfs, frames, 0)
         .map_err(|e| e.to_string())
@@ -448,7 +592,6 @@ impl InteractiveWorld {
             self.ability.request = self
                 .ability
                 .selected
-                .take()
                 .map(|method| (Aim::Destination(dest), method))
         }
     }
@@ -466,7 +609,7 @@ impl InteractiveWorld {
             return false;
         }
         let Ok(id) = parse_id(item) else { return false };
-        self.ability.request = self.ability.selected.take().map(|m| (Aim::Item(id), m));
+        self.ability.request = self.ability.selected.map(|m| (Aim::Item(id), m));
         true
     }
     pub(in crate::content::world) fn player_flags(&self) -> (u32, u32) {
@@ -553,12 +696,28 @@ impl InventoryReader {
             return Err("You lose your concentration".into());
         }
         let mut targets = self.spell_targets(w, &program, aim)?;
+        // Resolve authored armor before taking spell damage/resistance snapshots.
+        let mut prepared_actor = false;
+        for target in &targets {
+            if let Subject::Mobile(id) = target.subject
+                && target.kind == Kind::Actor
+                && id.kind == 2
+                && !w.cache.inventory.combat.prepared.contains(&id)
+            {
+                self.prepare_gear(w, id)?;
+                prepared_actor = true;
+            }
+        }
+        if prepared_actor {
+            targets = self.spell_targets(w, &program, aim)?;
+        }
         let mut run = Active {
             spell: id,
             bindings: vec![],
             summons: vec![],
             aptitude: stats.aptitude,
             callback: None,
+            callback_left: None,
             ending: false,
             center: Some((w.map.clone(), self.target(w, aim)?.tile)),
             due: program
@@ -826,7 +985,37 @@ impl InventoryReader {
         } else {
             None
         };
+        w.cache
+            .inventory
+            .combat
+            .check(None, 4, stats.current_fatigue)?;
         let cost = program.cost;
+        if impact {
+            w.cache.inventory.charge_spell(
+                (id / 5) as u32,
+                cost,
+                stats.current_fatigue,
+                w.game_second,
+                false,
+            )?;
+            if program.aggressive
+                || program
+                    .components
+                    .iter()
+                    .any(|c| matches!(c.operation, Operation::Vital { heal: false, .. }))
+            {
+                for t in &targets {
+                    if let Subject::Mobile(actor) = t.subject
+                        && t.kind == Kind::Actor
+                        && t.hp < t.maximum
+                    {
+                        self.engage(w, actor, false, None)?;
+                    }
+                }
+            }
+            w.cache.inventory.pay_combat_ap(None, 4);
+        }
+        let xp_before = w.cache.inventory.character.base[18];
         let (fatigue, mana) = w.cache.inventory.charge_spell(
             (id / 5) as u32,
             cost,
@@ -848,12 +1037,25 @@ impl InventoryReader {
                 && let Some(anchor) = project_world_tile(self.target(w, aim)?.tile, w.reference)
             {
                 let entry = id as i32 * 10 + 1;
-                let (_, projectile) = self.spell_eye(w, entry, None, now + delay, Cue::Forward);
+                let (_, mut projectile) = self.spell_eye(w, entry, None, now + delay, Cue::Forward);
                 if let Some(Ok(Some(def))) = self.spell_fx.get(&entry) {
-                    delay += w.cache.launch_missile(entry, anchor, def.projectile_speed);
+                    let travel = w.cache.launch_missile(entry, anchor, def.projectile_speed);
+                    projectile["travel_ms"] = json!(travel.as_millis());
+                    delay += travel;
                 }
+                projectile["impact_delay_ms"] = json!(delay.as_millis());
                 result["projectile"] = projectile;
             }
+            w.ability.casting_actor = if let Aim::Object(key) = aim {
+                match &w.cache.target(key).map(|t| &t.action) {
+                    Some(interaction::Action::Npc(id) | interaction::Action::Summon(id)) => {
+                        Some(*id)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
             w.ability.casting = Some((aim, Method::Spell(id), now + delay));
             result["casting_effect"] = fx;
             result["outcome"] = json!("casting");
@@ -994,20 +1196,21 @@ impl InventoryReader {
                         if let Some(v) = attachment {
                             binding.visuals.push(v);
                         }
+                        binding.destroy |= has(play, "destroy")
+                            && matches!(t.subject, Subject::Mobile(_))
+                            && t.hp >= t.maximum;
                         if has(play, "callback")
-                            && program.components.iter().any(|c| {
-                                c.phase == Phase::Callback
-                                    && matches!(
-                                        c.operation,
-                                        Operation::Vital { .. }
-                                            | Operation::Flag {
-                                                field: Field::Critter,
-                                                ..
-                                            }
-                                    )
-                            })
+                            && (binding.destroy
+                                || program
+                                    .components
+                                    .iter()
+                                    .any(|c| c.phase == Phase::Callback))
                         {
-                            run.callback = Some(until.unwrap_or(w.game_second));
+                            let due = until.unwrap_or(w.game_second);
+                            run.callback = Some(due);
+                            run.callback_left = Some(Duration::from_millis(
+                                fx["duration_ms"].as_u64().unwrap_or(0),
+                            ));
                         }
                         if !fx.is_null() {
                             effects.push(fx)
@@ -1116,48 +1319,7 @@ impl InventoryReader {
                         if let Some(to) = moves.remove(&t.key) {
                             match t.subject {
                                 Subject::Mobile(id) => {
-                                    if let Some(s) = w
-                                        .cache
-                                        .inventory
-                                        .magick
-                                        .active
-                                        .iter_mut()
-                                        .flat_map(|r| &mut r.summons)
-                                        .find(|s| s.id == id)
-                                    {
-                                        s.tile = to
-                                    } else if let Some(key) = t.key {
-                                        if !w.cache.inventory.magick.moved.contains_key(&id) {
-                                            let (r, _) =
-                                                w.cache.npc(key).expect("validated mobile target");
-                                            let frame = w
-                                                .cache
-                                                .ordered
-                                                .iter()
-                                                .find(|r| r.key == key)
-                                                .unwrap()
-                                                .frame
-                                                .clone();
-                                            let r = Arc::new(r.clone());
-                                            w.cache.inventory.magick.moved.insert(id, (r, frame));
-                                        }
-                                        let inv = &mut w.cache.inventory;
-                                        if let Some(p) = inv.magick.offsets.get_mut(&id.key()) {
-                                            p.tile = to
-                                        } else {
-                                            let sequence = inv.state.next_generated;
-                                            inv.state.next_generated += 1;
-                                            inv.magick.offsets.insert(
-                                                id.key(),
-                                                Placement {
-                                                    map: w.map.clone(),
-                                                    source: t.tile,
-                                                    tile: to,
-                                                    sequence,
-                                                },
-                                            );
-                                        }
-                                    }
+                                    w.relocate_actor(id, t.key, t.tile, to);
                                 }
                                 Subject::Item(id) => {
                                     if let Some((item, art)) = drops.remove(&id) {
@@ -1242,7 +1404,7 @@ impl InventoryReader {
                     _ => (),
                 }
             }
-            applied.push(json!({"target":t.subject,"tile":t.tile,"health_damage_before":hp_before,"health_damage":t.hp,"poison":t.poison,"resistance":resistance}));
+            applied.push(json!({"target":t.subject,"tile":t.tile,"health_damage_before":hp_before,"health_damage":t.hp,"max_hp":t.maximum,"remaining_hp":t.maximum.saturating_sub(t.hp).max(0),"poison":t.poison,"resistance":resistance}));
             if program.cancels != 0 {
                 while let Some(i) = w.cache.inventory.magick.active.iter().position(|r| {
                     !r.ending
@@ -1284,6 +1446,13 @@ impl InventoryReader {
         if let Some(Subject::Lock(_, lock)) = targets.first().map(|t| &t.subject) {
             result["flags_after"] = json!(w.cache.door_states.flags(*lock, targets[0].flags));
             result["target"] = json!(lock.label())
+        }
+        if w.cache.inventory.combat.active() {
+            let xp = w.cache.inventory.character.base[18].saturating_sub(xp_before);
+            w.cache.inventory.combat.log(
+                json!({"event":"spell", "caster":"player", "spell":id, "outcome":result["outcome"],
+                "targets":applied, "cost":4, "fatigue":fatigue, "item_mana":mana, "xp":xp}),
+            );
         }
         let message = if all_resisted {
             format!("{name} resisted")
@@ -1328,8 +1497,16 @@ fn apply_vital(inv: &mut Session, t: &mut Target, c: &Component, apt: i32, resis
                 .max(0)
         }
         amount = channel.after_resistance(amount, &t.resistance);
+        if !matches!(channel, Channel::Fatigue | Channel::Poison) {
+            amount = inv.difficulty.adjust(amount);
+        }
     }
+    let before = t.hp;
     inv.change_vitals(t, *channel, if *heal { -amount } else { amount });
+    if !heal {
+        inv.note_death(t, before, None);
+        inv.combat_reward(t, before);
+    }
     if *heal && has(flags, "full") {
         inv.change_vitals(t, Channel::Fatigue, -i32::MAX);
         inv.permanent_flags(&t.subject, Field::Critter, 0x780, false)
@@ -1341,6 +1518,7 @@ fn apply_vital(inv: &mut Session, t: &mut Target, c: &Component, apt: i32, resis
 
 impl InteractiveWorld {
     fn refresh_spell_state(&mut self) {
+        self.cache.inventory.combat.rescan();
         self.cache.inventory.refresh_magick();
         self.cache.update_character_movement();
         if self.cache.player_spell_flags() & 0x01000000 != 0
@@ -1365,5 +1543,57 @@ impl InteractiveWorld {
                         .is_ok_and(|p| p.maintain.is_some())
             })
             .map(|r| r.spell)
+    }
+}
+
+impl InteractiveWorld {
+    pub(in crate::content::world) fn relocate_actor(
+        &mut self,
+        id: OriginalId,
+        key: Option<WorldOrder>,
+        tile: Tile,
+        to: Tile,
+    ) {
+        if let Some(s) = self
+            .cache
+            .inventory
+            .magick
+            .active
+            .iter_mut()
+            .flat_map(|r| &mut r.summons)
+            .find(|s| s.id == id)
+        {
+            s.tile = to
+        } else if let Some(key) = key {
+            if !self.cache.inventory.magick.moved.contains_key(&id) {
+                let (r, _) = self.cache.npc(key).expect("validated mobile target");
+                let frame = self
+                    .cache
+                    .ordered
+                    .iter()
+                    .find(|r| r.key == key)
+                    .unwrap()
+                    .frame
+                    .clone();
+                let r = Arc::new(r.clone());
+                self.cache.inventory.magick.moved.insert(id, (r, frame));
+            }
+            let inv = &mut self.cache.inventory;
+            if let Some(p) = inv.magick.offsets.get_mut(&id.key()) {
+                p.tile = to
+            } else {
+                let sequence = inv.state.next_generated;
+                inv.state.next_generated += 1;
+                inv.magick.offsets.insert(
+                    id.key(),
+                    Placement {
+                        map: self.map.clone(),
+                        source: tile,
+                        tile: to,
+                        sequence,
+                    },
+                );
+            }
+        }
     }
 }

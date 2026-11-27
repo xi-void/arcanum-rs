@@ -22,6 +22,7 @@ pub enum Request {
     Sectors,
     Objects(ObjectFilter),
     Progression,
+    Combat,
     Inventory(String),
     ItemOwner(String),
     Pickup(String, Option<usize>),
@@ -306,6 +307,12 @@ const COMMANDS: &[Command] = &[
         |a| object_filter(a).map(Request::Objects)
     ),
     query!(
+        "combat",
+        "combat",
+        "Inspect the encounter, turn, action points, attacks and projectiles.",
+        |a| a.is_empty().then_some(Request::Combat)
+    ),
+    query!(
         "inventory",
         "inventory [OWNER]",
         "Inspect items, equipment, currency and character abilities.",
@@ -581,6 +588,18 @@ impl Command {
             ],
             "sectors" => &["bounds", "cached", "required", "speculative", "stats"],
             "objects" | "inspect" => &["map", "objects", "issues", "truncated"],
+            "combat" => &[
+                "armed",
+                "mode",
+                "participants",
+                "turn",
+                "round",
+                "ap",
+                "history",
+                "poses",
+                "projectiles",
+                "experience_pools",
+            ],
             "inventory" => &[
                 "owner",
                 "columns",

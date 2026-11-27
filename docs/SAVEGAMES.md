@@ -60,7 +60,7 @@ Writes sync a complete temporary file in the save directory before publishing
 it atomically. Loads validate the header, checksum and saved state, rebuild
 item and character resources from the mounted VFS, and prepare the destination
 before replacing the running session. The destination uses the saved committed
-tile. Routes, in-progress animations, camera settings and UI panels are
+tile. Routes, ordinary movement and attack poses, camera settings and UI panels are
 transient. Door changes restore to their settled open or closed state.
 
 The format is native to Arcanum-RS. The save list does not display portraits,
@@ -74,3 +74,5 @@ The pause labels use `Morph30Font.ART` (327). Slot text uses
 `window.c`. Each asset is resolved through the existing VFS.
 
 Version-1 saves also carry manual attribute and vital investments, health damage, all basic and technological skill ranks and training, colleges, degrees, base alignment, cumulative experience and unspent points. Earlier saves retain Haggle, the existing aptitude counters and known abilities. Missing newer fields take their original empty defaults. Loading rebuilds equipped effects from the winning item and rule resources. Consumed crafting components retain stable identities and stay unavailable after a map change or restart. The current sheet visit’s refundable purchases expire when the sheet closes or a game is loaded.
+
+The optional `objects.combat` field in version 1 saves stores combat mode, turn order and sides, the active turn and round, AP, weapon cooldowns, selected opponent, projectiles in flight, pending dying events and each original actor's remaining XP. Actors keep health, fatigue, spell effects and map positions in the shared character and magick records. NPC worn equipment and corpse loot use the ordinary item identity and placement records. Saves made before combat support start in exploration. Target-selection gestures, attack poses and diagnostic history are transient. Actor facing, waypoint, selected death sequence, in-progress fall time and corpse decay deadline persist. A settled corpse returns on its final frame. Finite spell callbacks save their remaining animation time independently of the turn clock. Disintegrated actors stay absent and retired items retain their identities.

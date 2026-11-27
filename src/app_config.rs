@@ -12,6 +12,7 @@ use toml::{Table, Value};
 pub(crate) struct Config {
     pub game_data: Option<PathBuf>,
     pub window: Window,
+    pub gameplay: Gameplay,
     pub display: Display,
     pub audio: Audio,
     pub ui: Ui,
@@ -19,6 +20,13 @@ pub(crate) struct Config {
     pub input: Input,
     pub developer: Developer,
     pub mods: Mods,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+pub(crate) struct Gameplay {
+    pub difficulty: arcanum_rs::content::Difficulty,
+    pub turn_based: bool,
 }
 
 #[derive(Deserialize)]

@@ -58,7 +58,7 @@ fn asset_name(table: &Mes, id: i32) -> Result<String> {
 }
 
 impl Definition {
-    fn scale(&self, art: Option<u32>) -> u32 {
+    pub(super) fn scale(&self, art: Option<u32>) -> u32 {
         if !self.autoscale {
             return self.authored_scale;
         }
@@ -78,7 +78,7 @@ impl Definition {
             _ => 100,
         }
     }
-    fn clips(
+    pub(super) fn clips(
         &self,
         vfs: &mut Vfs,
         frames: &mut FrameCache,
@@ -108,7 +108,10 @@ impl Definition {
         Ok((layers, duration))
     }
     pub fn load(vfs: &mut Vfs, entry: i32) -> Result<Option<Self>> {
-        let table = load_mes(vfs, "rules/spelleyecandy.mes")?;
+        Self::from_table(vfs, "rules/spelleyecandy.mes", entry)
+    }
+    pub(super) fn from_table(vfs: &mut Vfs, path: &str, entry: i32) -> Result<Option<Self>> {
+        let table = load_mes(vfs, path)?;
         let Some(line) = table.mes.get(entry).filter(|line| !line.trim().is_empty()) else {
             return Ok(None);
         };
@@ -371,6 +374,44 @@ impl SectorCache {
         }
         self.effects.len() != before || !started.is_empty()
     }
+    pub(super) fn weapon_missile(
+        &mut self,
+        tile: (u32, u32),
+        [from, to]: [(i32, i32); 2],
+        rotation: u8,
+        now: Duration,
+        duration: Duration,
+        clip: FrameLoop,
+    ) {
+        let entry = self
+            .effects
+            .keys()
+            .filter(|(owner, id)| owner.is_none() && *id < 0)
+            .map(|(_, id)| *id)
+            .min()
+            .unwrap_or(0)
+            .saturating_sub(1);
+        self.effects.insert(
+            (None, entry),
+            Playback {
+                start: now,
+                pending_sound: None,
+                looping: false,
+                reverse: false,
+                initial: 0,
+                age_offset: Duration::ZERO,
+                rotation,
+                end: now + duration,
+                destination: Some(to),
+                layers: [None, Some(clip)],
+                scale: 100,
+                additive: false,
+                tile,
+                anchor: from,
+                light: None,
+            },
+        );
+    }
     pub(super) fn launch_missile(
         &mut self,
         entry: i32,
@@ -384,7 +425,7 @@ impl SectorCache {
             .0
             .abs_diff(fx.anchor.0)
             .max(destination.1.abs_diff(fx.anchor.1));
-        let travel = Duration::from_millis(u64::from(pixels.div_ceil(speed.max(1)).max(1)) * 35);
+        let travel = missile_travel(pixels, speed);
         fx.destination = Some(destination);
         fx.end = fx.start + travel;
         travel
@@ -404,7 +445,7 @@ impl SectorCache {
     pub(super) fn remove_cast_overlay(&mut self) {
         let mut old = Vec::new();
         self.effects.retain(|(owner, id), fx| {
-            let remove = owner.is_none() && (id % 10 == 0 || fx.destination.is_some());
+            let remove = *id >= 0 && owner.is_none() && (id % 10 == 0 || fx.destination.is_some());
             if remove && let Some(l) = &fx.light {
                 old.push(l.bounds())
             }
@@ -574,9 +615,29 @@ impl InteractiveWorld {
     }
 }
 
+// CE path_make_straight samples the inclusive line every ten major-axis pixels.
+// AGupdateAnimMoveStraight advances Proj Speed samples per 35 ms animation tick.
+fn missile_travel(pixels: u32, speed: u32) -> Duration {
+    let samples = (u64::from(pixels) + 1).div_ceil(10);
+    Duration::from_millis(samples.div_ceil(u64::from(speed.max(1))) * 35)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn projectile_travel_quantizes_inclusive_path_at_authored_speed() {
+        for (pixels, speed, millis) in [
+            (0, 4, 35),
+            (39, 4, 35),
+            (40, 4, 70),
+            (80, 4, 105),
+            (399, 4, 350),
+            (399, 8, 175),
+        ] {
+            assert_eq!(missile_travel(pixels, speed), Duration::from_millis(millis));
+        }
+    }
     #[test]
     #[ignore = "requires the installed original game"]
     fn installed_college_eyecandy_frames_decode() {

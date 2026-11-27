@@ -3,6 +3,10 @@
 # Relative paths in this file are relative to config.toml.
 game_data = "/path/to/Arcanum"
 
+[gameplay]
+difficulty = "normal"  # easy, normal or hard
+turn_based = false
+
 [window]
 width = 1280
 height = 720

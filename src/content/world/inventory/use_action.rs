@@ -61,11 +61,21 @@ impl InteractiveWorld {
     }
 
     pub(in crate::content::world) fn unconscious(&self) -> bool {
+        self.incapacity().is_some()
+    }
+
+    pub(in crate::content::world) fn incapacity(&self) -> Option<&'static str> {
+        let stats = self.character_statistics();
         let (spell, critter) = self.player_flags();
-        spell & 0x10000 != 0
-            || critter & 0x60 != 0
-            || critter & 4 == 0 && self.fatigue().0 <= 0
-            || self.character_statistics().current_health <= 0
+        if stats.current_health <= 0 {
+            Some("You have died")
+        } else if spell & 0x10000 != 0 || critter & 0x60 != 0 {
+            Some("You are incapacitated")
+        } else if critter & 4 == 0 && stats.current_fatigue <= 0 {
+            Some("Unconscious from fatigue")
+        } else {
+            None
+        }
     }
 
     pub fn ability_character(&self) -> Value {
@@ -83,6 +93,7 @@ impl InteractiveWorld {
             .values()
             .filter_map(|lock| lock.relock_at.first().copied())
             .chain(self.cache.inventory.spell_deadline())
+            .chain(self.cache.inventory.magick.next_recovery())
             .chain(self.cache.inventory.character.recover_at)
             .chain(
                 self.cache
@@ -99,7 +110,8 @@ impl InteractiveWorld {
 
         let closed = self.cache.door_states.expire_locks(now);
         let inventory = &mut self.cache.inventory;
-        let mut changed = false;
+        inventory.game_second = now;
+        let mut changed = inventory.magick.recover(now);
         if inventory.character.fatigue_damage > 0 {
             inventory
                 .character
@@ -146,6 +158,18 @@ impl InventoryReader {
                 return false;
             }
             world.ability.casting = None;
+            let key = if let Some(id) = world.ability.casting_actor.take() {
+                let Some(aim) = Self::subject_aim(world, &super::casting::Subject::Mobile(id))
+                else {
+                    world
+                        .ability
+                        .reject(method, "Target has left the active map");
+                    return true;
+                };
+                aim
+            } else {
+                key
+            };
             (key, method, true)
         } else if let Some((key, method)) = world.ability.request.take() {
             (key, method, false)
@@ -220,8 +244,8 @@ impl InventoryReader {
         };
         let flags = world.cache.door_states.flags(id, original);
         let stats = world.character_statistics();
-        if world.unconscious() {
-            return Err("Unconscious from fatigue".into());
+        if let Some(reason) = world.incapacity() {
+            return Err(reason.into());
         }
         let target = LockTarget {
             id,

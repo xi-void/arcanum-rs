@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 pub struct Objects {
     #[serde(default)]
+    combat: combat::Combat,
+    #[serde(default)]
     accounts: trade::Accounts,
     #[serde(default)]
     restocks: stock::Events,
@@ -42,6 +44,7 @@ impl InteractiveWorld {
     pub fn save_objects(&self) -> Objects {
         let session = &self.cache.inventory;
         Objects {
+            combat: session.combat.snapshot(self.cache.effect_time),
             accounts: session.accounts.clone(),
             restocks: session.restocks.clone(),
             magick: session.magick.clone(),
@@ -110,6 +113,8 @@ impl Objects {
         session.character.sector_aptitude = 0;
         let backgrounds = load_mes(vfs, "rules/backgrnd.mes")?;
         session.load_rules(vfs, &backgrounds)?;
+        self.combat.validate()?;
+        session.combat = self.combat.clone();
         session.magick = self.magick.clone();
 
         let mut orders = BTreeSet::new();
@@ -196,7 +201,8 @@ impl Objects {
                     session.ground.insert(saved.id, art);
                 }
                 Place::WornBy(map, id, slot) if saved.slot.is_none() => {
-                    if !session.magick.owns_spawn(map, *id)
+                    if !(session.magick.owns_spawn(map, *id)
+                        || map_index(vfs, catalog, &mut indices, map)?.category(*id) == Some(16))
                         || !slot.accepts(
                             item.category,
                             item.inventory_art,

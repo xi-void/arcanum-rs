@@ -788,6 +788,15 @@ impl SectorCache {
         raster: &Raster,
         elapsed: Duration,
     ) -> Option<(&'a Arc<LoadedFrame>, SpriteDraw<'a>)> {
+        if let Some(Action::Npc(id) | Action::Summon(id)) =
+            self.target(raster.key).map(|t| &t.action)
+            && let Some((frame, offset)) = self.inventory.combat.sprite(Some(*id), elapsed)
+        {
+            let mut draw = raster.frame_draw(frame);
+            draw.anchor.0 += offset.0;
+            draw.anchor.1 += offset.1;
+            return Some((frame, draw));
+        }
         if let Some((_, frame)) = self
             .speaking_pose
             .as_ref()
@@ -860,19 +869,32 @@ impl SectorCache {
             Action::Door(door) if !door.direct_transition() => {
                 std::slice::from_ref(&door.direction)
             }
-            Action::Container(_) | Action::Npc(_) => &[0, 1, 2, 3, 4, 5, 6, 7],
+            Action::Container(_) | Action::Npc(_) | Action::Summon(_) => &[0, 1, 2, 3, 4, 5, 6, 7],
             _ => &[1, 3, 5, 7],
         };
         let entries = &self.entries;
         let states = &self.door_states;
         let cell = |tile| Self::player_cell(entries, states, tile);
         let reachable = |from| match &target.action {
-            Action::Container(_) => collision::can_reach_container(from, tile, cell),
+            Action::Container(_) | Action::Npc(_) | Action::Summon(_) => {
+                collision::can_reach_container(from, tile, cell)
+            }
             Action::Pickup(_) => Self::can_reach_item(from, tile, cell),
             _ => true,
         };
         let from = self.player.as_ref()?.route_origin();
-        if matches!(target.action, Action::Npc(_)) && npc::in_range(from, tile) {
+        if matches!(target.action, Action::Npc(_))
+            && self.npc(key).is_some_and(|(r, _)| {
+                r.prototype.as_ref().is_some_and(|p| {
+                    self.inventory
+                        .npc_vitals(r.id, &p.defaults, &r.instance())
+                        .1
+                        .current_health
+                        > 0
+                })
+            })
+            && npc::in_range(from, tile)
+        {
             return Some(0);
         }
         let candidates: Vec<_> = std::iter::once(tile)

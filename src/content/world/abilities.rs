@@ -78,6 +78,7 @@ pub(super) struct UseState {
     pub pending: Option<Method>,
     pub request: Option<(Aim, Method)>,
     pub finish_at: Option<Duration>,
+    pub casting_actor: Option<OriginalId>,
     pub casting: Option<(Aim, Method, Duration)>,
     pub last: Option<Value>,
     pub message: String,
@@ -95,6 +96,7 @@ impl UseState {
             .or(self.request.take().map(|r| r.1))
             .or(self.casting.take().map(|(_, m, _)| m));
         self.finish_at = None;
+        self.casting_actor = None;
         if let Some(method) = method {
             self.last = Some(json!({"method":method,"outcome":"cancelled","fatigue_cost":0}));
             self.message = "Cancelled".into();
@@ -123,8 +125,15 @@ impl InteractiveWorld {
             _ => None,
         }
     }
+    pub fn selected_spell(&self) -> Option<usize> {
+        if let Some(Method::Spell(id)) = self.ability.selected {
+            Some(id)
+        } else {
+            None
+        }
+    }
     pub fn reject_selected_spell(&mut self, reason: &str) {
-        if let Some(m) = self.ability.selected.take() {
+        if let Some(m) = self.ability.selected {
             self.ability.reject(m, reason)
         }
     }
@@ -168,10 +177,9 @@ impl InteractiveWorld {
                 .any(|s| s.starts_with("tgt_tile") || s == "tgt_cone");
         let immediate=auto && !program.components.iter().any(|c|matches!(&c.operation,crate::content::magick::Operation::Move(mode) if mode=="teleport_tile"));
         self.ability.message = format!("{} — select a target", study.name);
+        self.ability.selected = Some(method);
         if immediate {
             self.ability.request = Some((Aim::Player, method))
-        } else {
-            self.ability.selected = Some(method)
         }
     }
 }

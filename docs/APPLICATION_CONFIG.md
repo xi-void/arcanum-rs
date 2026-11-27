@@ -71,3 +71,5 @@ or under `/tmp`, and prints the socket path to standard error. Use
 automatic socket and its directory. `--rpc SOCKET` selects an explicit path
 in an existing private directory for automation. Developer options are disabled
 by default. [Diagnostics protocol](MACHINE_DIAGNOSTICS.md)
+
+The Game options write `gameplay.difficulty` (`easy`, `normal`, or `hard`) and `gameplay.turn_based` (the default combat mode). Normal is the stock CE default. Difficulty applies immediately and carries over when loading a slot. On Easy, the local player's attack effectiveness and final HP damage increase by half. On Hard they decrease by a quarter. The damage adjustment follows armor and resistance. The current encounter mode is saved with the encounter.

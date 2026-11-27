@@ -49,9 +49,9 @@ impl Category {
         match self {
             Self::Game => &[
                 Row::Hidden,
-                Row::Disabled("Difficulty", "Moderate"),
+                Row::Difficulty,
                 Row::Disabled("Violence Filter", "Off"),
-                Row::Disabled("Default Combat Mode", "Real-Time"),
+                Row::Mode,
                 Row::Disabled("Auto Attack", "Off"),
                 Row::Disabled("Auto Switch Weapons", "Off"),
                 Row::Run,
@@ -77,6 +77,8 @@ enum Row {
     Hidden,
     Disabled(&'static str, &'static str),
     InactiveBar(&'static str),
+    Difficulty,
+    Mode,
     Run,
     Zoom,
     Lighting,
@@ -91,6 +93,8 @@ impl Row {
         match self {
             Self::Hidden => "",
             Self::Disabled(title, _) | Self::InactiveBar(title) => title,
+            Self::Difficulty => "Difficulty",
+            Self::Mode => "Default Combat Mode",
             Self::Run => "Always Run",
             Self::Zoom => "World Zoom",
             Self::Lighting => "Lighting",
@@ -121,6 +125,18 @@ impl Row {
         let on = |enabled| if enabled { "On" } else { "Off" };
         match self {
             Self::Disabled(_, value) => value.to_owned(),
+            Self::Difficulty => match settings.difficulty {
+                arcanum_rs::content::Difficulty::Easy => "Easy",
+                arcanum_rs::content::Difficulty::Normal => "Moderate",
+                arcanum_rs::content::Difficulty::Hard => "Hard",
+            }
+            .to_owned(),
+            Self::Mode => (if settings.turn_based {
+                "Turn-Based"
+            } else {
+                "Real-Time"
+            })
+            .to_owned(),
             Self::Run => on(settings.run).to_owned(),
             Self::Lighting => on(settings.lighting).to_owned(),
             Self::Shadows => on(settings.shadows).to_owned(),
@@ -135,6 +151,12 @@ impl Row {
             return;
         }
         match self {
+            Self::Difficulty => {
+                use arcanum_rs::content::Difficulty::*;
+                settings.difficulty =
+                    [Easy, Normal, Hard][(settings.difficulty as i8 + step).rem_euclid(3) as usize];
+            }
+            Self::Mode => settings.turn_based = !settings.turn_based,
             Self::Run => settings.run = !settings.run,
             Self::Lighting => settings.lighting = !settings.lighting,
             Self::Shadows => settings.shadows = !settings.shadows,
