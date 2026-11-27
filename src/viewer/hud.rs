@@ -40,6 +40,8 @@ pub(super) enum Action {
     ToggleSchematics,
     Sheet(sheet::Control),
     JournalQuests,
+    JournalRumors,
+    JournalBackground,
     JournalPrevious,
     JournalNext,
     InventoryScrollUp,
@@ -84,6 +86,8 @@ struct Theme {
     name: String,
     author: Option<String>,
     spell_cursor: Option<String>,
+    #[serde(default)]
+    cursors: BTreeMap<CursorMode, String>,
     #[serde(default = "default_scale")]
     scale: u16,
     fit_viewport: Option<[u32; 2]>,
@@ -661,6 +665,23 @@ struct Placement {
     live_asset: Option<Arc<LoadedFrame>>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, serde::Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum CursorMode {
+    Default,
+    Spell,
+    Skill,
+    Combat,
+}
+struct CursorClip {
+    path: String,
+    winner: String,
+    hotspots: Vec<[u16; 2]>,
+    period: Duration,
+    sources: Vec<winit::window::CustomCursorSource>,
+    handles: Vec<winit::window::CustomCursor>,
+}
+
 pub(crate) struct Hud {
     components: Vec<Component>,
     font_profiles: BTreeMap<String, serde_json::Value>,
@@ -680,10 +701,9 @@ pub(crate) struct Hud {
     travel_available: bool,
     combat_ap: Option<i32>,
     npc_gauges: Option<([u32; 2], bool)>,
-    cursor_frames: Vec<winit::window::CustomCursorSource>,
-    native_cursors: Vec<winit::window::CustomCursor>,
-    cursor_period: Duration,
-    cursor_frame: Option<usize>,
+    cursors: BTreeMap<CursorMode, CursorClip>,
+    cursor_frame: Option<(CursorMode, usize)>,
+    cursor_hidden: bool,
     effective_scale: u32,
     panel_band: Rect,
     external_panel: Option<[u32; 2]>,
@@ -969,29 +989,48 @@ impl Hud {
             source.path().display(),
             scale
         );
-        let mut cursor_frames = Vec::new();
-        let mut cursor_period = Duration::from_secs(1);
-        if let Some(path) = &theme.spell_cursor {
-            let first = resource(game, &mut files, path, 0)?;
+        let mut paths = theme.cursors;
+        if let Some(path) = theme.spell_cursor {
+            paths.insert(CursorMode::Spell, path);
+        }
+        let mut cursors = BTreeMap::new();
+        for (mode, path) in paths {
+            let first = resource(game, &mut files, &path, 0)?;
             let count = first.decoded.frame_count;
-            cursor_period =
+            let period =
                 Duration::from_millis(1000 / first.decoded.frames_per_second.clamp(1, 1000) as u64);
+            let winner = first.source.to_string();
+            let mut sources = Vec::new();
+            let mut hotspots = Vec::new();
             for i in 0..count {
-                let f = resource(game, &mut files, path, i)?.decoded.frame;
-                cursor_frames.push(winit::window::CustomCursor::from_rgba(
-                    f.pixels.into_flattened(),
-                    f.width.try_into()?,
-                    f.height.try_into()?,
-                    f.hotspot.0.clamp(0, f.width as i32 - 1) as u16,
-                    f.hotspot.1.clamp(0, f.height as i32 - 1) as u16,
+                let frame = resource(game, &mut files, &path, i)?.decoded.frame;
+                let x = frame.hotspot.0.clamp(0, frame.width as i32 - 1) as u16;
+                let y = frame.hotspot.1.clamp(0, frame.height as i32 - 1) as u16;
+                hotspots.push([x, y]);
+                sources.push(winit::window::CustomCursor::from_rgba(
+                    frame.pixels.into_flattened(),
+                    frame.width.try_into()?,
+                    frame.height.try_into()?,
+                    x,
+                    y,
                 )?);
             }
+            cursors.insert(
+                mode,
+                CursorClip {
+                    path,
+                    winner,
+                    hotspots,
+                    period,
+                    sources,
+                    handles: vec![],
+                },
+            );
         }
         Ok(Self {
-            cursor_frames,
-            native_cursors: Vec::new(),
-            cursor_period,
+            cursors,
             cursor_frame: None,
+            cursor_hidden: false,
             npc_gauges: None,
             components,
             font_profiles,
@@ -1411,7 +1450,7 @@ impl Hud {
             })
             .collect();
         serde_json::json!({"character_sheet":self.sheet_diagnostic(),"spell_controls":spell_controls,"spell_panel":self.spells_open,"journal":self.journal_diagnostic(),"context_message":label(Binding::InventoryHover),
-            "npc_context":label(Binding::NpcContext),"npc_gauges":self.npc_gauges,"spell_cursor_frame":self.cursor_frame,"dialogue_responses":responses,"dialogue_scroll":self.dialogue_layout.diagnostics(),
+            "npc_context":label(Binding::NpcContext),"npc_gauges":self.npc_gauges,"cursor":self.cursor_diagnostic(),"spell_cursor_frame":self.cursor_frame.filter(|(mode,_)| *mode==CursorMode::Spell).map(|(_,i)| i),"dialogue_responses":responses,"dialogue_scroll":self.dialogue_layout.diagnostics(),
             "map_status":label(Binding::MapStatus),"scale_percent":self.scale,"effective_scale_percent":self.effective_scale,"inventory":self.inventory_diagnostics(),"fonts":self.font_profiles,"image_references":images,
             "focused":control(self.focus),"hovered":control(self.hover),"pressed":control(self.pressed)})
     }
@@ -1427,35 +1466,54 @@ impl Hud {
         }
     }
 
-    pub(super) fn update_spell_cursor(
+    pub(super) fn update_cursor(
         &mut self,
         window: &Window,
         event_loop: &ActiveEventLoop,
-        selected: bool,
+        mode: CursorMode,
         now: Duration,
     ) {
-        if selected && !self.cursor_frames.is_empty() {
-            self.native_cursors.extend(
-                self.cursor_frames
+        let dragging = self.inventory_cursor().is_some();
+        if self.cursor_hidden != dragging {
+            window.set_cursor_visible(!dragging);
+            self.cursor_hidden = dragging;
+        }
+        let mode = if self.cursors.contains_key(&mode) {
+            mode
+        } else {
+            CursorMode::Default
+        };
+        if let Some(clip) = self.cursors.get_mut(&mode) {
+            clip.handles.extend(
+                clip.sources
                     .drain(..)
                     .map(|s| event_loop.create_custom_cursor(s)),
-            )
-        }
-        let frame = (selected && !self.native_cursors.is_empty()).then(|| {
-            ((now.as_millis() / self.cursor_period.as_millis()) % self.native_cursors.len() as u128)
-                as usize
-        });
-        if self.cursor_frame != frame {
-            self.cursor_frame = frame;
-            if let Some(i) = frame {
-                window.set_cursor(self.native_cursors[i].clone())
-            } else {
-                window.set_cursor(winit::window::CursorIcon::Default)
+            );
+            let i =
+                ((now.as_millis() / clip.period.as_millis()) % clip.handles.len() as u128) as usize;
+            if self.cursor_frame != Some((mode, i)) {
+                window.set_cursor(clip.handles[i].clone());
+                self.cursor_frame = Some((mode, i));
             }
+        } else if self.cursor_frame.take().is_some() {
+            window.set_cursor(winit::window::CursorIcon::Default);
         }
     }
     pub(super) fn cursor_delay(&self) -> Option<Duration> {
-        self.cursor_frame.map(|_| self.cursor_period)
+        let clip = self.cursors.get(&self.cursor_frame?.0)?;
+        (clip.handles.len() > 1).then_some(clip.period)
+    }
+    fn cursor_diagnostic(&self) -> Option<serde_json::Value> {
+        if let Some((asset, grab)) = self.inventory_cursor() {
+            return Some(
+                serde_json::json!({"mode":"inventory_item","asset":asset,"grab_pixels":grab}),
+            );
+        }
+        let (mode, frame) = self.cursor_frame?;
+        let clip = &self.cursors[&mode];
+        Some(
+            serde_json::json!({"mode":mode,"frame":frame,"asset":clip.path,"winner":clip.winner,"hotspot":clip.hotspots[frame]}),
+        )
     }
     pub(super) fn set_npc_gauges(
         &mut self,
@@ -1815,6 +1873,8 @@ impl Hud {
                         action,
                         Action::ToggleJournal
                             | Action::JournalQuests
+                            | Action::JournalRumors
+                            | Action::JournalBackground
                             | Action::JournalPrevious
                             | Action::JournalNext
                     ))
@@ -1878,10 +1938,9 @@ impl Hud {
                         || action == self.selected_action
                         || action == self.active_action
                         || (action == Some(Action::ToggleInventory) && self.inventory_open())
-                        || (matches!(
-                            action,
-                            Some(Action::ToggleJournal | Action::JournalQuests)
-                        ) && self.journal.open)))
+                        || ((action == Some(Action::ToggleJournal)
+                            || action == Some(self.journal.tab()))
+                            && self.journal.open)))
                     .then_some(component.state_art[2].as_ref())
                     .flatten();
                 let highlighted = (hot
@@ -2168,6 +2227,7 @@ fn overlay(asset: &Arc<LoadedFrame>, rect: Rect, clip: Rect) -> OverlayDraw<'_> 
     OverlayDraw {
         asset,
         rect: pixels(rect),
+        additive: false,
         clip: pixels(clip),
     }
 }
@@ -2399,6 +2459,17 @@ fn reduced_coverage(glyph: &SpriteFrame, x: u32, y: u32, w: u32, h: u32) -> u8 {
     ((sum + area / 2) / area) as u8
 }
 
+/// TIG's additive ART blit adds palette intensity times the font tint.
+/// The Vulkan additive pipeline sums RGB directly, independent of alpha.
+pub(super) fn additive_glyph_coverage(frame: &mut SpriteFrame) {
+    for pixel in &mut frame.pixels {
+        let coverage = u16::from(pixel[3]);
+        for component in &mut pixel[..3] {
+            *component = ((u16::from(*component) * coverage + 127) / 255) as u8;
+        }
+    }
+}
+
 pub(super) fn blend_glyph(dst: &mut Color, color: Color, coverage: u8) {
     let alpha = (u32::from(color[3]) * u32::from(coverage) + 127) / 255;
     if alpha == 0 {
@@ -2495,6 +2566,15 @@ mod tests {
         scale_into(&source, &mut frame, Some([1, 0, 2, 1])).unwrap();
         assert_eq!(frame.pixels, source.pixels[1..]);
         assert!(scale_into(&source, &mut frame, Some([2, 0, 2, 1])).is_err());
+    }
+
+    #[test]
+    fn additive_font_pass_weights_the_highlight_by_palette_coverage() {
+        let mut frame = sprite([3, 1], [100, 60, 40, 255]);
+        frame.pixels[0][3] = 0;
+        frame.pixels[1][3] = 64;
+        additive_glyph_coverage(&mut frame);
+        assert_eq!(frame.pixels, [[0; 4], [25, 15, 10, 64], [100, 60, 40, 255]]);
     }
 
     #[test]

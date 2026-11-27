@@ -1,6 +1,6 @@
 # Arcanum-RS — Known Issues
 
-Baseline includes M78-R combat integration. Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
+Baseline includes M79-R character creation and cinematic playback. Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
 
 ## Triage
 
@@ -12,11 +12,15 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 
 ## Open issues
 
+- **M79 character sheet (P2, open).** The Classic sheet omits the player’s name.
+- **Moving shadows (P2, open).** NPC shadows can lose their anchor while the actor moves.
+- **Combat speed (P2, open).** Fast turn-based combat is missing. Configurable floating damage numbers are a separate optional future enhancement.
+
 ### COMBAT-001 — Remaining combat compatibility
 
-- **Priority P2. Status open.** The stock CE skill rolls, armor and resistance, AP costs, NPC-first turn list, critical damage bonuses and base XP pool rules underpin both combat modes. Detailed critical locations, equipment damage and dropped weapons, special critical-chart injuries, ambient light penalties and tactical NPC spell and weapon selection still need coverage. Real-time attack intervals use weapon cost and actor speed. NPCs and summons play the directional walking, attack and death sequences available for their current models. The resolver supports ordinary and torso deaths with the original fallback. Additional injury-specific death variants depend on critical-chart support.
+- **Priority P2. Status open.** The stock CE skill rolls, armor and resistance, AP costs, NPC-first turn list, critical damage bonuses and base XP pool rules underpin both combat modes. The Born Under a Sign background supplies both critical severity modifiers. Its hit modifier feeds the original bonus-damage rolls. Its fumble modifier is retained for the remaining weapon and ammunition damage rules. Detailed critical locations, equipment damage and dropped weapons, special critical-chart injuries, ambient light penalties and tactical NPC spell and weapon selection still need coverage. Real-time attack intervals use weapon cost and actor speed. NPCs and summons play the directional walking, attack and death sequences available for their current models. The resolver supports ordinary and torso deaths with the original fallback. Additional injury-specific death variants depend on critical-chart support.
 - Followers need recruitment, commands, party travel and party XP distribution. An allied summon can fight using its current form and ownership. Encounters use original hostility, sight, faction and supported script attachments. Some original dying and encounter scripts use operations beyond the script interpreter, reported by `rpc combat`.
-- **Installed regression baseline.** Three existing checks fail on this installation at the same assertions on the pre-M78 revision: the Bates lighting composition, the dining-room mobile shadow probe and the Kna Tha rabbit position. The dropped-item eviction check used an obsolete render-order number. Its assertion now follows the item's original identity through the rendered pickup target.
+- **Installed regression baseline.** The M79-R installed-data run reproduced the pre-M78 failures in the Bates lighting composition, the dining-room mobile shadow probe and the Kna Tha rabbit position. The other 74 installed checks passed, including the external VFS smoke check with its mod fixture. The dropped-item eviction assertion follows the item's original identity through the rendered pickup target.
 
 ### PROG-001 — Remaining character and ability execution
 
@@ -51,7 +55,7 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 ### QUEST-001 — Quest rewards and broader logbook coverage
 
 - **Priority:** P2 | **Status:** Deferred
-- The Classic book exposes Quests. Other sections depend on their gameplay
+- The Classic book exposes Quests, Rumors & Notes, and Background. Other sections depend on their gameplay
   systems. The original logbook notification highlight is pending.
 - Completion awards original quest XP and alignment. Quest-specific NPC reaction changes and the completion sound are pending. Floating-line
   responses and unbotching are deferred.
@@ -82,7 +86,7 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
   Dialogue does not implement recruitment or the bank fight.
 - Native clicks now reach the Wise Woman's and Black Root Herbalist's greetings and barter responses. Their other services, including identification, remain pending.
 - **Bridge gate resolved in M74-R.** Paying Lukan transfers his original bridge key. Clicking the leaf opens the gate and runs Use script 30019. The changed collision edge allows passage. [Installed-data reproduction](AGENT_WORKFLOW.md#shrouded-hills-interaction-check).
-- The original NPC event scheduler remains deferred. Doc's first heartbeat
+- First and recurring NPC heartbeats now run on active mobiles. Some script operations in Shrouded Hills still require implementation. Doc's first heartbeat
   `01302docfirst_heartbeat.scr` can change his day standpoint and remove the
   attachment. His `01759docroberts_heartbeat1.scr` and the bridge copy's
   `02770docbridgehb.scr` use reputation 1050 and state toggles.
@@ -117,11 +121,6 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 - **Priority:** P2 | **Status:** Needs reproduction
 - M69-R native fixture discovery reported SchemeIndex ID 29 on Void and
   Tulla Interior – Battle – Morph. Map playback and dialogue testing continued.
-
-### UI-009 — Quit Game exits the application
-
-The Classic Quit Game button asks for confirmation and then exits. Return to
-the original main menu when the main menu and new-game lifecycle exist.
 
 ### AUD-001 — Missing resources in the authored wasteland scheme
 
@@ -215,11 +214,6 @@ the original main menu when the main menu and new-game lifecycle exist.
 - Render a black background outside the menu artwork.
 - Preserve existing menu dimensions and scaling.
 
-### UI — Pause menu text color
-- Priority: P2
-- Menu lettering appears gold instead of the original red.
-- Investigate original text colors and button states using CE and installed resources.
-
 ### SAVE — New save name entry
 - Priority: P2
 - Clicking New requires an additional click on the green confirmation arrow before entering a save name.
@@ -260,6 +254,11 @@ These are planned capabilities, not regressions. Implement in their own mileston
 
 ## Regression watchlist — previously corrected
 
+- **M79 opening events and camera. Resolved.** A fresh campaign opens Virgil’s authored dialogue from his heartbeat. Scripted passengers fall and the original flat corpse poses expose Isaac’s camera and Wilhemina’s note. The independent camera stays put while walking and across save/load, and centers on map arrival. [Native reproduction](AGENT_WORKFLOW.md#crash-site-opening).
+- **M79 menu music and creation sounds. Resolved.** The shopping map’s entry sector selects scheme 26 and the installed Arcanum theme. Native output captured the theme on launch, through creation and shopping, and again after returning from the Crash Site. Artwork buttons use the original press and release samples. At the merchant, picking up, buying and selling a dagger produced the item samples. Cancelling the drag and an unaffordable purchase produced no drop cue. A drag-purchased dagger was equipped after native save and load.
+- **Classic main and pause lettering. Resolved.** Both menus use the original dark red face and bright selection. The relief uses the ART glyph coverage. Labels use their measured frame extents and configured top and center independently of the hitbox. Vulkan captures covered normal, hovered, keyboard-selected and modal-disabled entries. A narrowed external button at 120% effective scale retained the full label and its configured click area.
+
+- **UI-009. Resolved.** Quit Game returns to the original main menu after confirmation. Native checks covered loading the previous character, creating a second character and exiting from the main menu. Starting a new campaign copies the new character and owned items from the merchant session in transaction order. Merchant state, old character effects, quests and rumors stay with their original session.
 - **COMBAT-002. Resolved.** NPC and summon steps previously changed tile without a walking pose. Kree bandits, the Crash Site wolf and an Orcish Champion now use their directional walking and falling ART. A saved wolf fall resumed after a full restart and stayed on its last frame after a second F8 during the player's turn. Spell targeting remains active across casts until cancelled. Native right-button release restored the ordinary pointer. Quench Life completed its callback once during turn-based combat.
 
 These are not open defects. Retain focused regression coverage and reopen only if reproduced.

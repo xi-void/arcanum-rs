@@ -125,6 +125,12 @@ impl InteractiveWorld {
             _ => None,
         }
     }
+    pub fn selecting_skill(&self) -> bool {
+        self.ability.selected.is_some_and(Method::is_skill)
+    }
+    pub fn combat_ready(&self) -> bool {
+        self.cache.inventory.combat.armed
+    }
     pub fn selected_spell(&self) -> Option<usize> {
         if let Some(Method::Spell(id)) = self.ability.selected {
             Some(id)

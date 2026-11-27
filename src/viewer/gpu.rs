@@ -142,6 +142,10 @@ impl WindowRenderer {
         }
     }
 
+    pub fn stream_rgba(&mut self, asset: &Arc<LoadedFrame>, pixels: &[u8]) -> Result<(), String> {
+        self.compositor.stream_rgba(asset, pixels)
+    }
+
     pub fn render_inset<'a>(
         &mut self,
         asset: &Arc<LoadedFrame>,

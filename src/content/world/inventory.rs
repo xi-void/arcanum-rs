@@ -9,7 +9,9 @@ pub(super) mod casting;
 pub(super) mod combat;
 mod crafting;
 pub use crafting::SchematicComponent;
+mod creation;
 mod equipment;
+pub use creation::{CreationBuild, CreationCatalog};
 mod save;
 mod stock;
 pub(super) mod trade;
@@ -246,7 +248,9 @@ impl Records<'_> {
         };
         let field = |slot| object.field(slot).and_then(FieldValue::scalar);
         let inventory_art = field(70).or(proto.defaults.inventory_art);
-        Ok(Item {
+        let mut item = Item {
+            carry: None,
+            insert_stat: None,
             id,
             stats: ItemStats::resolve(&object, proto.defaults.item.as_deref()),
             generated: false,
@@ -268,7 +272,9 @@ impl Records<'_> {
                 proto.defaults.inventory_scripts,
                 objects::has_inventory_scripts,
             ),
-        })
+        };
+        item.resolve_carry(self.vfs);
+        Ok(item)
     }
 
     fn container(&mut self, id: OriginalId) -> Result<Container, String> {
@@ -579,7 +585,7 @@ pub struct InventoryEntry {
 }
 
 pub struct InventoryReader {
-    portraits: BTreeMap<i32, Result<Arc<LoadedFrame>, String>>,
+    portraits: BTreeMap<(i32, bool), Result<Arc<LoadedFrame>, String>>,
     schematic_reports:
         BTreeMap<i32, Result<Arc<crate::content::schematics::SchematicReport>, String>>,
     pub(super) vfs: Vfs,
@@ -591,6 +597,9 @@ pub struct InventoryReader {
 }
 
 impl InventoryReader {
+    pub fn resources(&mut self) -> &mut Vfs {
+        &mut self.vfs
+    }
     pub fn new(mut vfs: Vfs) -> Self {
         let descriptions = ["mes/gamedesc.mes", "mes/description.mes"]
             .into_iter()
@@ -1200,7 +1209,7 @@ impl InteractiveWorld {
         if world_changed {
             self.cache.activate(&self.cache.active.clone());
         }
-        self.queue_sound(super::SoundEvent::Effect(sound));
+        self.queue_sound(super::SoundEvent::Inventory(sound));
         Ok(result)
     }
 

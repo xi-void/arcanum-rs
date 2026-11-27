@@ -197,7 +197,7 @@ impl super::inventory::InventoryReader {
         {
             return Some(self.open_corpse(world, *id));
         }
-        let result = self.open_npc_dialogue(world, key);
+        let result = self.open_npc_dialogue(world, key, None);
         if let Err(error) = &result
             && world.dialogue_status.is_none()
         {
@@ -208,17 +208,18 @@ impl super::inventory::InventoryReader {
         Some(result)
     }
 
-    fn open_npc_dialogue(
+    pub(super) fn open_npc_dialogue(
         &mut self,
         world: &mut InteractiveWorld,
         key: WorldOrder,
+        script_start: Option<usize>,
     ) -> Result<(), String> {
         if world.dialogue.is_some() {
             return Err("Dialogue already active".into());
         }
         let (resident, tile) = world.cache.npc(key).ok_or("NPC is unavailable")?;
         let player = world.cache.player.as_ref().ok_or("Player is unavailable")?;
-        if player.moving() || !in_range(player.tile(), tile) {
+        if script_start.is_none() && (player.moving() || !in_range(player.tile(), tile)) {
             return Err("NPC is out of dialogue range".into());
         }
         let object = resident.instance();
@@ -352,7 +353,7 @@ impl super::inventory::InventoryReader {
         let mut staged = world.cache.scripts.clone();
         staged.interaction =
             Some(world.script_inventory(&mut self.vfs, &context.target, reaction)?);
-        let invocation = context.entry.invocation(0);
+        let invocation = context.entry.invocation(script_start.unwrap_or(0));
         let execution = script.execute(&invocation, &mut staged).map_err(|fault| {
             let error = format!(
                 "{} from {}: {fault}",
@@ -498,7 +499,7 @@ impl super::inventory::InventoryReader {
     }
 }
 
-fn initial_reaction(
+pub(super) fn initial_reaction(
     base: Option<i32>,
     flags: Option<u32>,
     race: Option<i32>,

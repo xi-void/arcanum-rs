@@ -275,6 +275,7 @@ fn screen_overlay_keeps_screen_coordinates_at_each_world_zoom() {
         [],
         [OverlayDraw {
             asset: &hud,
+            additive: false,
             rect: [1., 1., 4., 2.],
             clip: [2., 1., 2., 2.],
         }],

@@ -440,6 +440,14 @@ impl Hud {
         Some(sound)
     }
 
+    pub(super) fn inventory_cursor(&self) -> Option<(&str, [i32; 2])> {
+        let drag = self.inventory.drag.as_ref()?;
+        let item = self.dragged_item(drag)?;
+        Some((
+            &item.icon.as_ref().ok()?.source.virtual_path,
+            drag.grab_pixels,
+        ))
+    }
     pub(in crate::viewer) fn dragging_inventory(&self) -> bool {
         self.inventory.drag.is_some()
     }
@@ -957,6 +965,22 @@ pub(super) fn equipment_icon(placement: &Placement, asset: &LoadedFrame) -> Rect
         y: placement.full.y + ((placement.full.h - h) / 2) as i32,
         w,
         h,
+    }
+}
+
+impl Hud {
+    pub(in crate::viewer) fn inventory_message(&self) -> &str {
+        self.inventory
+            .error
+            .as_deref()
+            .or_else(|| {
+                self.components
+                    .get(self.bound(Binding::InventoryHover)?)?
+                    .label
+                    .as_ref()
+                    .map(|label| label.value.as_str())
+            })
+            .unwrap_or_default()
     }
 }
 

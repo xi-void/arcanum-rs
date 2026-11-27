@@ -1,6 +1,55 @@
 use super::*;
 
 impl Session {
+    pub(super) fn original_character(
+        vfs: &mut Vfs,
+        prototype: u32,
+    ) -> Result<Character, Box<dyn std::error::Error>> {
+        let mut character = Character::default();
+        // CE supplies a generic PC when this prototype is absent.
+        let pc = crate::prototype::SerializedPrototypeId(prototype);
+        if !vfs
+            .paths_with_prefix(&format!("proto/{prototype:06} - "))
+            .is_empty()
+            || prototype != 16086
+        {
+            let (source, bytes) = super::super::super::sector::read_static_prototype(vfs, pc)?;
+            let defaults = objects::prototype_defaults(&bytes, pc, 15)
+                .map_err(|error| format!("{source}: {error}"))?;
+            if let Some(stats) = defaults.character {
+                for (base, value) in character.base.iter_mut().zip(*stats) {
+                    if let Some(value) = value {
+                        *base = value;
+                    }
+                }
+            }
+            character.spell_flags = defaults.appearance.spell_flags.unwrap_or_default();
+            character.tech_skills = defaults.tech_skills;
+            character.colleges = defaults.colleges;
+            character.mastery = defaults.mastery;
+            character.fatigue_damage = defaults.fatigue_damage;
+            character.critter_flags = defaults.appearance.critter_flags.unwrap_or_default();
+            character.critter_flags2 = defaults.appearance.critter_flags2.unwrap_or_default();
+            character.name = defaults.player_name;
+            character.background_text = defaults.background_text;
+            character.portrait = defaults.portrait;
+            character.basic_skills = defaults.basic_skills;
+            character.degrees = defaults.degrees;
+            character.health_damage = defaults.npc_damage[0];
+            character.background = defaults.background.unwrap_or_default();
+            character.sound_effect = defaults.appearance.sound_effect;
+            character.original_palette = defaults.original_art.map_or(0, |art| (art >> 4) & 3);
+            character.base_ac = defaults.armor_class.unwrap_or_default();
+            character.hp = defaults.hp;
+            character.fatigue = defaults.fatigue;
+            character.base_resistance = defaults
+                .resistance
+                .unwrap_or_default()
+                .map(Option::unwrap_or_default);
+        }
+        Ok(character)
+    }
+
     pub(super) fn equipped(
         &self,
         slot: EquipmentSlot,
@@ -63,6 +112,38 @@ impl Session {
                 self.rules
                     .worn
                     .extend(std::iter::repeat_n(effect.clone(), count));
+            }
+        }
+        if self
+            .state
+            .changes
+            .values()
+            .any(|change| change.item.carry.is_some())
+        {
+            let needs_stat = self.state.changes.values().any(|c| {
+                c.item.carry.is_some()
+                    && c.item.insert_stat.is_none()
+                    && matches!(c.place, Place::Owned(Owner::Player) | Place::Equipped(_))
+            });
+            let values = needs_stat.then(|| self.statistics().script_values());
+            for change in self.state.changes.values_mut() {
+                let Some(effect) = &change.item.carry else {
+                    continue;
+                };
+                if matches!(
+                    change.place,
+                    Place::Owned(Owner::Player) | Place::Equipped(_)
+                ) {
+                    let stat = *change.item.insert_stat.get_or_insert_with(|| {
+                        values.as_ref().and_then(|s| s[effect.stat]).unwrap_or(0) as u8
+                    });
+                    self.rules.worn.extend(std::iter::repeat_n(
+                        effect.adjustment.clone(),
+                        usize::from(stat / effect.divisor),
+                    ));
+                } else {
+                    change.item.insert_stat = None;
+                }
             }
         }
     }
@@ -308,7 +389,9 @@ impl Session {
         };
         let proto = mobile::population::Prototype { source, defaults };
         let inventory_art = proto.defaults.inventory_art;
-        Ok(Item {
+        let mut item = Item {
+            carry: None,
+            insert_stat: None,
             id,
             category,
             description: proto.defaults.description,
@@ -328,7 +411,9 @@ impl Session {
             scripted: proto.defaults.inventory_scripts,
             stats: proto.defaults.item.map(|stats| *stats).unwrap_or_default(),
             generated: true,
-        })
+        };
+        item.resolve_carry(vfs);
+        Ok(item)
     }
 }
 
@@ -419,45 +504,13 @@ impl SectorCache {
         vfs: &mut Vfs,
         frames: &mut FrameCache,
         start: Tile,
+        build: Option<&CreationBuild>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let inventory = &mut self.inventory;
-        // CE supplies a generic PC when this prototype is absent.
-        let pc = crate::prototype::SerializedPrototypeId(16086);
-        if let Ok((source, bytes)) = super::super::super::sector::read_static_prototype(vfs, pc) {
-            let defaults = objects::prototype_defaults(&bytes, pc, 15)
-                .map_err(|error| format!("{source}: {error}"))?;
-            if let Some(stats) = defaults.character {
-                for (base, value) in inventory.character.base.iter_mut().zip(*stats) {
-                    if let Some(value) = value {
-                        *base = value;
-                    }
-                }
-            }
-            inventory.character.spell_flags = defaults.appearance.spell_flags.unwrap_or_default();
-            inventory.character.tech_skills = defaults.tech_skills;
-            inventory.character.colleges = defaults.colleges;
-            inventory.character.mastery = defaults.mastery;
-            inventory.character.fatigue_damage = defaults.fatigue_damage;
-            inventory.character.critter_flags =
-                defaults.appearance.critter_flags.unwrap_or_default();
-            inventory.character.critter_flags2 =
-                defaults.appearance.critter_flags2.unwrap_or_default();
-            inventory.character.portrait = defaults.portrait;
-            inventory.character.basic_skills = defaults.basic_skills;
-            inventory.character.degrees = defaults.degrees;
-            inventory.character.health_damage = defaults.npc_damage[0];
-            inventory.character.background = defaults.background.unwrap_or_default();
-            inventory.character.sound_effect = defaults.appearance.sound_effect;
-            inventory.character.original_palette =
-                defaults.original_art.map_or(0, |art| (art >> 4) & 3);
-            inventory.character.base_ac = defaults.armor_class.unwrap_or_default();
-            inventory.character.hp = defaults.hp;
-            inventory.character.fatigue = defaults.fatigue;
-            inventory.character.base_resistance = defaults
-                .resistance
-                .unwrap_or_default()
-                .map(Option::unwrap_or_default);
-        }
+        inventory.character = match build {
+            Some(build) => build.character.clone(),
+            None => Session::original_character(vfs, 16086)?,
+        };
         let backgrounds = load_mes(vfs, "rules/backgrnd.mes")?;
         inventory.character.validate_progression()?;
         inventory.load_rules(vfs, &backgrounds)?;
@@ -482,23 +535,74 @@ impl SectorCache {
                 Some((&Grid::default(), None)),
             )?;
         }
+        let mut gifts = backgrounds
+            .mes
+            .get(block + 4)
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(|s| s.parse::<u32>())
+            .collect::<Result<Vec<_>, _>>()?;
         if inventory.character.tech_skills[2] & 63 != 0 {
-            // CE item_generate_inventory gives trained starting PCs crude lockpicks.
-            let item = inventory.create_starting_item(vfs, frames, 15178 + 20, 14)?;
-            let grid = Grid {
-                items: inventory
-                    .state
-                    .changes
-                    .values()
-                    .filter(|change| change.place == Place::Owned(Owner::Player))
-                    .filter_map(|change| {
-                        Some((change.item.id, (change.slot?, change.item.footprint.cells)))
-                    })
-                    .collect(),
-            };
+            gifts.push(15178);
+        }
+        if inventory.character.basic_skills[10] & 63 != 0 {
+            gifts.push(15179);
+        }
+        let mut grid = Grid::default();
+        for change in inventory.state.changes.values() {
+            if let Some(slot) = change.slot {
+                grid.items
+                    .insert(change.item.id, (slot, change.item.footprint.cells));
+            }
+        }
+        for base in gifts {
+            let id = base.checked_add(20).ok_or("Starting prototype overflow")?;
+            let (_, bytes) = crate::content::sector::read_static_prototype(
+                vfs,
+                crate::prototype::SerializedPrototypeId(id),
+            )?;
+            let kind = crate::prototype::decode_header(&bytes)?.object_type;
+            let mut item = inventory.create_starting_item(vfs, frames, id, kind)?;
+            item.flags |= 1;
+            let slot = grid
+                .fit(item.id, item.footprint.cells, Owner::Player.rows(), None)
+                .ok_or("Starting items exceed backpack space")?;
+            grid.items.insert(item.id, (slot, item.footprint.cells));
             inventory
                 .state
-                .relocate(item, Place::Owned(Owner::Player), Some((&grid, None)))?;
+                .put(item, Place::Owned(Owner::Player), Some(slot));
+        }
+        // An authored background can supply body armor instead of the default outfit.
+        // Keep an incompatible gift in the pack, just as the merchant screen does.
+        if let Some(gift) = inventory
+            .state
+            .changes
+            .values()
+            .find(|c| {
+                EquipmentSlot::Armor.accepts(
+                    c.item.category,
+                    c.item.inventory_art,
+                    c.item.stats.equipment_flags.unwrap_or(0),
+                )
+            })
+            .map(|c| c.item.clone())
+        {
+            let fits = inventory
+                .check_equipment(&gift, EquipmentSlot::Armor)
+                .is_ok();
+            let art = inventory.body_art(fits.then_some(&gift))?;
+            let appearance = Appearance::load(vfs, frames, art)?;
+            if fits {
+                if let Some(effect) = inventory.prepare_wield(vfs, &gift)? {
+                    inventory.wielded.insert(gift.id, effect);
+                }
+                inventory
+                    .state
+                    .put(gift, Place::Equipped(EquipmentSlot::Armor), None);
+            }
+            self.player = Some(Player::new(Arc::new(appearance), start));
+            self.update_character_movement();
+            return Ok(());
         }
         let size = inventory
             .character
@@ -725,7 +829,7 @@ impl InteractiveWorld {
         inventory.revision += 1;
         self.cache.update_character_movement();
         if let Some(id) = sound {
-            self.queue_sound(super::super::SoundEvent::Effect(id));
+            self.queue_sound(super::super::SoundEvent::Inventory(id));
         }
         Ok(
             json!({"slot":slot,"equipped":equipped,"unequipped":unequipped,"statistics":self.character_statistics()}),

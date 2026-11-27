@@ -23,6 +23,8 @@ pub(crate) enum Event {
     Use,
     BuyObject,
     Dying,
+    FirstHeartbeat,
+    Heartbeat,
     Dialogue,
 }
 
@@ -58,17 +60,41 @@ pub struct State {
     pub(super) sector_toggles: BTreeMap<String, BTreeSet<u64>>,
     #[serde(skip)]
     pub(super) sector_map: Option<Arc<(String, BTreeSet<u64>)>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) detached: BTreeMap<String, BTreeSet<Event>>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(super) switched_off: BTreeSet<String>,
+    #[serde(skip)]
+    pub(super) heartbeat: Option<HeartbeatContext>,
     flags: BTreeMap<i32, bool>,
     variables: BTreeMap<i32, i32>,
     attachments: BTreeMap<String, BTreeMap<Event, Local>>,
     #[serde(default)]
     pub quests: Ledger,
+    #[serde(default)]
+    pub rumors: BTreeMap<i32, u64>,
+    #[serde(skip)]
+    slides: Option<Vec<i32>>,
+    #[serde(default)]
+    pub quelled_rumors: BTreeSet<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     random: Option<Random>,
     #[serde(skip)]
     pub(super) game_minute: u64,
     #[serde(skip)]
     pub(super) interaction: Option<Interaction>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct HeartbeatContext {
+    pub vicinity: Vec<Actor>,
+    pub action: Option<ActorAction>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ActorAction {
+    Kill,
+    CallDialogue(usize),
 }
 
 /// The staged read view for a single SCR/DLG invocation. Operations commit with its state writes.
@@ -242,6 +268,28 @@ impl State {
         }
         Some(())
     }
+    pub(super) fn learn_rumor(&mut self, id: i32, quell: bool) -> Option<()> {
+        if !(1000..3000).contains(&id) {
+            return None;
+        }
+        if quell {
+            self.quelled_rumors.insert(id);
+        } else {
+            self.rumors.entry(id).or_insert(self.game_minute);
+        }
+        Some(())
+    }
+    pub(super) fn choose_rumor(&mut self, mut ids: Vec<i32>) -> Option<i32> {
+        ids.retain(|id| !self.rumors.contains_key(id) && !self.quelled_rumors.contains(id));
+        if ids.is_empty() {
+            return None;
+        }
+        let index = self
+            .random
+            .get_or_insert_with(Random::fresh)
+            .below(ids.len() as u64);
+        Some(ids[index as usize])
+    }
     pub(super) fn initialize_random(&mut self) {
         self.random.get_or_insert_with(Random::fresh);
     }
@@ -286,6 +334,14 @@ impl State {
                 .then(|| (self.local(attachment).counters >> (8 * index)) as i32);
         }
         self.read(attachment, slot)
+    }
+
+    pub(crate) fn set_global_flag(&mut self, index: i32) -> Result<(), String> {
+        if !(0..GLOBAL_FLAGS).contains(&index) {
+            return Err("Invalid starting global flag".into());
+        }
+        self.flags.insert(index, true);
+        Ok(())
     }
 
     pub(crate) fn write(&mut self, attachment: &Attachment, slot: Slot, value: i32) -> Option<()> {
@@ -403,12 +459,13 @@ impl Invocation<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Actor {
     Player,
     Item(u32),
     Mobile,
+    None,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -461,7 +518,7 @@ pub(super) struct Code {
 pub(super) struct Statement {
     pub condition: Operation,
     pub action: Operation,
-    otherwise: Operation,
+    pub(super) otherwise: Operation,
 }
 
 pub(super) struct Operation {
@@ -683,6 +740,7 @@ impl Code {
         let mut pc = input.position;
         let attachment = input.attachment;
         let mut temporaries = [0; 10];
+        let mut loop_state: Option<(usize, usize)> = None;
         for _ in 0..STEP_BUDGET {
             let fault = |reason| Fault {
                 statement: Some(pc),
@@ -778,7 +836,7 @@ impl Code {
                 10 if cond.focus(0) == 1 && matches!(cond.focus(1), 0 | 21) => input.met,
                 20 if cond.focus(0) == 0 => match input.triggerer {
                     Actor::Item(name) => value(cond, 1).map(|n| i64::from(n) == i64::from(name)),
-                    Actor::Player | Actor::Mobile => None,
+                    Actor::Player | Actor::Mobile | Actor::None => None,
                 },
                 18 if [cond.focus(0), cond.focus(1)] == [1, 0] => input.follows_player,
                 45 => sector_operand(value(cond, 0), value(cond, 1)).and_then(|id| {
@@ -801,6 +859,10 @@ impl Code {
                         let dy = (i64::from(obj_y) - i64::from(y)).abs();
                         dx.max(dy) <= i64::from(range)
                     }),
+                40 if actor(cond.focus(0)) == Some(0) => {
+                    value(cond, 1).map(|id| view.state().rumors.contains_key(&id))
+                }
+                41 => value(cond, 0).map(|id| view.state().quelled_rumors.contains(&id)),
                 39 if cond.focus(0) == 1 => input.npc_flags.map(|flags| flags & 0x20 != 0),
                 43 => value(cond, 0)
                     .and_then(|index| view.state().read(attachment, Slot::GlobalFlag(index)))
@@ -841,6 +903,115 @@ impl Code {
                     let line = value(action, 0).filter(|&n| n > 0).ok_or_else(unresolved)?;
                     Some(Outcome::Dialogue { line })
                 }
+                5 if view.state().heartbeat.is_some() => {
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    state
+                        .detached
+                        .entry(attachment.owner.clone())
+                        .or_default()
+                        .insert(attachment.event);
+                    None
+                }
+                18 if action.focus(0) == 8 && loop_state.is_none() => {
+                    let actors = &view
+                        .state()
+                        .heartbeat
+                        .as_ref()
+                        .ok_or_else(unresolved)?
+                        .vicinity;
+                    if actors.is_empty() {
+                        pc = self
+                            .statements
+                            .iter()
+                            .enumerate()
+                            .skip(pc + 1)
+                            .find(|(_, r)| r.condition.opcode == 0 && r.action.opcode == 19)
+                            .map(|(n, _)| n)
+                            .ok_or_else(unresolved)?;
+                    } else {
+                        loop_state = Some((pc + 1, 0));
+                    }
+                    None
+                }
+                19 => {
+                    let (start, index) = loop_state.take().ok_or_else(unresolved)?;
+                    let actors = &view
+                        .state()
+                        .heartbeat
+                        .as_ref()
+                        .ok_or_else(unresolved)?
+                        .vicinity;
+                    if index + 1 < actors.len() {
+                        loop_state = Some((start, index + 1));
+                        pc = start;
+                        continue;
+                    }
+                    None
+                }
+                34 if action.focus(0) == 10 => {
+                    let (_, i) = loop_state.ok_or_else(unresolved)?;
+                    let actor = view
+                        .state()
+                        .heartbeat
+                        .as_ref()
+                        .and_then(|h| h.vicinity.get(i))
+                        .ok_or_else(unresolved)?;
+                    let kind = match actor {
+                        Actor::Player => 15,
+                        Actor::Mobile => 16,
+                        _ => return Err(unresolved()),
+                    };
+                    view.assign(
+                        attachment,
+                        action.operand(1).ok_or_else(unresolved)?,
+                        kind,
+                        &mut temporaries,
+                    )
+                    .ok_or_else(unresolved)?;
+                    None
+                }
+                56 if action.focus(0) == 1 && view.state().heartbeat.is_some() => {
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    if !state.switched_off.remove(&attachment.owner) {
+                        state.switched_off.insert(attachment.owner.clone());
+                    }
+                    None
+                }
+                58 | 81 if action.focus(0) == 1 && view.state().heartbeat.is_some() => {
+                    let effect = if action.opcode == 58 {
+                        ActorAction::Kill
+                    } else {
+                        let trigger = match action.focus(3) {
+                            21 => Some(&Actor::Player),
+                            10 => loop_state.and_then(|(_, i)| {
+                                view.state().heartbeat.as_ref()?.vicinity.get(i)
+                            }),
+                            _ => None,
+                        };
+                        if value(action, 1) != Some(9) || trigger != Some(&Actor::Player) {
+                            return Err(unresolved());
+                        }
+                        ActorAction::CallDialogue(
+                            usize::try_from(value(action, 2).ok_or_else(unresolved)?)
+                                .map_err(|_| unresolved())?,
+                        )
+                    };
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    let action = &mut state.heartbeat.as_mut().unwrap().action;
+                    if action.replace(effect).is_some() {
+                        return Err(fault(
+                            "Multiple actor action requests in one heartbeat are unsupported"
+                                .into(),
+                        ));
+                    }
+                    None
+                }
                 8 | 9 | 100 | 101 => {
                     let index = value(action, 0).ok_or_else(unresolved)?;
                     let slot = if action.opcode < 10 {
@@ -854,6 +1025,27 @@ impl Code {
                         i32::from(matches!(action.opcode, 8 | 100)),
                     )
                     .ok_or_else(unresolved)?;
+                    None
+                }
+                131 => {
+                    let id = value(action, 0).ok_or_else(unresolved)?;
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    state.slides.as_mut().ok_or_else(unresolved)?.push(id);
+                    None
+                }
+                50 | 51 => {
+                    let id = value(action, 0).ok_or_else(unresolved)?;
+                    if actor(action.focus(1)) != Some(0) {
+                        return Err(unresolved());
+                    }
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    state
+                        .learn_rumor(id, action.opcode == 51)
+                        .ok_or_else(unresolved)?;
                     None
                 }
                 10..=12 => {
@@ -1093,6 +1285,142 @@ pub(super) struct WieldEffect {
     power_ratio: bool,
     pub sources: [Source; 2],
 }
+/// Original paired insert/remove SCRs store the effective stat in local
+/// counter zero on insert. Removal divides that stored value again.
+#[derive(Clone)]
+pub(crate) struct CarryEffect {
+    pub stat: usize,
+    pub divisor: u8,
+    pub adjustment: Arc<crate::content::character::Adjustments>,
+}
+impl CarryEffect {
+    pub(crate) fn load(vfs: &mut Vfs, attachments: [(i32, Local); 2]) -> Result<Self, String> {
+        let [(insert, locals), (remove, _)] = attachments;
+        let enter = Script::load(vfs, insert)?;
+        let exit = Script::load(vfs, remove)?;
+        let invalid = || {
+            format!(
+                "Unsupported carry scripts {} and {}",
+                enter.source, exit.source
+            )
+        };
+        let [
+            get,
+            div,
+            stop,
+            add,
+            dec,
+            jump,
+            again,
+            empty,
+            sub,
+            decr,
+            back,
+        ] = enter.code.statements.as_slice()
+        else {
+            return Err(invalid());
+        };
+        let [call, ret] = exit.code.statements.as_slice() else {
+            return Err(invalid());
+        };
+        let instruction = |s: &Statement, condition, action| {
+            s.condition.opcode == condition && s.action.opcode == action && s.otherwise.opcode == 0
+        };
+        let arg = |op: &Operation, i: usize, t, v| op.types[i] == t && op.values[i] == v;
+        let divide = |s: &Statement| {
+            instruction(s, 0, 14)
+                && arg(&s.action, 0, 2, 0)
+                && arg(&s.action, 1, 0, 0)
+                && arg(&s.action, 2, 0, 2)
+        };
+        let done = |s: &Statement| {
+            instruction(s, 4, 2) && arg(&s.condition, 0, 2, 0) && s.condition.literal(1) == Some(0)
+        };
+        let decrement = |s: &Statement| {
+            instruction(s, 0, 12)
+                && arg(&s.action, 0, 2, 0)
+                && arg(&s.action, 1, 2, 0)
+                && s.action.literal(2) == Some(1)
+        };
+        if enter.code.check_flags().is_err()
+            || exit.code.check_flags().is_err()
+            || !instruction(get, 0, 33)
+            || !arg(&get.action, 0, 0, 3)
+            || get.action.focus(1) != 0
+            || !arg(&get.action, 2, 0, 0)
+            || !divide(div)
+            || !divide(again)
+            || !done(stop)
+            || !done(empty)
+            || !decrement(dec)
+            || !decrement(decr)
+            || !instruction(add, 0, 77)
+            || add.action.focus(0) != 0
+            || !arg(&add.action, 1, 0, 1)
+            || add.action.literal(2) != Some(5)
+            || !instruction(sub, 0, 78)
+            || sub.action.focus(0) != 0
+            || !arg(&sub.action, 1, 0, 1)
+            || !instruction(jump, 0, 3)
+            || jump.action.literal(0) != Some(2)
+            || !instruction(back, 0, 3)
+            || back.action.literal(0) != Some(7)
+            || !instruction(call, 0, 81)
+            || call.action.focus(0) != 1
+            || call.action.literal(1) != Some(21)
+            || call.action.literal(2) != Some(6)
+            || !instruction(ret, 0, 2)
+        {
+            return Err(invalid());
+        }
+        let stat = locals.counter(3).unwrap() as usize;
+        let divisor = locals.counter(2).unwrap() as u8;
+        if stat >= 28 || divisor == 0 {
+            return Err(invalid());
+        }
+        let effects =
+            crate::content::load_mes(vfs, "rules/effect.mes").map_err(|e| e.to_string())?;
+        let effect = effects
+            .mes
+            .get(locals.counter(1).unwrap())
+            .ok_or_else(invalid)?;
+        Ok(Self {
+            stat,
+            divisor,
+            adjustment: Arc::new(crate::content::character::Adjustments::parse(effect)?),
+        })
+    }
+}
+
+/// CE slide_ui_prepare invokes a SAP_USE entry with null objects.
+pub fn slide_sequence(vfs: &mut Vfs, script: i32) -> Result<Vec<i32>, String> {
+    let program = Script::load(vfs, script)?;
+    let attachment = Attachment {
+        owner: String::new(),
+        event: Event::Use,
+        script,
+        initial: Local::default(),
+    };
+    let invocation = Invocation {
+        attachment: &attachment,
+        triggerer: Actor::None,
+        position: 0,
+        hour: 0,
+        follows_player: None,
+        npc_flags: None,
+        locations: [None, None],
+        met: None,
+    };
+    let mut state = State {
+        slides: Some(Vec::new()),
+        ..State::default()
+    };
+    program
+        .execute(&invocation, &mut state)
+        .map_err(|e| format!("{}: {e}", program.source))?;
+    Ok(state.slides.unwrap())
+}
+
 impl WieldEffect {
     pub fn load(vfs: &mut Vfs, attachments: [(i32, Local); 2]) -> Result<Self, String> {
         let [(on, initial), (off, _)] = attachments;
@@ -1449,6 +1777,58 @@ mod tests {
             locations: [None; 2],
             met: None,
         }
+    }
+
+    #[test]
+    #[ignore = "requires installed Crash Site scripts"]
+    fn installed_heartbeat_vicinity_and_starting_flags_drive_original_actor_actions() {
+        let root = std::env::var_os("ARCANUM_GAME_DIR").expect("set ARCANUM_GAME_DIR");
+        let mut vfs = Vfs::from_game(root, crate::vfs::Policy::Ce).unwrap();
+        let mut owner = attachment("placed NPC", Event::Heartbeat);
+        owner.initial = Local::default();
+        owner.script = 1100;
+        let program = Script::load(&mut vfs, owner.script).unwrap();
+        let invoke = |program: &Script, owner: &Attachment, state: &mut State, nearby| {
+            state.heartbeat = Some(HeartbeatContext {
+                vicinity: nearby,
+                action: None,
+            });
+            let mut input = invocation(owner);
+            input.triggerer = Actor::Mobile;
+            program.execute(&input, state).unwrap();
+            state.heartbeat.take().unwrap().action
+        };
+        let mut state = State::default();
+        assert_eq!(invoke(&program, &owner, &mut state, vec![]), None);
+        assert_eq!(
+            invoke(&program, &owner, &mut state, vec![Actor::Mobile]),
+            None
+        );
+        assert!(state.detached.is_empty());
+        assert_eq!(
+            invoke(
+                &program,
+                &owner,
+                &mut state,
+                vec![Actor::Mobile, Actor::Player]
+            ),
+            Some(ActorAction::CallDialogue(4))
+        );
+        assert!(state.detached[&owner.owner].contains(&owner.event));
+
+        owner.script = 1781;
+        let program = Script::load(&mut vfs, owner.script).unwrap();
+        let mut state = State::default();
+        assert_eq!(
+            invoke(&program, &owner, &mut state, vec![]),
+            Some(ActorAction::Kill)
+        );
+        assert!(state.switched_off.is_empty());
+        state.set_global_flag(2350).unwrap();
+        assert_eq!(invoke(&program, &owner, &mut state, vec![]), None);
+        let loaded: State = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(loaded.switched_off.contains(&owner.owner));
+        assert!(loaded.detached[&owner.owner].contains(&owner.event));
     }
 
     #[test]

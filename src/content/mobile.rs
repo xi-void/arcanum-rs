@@ -498,7 +498,7 @@ fn load_critter(
         .and_then(|n| u32::try_from(n).ok())
         .filter(|&n| n != 0)
         .ok_or("invalid critter blit scale")?;
-    const UNSUPPORTED: u32 = 0x301f_93c7;
+    const UNSUPPORTED: u32 = 0x301f_93c3; // OF_FLAT controls draw order.
     if flags & UNSUPPORTED != 0 || critter & 1 != 0 || f.blit_flags != Some(0) {
         return Err(format!("unsupported mobile appearance (flags {flags:#x}, critter {critter:#x}, scale {:?}, blit {:?})", f.scale, f.blit_flags).into());
     }
@@ -524,9 +524,27 @@ fn load_critter(
             .checked_add(offset.1)
             .ok_or("mobile Y offset overflow")?,
     );
-    let pose = cache
-        .resolve(|| Pose::decode(art, names))?
-        .resolve_stand(vfs)?;
+    let flat = flags & 4 != 0;
+    let animation = (art >> 6) & 31;
+    let pose = if flat && animation != 0 {
+        let mut pose = Pose::decode(art & !(31 << 6), names)?;
+        let stem = pose
+            .path
+            .strip_suffix("aa.art")
+            .ok_or("invalid unarmed critter path")?;
+        let suffix = char::from(b'a' + animation as u8);
+        let primary = format!("{stem}a{suffix}.art");
+        pose.path = if vfs.resolve(&primary)?.winner().is_some() {
+            primary
+        } else {
+            format!("{stem}b{suffix}.art")
+        };
+        pose
+    } else {
+        cache
+            .resolve(|| Pose::decode(art, names))?
+            .resolve_stand(vfs)?
+    };
     let asset = pose.load(vfs, cache, pose.frame)?;
     let diagnostic = format!(
         "mobile at {:?} ART {:#010x}: {}, direction {} (stored {}), frame {}, palette {}, hotspot {:?}, offset {offset:?}, scale {scale}%, shadow {shadow_id:#010x} ({shadow_note}); prepared in {:?}",
@@ -540,7 +558,11 @@ fn load_critter(
         asset.decoded.frame.hotspot,
         start.elapsed()
     );
-    let (fidget, diagnostic) = if animate && art >> 28 == 12 && asset.decoded.frame_count > 1 {
+    let (fidget, diagnostic) = if animate
+        && !flat
+        && art >> 28 == 12
+        && asset.decoded.frame_count > 1
+    {
         let flags2 = f.critter_flags2.unwrap_or_default();
         let spell = f.spell_flags.unwrap_or_default();
         let diagnostic =
@@ -613,7 +635,7 @@ fn load_critter(
     };
     Ok(MobileFrame {
         object_index: 0,
-        flat: false,
+        flat,
         caster,
         offset,
         asset,

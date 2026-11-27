@@ -1,12 +1,12 @@
 # Native savegames
 
-Play starts at the original Crash Site. Press **Escape** or click the HUD menu
+Final character confirmation starts a new campaign at the original Crash Site. Press **Escape** or click the HUD menu
 button to open the Classic pause menu. Choose **Save Game**, select **New**,
 type a name, and click the right arrow or press **Enter**. Select an existing
 slot and confirm to overwrite it under the same name. **Load Game** uses the
 same slot list. Use the red delete button or **Delete** and confirm to remove
 the selected save. The info toggle hides or shows the name, location and game
-time over the world preview. **Quit Game** confirms and exits the application.
+time over the world preview. **Quit Game** confirms and returns to the main menu. **Exit Game** there closes the application.
 
 **F7** writes the fixed **Auto-Save** slot during play. **F8** loads the newest
 save by file modification time, including named saves. These are the stock
@@ -23,6 +23,8 @@ Merchant purses, trade reaction adjustments, identified items, named-item transf
 Using a key retains its original inventory identity. The engine restores its code from the winning instance and prototype on load. Open doors retain their pose and collision state. Optional `scripts.sector_toggles` records overland sector block changes by map directory and sector ID. Older saves start with the authored `map.sbf` blocks.
 
 Lockpicking and Cantrip persist the changed lock bits by original door or container identity. Jam and relock deadlines use absolute game seconds. Character skill entries, known colleges, college mastery, fatigue damage, recovery deadline, equipped-item mana expenditure and the skill random stream travel with the player. Current fatigue, effective skills and aptitude are recalculated using the restored character, location and installed rules. Loading a pre-ability version-1 save starts with no purchased technological skills or spells and zero fatigue damage. Pending targeting and unfinished attempts are transient.
+
+The character record stores the chosen name, portrait, race, gender and background. The final starting-shop transaction carries purchased items, the purse and equipped items into the campaign. Session-local merchant stock and creation refunds expire on confirmation. Rumor timestamps and quelled flags persist in the script state. Technical manuals retain the stat sampled on insertion, so loading with a different current Intelligence preserves the original expertise bonus. Older slots use defaults for absent fields.
 
 ## Format version 1
 
@@ -43,6 +45,8 @@ owners, grid slots, equipment slots, stack quantities, drop positions and
 merged-stack links. Generated IDs retain the allocator state. Door IDs use
 the original map directory, sector and record index. The engine rebuilds
 sector caches and GPU resources from the installed data during restoration.
+
+The optional `camera_offset` stores the view center relative to the saved player tile, in projected world pixels. Independent cameras restore that offset at the current zoom. Older slots center on arrival. Continuous follow and the camera controls are user preferences. Script-detached attachments and switched-off actors are saved by original object identity, including one-shot opening conversations. The runtime recreates pending NPC heartbeat timers on map activation.
 
 The optional `scripts` field stores committed global flags and variables and
 local state keyed by original object identity and attachment point. Earlier

@@ -5,9 +5,7 @@ On Linux, the windowed build requires ALSA development headers (`libasound2-dev`
 `$XDG_CONFIG_HOME/arcanum-rs/config.toml`, or to
 `~/.config/arcanum-rs/config.toml` when `XDG_CONFIG_HOME` is empty, unset or
 relative. Set `game_data` to the directory containing the installed Arcanum
-archives and campaign data. Launch the executable directly. Startup uses the
-game's authored Crash Site start unless the `play` command selects another
-location.
+archives and campaign data. Launch the executable directly. Ordinary startup opens the Classic main menu. **Single Player → New Game** runs character creation and the starting merchant, then enters the campaign’s authored start. **Load Game** opens the slot list and **Last Save** resumes the newest native slot. The explicit map and center overrides remain available for development.
 
 ## Settings and precedence
 
@@ -25,7 +23,7 @@ arguments and work independently of the play configuration.
 | `display` | `lighting`, `shadows` | `--lighting-on`, `--lighting-off`, `--shadows`, `--no-shadows` |
 | `audio` | `effects`, `voice`, `music` (0–10, with 0 muted) | |
 | `ui` | `hud`, `map`, `pause`, `scale` | `--ui classic\|off\|PATH`, `--map-ui PATH`, `--ui-scale PERCENT` |
-| `camera` | `zoom`, `follow` | `--zoom 1\|2\|3`, `--follow`, `--no-follow` |
+| `camera` | `zoom`, `follow`, `edge_scroll`, `keyboard_pan`, `recenter_key` | `--zoom 1\|2\|3`, `--follow`, `--no-follow` |
 | `input` | `run` | `--run`, `--walk-by-default` |
 | `developer` | `enabled`, `rpc`, `diagnostics`, `console_ui`, `map_reveal`, `discover_all` | `--debug`, `--no-debug`, `--rpc SOCKET`, `--no-rpc`, `--diagnostics DIRECTORY`, `--console-ui PATH`, `--map-reveal`, `--no-map-reveal`, `--discover-all`, `--no-discover-all` |
 | `mods` | `directory`, `enabled` | `--no-mods` or `--mods DIRECTORY ID …` at the end |
@@ -43,10 +41,12 @@ resolved within the package and original artwork read from the installed game.
 See [UI themes](UI_THEMES.md). Older M63 files use `ui.hud_scale` as a fallback
 when `ui.scale` is absent.
 
+The default camera stays in place during movement. Screen edges and arrow keys pan, Shift accelerates panning, and Home centers once. F5 toggles continuous tracking. Set `camera.recenter_key` to a physical key code such as `"Home"` or `"End"` to change the binding.
+
 ## Changes during play
 
 The engine saves changed preferences on clean exit. This includes shared UI
-scale from the HUD, inventory, pause menu or maps, camera zoom, lighting, shadows and the
+scale from the HUD, inventory, pause menu or maps, camera zoom and follow mode, lighting, shadows and the
 default movement gait. **Escape → Options** opens the Classic Game, Video
 and Sound categories. **Done** saves changed preferences and returns to the pause
 menu. Sound controls take effect immediately. Effects also adjusts the ambient

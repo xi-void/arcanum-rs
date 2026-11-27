@@ -259,7 +259,7 @@ impl Conversation {
         };
         let generic = context.npc_gender.and_then(|gender| {
             let gender = if gender == 1 { 'm' } else { 'f' };
-            let dumb = if context.stats.attributes[4] <= 4 {
+            let dumb = if context.stats.speech_intelligence <= 4 {
                 "dumb_"
             } else {
                 ""
@@ -403,7 +403,7 @@ impl Conversation {
                     destination = success;
                 } else {
                     let turn = self
-                        .training_turn(vfs, service, destination, stats, &mut staged)
+                        .service_turn(vfs, service, destination, stats, &mut staged)
                         .map_err(ResponseRejection::Effect)?;
                     finish(vfs, &mut staged).map_err(ResponseRejection::Effect)?;
                     return Ok(Some(turn));
@@ -511,6 +511,12 @@ impl Conversation {
         for &effect in writes {
             let (slot, value) = match effect {
                 Effect::Write(slot, value) => (slot, value),
+                Effect::Rumor(id, quell) => {
+                    scripts
+                        .learn_rumor(id, quell)
+                        .ok_or("Invalid rumor number")?;
+                    continue;
+                }
                 Effect::Attack => {
                     scripts
                         .interaction
@@ -645,6 +651,13 @@ impl Conversation {
         } else {
             &line.alternate
         };
+        if directive(raw) == Some('r') {
+            let service = training::Service::offer(raw).ok_or("Malformed rumor directive")?;
+            let mut turn = self.service_turn(vfs, service, line.next, stats, scripts)?;
+            turn.line = id;
+            turn.conditions = condition_state;
+            return Ok(turn);
+        }
         let generated = line.text.eq_ignore_ascii_case("g:");
         let raw = if generated {
             self.greeting(vfs, stats).ok_or_else(|| {
@@ -666,7 +679,13 @@ impl Conversation {
             speech_id: line.test.parse().ok(),
             conditions: condition_state,
         };
-        turn.text = substitute(&raw, &self.speaker, line.id, &mut turn.dependencies);
+        turn.text = substitute(
+            &raw,
+            &stats.name,
+            &self.speaker,
+            line.id,
+            &mut turn.dependencies,
+        );
         if speaker_effects.is_none() {
             turn.dependencies.push(Dependency {
                 line: id,
@@ -692,7 +711,7 @@ impl Conversation {
             .range((std::ops::Bound::Excluded(id), std::ops::Bound::Unbounded))
             .take_while(|(_, response)| response.iq != 0)
         {
-            let iq = i64::from(stats.attributes[4]);
+            let iq = i64::from(stats.speech_intelligence);
             let gender_matches = match response.alternate.as_str() {
                 "" => true,
                 "0" => stats.gender == 0,
@@ -724,7 +743,16 @@ impl Conversation {
             if !gender_matches || !threshold(iq, response.iq) || !passes {
                 continue;
             }
+            let class_text;
             let text = match directive(&response.text) {
+                Some('r') if training::Service::offer(&response.text).is_some() => {
+                    class_text = self.pc_class(vfs, stats, 2000)?;
+                    &class_text
+                }
+                Some('a') => {
+                    class_text = self.pc_class(vfs, stats, 1000)?;
+                    &class_text
+                }
                 Some(code) => {
                     let start = match code {
                         't' if training::Service::offer(&response.text).is_some() => 500,
@@ -779,7 +807,13 @@ impl Conversation {
                 service: expert.or_else(|| training::Service::offer(&response.text)),
                 barter: response.text.eq_ignore_ascii_case("b:"),
                 id: Some(response.id),
-                text: substitute(text, &self.speaker, response.id, &mut turn.dependencies),
+                text: substitute(
+                    text,
+                    &stats.name,
+                    &self.speaker,
+                    response.id,
+                    &mut turn.dependencies,
+                ),
                 next: response.next,
                 condition: response.test.clone(),
                 effect: response.effect.clone(),
@@ -905,7 +939,13 @@ fn exists(vfs: &Vfs, path: &str) -> bool {
     vfs.resolve(path).is_ok_and(|res| res.winner().is_some())
 }
 
-fn substitute(raw: &str, speaker: &str, line: i32, dependencies: &mut Vec<Dependency>) -> String {
+fn substitute(
+    raw: &str,
+    player: &str,
+    speaker: &str,
+    line: i32,
+    dependencies: &mut Vec<Dependency>,
+) -> String {
     let mut chunks = raw.split('@');
     let mut text = chunks.next().unwrap_or_default().to_owned();
     while let Some(token) = chunks.next() {
@@ -914,7 +954,9 @@ fn substitute(raw: &str, speaker: &str, line: i32, dependencies: &mut Vec<Depend
             text.push_str(token);
             break;
         };
-        if token.eq_ignore_ascii_case("npcname") {
+        if token.eq_ignore_ascii_case("pcname") {
+            text.push_str(player);
+        } else if token.eq_ignore_ascii_case("npcname") {
             text.push_str(speaker);
         } else {
             dependencies.push(Dependency {
@@ -967,6 +1009,7 @@ fn state_operands(code: &str, raw: &str) -> Option<(Slot, i32)> {
 
 #[derive(Clone, Copy)]
 enum Effect {
+    Rumor(i32, bool),
     Attack,
     Training(usize, u32),
     Experience(i32),
@@ -984,6 +1027,9 @@ fn effects(raw: &str) -> Option<Vec<Effect>> {
         .map(|effect| {
             let effect = effect.trim();
             match effect.get(..2)?.to_ascii_lowercase().as_str() {
+                op @ ("ru" | "rq") => {
+                    Some(Effect::Rumor(effect[2..].trim().parse().ok()?, op == "rq"))
+                }
                 "co" => Some(Effect::Attack),
                 "tr" => {
                     let (id, tier) = skill_operands(&effect[2..])?;
@@ -1090,6 +1136,15 @@ fn conditions(
             args.parse::<i32>().ok().and_then(|n| {
                 let stat =
                     match code.as_str() {
+                        "ru" | "rq" => {
+                            let id = n.checked_abs()?;
+                            let set = if code == "ru" {
+                                scripts.rumors.contains_key(&id)
+                            } else {
+                                scripts.quelled_rumors.contains(&id)
+                            };
+                            return Some(set == (n >= 0));
+                        }
                         "ch" => stats.attributes[7],
                         "re" => state.reaction?,
                         "me" if matches!(n, 0 | 1) => return Some(state.met == (n == 1)),

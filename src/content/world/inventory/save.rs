@@ -34,6 +34,8 @@ struct SavedItem {
     identified: bool,
     #[serde(default)]
     structural_damage: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    insert_stat: Option<u8>,
     quantity: Option<u32>,
     place: Place,
     slot: Option<usize>,
@@ -41,6 +43,21 @@ struct SavedItem {
 }
 
 impl InteractiveWorld {
+    pub fn starting_possessions(&self) -> Objects {
+        let mut objects = self.save_objects();
+        objects
+            .items
+            .retain(|item| matches!(item.place, Place::Owned(Owner::Player) | Place::Equipped(_)));
+        // Discarded merchant records can leave gaps in the transaction sequence.
+        objects.items.sort_by_key(|item| item.order);
+        for (order, item) in objects.items.iter_mut().enumerate() {
+            item.order = order;
+        }
+        objects.accounts.clear();
+        objects.restocks.clear();
+        objects
+    }
+
     pub fn save_objects(&self) -> Objects {
         let session = &self.cache.inventory;
         Objects {
@@ -65,6 +82,7 @@ impl InteractiveWorld {
                         origin_map: item.origin_map.clone(),
                         instance: item.instance_source.virtual_path.clone(),
                         identified: item.flags & 1 != 0,
+                        insert_stat: item.insert_stat,
                         structural_damage: Some(item.stats.hp[2]),
                         quantity: item.stats.quantity,
                         place: change.place.clone(),
@@ -90,7 +108,7 @@ impl WorldStream {
         catalog: &Catalog,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let (inventory, appearance) = objects.restore(&mut self.loader.vfs, catalog)?;
-        self = self.prepare_player(None, Some((inventory, appearance)))?;
+        self = self.prepare_player(None, Some((inventory, appearance)), None)?;
         self.cache.door_states = doors;
         self.cache.inventory_context = Some((self.loader.map.clone(), self.loader.reference));
         Ok(self)
@@ -180,6 +198,7 @@ impl Objects {
                 }
                 item.stats.hp[2] = damage;
             }
+            item.insert_stat = saved.insert_stat;
             item.stats.quantity = saved.quantity;
             match &saved.place {
                 Place::Owned(owner) if saved.slot.is_some() => {

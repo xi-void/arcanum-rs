@@ -230,6 +230,7 @@ pub struct ViewPreparation {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ViewPlan {
+    actor_sectors: [u64; 4],
     position: (i32, i32),
     viewport: (u32, u32),
     direction: (i32, i32),
@@ -242,6 +243,7 @@ pub enum DeveloperAction {
 
 /// Sound cues emitted by committed gameplay actions.
 pub enum SoundEvent {
+    Inventory(i32),
     Effect(i32),
     EffectVariant { preferred: i32, fallback: i32 },
     Footstep { surface: u8, armor: u8 },
@@ -277,6 +279,7 @@ pub struct InteractiveWorld {
     pub(super) trade: Option<super::inventory::trade::Merchant>,
     pub(super) dialogue: Option<super::super::dialogue::Conversation>,
     pub(super) met_npcs: BTreeSet<(String, String)>,
+    pub(super) heartbeats: super::heartbeat::Scheduler,
     pub(super) dialogue_status: Option<serde_json::Value>,
     pub(super) container_request: Option<crate::sector::objects::OriginalId>,
     pickup_request: Option<crate::sector::objects::OriginalId>,
@@ -337,6 +340,7 @@ impl InteractiveWorld {
             npc_request: None,
             trade: None,
             dialogue: None,
+            heartbeats: Default::default(),
             dialogue_status: None,
             met_npcs: BTreeSet::new(),
             container_request: None,
@@ -364,7 +368,10 @@ impl InteractiveWorld {
         let wanted = required || self.speculative.contains(&id);
         let start = Instant::now();
         let evictions = self.cache.evictions;
-        let accepted = wanted && self.cache.evict(MAX_SECTORS, &self.required, true);
+        let accepted = wanted
+            && self
+                .cache
+                .evict(self.cache_capacity(), &self.required, true);
         let (reads, art) = done.resources;
         self.diagnostic_completion = Some((id, accepted, done.elapsed));
         if accepted {
@@ -415,6 +422,10 @@ impl InteractiveWorld {
         accepted && required
     }
 
+    fn cache_capacity(&self) -> usize {
+        // Reserve the extra actor footprint only when it lies outside the visible sector budget.
+        MAX_SECTORS.max(self.required.len())
+    }
     pub fn prepare(
         &mut self,
         camera: &Camera,
@@ -431,7 +442,19 @@ impl InteractiveWorld {
             return Err("sector preparation worker stopped".into());
         }
         let position = camera.position();
+        // A detached camera may leave the moving actor and its next step off-screen.
+        let actor_sectors = self.cache.player.as_ref().map_or([u64::MAX; 4], |pc| {
+            let (x, y) = pc.tile();
+            [
+                (x.saturating_sub(1), y.saturating_sub(1)),
+                (x.saturating_sub(1), y + 1),
+                (x + 1, y.saturating_sub(1)),
+                (x + 1, y + 1),
+            ]
+            .map(tile_sector_id)
+        });
         let plan = ViewPlan {
+            actor_sectors,
             position,
             viewport,
             direction,
@@ -444,7 +467,18 @@ impl InteractiveWorld {
             });
         }
         let needed = self.region.needed(self.reference, position, viewport)?;
-        let next = needed.as_slice();
+        let mut sectors = needed.as_slice().to_vec();
+        for id in actor_sectors {
+            if !sectors.contains(&id)
+                && let Some(c) = Coordinates::from_id(id)
+                && (self.region.first.x..=self.region.last.x).contains(&c.x)
+                && (self.region.first.y..=self.region.last.y).contains(&c.y)
+            {
+                sectors.push(id);
+            }
+        }
+        let next = sectors.as_slice();
+        let capacity = MAX_SECTORS.max(next.len());
         for id in next.iter().filter(|id| !self.required.contains(id)) {
             if let Some((_, touched)) = self.cache.entries.get(id) {
                 self.cache.hits += 1;
@@ -466,7 +500,7 @@ impl InteractiveWorld {
             .iter()
             .filter(|id| !next.contains(id))
             .count();
-        if next.len() + active_elsewhere > MAX_SECTORS {
+        if next.len() + active_elsewhere > capacity {
             // The previous buffer remains on screen, but its scene is no longer
             // needed when the two footprints cannot both fit.
             self.cache.activate(&[]);
@@ -491,7 +525,7 @@ impl InteractiveWorld {
         } else if self.hold_started.is_none() {
             self.hold_started = Some(Instant::now());
         }
-        let free = MAX_SECTORS
+        let free = capacity
             - next.len()
             - self
                 .cache
@@ -583,6 +617,12 @@ impl InteractiveWorld {
 
     pub fn set_game_hour(&mut self, hour: u8) -> bool {
         self.cache.set_game_hour(hour)
+    }
+
+    pub fn camera_offset(&self, camera: &Camera, tile: (u32, u32)) -> Option<(i32, i32)> {
+        let (x, y) = project_world_tile(tile, self.reference)?;
+        let (cx, cy) = camera.position();
+        Some((cx.checked_sub(x)?, cy.checked_sub(y)?))
     }
 
     pub fn follow_player(&self, elapsed: Duration, camera: &mut Camera) {

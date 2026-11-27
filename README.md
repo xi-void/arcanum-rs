@@ -45,6 +45,8 @@ Set `game_data` in `config.toml` to your Arcanum installation directory, then ru
 by its absolute path. An executable on your `PATH` can be launched with
 `arcanum-rs`. [Configuration reference](docs/APPLICATION_CONFIG.md)
 
+Choose **Single Player → New Game** to select or create a character. Set the name, portrait, race, gender and background, then spend all five starting points on the character sheet. The minus controls refund eligible purchases. The next arrow opens the starting merchant. Right-click an item to trade, then use the next arrow to confirm the character. **Escape** skips the current cinematic. Play starts at the original Crash Site.
+
 Press **R** or click the sword button to ready an attack. Click an actor to approach and strike with the equipped weapon or bare hands. Hostile actors can initiate combat. **Space** switches between real-time and turn-based combat. During your turn, click to move, attack, or select a spell and its target. Press **E** or **Enter**, or click the end-turn button beside the green AP lights, to pass. Click a fallen actor to approach and loot the body. **F7** saves and **F8** loads the newest slot.
 
 **Left-click** a destination on the floor to walk there, or **Shift + left-click**
@@ -60,8 +62,7 @@ Click the logbook icon or press **L** to read Quests. Turn spreads with the arro
 **Escape** opens the Classic pause menu. Choose Save Game, Load Game,
 Options, Quit Game or Continue. **F7** writes the quicksave and **F8** loads
 the newest save. [Native savegames](docs/SAVEGAMES.md)
-The camera follows the character by default, and original sectors load in the
-background. The default spawn is the original Zephyr crash site, resolved
+The camera stays where you place it. Use the screen edges or arrow keys to pan, **Home** to center on the player and **F5** to toggle and save continuous following. Original sectors load in the background. The default spawn is the original Zephyr crash site, resolved
 from the game's `START_MAP` metadata. Click the nearby cave entrance to
 enter, then click the exit inside to return. Use `arcanum-rs play --map 5011` for Bates Mansion or
 `arcanum-rs play --map "k'na tha" --center 383 928` for K’na Tha.

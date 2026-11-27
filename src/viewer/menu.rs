@@ -7,6 +7,9 @@ use std::sync::Arc;
 pub(crate) struct Settings {
     pub zoom: u8,
     pub follow: bool,
+    pub edge_scroll: bool,
+    pub keyboard_pan: bool,
+    pub recenter_key: winit::keyboard::KeyCode,
     pub lighting: bool,
     pub shadows: bool,
     pub run: bool,
@@ -19,7 +22,10 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             zoom: 1,
-            follow: true,
+            follow: false,
+            edge_scroll: true,
+            keyboard_pan: true,
+            recenter_key: winit::keyboard::KeyCode::Home,
             lighting: true,
             shadows: true,
             run: false,

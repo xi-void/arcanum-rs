@@ -23,8 +23,9 @@ Omit `--ui` for Classic. The windowed build presents through Vulkan. Press **[**
 or **Shift+Tab** to move between available HUD actions and **Enter** or
 **Space** to activate the focused action. The mouse can activate the same
 actions. World zoom is controlled separately by the wheel and **0**.
-Theme and scale choices can be specified at each launch. Main-menu
-theming and runtime package switching are future work.
+Theme and scale choices can be specified at each launch. The configured pause package also supplies the main menu. Its `[creation]` section sets the identity and pre-generated character artwork, fields, selection arrows and description geometry on the shared canvas. The allocation and merchant screens use the character sheet and inventory components of the active HUD. If the gameplay package omits these panels or the HUD is switched off, the front end mounts the Classic panels during creation and restores the selected HUD on entry to gameplay.
+
+The HUD’s `[cursors]` table accepts `default`, `combat` and `skill` ART references. The existing `spell_cursor` selects the targeting clip. Frames, hot spots and animation cadence come from the resolved ART. The native pointer remains in window coordinates when the world zoom or shared panel scale changes.
 
 ## Package format
 
@@ -183,6 +184,8 @@ and separate response colors for normal, hovered and disabled states.
 TIG `font.c` distinguishes the glyph rectangle from the horizontal
 advance. Its source-alpha blit in `art.c` reads palette red through
 `tig_color_alpha` in `color.h`.
+
+Both Classic menus use `menu_color` for ordinary lettering, `menu_hover_color` for mouse or keyboard selection and `menu_disabled_color` for inactive entries. The original Morph relief draws `menu_shadow_color` one source pixel above and left and adds `menu_highlight_color` one source pixel below and right. These RGBA values live in the pause package and apply to both menus. The glyphs start at the configured `pause_y` and center on `pause_center`. The `pause_hit_width` controls pointer input independently of text width.
 
 The HUD, atlas and Classic menus use the same glyph measurement and
 rasterizer. Vulkan draws the prepared UI after the world pass. Theme

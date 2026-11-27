@@ -29,7 +29,10 @@ hud = "classic"  # "classic", "off", package directory or theme.toml.
 
 [camera]
 zoom = 1  # 1, 2 or 3.
-follow = true  # When false, Home recenters on the player.
+follow = false  # Home centers once. F5 toggles persistent player following.
+edge_scroll = true
+keyboard_pan = true  # Arrow keys, with Shift for faster scrolling.
+recenter_key = "Home"  # Physical key code, e.g. Home, End or KeyC.
 
 [input]
 run = false

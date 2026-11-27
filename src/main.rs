@@ -1463,7 +1463,15 @@ fn show_world(
         (None, None)
     };
     if let Some((world, camera, size, trace, map, animation_ms, explore)) = stream {
-        let world = if playing { world.with_player()? } else { world };
+        let main_menu = playing
+            && !options
+                .iter()
+                .any(|arg| matches!(arg.to_str(), Some("--map" | "--center" | "--sectors")));
+        let world = if playing && !main_menu {
+            world.with_player()?
+        } else {
+            world
+        };
         let world = if debug {
             world.with_object_audit()
         } else {
@@ -1554,7 +1562,15 @@ fn show_world(
                         let mut vfs = inspection_vfs(game, mount_options, policy)?;
                         let catalog = content::maps::Catalog::load(&mut vfs)?;
                         let id = dst.map.map(|id| id.to_string());
-                        let map = if matches!(&mode, viewer::LocationMode::Save { .. }) {
+                        let fresh = matches!(
+                            mode,
+                            viewer::LocationMode::Creation(_) | viewer::LocationMode::Start(..)
+                        );
+                        let map = if matches!(mode, viewer::LocationMode::Creation(_)) {
+                            catalog.shopping()?.unwrap_or(catalog.new_game()?)
+                        } else if matches!(mode, viewer::LocationMode::Start(..)) {
+                            catalog.new_game()?
+                        } else if matches!(&mode, viewer::LocationMode::Save { .. }) {
                             catalog
                                 .maps
                                 .iter()
@@ -1564,7 +1580,7 @@ fn show_world(
                             catalog.find(id.as_deref().unwrap_or(current))?
                         };
                         let files = map.files(&mut vfs)?;
-                        let center = files.center(Some(dst.tile))?;
+                        let center = files.center((!fresh).then_some(dst.tile))?;
                         let region = files.bounds();
                         let mut camera =
                             region.camera(center).ok_or("invalid destination bounds")?;
@@ -1587,11 +1603,25 @@ fn show_world(
                             region,
                             center,
                         )?;
-                        if let Some(hour) = hour {
+                        if fresh {
+                            world = world.with_starting_lighting()?;
+                        } else if let Some(hour) = hour {
                             world = world.with_lighting(current_hour.unwrap_or(hour))?;
                         }
                         let restore = matches!(&mode, viewer::LocationMode::Save { .. });
                         world = match mode {
+                            viewer::LocationMode::Creation(build) => world.with_creation(build)?,
+                            viewer::LocationMode::Start(objects, flag) => {
+                                let mut world = world.with_saved_player(
+                                    Default::default(),
+                                    objects,
+                                    &catalog,
+                                )?;
+                                if let Some(flag) = flag {
+                                    world.set_start_flag(flag)?;
+                                }
+                                world
+                            }
                             viewer::LocationMode::Travel { bypass } => world
                                 .with_arriving_player(previous)?
                                 .with_collision_bypass(bypass),
@@ -1635,10 +1665,14 @@ fn show_world(
                 hud,
                 inventory_reader,
                 startup: viewer::Startup {
+                    main_menu,
                     fullscreen: config.window.fullscreen,
                     settings: viewer::Settings {
                         zoom: config.camera.zoom,
                         follow: config.camera.follow,
+                        edge_scroll: config.camera.edge_scroll,
+                        keyboard_pan: config.camera.keyboard_pan,
+                        recenter_key: config.camera.recenter_key,
                         lighting: config.display.lighting,
                         shadows: config.display.shadows,
                         run: config.input.run,

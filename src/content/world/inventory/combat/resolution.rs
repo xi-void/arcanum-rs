@@ -67,10 +67,14 @@ impl Session {
             .map(|c| &c.item)
     }
     pub(super) fn weapon(&self, actor: Actor, t: &Target) -> Weapon {
-        let s = t.stats.as_ref().expect("actor statistics");
         let weapon = self
             .worn(actor, EquipmentSlot::Weapon)
             .filter(|_| t.spell & 0x2003c == 0);
+        self.weapon_stats(actor, t, weapon)
+    }
+
+    fn weapon_stats(&self, actor: Actor, t: &Target, weapon: Option<&Item>) -> Weapon {
+        let s = t.stats.as_ref().expect("actor statistics");
         let empty = ItemStats::default();
         let item = weapon.map_or(&empty, |i| &i.stats);
         let flags = item.equipment_flags.unwrap_or(0);
@@ -166,6 +170,30 @@ impl Session {
         }
     }
 
+    /// CE item_wield_best compares the last damage channel for each eligible weapon.
+    pub(in crate::content::world::inventory) fn starting_weapon_score(
+        &self,
+        player: &Target,
+        item: &Item,
+        counts: [u64; 5],
+    ) -> Option<i64> {
+        let weapon = self.weapon_stats(None, player, Some(item));
+        if weapon
+            .ammo
+            .is_some_and(|(kind, need)| u64::from(need) > counts[kind as usize + 1])
+        {
+            return None;
+        }
+        let skill = player.stats.as_ref()?.skills[weapon.skill];
+        let effectiveness = if weapon.skill != 2 && skill.level == 0 {
+            -1
+        } else {
+            self.attack_rating(player, player, &weapon).0
+        };
+        let [min, max] = weapon.bounds[4];
+        Some((i64::from(min) + i64::from(max)) / 2 * i64::from(effectiveness) / 100)
+    }
+
     fn attack_rating(&self, a: &Target, t: &Target, w: &Weapon) -> (i32, i64) {
         let s = a.stats.as_ref().unwrap();
         let d = t.stats.as_ref().unwrap();
@@ -244,19 +272,23 @@ impl Session {
             .find(|(flag, _, _)| w.id.is_none() && a.spell & flag != 0);
         let player_attack = a.subject == Subject::Player;
         let fumble = !hit && critical;
+        let severity = a.stats.as_ref().unwrap().critical_severity[0];
         if hit || fumble {
             let receiver = if fumble { &mut *a } else { &mut *t };
             let severe = critical && (!fumble || self.skill_random.below(2) == 0);
-            let bonus = if !severe {
+            let roll_bonus = |random: &mut crate::random::Random, base: i32| {
+                random.below(100) < severity.saturating_add(base).clamp(0, 100) as u64
+            };
+            let bonus = if !severe || !player_attack && receiver.subject == Subject::Player {
                 0
-            } else if receiver.subject == Subject::Player {
-                50
-            } else if self.skill_random.below(100) < 10 {
+            } else if roll_bonus(&mut self.skill_random, 10) {
                 200
-            } else if self.skill_random.below(100) < 30 {
+            } else if roll_bonus(&mut self.skill_random, 30) {
                 100
-            } else {
+            } else if roll_bonus(&mut self.skill_random, 60) {
                 50
+            } else {
+                0
             };
 
             for (i, channel) in [

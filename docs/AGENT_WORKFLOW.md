@@ -211,6 +211,14 @@ Use an OS audio monitor or listen to the output when confirming samples reach
 the device. For location tests, check the output again after
 `coc` or a native load and after `settime` changes the game hour.
 
+## Crash Site opening
+
+Launch the configured executable, create a character, allocate all five points, finish shopping, and confirm. After the opening movies, wait for Virgil without clicking him. In the installed campaign his placed mobile uses dialogue script 1324 and overrides its heartbeat with `scr/01100prestonradcliffeheartbeat.scr`. It enumerates nearby critters, calls its own dialogue attachment at statement 4 with the player as triggerer, and detaches. The first line is 1. `pos.npc_events` records the most recent distinct callbacks, winning resource, result and any rejection. `pos.scripts.detached` and `switched_off` are saved with the original identities.
+
+The twelve passenger heartbeats (1781–1792) check their respective pre-generated character flags before choosing to hide or kill the placed NPC. The callback range is 30 tiles. Other bodies already carry lethal damage and an authored flat pose. Click Isaac Zapruder at (92942, 82586) for the Crash Site Camera and Thermometer, and Wilhemina Carpenter at (92939, 82609) for her note to Jared. The item identities come from their original inventories. A custom character saved after visiting both bodies had twelve dead passengers. In a separate campaign, selecting Merwin Tumblebrook set flag 2350 and script 1781 switched off his placed counterpart.
+
+With follow off, scroll away with the arrow keys or screen edges, click reachable ground, and use Home while the player is moving. The camera stays there as the player continues. Wheel up to zoom, F5 to toggle follow, and F7/F8 to save and reload an independently panned view. The cave entrance at (92910, 82598) and its return both center once on arrival.
+
 ## Native NPC dialogue
 
 Use `rpc objects category npc` to locate original NPCs and see their effective
@@ -333,8 +341,7 @@ Restore uses the normal location loader and expects the same UI packages and
 declared VFS mods. It restores map, tile, facing, game hour, collision bypass,
 zoom, UI scale, render toggles, diagnostic overlays, and the selected record
 when available. Camera coordinates, viewport dimensions, and cached-sector
-references are recorded for context. The camera follows the player after
-restore and the window keeps its current size. Snapshots cover reproduction
+references are recorded for context. Snapshot restore centers the camera on arrival and respects the configured follow mode. The window keeps its current size. Snapshots cover reproduction
 context. Door changes, inventory and ground-item state, pending interactions,
 travel progress, script state, cache ordering, and exact animation phase are outside the
 restore scope. A restore within the running session preserves current inventory
@@ -493,3 +500,21 @@ For the Kree feedback checks, the installed Harm target fell using the 13-frame 
 
 
 A second Kree bandit left five original items after lethal Harm. Advancing the saved decay deadline and loading the game moved all five identities to the corpse tile. Disintegrate on the equivalent encounter left no accessible corpse. A Quench Life save with 2.33 seconds remaining completed its callback after F8. The native audio output recorded the wolf death, humanoid death and material-specific hit resources. A full restart during the wolf fall reached the last of its 15 frames on the saved player turn without replaying the death sound.
+
+
+## New game, character creation and original movies
+
+Launch the configured windowed executable with `target/release/arcanum-rs`. Use Single Player, New Game, New Character. Exercise the name field, race and portrait selectors, the point-allocation gate, refunds, merchant buy/sell, final confirmation and the transition to the Crash Site. **Escape** skips one movie. Use **F7**, exit through the menus, restart and load from Single Player to test persistence. For session independence, return to the main menu from the loaded game and create a second character with a different background.
+
+In `rpc pos`, `ui.pause_menu` reports the current screen, installed creation data sources, preview, active buttons and rejection messages. During allocation, inspect `player.statistics` and `ui.hud.character_sheet`. During shopping, inspect `ui.hud.inventory`. The native cursor asset, frame, winning mount and hot spot are in `ui.hud.cursor`. The surface capture excludes the system cursor. Inspect the actual window-system pointer to verify its pixels and hot spot. While a movie plays, `ui.cinematic` reports the active resource, queue, frame index, audio clock and number of decoded PCM samples.
+
+The installed campaign’s `movies/movies.mes` maps IDs 1 and 7 to `00069.bik` and `01138.bik`. The installed original executable (SHA-256 `fd244584c4a40e1fca1013d6bf603e70a991491157f51d4d3a273c5bc6ab461e`, HighRes backup) writes 1 and 7 into the two teleport movie fields at addresses `0x541411` and `0x541436`. These match CE’s `sub_5412E0` in `mainmenu_ui.c`. The original teleport handler calls the movie player at `0x4d34be` and `0x4d34d5`, using the first and second fields respectively, with audio track zero. The Single Player intro uses the same order. CE startup selects movie 8 (`50000.bik`) after the optional Sierra and Troika logos. Asset overrides apply independently to each clip. Unavailable or undecodable clips advance the sequence.
+
+Windowed builds pin `infinitier_bik_decoder` 0.1.0, GPL-3.0-or-later. Its authors identify the video and audio implementations as Rust ports of the FFmpeg 6.1 Bink sources. The engine uses the crate’s header parser and codecs, demultiplexes all audio tracks and plays track zero through the existing mixer. The decoder’s direct dependencies are bitflags, hound, infinitier_datasource, libm, log and thiserror. Linux and Windows use the same Rust code. Game data stays in the installed VFS. Release packaging must carry the applicable licence, notices and corresponding source for GPL-compatible distribution. [Published decoder source and provenance](https://github.com/ufoscout/infinitier/tree/7ca7d7c10548e2955442d20f29d4d7b5c36f365c/src/codecs/bik_decoder)
+
+
+Native checks on Intel HD 520 Vulkan used independently created characters. A male Half-Ogre at IN 4 and a female human Super Model at IN 4 received Virgil’s low-Intelligence response and the low-Intelligence quest and rumor descriptions. Spending one point on a second Super Model’s Intelligence changed all three selections at IN 5. A female human Idiot Savant at functional IN 14 retained speech IN 1, the normal journal text and zero starting gold. The installed chemistry manual test reads the original insert/remove scripts and checks a bonus of one for the Savant. Native shop tests covered an unaffordable purchase, resale, re-purchase and a dagger equipped on arrival. A full process restart and Load Game restored the selected portrait, dagger, purse, background, spell and journal data.
+
+Both post-confirmation movies completed and both could be skipped individually. On the test machine each produced 44.1 kHz stereo output. The original arrow’s measured hot spot was (0, 3), and the animated spell pointer’s was (1, 3). At 2× world zoom a native click cast Strength of Earth on Virgil and retained spell selection until right-click cancellation. A new character bought Lockpicks from the starting merchant and dragged them onto Use at the Crash Site. The native pointer switched to `skillcur.art` with hot spot (2, 3). Escape returned it to the original arrow.
+
+The installed-data decoder check read all eight campaign Bink files through the VFS to their final frames with PCM audio, including the two-track movie `02112.bik`. A separate native run with a missing first movie and a truncated second movie reached the Crash Site with the selected Field Notes HUD. This run used an isolated resource override. The completion, skip and audio checks used the normal installation.

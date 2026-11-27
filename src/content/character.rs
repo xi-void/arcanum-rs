@@ -180,6 +180,7 @@ pub(crate) struct Adjustments {
     xp_flat: i32,
     crithitchance: i32,
     critfailchance: i32,
+    critical_severity: [i32; 2],
 
     operations: Vec<(usize, Modifier)>,
     pub(crate) other: Vec<String>,
@@ -239,6 +240,10 @@ impl Adjustments {
             .position(|&s| s == key)
             {
                 Some((&mut result.expertise[i], value))
+            } else if key == "crithiteffect" {
+                Some((&mut result.critical_severity[0], value))
+            } else if key == "critfaileffect" {
+                Some((&mut result.critical_severity[1], value))
             } else if key == "crithitchance" {
                 Some((&mut result.crithitchance, value))
             } else if key == "critfailchance" {
@@ -396,6 +401,10 @@ pub(crate) struct Environment {
 
 #[derive(Clone, Serialize, serde::Deserialize)]
 pub(crate) struct Character {
+    #[serde(default)]
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) background_text: i32,
     pub(crate) base: [i32; 28],
     #[serde(default)]
     #[serde(skip_serializing, rename = "haggle")]
@@ -449,6 +458,8 @@ impl Default for Character {
         base[26] = 1;
         Self {
             base,
+            name: String::new(),
+            background_text: 0,
             legacy_haggle: None,
             basic_skills: [0; 12],
             degrees: [0; 8],
@@ -475,8 +486,19 @@ impl Default for Character {
     }
 }
 
+// CE dialog.c sub_414F50 and script.c SAT_GET_STAT share this rule.
+fn speech_intelligence(intelligence: i32, background: i32) -> i32 {
+    if intelligence >= 5 && matches!(background, 55 | 74 | 75) {
+        1
+    } else {
+        intelligence
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct CharacterStatistics {
+    pub name: String,
+    pub speech_intelligence: i32,
     pub alignment: i32,
     pub portrait: i32,
     pub skills: [SkillRank; 16],
@@ -490,12 +512,14 @@ pub struct CharacterStatistics {
     pub race: i32,
     pub gender: i32,
     pub background: i32,
+    pub background_text: i32,
     pub race_effect: Option<i32>,
     pub weight: Option<i64>,
     pub carry_capacity: i32,
     pub encumbrance: Option<Encumbrance>,
     pub speed: Option<i32>,
     pub damage_bonus: i32,
+    pub critical_severity: [i32; 2],
     pub ac_adjustment: i32,
     pub reaction_modifier: i32,
     pub heal_rate: i32,
@@ -513,6 +537,29 @@ pub struct CharacterStatistics {
     pub defense: i32,
     pub resistance: [i32; 5],
     pub unresolved: Vec<&'static str>,
+}
+
+impl CharacterStatistics {
+    pub(crate) fn script_values(&self) -> [Option<i32>; 28] {
+        let mut values = self.base.map(Some);
+        for (slot, attribute) in values.iter_mut().zip(self.attributes) {
+            *slot = Some(attribute)
+        }
+        values[8..17].copy_from_slice(&[
+            Some(self.carry_capacity),
+            Some(self.damage_bonus),
+            Some(self.ac_adjustment),
+            self.speed,
+            Some(self.heal_rate),
+            Some(self.poison_recovery),
+            Some(self.reaction_modifier),
+            Some(self.max_followers),
+            Some(self.aptitude),
+        ]);
+        values[4] = Some(self.speech_intelligence);
+        values[19] = Some(self.alignment);
+        values
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -779,6 +826,13 @@ impl Character {
             + 2 * i64::from(level)
             + special(1);
         CharacterStatistics {
+            name: self.name.clone(),
+            critical_severity: std::array::from_fn(|index| {
+                rules
+                    .modifiers()
+                    .fold(0i32, |n, e| n.saturating_add(e.critical_severity[index]))
+            }),
+            speech_intelligence: speech_intelligence(attributes[4], self.background),
             portrait: self.portrait,
             alignment: self.rules_alignment(rules),
             skills: std::array::from_fn(|i| {
@@ -815,6 +869,7 @@ impl Character {
             race: self.race(),
             gender: self.gender(),
             background: self.background,
+            background_text: self.background_text,
             race_effect: self.race_effect(),
             weight,
             carry_capacity,

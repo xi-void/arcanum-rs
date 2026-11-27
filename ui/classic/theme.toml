@@ -2,6 +2,11 @@ name = "Classic"
 spell_cursor = "vfs:art/interface/spellcur.art"
 scale = 125
 
+[cursors]
+default = "vfs:art/interface/cursor.art"
+combat = "vfs:art/interface/battlecur.art"
+skill = "vfs:art/interface/skillcur.art"
+
 [fonts.body]
 source = "vfs:art/interface/flare12font.art"
 color = [255, 255, 255, 255]
@@ -1272,6 +1277,8 @@ parent = "journal-panel"
 offset = [696, 83]
 size = [46, 41]
 image = "vfs:art/interface/tab_note.art"
+selected_frame = 1
+action = "journal-rumors"
 
 [[hud]]
 id = "journal-quests"
@@ -1309,6 +1316,8 @@ parent = "journal-panel"
 offset = [696, 313]
 size = [46, 41]
 image = "vfs:art/interface/tab_backgrnd.art"
+selected_frame = 1
+action = "journal-background"
 
 [[hud]]
 id = "journal-keys"
