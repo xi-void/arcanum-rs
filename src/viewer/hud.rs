@@ -29,7 +29,9 @@ pub(super) enum Action {
     OpenMap,
     ToggleInventory,
     ToggleSpells,
-    CastCantrip,
+    CastCantrip, // Existing external packages may still bind this action.
+    CastSpell(usize),
+    DismissSpell(usize),
     SpellCollege(usize),
     ToggleJournal,
     ToggleCharacter,
@@ -259,6 +261,7 @@ struct Element {
     spell_panel: bool,
     required_conveyance: Option<u32>,
     spell_slot: Option<usize>,
+    maintained_slot: Option<usize>,
     response: Option<usize>,
     hover_text_color: Option<Color>,
     disabled_text_color: Option<Color>,
@@ -669,6 +672,7 @@ pub(crate) struct Hud {
     fatigue_revision: Option<u64>,
     spells_open: bool,
     college_levels: [u32; 16],
+    maintained: Vec<usize>,
     spell_college: usize,
     loaded_college: Option<usize>,
     inventory: InventoryPanel,
@@ -975,6 +979,7 @@ impl Hud {
             fatigue_revision: None,
             spells_open: false,
             college_levels: [0; 16],
+            maintained: Vec::new(),
             spell_college: 0,
             loaded_college: None,
             inventory: InventoryPanel::default(),
@@ -1033,6 +1038,35 @@ impl Hud {
         reader: &mut arcanum_rs::content::world::InventoryReader,
         world: &InteractiveWorld,
     ) {
+        if !self
+            .maintained
+            .iter()
+            .copied()
+            .eq(world.maintained_spells())
+        {
+            self.maintained = world.maintained_spells().collect();
+            if let Some(style) = &self.sheet_style {
+                let rules = world.progression_rules();
+                for component in &mut self.components {
+                    let Some((slot, id)) = component
+                        .config
+                        .maintained_slot
+                        .and_then(|n| Some((n, *self.maintained.get(n)?)))
+                    else {
+                        continue;
+                    };
+                    let art = style.spell_icon_bases[id / 5] + 1 + (id % 5) as i32;
+                    component.config.action = Some(Action::DismissSpell(slot));
+                    component.config.hover_message = Some(format!("End {}", rules.spells[id].name));
+                    if let Some(path) = rules.interface.get(&art)
+                        && let Ok(frame) = reader.sheet_art(path, 0)
+                    {
+                        component.art = frame
+                    }
+                }
+            }
+            self.clear_layout();
+        }
         let levels = world.college_levels();
         if levels != self.college_levels {
             self.college_levels = levels;
@@ -1058,6 +1092,7 @@ impl Hud {
                 continue;
             };
             let id = self.spell_college * 5 + row;
+            c.config.action = Some(Action::CastSpell(id));
             c.config.hover_message = rules.spells.get(id).map(|s| s.name.clone());
             let art = style.spell_icon_bases[self.spell_college] + 1 + row as i32;
             if let Some(path) = rules.interface.get(&art) {
@@ -1230,6 +1265,7 @@ impl Hud {
                         .is_some_and(|n| n > self.college_levels[0])
                     || matches!(component.config.action,Some(Action::SpellCollege(i)) if self.college_levels.get(i).copied().unwrap_or(0)==0)
                     || component.config.spell_slot.is_some_and(|r|r>=self.college_levels[self.spell_college] as usize)
+                    || component.config.maintained_slot.is_some_and(|i|i>=self.maintained.len())
                     || component.config.hidden
                     || (component.config.dialogue_only && !self.dialogue_open)
                     || (component.config.journal_panel && !self.journal.open)
@@ -1297,7 +1333,13 @@ impl Hud {
             .filter(|(c, _)| {
                 matches!(
                     c.config.action,
-                    Some(Action::ToggleSpells | Action::CastCantrip | Action::SpellCollege(_))
+                    Some(
+                        Action::ToggleSpells
+                            | Action::CastCantrip
+                            | Action::CastSpell(_)
+                            | Action::SpellCollege(_)
+                            | Action::DismissSpell(_)
+                    )
                 )
             })
             .filter_map(|(c, p)| {
@@ -1634,10 +1676,14 @@ impl Hud {
         config.action.filter(|action| {
             !config.disabled
                 && (config.spell_slot.is_none()
-                    || self.spell_college == 0 && config.spell_slot == Some(1))
+                    || config
+                        .spell_slot
+                        .is_some_and(|r| r < self.college_levels[self.spell_college] as usize))
                 && Some(*action) != self.unavailable_action
-                && (!matches!(action, Action::ToggleSpells | Action::CastCantrip)
-                    || !self.inventory_open() && !self.dialogue_open)
+                && (!matches!(
+                    action,
+                    Action::ToggleSpells | Action::CastCantrip | Action::CastSpell(_)
+                ) || !self.inventory_open() && !self.dialogue_open)
                 && (!self.sheet.open
                     || matches!(
                         action,
@@ -1684,6 +1730,7 @@ impl Hud {
                     || (p.live_asset.is_none()
                         && component.config.sheet_image.is_none()
                         && component.config.spell_slot.is_none()
+                        && component.config.maintained_slot.is_none()
                         && component.config.image.is_none()
                         && component.config.fill.is_none()
                         && component.config.hover_fill.is_none()

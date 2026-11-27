@@ -449,3 +449,25 @@ CE’s `stat.c`, `skill.c`, `spell.c`, `tech.c` and `level.c` supply the advance
 For native checks, Doc Roberts offers apprentice Heal training near `coc 5000 90213 84148`. The generic beggar near `coc 5000 76135 48154` offers both a ten-coin donation and a hostile refusal. Reload the save before replaying alternative responses. Electrical degree 2 unlocks schematic **2410** in the tested installation. Copper Ring and Capacitor create a Charged Ring. Inspect Dexterity and speed before equipping it, after equipping it and after native loading. **F7** quicksaves and **F8** quickloads.
 
 M76-R native verification used installed resources on Intel HD 520 Vulkan at 1280×720 and 1920×1080. With the same tool, gate and roll of 14, untrained Pick Locks failed at effective level 0 and succeeded at level 8 after two rank purchases and a Dexterity increase. Unlocking Cantrip at aptitude 10 failed on the difficulty-20 gate and opened the difficulty-10 barrel. At aptitude 20 it opened the gate. At level 15 with the required attributes, the sheet purchased all five Temporal spells and all seven Therapeutics degrees for twelve points, reaching 100 expertise at Doctorate. A worn Charged Ring granted one Dexterity at aptitude −11 and two at −16, with the bonus reversing on refund. A ten-coin donation added 2 alignment and a hostile response subtracted 8. A quest reward granted 800 XP and the character point for reaching level 2. Isolated saves staged the tools, ingredients, positions, skill random stream and starting values. Purchases, training, quest and alignment choices, casts, lock attempts, crafting, equipping, saving and loading used native controls.
+
+## College spell execution
+
+Open the Classic spell panel, click a college and learned rank, then click the target, inventory item or destination requested by the spell. Self-only casts can start on selection. Escape cancels targeting. The top HUD displays maintained spells in casting order. Click a slot to dismiss it. Familiar has no upkeep slot. F7 and F8 save and restore current effects with the rest of the playable session.
+
+Use `rpc progression` to inspect each installed spell's availability, source, program error and known runtime dependencies. Inspect a native action with the existing local client:
+
+```sh
+rpc pos | jq '.result.player.navigation | {ability, magick, spell_models, spell_effects}'
+```
+
+`ability.last` records the target, outcome, fatigue and item mana expenditure, resistance and effect details. `magick.active` records bindings, summoned IDs, map and tile, callback/upkeep deadlines and visual sequences. `spell_models` reports the sampled frame resource, facing, palette and scale for visible summoned objects and the current player pose. `spell_effects` reports the live EyeCandy. Compare these with the rendered Vulkan frame. An accepted cast or a resolved ART path alone does not verify appearance.
+
+`world-scan` reports the installed program count in `research.character_progression.decoded_spell_programs`. The installed-resource tests resolve aptitude-dependent summon prototypes, Body directional clips and college EyeCandy through the world ART cache.
+
+```sh
+ARCANUM_GAME_DIR="$game" cargo test --locked --features windowed --lib installed_college_ -- --ignored
+```
+
+M77-R comparisons use the already-running vanilla game as the visual reference and CE/TIG source for resource interpretation. Local full frames, cropped side-by-side comparisons and state at impact, save/load and dismissal are in `target/visual-checks/m77-r/`. The original mage already had a Familiar. Compare its standing model there and use the native cast, repeat rejection and dispel captures to check the RS lifecycle. Conjure Spirit attaches to the original corpse. Create Undead and Resurrect also operate on that actor. For Resurrect, inspect vital damage after the EyeCandy callback. The initial impact report precedes the heal.
+
+Reproduce wall and creature comparisons on open ground using the same caster-to-target direction. Record arrival, sustain and dismissal, then compare with vanilla. For Body spells click to move before dismissing, and check the returning pose after F7/F8. Use an isolated save for fatigue, resistance and persistent effects. Original archives remain read-only.

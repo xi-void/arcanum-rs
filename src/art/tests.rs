@@ -97,7 +97,7 @@ fn validates_framing_and_rejects_unsupported_layouts() {
             matches!(decode_frame(&original[..length], 0), Err(Error::Truncated {section: actual, ..}) if actual == section)
         );
     }
-    for (offset, value) in [(0, 3), (0, 8), (0, 25), (8, 16), (12, 0)] {
+    for (offset, value) in [(0, 0x80), (8, 16), (12, 0)] {
         let mut bytes = original.clone();
         set_word(&mut bytes, offset, value);
         assert!(matches!(
@@ -108,11 +108,13 @@ fn validates_framing_and_rejects_unsupported_layouts() {
 }
 
 #[test]
-fn facade_flag_keeps_frame_selection_and_payload_validation() {
+fn presentation_flags_keep_frame_selection_and_payload_validation() {
     let mut input = fixture(&[(2, 1, &[0, 1]), (2, 1, &[1, 0])]);
     let expected = decode_frame(&input, 1).unwrap();
-    set_word(&mut input, 0, 0x09);
-    assert_eq!(decode_frame(&input, 1).unwrap(), expected);
+    for flags in [0x03, 0x09, 0x11, 0x19] {
+        set_word(&mut input, 0, flags);
+        assert_eq!(decode_direction(&input, 1, 7, 0).unwrap(), expected);
+    }
     assert_eq!(
         decode_frame(&input, 1).unwrap().frame.pixels,
         [[1, 2, 3, 255], [0; 4]]

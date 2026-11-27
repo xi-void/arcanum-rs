@@ -248,6 +248,10 @@ struct Raster {
     object_light: ObjectLight,
     animation: Option<RasterAnimation>,
     click_through: bool,
+    hidden: bool,
+    translucent: bool,
+    facing: Option<u8>,
+    actor_art: Option<u32>,
 }
 
 pub(super) const OBJECT_RENDER_DESCRIPTOR_BYTES: usize =
@@ -267,6 +271,10 @@ impl Raster {
             object_light: ObjectLight::Unlit,
             animation: None,
             click_through: false,
+            hidden: false,
+            translucent: false,
+            facing: None,
+            actor_art: None,
             bounds: RasterBounds::scaled(
                 SpriteDraw {
                     frame: &frame.decoded.frame,
@@ -873,8 +881,9 @@ struct SectorCache {
     lights: LightGrid,
     shades: Vec<PreparedShade>,
     dynamic: Vec<DynamicLight>,
-    effects: BTreeMap<Option<WorldOrder>, spell_fx::Playback>,
+    effects: BTreeMap<(Option<WorldOrder>, i32), spell_fx::Playback>,
     effect_time: Duration,
+    sync_spell_fx: bool,
     dynamic_grid: LightGrid,
     hour: u8,
     shadows_disabled: bool,
@@ -986,6 +995,7 @@ impl SectorCache {
             self.ordered.extend(sector.draws.iter().cloned());
         }
         self.project_inventory();
+        self.project_spells();
         self.ordered.sort_unstable_by_key(|draw| draw.key);
         self.walk_subject = required.iter().find_map(|id| {
             let (key, walk) = self.entries[id].0.walk.as_ref()?;
@@ -1177,7 +1187,7 @@ impl SectorCache {
             .values()
             .filter(|fx| self.active.contains(&tile_sector_id(fx.tile)))
         {
-            if let Some(light) = &fx.light {
+            if let Some(light) = fx.light_at(self.effect_time) {
                 grid.insert_light(light);
             }
         }
@@ -1315,7 +1325,7 @@ impl SectorCache {
                     self.effects
                         .values()
                         .filter(move |effect| tile_sector_id(effect.tile) == id)
-                        .filter_map(|effect| effect.light.as_ref()),
+                        .filter_map(|effect| effect.light_at(self.effect_time)),
                 )
                 .chain(self.entries[&id].0.emitters.iter().rev())
         })
@@ -1410,10 +1420,10 @@ impl SectorCache {
                     Some(candidate)
                 });
             let overlays = self.effects.iter().filter_map(move |(owner, effect)| {
-                if tile_sector_id(effect.tile) != *id || player_shadow && owner.is_none() {
+                if tile_sector_id(effect.tile) != *id || player_shadow && owner.0.is_none() {
                     return None;
                 }
-                effect.light.as_ref()?.shadow_candidate()
+                effect.light_at(self.effect_time)?.shadow_candidate()
             });
             probes.chain(overlays).chain(
                 self.entries[id]
@@ -1679,6 +1689,10 @@ impl SectorCache {
                     .then(|| raster.next_change(&viewport, elapsed, self.fidget))
                     .flatten()
             })
+            .chain(
+                self.player_form()
+                    .and_then(|m| m.delay(self.player.as_ref()?.facing(), elapsed)),
+            )
             .chain(self.effect_delay(elapsed))
             .chain(self.walk_delay(&viewport, elapsed))
             .chain(self.door_delay(&viewport, elapsed))
@@ -1776,12 +1790,13 @@ impl SectorCache {
         range.flat_map(move |index| {
             let draw = self.visible_raster(index, viewport, elapsed);
             let raster = &self.ordered[index];
-            let effect = self
-                .effects
-                .get(&Some(raster.key))
-                .filter(|_| self.raster_revealed(raster));
-            let overlay = |front| effect.and_then(|fx| fx.draw(front, elapsed, viewport));
-            [overlay(false), draw, overlay(true)].into_iter().flatten()
+            let overlay = move |front| {
+                self.effects
+                    .range((Some(raster.key), i32::MIN)..=(Some(raster.key), i32::MAX))
+                    .filter(move |_| self.raster_revealed(raster))
+                    .filter_map(move |(_, fx)| fx.draw(front, elapsed, viewport, None))
+            };
+            overlay(false).chain(draw).chain(overlay(true))
         })
     }
 
@@ -1808,7 +1823,7 @@ impl SectorCache {
         } else {
             raster.visible_at(&viewport, elapsed, self.fidget)?
         };
-        if !self.raster_revealed(raster) {
+        if raster.hidden || !self.raster_revealed(raster) {
             return None;
         }
         let mut modulation = self.shades.get(index).map_or_else(
@@ -1821,7 +1836,7 @@ impl SectorCache {
             },
             PreparedShade::modulation,
         );
-        if let Some(corners) = self.fade(raster) {
+        if let Some(corners) = self.fade(raster).or(raster.translucent.then_some([128; 4])) {
             let (color, columns) = match modulation {
                 Modulation::Uniform(color) => (color, &[][..]),
                 Modulation::Columns(columns) => ([255; 3], columns),
@@ -1851,11 +1866,13 @@ impl SectorCache {
         if self.roof_covered(pose.tile) {
             return None;
         }
+        let asset = self.form_asset(elapsed).unwrap_or(pose.asset);
         let draw = SpriteDraw {
-            frame: &pose.asset.decoded.frame,
-            anchor: pose.anchor,
+            frame: &asset.decoded.frame,
+            anchor: self.player_body_anchor(pose.tile, pose.anchor),
         };
-        let sprite = viewport.place(draw, RasterBounds::new(draw))?;
+        let scale = self.player_scale();
+        let sprite = viewport.place(draw, RasterBounds::scaled(draw, scale))?;
         let modulation = self.ambient.map_or(Modulation::Unlit, |(ambient, _)| {
             let base = if self.outdoor(pose.tile) {
                 ambient.outdoor
@@ -1864,6 +1881,37 @@ impl SectorCache {
             };
             Modulation::Uniform(lighting::point(self.light_emitters(), pose.anchor, base))
         });
+        let modulation = if draw.anchor != pose.anchor {
+            let color = if let Modulation::Uniform(color) = modulation {
+                color
+            } else {
+                [255; 3]
+            };
+            Modulation::Wading {
+                color,
+                alpha: if self.player_spell_flags() & 1 != 0 {
+                    128
+                } else {
+                    255
+                },
+                depth: (15 * 100 / scale).min(asset.decoded.frame.height),
+            }
+        } else if self.player_spell_flags() & 1 != 0 {
+            let color = if let Modulation::Uniform(color) = modulation {
+                color
+            } else {
+                [255; 3]
+            };
+            Modulation::Fade {
+                corners: [128; 4],
+                color,
+                columns: &[],
+            }
+        } else if self.player_form().is_some_and(|m| m.additive) {
+            Modulation::Additive
+        } else {
+            modulation
+        };
         let key = (
             true,
             super::scenery::order(pose.tile, pose.offset, false, usize::MAX),
@@ -1871,9 +1919,9 @@ impl SectorCache {
         Some((
             key,
             WorldDraw {
-                asset: pose.asset,
+                asset,
                 sprite,
-                scale: 100,
+                scale,
                 modulation,
             },
         ))
@@ -2032,8 +2080,12 @@ impl SectorCache {
                 modulation: moving.shade.modulation(),
             })
         });
-        let caster_effect = player.as_ref().and_then(|_| self.effects.get(&None));
-        let caster_layer = |front| caster_effect.and_then(|fx| fx.draw(front, elapsed, viewport));
+        let player_anchor = self.player.as_ref().map(|p| p.sample(elapsed).anchor);
+        let caster_layer = |front| {
+            self.effects
+                .range((None, i32::MIN)..=(None, i32::MAX))
+                .filter_map(move |(_, fx)| fx.draw(front, elapsed, viewport, player_anchor))
+        };
         self.visible_rasters(0..split, viewport, elapsed)
             .chain(shadows.iter().filter_map(move |draw| {
                 let sprite = SpriteDraw {

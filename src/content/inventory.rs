@@ -47,6 +47,7 @@ pub(super) enum Place {
     Ground(String, Tile),
     Owned(Owner),
     Equipped(EquipmentSlot),
+    WornBy(String, OriginalId, EquipmentSlot),
     Merged(OriginalId),
     Spent,
     Consumed,
@@ -62,6 +63,9 @@ impl Place {
             }
             Self::Owned(Owner::OriginalObject(map, id)) => {
                 json!({"kind":"original_object","map":map,"id":id.key()})
+            }
+            Self::WornBy(map, id, slot) => {
+                json!({"kind":"equipped","map":map,"owner":id.key(),"slot":slot})
             }
             Self::Equipped(slot) => json!({"kind":"equipped","slot":slot}),
             Self::Retired => json!({"kind":"restocked"}),

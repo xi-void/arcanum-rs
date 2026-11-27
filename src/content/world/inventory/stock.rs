@@ -32,12 +32,17 @@ impl Restock {
     }
 }
 
-struct SourceSet {
-    coins: [u32; 2],
-    items: Vec<(u32, u32)>,
+pub(super) struct SourceSet {
+    coins: [i32; 2],
+    pub(super) items: Vec<(u32, u32)>,
 }
 impl SourceSet {
-    fn parse(text: &str) -> Result<Self, String> {
+    pub(super) fn coins(&self, random: &mut Random) -> u32 {
+        let [low, high] = self.coins;
+        (i64::from(low) + random.below((i64::from(high) - i64::from(low) + 1) as u64) as i64).max(0)
+            as u32
+    }
+    pub(super) fn parse(text: &str) -> Result<Self, String> {
         let (_, pairs) = text
             .split_once(':')
             .ok_or("Missing inventory source name")?;
@@ -46,17 +51,25 @@ impl SourceSet {
                 .split_once(',')
                 .ok_or("Incomplete inventory source pair")?;
             Ok::<_, String>((
-                a.parse::<u32>().map_err(|e| e.to_string())?,
-                b.parse::<u32>().map_err(|e| e.to_string())?,
+                a.parse::<i32>().map_err(|e| e.to_string())?,
+                b.parse::<i32>().map_err(|e| e.to_string())?,
             ))
         });
         let (low, high) = pairs.next().transpose()?.unwrap_or_default();
-        if low > high || high > i32::MAX as u32 {
+        if low > high {
             return Err("Invalid inventory source gold range".into());
         }
         Ok(Self {
             coins: [low, high],
-            items: pairs.collect::<Result<_, _>>()?,
+            items: pairs
+                .map(|pair| {
+                    let (rate, id) = pair?;
+                    Ok::<_, String>((
+                        rate.try_into().map_err(|_| "Negative inventory rate")?,
+                        id.try_into().map_err(|_| "Negative inventory prototype")?,
+                    ))
+                })
+                .collect::<Result<_, _>>()?,
         })
     }
 }
@@ -208,8 +221,7 @@ impl InteractiveWorld {
             grid.items.remove(&id);
             self.cache.inventory.state.put(item, Place::Retired, None);
         }
-        let [low, high] = set.coins;
-        let coins = low + event.random.below(u64::from(high - low) + 1) as u32;
+        let coins = set.coins(&mut event.random);
         let mut generated = Vec::new();
         if coins > 0 {
             if let Owner::OriginalObject(_, id) = &owner {

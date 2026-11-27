@@ -383,6 +383,18 @@ impl Hud {
         })
     }
 
+    pub(in crate::viewer) fn carried_item_at(&self, point: (u32, u32)) -> Option<&str> {
+        let item = self
+            .grid_item(point)
+            .filter(|(index, _, _)| *index == 0)
+            .map(|(_, _, i)| i)
+            .or_else(|| {
+                self.equipment_at(point)
+                    .and_then(|(slot, _)| self.equipped(slot))
+            })?;
+        Some(&item.id)
+    }
+
     pub(in crate::viewer) fn begin_inventory_drag(&mut self, point: (u32, u32)) -> Option<i32> {
         if let Some((slot, placement)) = self.equipment_at(point)
             && let Some(item) = self.equipped(slot)

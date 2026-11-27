@@ -10,6 +10,7 @@ mod inventory;
 pub mod items;
 mod jumps;
 mod lighting;
+pub(crate) mod magick;
 pub mod map_atlas;
 pub mod maps;
 mod mobile;
@@ -25,6 +26,7 @@ pub mod sector;
 pub mod shadow;
 mod terrain;
 pub mod travel;
+pub(crate) mod vitals;
 pub mod wall;
 pub mod world;
 

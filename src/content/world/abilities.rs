@@ -22,6 +22,8 @@ impl LockId {
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub(super) struct LockChange {
+    #[serde(default)]
+    pub held: Option<bool>,
     pub locked: Option<bool>,
     pub jammed: Option<bool>,
     // CE TIMEEVENT_TYPE_LOCK runs even if another method has since touched the lock.
@@ -30,7 +32,7 @@ pub(super) struct LockChange {
 
 impl LockChange {
     pub fn flags(&self, mut flags: u32) -> u32 {
-        for (bit, value) in [(1, self.locked), (2, self.jammed)] {
+        for (bit, value) in [(1, self.locked), (2, self.jammed), (4, self.held)] {
             if let Some(on) = value {
                 flags = (flags & !bit) | if on { bit } else { 0 };
             }
@@ -53,7 +55,7 @@ impl LockChange {
 #[serde(rename_all = "snake_case")]
 pub(super) enum Method {
     PickLocks(OriginalId),
-    UnlockingCantrip,
+    Spell(usize),
 }
 impl Method {
     pub fn is_skill(self) -> bool {
@@ -61,25 +63,28 @@ impl Method {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Aim {
+    Player,
+    Object(WorldOrder),
+    Tile((u32, u32)),
+    Item(OriginalId),
+    Destination(crate::content::jumps::Destination),
+}
+
 #[derive(Default)]
 pub(super) struct UseState {
     pub selected: Option<Method>,
     pub pending: Option<Method>,
-    pub request: Option<(WorldOrder, Method)>,
+    pub request: Option<(Aim, Method)>,
     pub finish_at: Option<Duration>,
-    pub casting: Option<(WorldOrder, Duration)>,
+    pub casting: Option<(Aim, Method, Duration)>,
     pub last: Option<Value>,
     pub message: String,
 }
 impl UseState {
     pub fn select(&mut self, method: Method) {
-        self.message = if method.is_skill() {
-            "Pick Locks"
-        } else {
-            "Unlocking Cantrip"
-        }
-        .to_owned()
-            + " — select a portal or container";
+        self.message = "Pick Locks — select a portal or container".into();
         self.selected = Some(method);
     }
     pub fn cancel(&mut self) -> bool {
@@ -88,7 +93,7 @@ impl UseState {
             .take()
             .or(self.pending.take())
             .or(self.request.take().map(|r| r.1))
-            .or(self.casting.take().map(|_| Method::UnlockingCantrip));
+            .or(self.casting.take().map(|(_, m, _)| m));
         self.finish_at = None;
         if let Some(method) = method {
             self.last = Some(json!({"method":method,"outcome":"cancelled","fatigue_cost":0}));
@@ -105,104 +110,7 @@ impl UseState {
         self.message.clear();
     }
     pub fn diagnostic(&self) -> Value {
-        json!({"selected":self.selected,"pending":self.pending.or(self.casting.map(|_|Method::UnlockingCantrip)),"message":self.message,"last":self.last})
-    }
-}
-
-pub(super) struct Spell {
-    pub cost: i32,
-    pub willpower: i32,
-    pub range: u32,
-    pub target_effect: Option<i32>,
-    pub targets: [bool; 2],
-    pub clears: [bool; 2],
-    pub source: super::super::Source,
-}
-impl Spell {
-    pub fn load(vfs: &mut Vfs) -> Result<Self, String> {
-        let table = load_mes(vfs, "rules/spelllist.mes").map_err(|e| e.to_string())?;
-        Self::decode(&table).map_err(|e| format!("Unlocking Cantrip in {}: {e}", table.source))
-    }
-    fn decode(table: &super::super::LoadedMes) -> Result<Self, String> {
-        let mut spell = Self {
-            cost: 0,
-            willpower: 9,
-            range: 99,
-            target_effect: None,
-            targets: [false; 2],
-            clears: [false; 2],
-            source: table.source.clone(),
-        };
-        let kinds = ["tgt_obj_t_portal", "tgt_obj_t_container"];
-        for id in 1050..1100 {
-            let Some(line) = table.mes.get(id) else {
-                continue;
-            };
-            let line = line.to_ascii_lowercase();
-            let parts: Vec<_> = line.split(',').map(str::trim).collect();
-            if id == 1050 {
-                let targets = line
-                    .trim()
-                    .strip_prefix("aoe:")
-                    .ok_or("expected target flags")?;
-                for target in targets.split('|').map(str::trim) {
-                    let i = kinds
-                        .iter()
-                        .position(|&s| s == target)
-                        .ok_or("unsupported target flag")?;
-                    spell.targets[i] = true;
-                }
-            } else if id == 1051 {
-                for part in parts {
-                    let (key, value) = part.split_once(':').ok_or("expected spell parameter")?;
-                    let n: i32 = value
-                        .trim()
-                        .parse()
-                        .map_err(|_| "invalid spell parameter")?;
-                    if n < 0 {
-                        return Err("negative spell parameter".into());
-                    }
-                    match key.trim() {
-                        "cost" => spell.cost = n,
-                        "iq" => spell.willpower = n,
-                        "range" => spell.range = n as u32,
-                        _ => return Err(format!("unsupported parameter {key}")),
-                    }
-                }
-            } else {
-                match parts.as_slice() {
-                    ["[begin]", target, "type: objflag", field, flag, "flag_off"] => {
-                        let i = kinds
-                            .iter()
-                            .position(|&s| Some(s) == target.strip_prefix("aoe:").map(str::trim))
-                            .ok_or("unsupported component target")?;
-                        if (*field, *flag)
-                            != [
-                                ("obj_f_portal_flags", "opf_locked"),
-                                ("obj_f_container_flags", "ocof_locked"),
-                            ][i]
-                        {
-                            return Err("unsupported lock flag component".into());
-                        }
-                        spell.clears[i] = true;
-                    }
-                    ["[begin]", "type: eyecandy", index, "add"] => {
-                        let index = index
-                            .parse::<i32>()
-                            .map_err(|_| "invalid EyeCandy component index")?;
-                        if !(0..6).contains(&index) || spell.target_effect.is_some() {
-                            return Err("unsupported EyeCandy component sequence".into());
-                        }
-                        spell.target_effect = Some(index);
-                    }
-                    _ => return Err(format!("unsupported spell clause {id}: {line}")),
-                }
-            }
-        }
-        if !spell.targets.contains(&true) {
-            return Err("missing target definition".into());
-        }
-        Ok(spell)
+        json!({"selected":self.selected,"pending":self.pending.or(self.casting.map(|(_,m,_)|m)),"message":self.message,"last":self.last})
     }
 }
 
@@ -213,6 +121,11 @@ impl InteractiveWorld {
             interaction::Action::Window { id, .. } => Some(LockId::Door(*id)),
             interaction::Action::Container(id) => Some(LockId::Container(*id)),
             _ => None,
+        }
+    }
+    pub fn reject_selected_spell(&mut self, reason: &str) {
+        if let Some(m) = self.ability.selected.take() {
+            self.ability.reject(m, reason)
         }
     }
     pub fn ability_message(&self) -> &str {
@@ -229,16 +142,36 @@ impl InteractiveWorld {
     pub fn college_levels(&self) -> [u32; 16] {
         self.cache.inventory.character.colleges
     }
-    pub fn conveyance_level(&self) -> u32 {
-        self.cache.inventory.character.colleges[0]
-    }
-    pub fn select_cantrip(&mut self) {
-        let method = Method::UnlockingCantrip;
+    pub fn select_spell(&mut self, id: usize) {
         self.cancel_player_route();
-        if self.conveyance_level() < 2 {
-            self.ability.reject(method, "Unlocking Cantrip is unknown");
+        let method = Method::Spell(id);
+        let Some(study) = self.progression_rules().spells.get(id) else {
+            self.ability.reject(method, "Unknown spell");
+            return;
+        };
+        if self.college_levels()[id / 5] as usize <= id % 5 {
+            self.ability.reject(method, "Spell has not been learned");
+            return;
+        }
+        let program = match &study.program {
+            Ok(p) => p,
+            Err(e) => {
+                let reason = e.clone();
+                self.ability.reject(method, &reason);
+                return;
+            }
+        };
+        let auto = program.targets.iter().any(|s| s == "tgt_self")
+            && !program
+                .targets
+                .iter()
+                .any(|s| s.starts_with("tgt_tile") || s == "tgt_cone");
+        let immediate=auto && !program.components.iter().any(|c|matches!(&c.operation,crate::content::magick::Operation::Move(mode) if mode=="teleport_tile"));
+        self.ability.message = format!("{} — select a target", study.name);
+        if immediate {
+            self.ability.request = Some((Aim::Player, method))
         } else {
-            self.ability.select(method);
+            self.ability.selected = Some(method)
         }
     }
 }
@@ -250,6 +183,7 @@ mod tests {
     #[test]
     fn lock_expiry_preserves_authored_restrictions_and_other_deadlines() {
         let mut change = LockChange {
+            held: None,
             locked: Some(false),
             jammed: Some(true),
             relock_at: [3600, 86400].into(),

@@ -81,6 +81,7 @@ pub(super) enum Action {
     },
     Container(crate::sector::objects::OriginalId),
     Pickup(crate::sector::objects::OriginalId),
+    Summon(crate::sector::objects::OriginalId),
     Npc(crate::sector::objects::OriginalId),
     Unsupported(String),
 }
@@ -140,6 +141,9 @@ struct Change {
 pub struct DoorStates {
     poses: BTreeMap<Id, Change>,
     developer_unlocked: BTreeSet<Id>,
+    pub(super) summons: BTreeSet<Tile>,
+    pub(super) vacated: BTreeMap<Tile, u32>,
+    pub(super) spell_holds: BTreeSet<abilities::LockId>,
     pub(super) locks: BTreeMap<abilities::LockId, abilities::LockChange>,
 }
 
@@ -230,6 +234,9 @@ impl DoorStates {
             return Err("Duplicate saved lock".into());
         }
         Ok(Self {
+            summons: BTreeSet::new(),
+            vacated: BTreeMap::new(),
+            spell_holds: BTreeSet::new(),
             poses: changed,
             developer_unlocked: unlocked,
             locks,
@@ -242,6 +249,7 @@ impl DoorStates {
         self.locks
             .get(&id)
             .map_or(original, |change| change.flags(original))
+            | if self.spell_holds.contains(&id) { 4 } else { 0 }
     }
 
     pub(super) fn expire_locks(&mut self, now: u64) -> bool {
@@ -298,7 +306,12 @@ impl DoorStates {
         tile: Tile,
         base: collision::Cell,
     ) -> collision::Cell {
-        let mut cell = base;
+        let base = base.vacate(self.vacated.get(&tile).copied().unwrap_or(0));
+        let mut cell = if self.summons.contains(&tile) {
+            base.occupied()
+        } else {
+            base
+        };
         for key in sector.doors_at.get(&tile).into_iter().flatten() {
             let Action::Door(door) = &sector.interactions[key].action else {
                 continue;
@@ -665,6 +678,9 @@ impl SectorCache {
         goal: Tile,
         run: bool,
     ) -> Result<(usize, Option<WorldOrder>), String> {
+        if self.player_spell_flags() & 0x01000000 != 0 {
+            return Err("Movement prevented by Entangle".into());
+        }
         let origin = self
             .player
             .as_ref()
@@ -824,7 +840,7 @@ impl SectorCache {
                 raster.key.0
                     // CE sub_43D9F0 skips walls with OWAF_TRANS_LEFT or
                     // OWAF_TRANS_RIGHT during object hit testing.
-                    && (inspect || (!raster.click_through && !self.faded_walls.contains_key(&raster.key)))
+                    && (inspect || (!raster.hidden && !raster.click_through && !self.faded_walls.contains_key(&raster.key)))
                     && !matches!(raster.object_light, ObjectLight::Roof)
                     && self.raster_revealed(raster)
             })
@@ -948,9 +964,11 @@ impl SectorCache {
                 Some(Ok(Some(*dst)))
             }
             Action::Unsupported(reason) => Some(Err(reason.clone())),
-            Action::Window { .. } | Action::Container(_) | Action::Pickup(_) | Action::Npc(_) => {
-                None
-            }
+            Action::Window { .. }
+            | Action::Container(_)
+            | Action::Pickup(_)
+            | Action::Summon(_)
+            | Action::Npc(_) => None,
         }
     }
 
@@ -980,7 +998,7 @@ pub(super) fn hits(sprite: SpriteDraw<'_>, point: (i64, i64)) -> bool {
     hits_scaled(sprite, point, 100)
 }
 
-fn hits_scaled(sprite: SpriteDraw<'_>, point: (i64, i64), scale: u32) -> bool {
+pub(super) fn hits_scaled(sprite: SpriteDraw<'_>, point: (i64, i64), scale: u32) -> bool {
     let ((left, top), (width, height)) = scaled_sprite_rect(sprite, scale);
     let (x, y) = (point.0 - left, point.1 - top);
     if !(0..width).contains(&x) || !(0..height).contains(&y) {

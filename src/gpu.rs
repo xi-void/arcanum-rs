@@ -760,6 +760,11 @@ fn instance_data(draw: &WorldDraw<'_>, columns: &mut Vec<u32>) -> Result<Instanc
                 columns.extend(colors.iter().copied().map(pack));
             }
         }
+        Modulation::Wading {
+            color,
+            alpha,
+            depth,
+        } => data.shade = [5, pack(color), depth, u32::from(alpha)],
         Modulation::Columns(colors) => {
             if colors.len() != frame.width as usize || columns.len() + colors.len() > MAX_COLUMNS {
                 return Err("invalid or oversized GPU column modulation".into());

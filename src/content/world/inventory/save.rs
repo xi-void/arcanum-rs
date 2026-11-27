@@ -13,6 +13,8 @@ pub struct Objects {
     skill_random: crate::random::Random,
     #[serde(default)]
     recharges: BTreeMap<String, use_action::Recharge>,
+    #[serde(default)]
+    magick: casting::State,
     character: Character,
     next_generated: u64,
     items: Vec<SavedItem>,
@@ -28,6 +30,8 @@ struct SavedItem {
     instance: String,
     #[serde(default)]
     identified: bool,
+    #[serde(default)]
+    structural_damage: Option<i32>,
     quantity: Option<u32>,
     place: Place,
     slot: Option<usize>,
@@ -40,6 +44,7 @@ impl InteractiveWorld {
         Objects {
             accounts: session.accounts.clone(),
             restocks: session.restocks.clone(),
+            magick: session.magick.clone(),
             character: session.character.clone(),
             skill_random: session.skill_random,
             recharges: session.recharges.clone(),
@@ -57,6 +62,7 @@ impl InteractiveWorld {
                         origin_map: item.origin_map.clone(),
                         instance: item.instance_source.virtual_path.clone(),
                         identified: item.flags & 1 != 0,
+                        structural_damage: Some(item.stats.hp[2]),
                         quantity: item.stats.quantity,
                         place: change.place.clone(),
                         slot: change.slot,
@@ -104,6 +110,7 @@ impl Objects {
         session.character.sector_aptitude = 0;
         let backgrounds = load_mes(vfs, "rules/backgrnd.mes")?;
         session.load_rules(vfs, &backgrounds)?;
+        session.magick = self.magick.clone();
 
         let mut orders = BTreeSet::new();
         let mut equipment = BTreeMap::new();
@@ -162,6 +169,12 @@ impl Objects {
             if saved.identified {
                 item.flags |= 1;
             }
+            if let Some(damage) = saved.structural_damage {
+                if damage < 0 {
+                    return Err("Invalid saved item damage".into());
+                }
+                item.stats.hp[2] = damage;
+            }
             item.stats.quantity = saved.quantity;
             match &saved.place {
                 Place::Owned(owner) if saved.slot.is_some() => {
@@ -182,6 +195,22 @@ impl Objects {
                     let art = records(vfs, map, None).ground_art(&item, *tile, *tile)?;
                     session.ground.insert(saved.id, art);
                 }
+                Place::WornBy(map, id, slot) if saved.slot.is_none() => {
+                    if !session.magick.owns_spawn(map, *id)
+                        || !slot.accepts(
+                            item.category,
+                            item.inventory_art,
+                            item.stats.equipment_flags.unwrap_or_default(),
+                        )
+                        || session
+                            .state
+                            .changes
+                            .values()
+                            .any(|c| c.place == saved.place)
+                    {
+                        return Err("Invalid summoned equipment slot".into());
+                    }
+                }
                 Place::Consumed if saved.slot.is_none() => {}
                 Place::Retired if saved.slot.is_none() => {}
                 Place::Spent
@@ -200,6 +229,7 @@ impl Objects {
             );
         }
 
+        session.restore_magick(vfs)?;
         for id in equipment.values() {
             if let Some(entry) = session.prepare_wield(vfs, &session.state.changes[id].item)? {
                 session.wielded.insert(*id, entry);
@@ -240,6 +270,12 @@ impl Objects {
             }
         }
         for owner in owners {
+            if let Owner::OriginalObject(map, id) = &owner
+                && id.kind == u16::MAX
+                && !session.magick.owns_spawn(map, *id)
+            {
+                return Err("Missing owner of generated creature inventory".into());
+            }
             let (mut records, container) = if let Owner::Container(map, id) = &owner {
                 let index = map_index(vfs, catalog, &mut indices, map)?;
                 let mut records = records(vfs, map, Some(index));

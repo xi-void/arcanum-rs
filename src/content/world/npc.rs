@@ -43,11 +43,14 @@ pub(super) fn facing(a: Tile, b: Tile) -> Option<u8> {
 }
 
 impl SectorCache {
-    fn npc(&self, key: WorldOrder) -> Option<(&mobile::population::Resident, Tile)> {
+    pub(super) fn npc(&self, key: WorldOrder) -> Option<(&mobile::population::Resident, Tile)> {
         let target = self.target(key)?;
         let interaction::Action::Npc(id) = target.action else {
             return None;
         };
+        if let Some(resident) = self.inventory.displaced_actor(id) {
+            return Some((resident, target.tile));
+        }
         let sector = &self.entries.get(&tile_sector_id(target.tile))?.0;
         let index = key.1.5.checked_sub(mobile_draw_slot(0))?;
         let resident = sector.mobiles.get(index)?;
@@ -114,14 +117,23 @@ impl InteractiveWorld {
 impl super::inventory::InventoryReader {
     pub fn npc_context(&self, world: &InteractiveWorld) -> Option<String> {
         let (resident, _) = world.cache.npc(world.cache.hover?)?;
-        Some(
-            self.npc_name(
-                resident,
-                world
-                    .met_npcs
-                    .contains(&(world.map.clone(), resident.id.key())),
-            ),
-        )
+        let name = self.npc_name(
+            resident,
+            world
+                .met_npcs
+                .contains(&(world.map.clone(), resident.id.key())),
+        );
+        if world.player_flags().0 & 0x80 != 0
+            && let Some(proto) = resident.prototype.as_ref()
+        {
+            let (_, stats) = world.cache.inventory.npc_vitals(
+                resident.id,
+                &proto.defaults,
+                &resident.instance(),
+            );
+            return Some(format!("{name}  Alignment {}", stats.alignment));
+        }
+        Some(name)
     }
 
     fn npc_name(&self, resident: &mobile::population::Resident, known: bool) -> String {
@@ -197,15 +209,7 @@ impl super::inventory::InventoryReader {
         let leader = object
             .field(129)
             .map_or(defaults.npc_leader, FieldValue::reference);
-        let follows_player = leader.is_none().then_some(false);
-        let critter = effective
-            .appearance
-            .critter_flags
-            .ok_or("NPC critter flags unavailable")?;
-        let spell = effective
-            .appearance
-            .spell_flags
-            .ok_or("NPC spell flags unavailable")?;
+        let mut follows_player = leader.is_none().then_some(false);
         let script = effective
             .appearance
             .dialog_script
@@ -228,33 +232,30 @@ impl super::inventory::InventoryReader {
                 },
             )
         };
-        let pool = |pts: i32, adj: i32, stat: Option<i32>| {
-            Some(
-                i64::from(pts) * 4
-                    + i64::from(adj)
-                    + 2 * (i64::from(stat?) + i64::from(attribute(17)?))
-                    + i64::from(attribute(6)?)
-                    + 4,
-            )
-        };
-        let signed = |index, inherited| scalar(index).map_or(inherited, |n| n as i32);
-        let hp = pool(
-            signed(26, defaults.hp[0]),
-            signed(27, defaults.hp[1]),
-            attribute(0),
-        );
-        let fatigue = pool(
-            signed(70, defaults.fatigue[0]),
-            signed(71, defaults.fatigue[1]),
-            attribute(2),
-        );
-        let damage = signed(28, defaults.npc_damage[0]);
-        let fatigue_damage = signed(72, defaults.npc_damage[1]);
+        let (actor, vitals) = world
+            .cache
+            .inventory
+            .npc_vitals(resident.id, defaults, &object);
+        let critter = actor.critter_flags;
+        let spell = actor.spell_flags;
+        let spirit = spell & 0x02000000 != 0;
+        let controlled = spell & 0x08000000 != 0;
+        if controlled {
+            follows_player = Some(true)
+        }
+        let npc_flags = npc_flags.map(|f| {
+            if controlled || spell & 0x00800000 != 0 {
+                f | 0x800
+            } else {
+                f
+            }
+        });
+        let (hp, fatigue) = (Some(vitals.max_health), Some(vitals.max_fatigue));
+        let (damage, fatigue_damage) = (actor.health_damage, actor.fatigue_damage);
         if critter & 0x3070 != 0
             || spell & 0x10000 != 0
             || npc_flags.is_some_and(|flags| flags & 0x80001 != 0 || flags & 0x900 == 0x100)
-            || damage >= 32_000
-            || hp.is_some_and(|max| i64::from(damage) >= max)
+            || !spirit && (damage >= 32_000 || hp.is_some_and(|max| i64::from(damage) >= max))
             || critter & 4 == 0 && fatigue.is_some_and(|max| i64::from(fatigue_damage) >= max)
         {
             return Err(format!(
@@ -273,14 +274,24 @@ impl super::inventory::InventoryReader {
         let met = world
             .met_npcs
             .contains(&(world.map.clone(), target.clone()));
-        let reaction = reaction.map(|r| r.saturating_add(world.reaction_delta(&target)));
+        let magick_reaction = if controlled {
+            -50
+        } else if spell & 0x00800000 != 0 && critter & 8 == 0 {
+            30
+        } else {
+            0
+        };
+        let reaction = reaction.map(|r| {
+            r.saturating_add(world.reaction_delta(&target))
+                .saturating_add(magick_reaction)
+        });
         let context = Context {
             target,
             speaker: self.npc_name(resident, true),
             tile,
             facing: npc_facing,
             npc_gender: attribute(26),
-            npc_intelligence: attribute(4),
+            npc_intelligence: Some(vitals.attributes[4]),
             npc_race: attribute(27),
             social_class: scalar(144).map(|n| n as i32).or(defaults.social_class),
             player_armor: world.player_appearance().map(|art| (art >> 20) & 15),

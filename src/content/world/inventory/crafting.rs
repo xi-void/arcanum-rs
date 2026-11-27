@@ -214,7 +214,7 @@ impl InventoryReader {
             let item = component
                 .item
                 .ok_or("Required components are missing from the backpack")?;
-            check_item(item)?;
+            check_item(item, &world.cache.inventory.state)?;
             check_removal(item)?;
             if !adequate(&item.stats, &expertise) {
                 return Err("Insufficient expertise for this component".into());

@@ -492,7 +492,7 @@ pub(crate) fn prototype_defaults(
         let value = read_value(&mut reader, index, category)?;
         match index {
             22 => description = value.scalar(),
-            23 if category == 15 => original_art = value.scalar(),
+            23 => original_art = value.scalar(),
             25 if category == 15 => armor_class = value.scalar().map(|v| v as i32),
             26..=27 if matches!(category, 15 | NPC) => {
                 hp[index - 26] = value.scalar().unwrap_or_default() as i32
@@ -500,7 +500,7 @@ pub(crate) fn prototype_defaults(
             28 if matches!(category, 15 | NPC) => {
                 npc_damage[0] = value.scalar().unwrap_or_default() as i32
             }
-            30 if category == 15 => resistance = Some(int_array(value)),
+            30 if matches!(category, 15 | NPC) => resistance = Some(int_array(value)),
             _ => {}
         }
         if let Some(item) = &mut item {

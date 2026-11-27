@@ -57,6 +57,7 @@ pub(super) struct Sample<'a> {
     pub offset: (i32, i32),
     pub anchor: (i32, i32),
     pub gait_frame: Option<usize>,
+    pub gait_phase: Option<f64>,
     pub asset: &'a Arc<LoadedFrame>,
 }
 
@@ -188,6 +189,9 @@ impl Player {
         }
     }
 
+    pub(super) fn is_running(&self) -> bool {
+        self.running
+    }
     pub(super) fn facing(&self) -> u8 {
         self.facing
     }
@@ -196,6 +200,11 @@ impl Player {
         self.facing = facing;
     }
 
+    pub(in crate::content) fn relocate(&mut self, tile: Tile) {
+        self.route.clear();
+        self.step = None;
+        self.tile = tile;
+    }
     pub(super) fn tile(&self) -> Tile {
         self.tile
     }
@@ -329,6 +338,7 @@ impl Player {
             return Sample {
                 asset: &direction.stand,
                 gait_frame: None,
+                gait_phase: None,
                 tile: self.tile,
                 offset: (0, 0),
                 anchor: origin,
@@ -354,6 +364,7 @@ impl Player {
         Sample {
             asset: &gait.frames[frame],
             gait_frame: Some(frame),
+            gait_phase: Some(phase.fract()),
             tile,
             offset: (anchor.0 - c.0, anchor.1 - c.1),
             anchor,

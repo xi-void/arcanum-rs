@@ -5,6 +5,7 @@ use super::super::player::Appearance;
 use super::super::read_bounded;
 use crate::sector::objects::ItemStats;
 
+pub(super) mod casting;
 mod crafting;
 pub use crafting::SchematicComponent;
 mod equipment;
@@ -36,6 +37,7 @@ pub(super) struct Session {
     >,
     purchases: Vec<crate::content::character::progression::Investment>,
     skill_random: crate::random::Random,
+    pub(super) magick: casting::State,
     recharges: BTreeMap<String, use_action::Recharge>,
     state: State,
     revision: u64,
@@ -55,7 +57,7 @@ struct GroundArt {
 impl GroundArt {
     fn raster(&self, tile: Tile, reference: Tile, order: usize) -> Option<Raster> {
         let anchor = project_world_tile(tile, reference)?;
-        let key = super::super::scenery::order(tile, (0, 0), self.flat, usize::MAX - order);
+        let key = super::super::scenery::order(tile, (0, 0), self.flat, usize::MAX - 1 - order * 2);
         let mut raster = Raster::new((true, key), &self.asset, anchor);
         raster.object_light = ObjectLight::Point;
         within_overhang(raster.bounds, anchor).then_some(raster)
@@ -349,6 +351,7 @@ impl Records<'_> {
             {
                 Some(self.index()?.members(*id))
             }
+            Owner::OriginalObject(_, id) if id.kind == u16::MAX => None,
             Owner::OriginalObject(..) => return Err("Invalid NPC inventory owner".into()),
             _ => container.map(|c| c.members.clone()),
         };
@@ -579,8 +582,7 @@ pub struct InventoryReader {
     pub(super) frames: FrameCache,
     pub(super) descriptions: Vec<super::super::LoadedMes>,
     key_descriptions: Option<super::super::LoadedMes>,
-    cantrip: Result<abilities::Spell, String>,
-    spell_fx: [Result<Option<spell_fx::Definition>, String>; 2],
+    spell_fx: BTreeMap<i32, Result<Option<spell_fx::Definition>, String>>,
     pub quest_catalog: super::super::quest::Catalog,
 }
 
@@ -591,24 +593,6 @@ impl InventoryReader {
             .filter_map(|path| super::super::load_mes(&mut vfs, path).ok())
             .collect();
         let key_descriptions = super::super::load_mes(&mut vfs, "mes/gamekey.mes").ok();
-        let cantrip = abilities::Spell::load(&mut vfs);
-        let spell_fx = [
-            Some(10),
-            cantrip
-                .as_ref()
-                .ok()
-                .and_then(|spell| spell.target_effect)
-                .map(|component| 10 + component),
-        ]
-        .map(|index| {
-            index
-                .map(|id| {
-                    spell_fx::Definition::load(&mut vfs, id)
-                        .map_err(|err| format!("SpellEyeCandy {id}: {err}"))
-                })
-                .transpose()
-                .map(Option::flatten)
-        });
         let quest_catalog = super::super::quest::Catalog::load(&mut vfs);
         Self {
             vfs,
@@ -618,8 +602,7 @@ impl InventoryReader {
             quest_catalog,
             portraits: BTreeMap::new(),
             schematic_reports: BTreeMap::new(),
-            cantrip,
-            spell_fx,
+            spell_fx: BTreeMap::new(),
         }
     }
 
@@ -759,7 +742,7 @@ impl InventoryReader {
                 slot,
                 cells,
                 name,
-                movable: check_item(item).is_ok(),
+                movable: check_item(item, state).is_ok(),
                 removable: item.flags & ITEM_NO_DROP == 0,
                 icon,
             };
@@ -979,7 +962,7 @@ impl InteractiveWorld {
         let state = &self.cache.inventory.state;
         let mut item = records.item(id, state)?;
         let current = state.place(&item).clone();
-        let flags = check_item(&item)?;
+        let flags = check_item(&item, state)?;
         let mut remainder = None;
         if let Some(quantity) = quantity {
             let total = item.stats.quantity.ok_or("Item is not a divisible stack")?;
@@ -1089,6 +1072,7 @@ impl InteractiveWorld {
                 None
             }
             Place::Equipped(_)
+            | Place::WornBy(..)
             | Place::Merged(_)
             | Place::Consumed
             | Place::Spent
@@ -1267,7 +1251,7 @@ impl InteractiveWorld {
             layout.grid.items.retain(|id, entry| {
                 let (slot, cells) = *entry;
                 let item = &layout.items[id];
-                if check_item(item).is_err() {
+                if check_item(item, state).is_err() {
                     return true;
                 }
                 moving.push((std::cmp::Reverse((cells[1], cells[0])), slot, *id));
@@ -1381,7 +1365,7 @@ fn check_removal(item: &Item) -> Result<(), String> {
         .ok_or_else(|| "Original item cannot be removed from its owner".into())
 }
 
-fn check_item(item: &Item) -> Result<u32, String> {
+fn check_item(item: &Item, state: &State) -> Result<u32, String> {
     let flags = item
         .effective
         .flags
@@ -1389,9 +1373,10 @@ fn check_item(item: &Item) -> Result<u32, String> {
         .ok_or("Unresolved item visibility flags")?;
     if !item_visible(item)
         || item.scripted
-        || item
-            .authored_slot
-            .is_some_and(|slot| matches!(slot, 1000..=1008 | 2000..=2009))
+        || !state.changes.contains_key(&item.id)
+            && item
+                .authored_slot
+                .is_some_and(|slot| matches!(slot, 1000..=1008 | 2000..=2009))
     {
         return Err(
             "Item is unavailable or requires an unsupported scripted or equipment transaction"

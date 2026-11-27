@@ -60,6 +60,7 @@ struct Waypoint {
 
 pub(super) enum Arrival {
     Destination(i32, Point),
+    Spell(i32, Point),
     Cancelled(i32, Option<Point>),
 }
 
@@ -76,6 +77,7 @@ pub(crate) struct MapUi {
     world_available: bool,
     travel_map: Result<TravelMap, String>,
     can_travel: bool,
+    spell_selection: bool,
     waypoints: Vec<Waypoint>,
     active_waypoint: Option<usize>,
     journey: Option<Journey>,
@@ -133,6 +135,7 @@ impl MapUi {
             world_available: false,
             travel_map,
             can_travel: false,
+            spell_selection: false,
             waypoints: Vec::new(),
             active_waypoint: None,
             journey: None,
@@ -344,6 +347,20 @@ impl MapUi {
         self.open
     }
 
+    pub(super) fn select_teleport(&mut self) -> Result<(), String> {
+        self.check_teleport(None)?;
+        self.spell_selection = true;
+        self.switch(Mode::World);
+        self.travel_notice("Select a discovered destination");
+        Ok(())
+    }
+    fn check_teleport(&mut self, tile: Option<Point>) -> Result<(), String> {
+        let name = &self.origin_map.as_ref().ok_or("Missing source map")?.0;
+        let id = self.atlas.catalog.find(name).map_err(|e| e.to_string())?.id;
+        self.atlas
+            .check_teleport(&mut self.vfs, id, self.world_tile, tile)
+            .map_err(|e| e.to_string())
+    }
     pub(super) fn open(&mut self, scale: Option<u16>) {
         if let Some(scale) = scale {
             self.hud.set_scale(scale);
@@ -380,6 +397,7 @@ impl MapUi {
 
     pub(super) fn close(&mut self) {
         self.open = false;
+        self.spell_selection = false;
         self.journey = None;
         self.cancel_drag();
         self.hud.clear_layout();
@@ -514,6 +532,7 @@ impl MapUi {
             Action::MapZoomIn => self.zoom(1),
             Action::MapOverview => self.switch(Mode::Continent),
             Action::MapRecenter => self.recenter(),
+            Action::MapTravel if self.spell_selection => {}
             Action::MapTravel => {
                 if self.journey.is_some() {
                     return self.cancel_journey();
@@ -788,7 +807,22 @@ impl MapUi {
             return self.action(action, now);
         }
         if on_canvas && !matches!(self.hud.hit(point), Hit::Button(_)) && !self.travelling() {
-            if self.mode == Mode::World {
+            if self.spell_selection && matches!(self.mode, Mode::World | Mode::Continent) {
+                let Some(area) = self.pick(point) else {
+                    self.travel_notice("Select a discovered destination");
+                    return None;
+                };
+                if let Err(e) = self.atlas.select(area, &self.vfs) {
+                    self.travel_notice(&e.to_string());
+                    return None;
+                }
+                let dest = self.atlas.destination.as_ref()?.clone();
+                if let Err(e) = self.check_teleport(Some(dest.tile)) {
+                    self.travel_notice(&e);
+                    return None;
+                }
+                return Some(Arrival::Spell(dest.map, dest.tile));
+            } else if self.mode == Mode::World {
                 self.place_waypoint(point);
             } else if self.mode == Mode::Continent
                 && let Some(pixel) = self

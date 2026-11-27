@@ -112,6 +112,19 @@ impl Pose {
         .in_direction(direction)
     }
 
+    /// CE name_normalize_aid resolves a missing unarmed stand to the armed stand.
+    pub(super) fn resolve_stand(mut self, vfs: &Vfs) -> Result<Self, Box<dyn Error>> {
+        if vfs.resolve(&self.path)?.winner().is_none()
+            && let Some(stem) = self.path.strip_suffix("xaa.art")
+        {
+            let fallback = format!("{stem}xba.art");
+            if vfs.resolve(&fallback)?.winner().is_some() {
+                self.path = fallback;
+            }
+        }
+        Ok(self)
+    }
+
     pub(super) fn in_direction(mut self, direction: u8) -> Self {
         self.direction = direction;
         self.rotation = if (1..4).contains(&direction) {
@@ -511,7 +524,9 @@ fn load_critter(
             .checked_add(offset.1)
             .ok_or("mobile Y offset overflow")?,
     );
-    let pose = cache.resolve(|| Pose::decode(art, names))?;
+    let pose = cache
+        .resolve(|| Pose::decode(art, names))?
+        .resolve_stand(vfs)?;
     let asset = pose.load(vfs, cache, pose.frame)?;
     let diagnostic = format!(
         "mobile at {:?} ART {:#010x}: {}, direction {} (stored {}), frame {}, palette {}, hotspot {:?}, offset {offset:?}, scale {scale}%, shadow {shadow_id:#010x} ({shadow_note}); prepared in {:?}",
@@ -622,31 +637,13 @@ pub(super) fn item_art_entry(art: u32) -> i32 {
     ((art >> 17) & 0x7ff) as i32 + 20 * (subtype + 50 * kind) + adjust
 }
 
-pub(super) fn load_prop(
+pub(super) fn prop_asset(
     vfs: &mut Vfs,
     cache: &mut FrameCache,
     names: &mut BTreeMap<&'static str, super::LoadedMes>,
-    effective: &population::Effective,
-    (category, tile): (u32, (u32, u32)),
-    reference: (u32, u32),
-) -> Result<MobileFrame, Box<dyn Error>> {
-    let art = effective
-        .current_art
-        .value()
-        .ok_or("unresolved current ART")?;
-    let appearance = effective.appearance;
-    let flags = effective
-        .flags
-        .value()
-        .ok_or("unresolved visibility flags")?;
-    if appearance.scale != Some(100)
-        || appearance.blit_flags != Some(0)
-        || appearance.blit_color != Some(0x00ff_ffff)
-        || appearance.alpha != Some(255)
-        || flags & 0x0002_00c0 != 0
-    {
-        return Err("unsupported mobile prop scale, blending or water state".into());
-    }
+    category: u32,
+    art: u32,
+) -> Result<Arc<LoadedFrame>, Box<dyn Error>> {
     let (dir, table, entry, frame, rotation) = match (category, art >> 28) {
         (5..=14, 6) if (art >> 12) & 3 == 0 => (
             "item",
@@ -688,7 +685,36 @@ pub(super) fn load_prop(
         return Err("invalid ground ART name".into());
     }
     let path = format!("art/{dir}/{name}");
-    let asset = cache.load_rotated(vfs, &path, frame, ((art >> 4) & 3) as u8, false, rotation)?;
+    cache.load_rotated(vfs, &path, frame, ((art >> 4) & 3) as u8, false, rotation)
+}
+
+pub(super) fn load_prop(
+    vfs: &mut Vfs,
+    cache: &mut FrameCache,
+    names: &mut BTreeMap<&'static str, super::LoadedMes>,
+    effective: &population::Effective,
+    (category, tile): (u32, (u32, u32)),
+    reference: (u32, u32),
+) -> Result<MobileFrame, Box<dyn Error>> {
+    let art = effective
+        .current_art
+        .value()
+        .ok_or("unresolved current ART")?;
+    let appearance = effective.appearance;
+    let flags = effective
+        .flags
+        .value()
+        .ok_or("unresolved visibility flags")?;
+    if appearance.scale != Some(100)
+        || appearance.blit_flags != Some(0)
+        || appearance.blit_color != Some(0x00ff_ffff)
+        || appearance.alpha != Some(255)
+        || flags & 0x0002_00c0 != 0
+    {
+        return Err("unsupported mobile prop scale, blending or water state".into());
+    }
+    let asset = prop_asset(vfs, cache, names, category, art)?;
+    let path = asset.source.virtual_path.clone();
     let offset = (
         appearance.offset_x.ok_or("unresolved X offset")?,
         appearance.offset_y.ok_or("unresolved Y offset")?,

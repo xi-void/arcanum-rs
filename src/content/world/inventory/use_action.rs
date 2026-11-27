@@ -61,15 +61,18 @@ impl InteractiveWorld {
     }
 
     pub(in crate::content::world) fn unconscious(&self) -> bool {
-        let pc = &self.cache.inventory.character;
-        pc.critter_flags & 4 == 0 && self.fatigue().0 <= 0
+        let (spell, critter) = self.player_flags();
+        spell & 0x10000 != 0
+            || critter & 0x60 != 0
+            || critter & 4 == 0 && self.fatigue().0 <= 0
+            || self.character_statistics().current_health <= 0
     }
 
     pub fn ability_character(&self) -> Value {
         let pc = &self.cache.inventory.character;
         let stats = self.character_statistics();
         json!({"pick_locks_points":stats.pick_locks.points,"pick_locks_training":stats.pick_locks.training,"pick_locks":stats.pick_locks,
-            "colleges":pc.colleges,"mastery":pc.mastery,"aptitude":stats.aptitude,"fatigue":stats.current_fatigue,
+            "magick":self.cache.inventory.magick.report(), "colleges":pc.colleges,"mastery":pc.mastery,"aptitude":stats.aptitude,"fatigue":stats.current_fatigue,
             "fatigue_damage":pc.fatigue_damage,"max_fatigue":stats.max_fatigue,"recovery_due":pc.recover_at})
     }
 
@@ -79,6 +82,7 @@ impl InteractiveWorld {
             .locks
             .values()
             .filter_map(|lock| lock.relock_at.first().copied())
+            .chain(self.cache.inventory.spell_deadline())
             .chain(self.cache.inventory.character.recover_at)
             .chain(
                 self.cache
@@ -92,6 +96,7 @@ impl InteractiveWorld {
 
     pub fn update_ability_time(&mut self, now: u64) -> bool {
         self.game_second = now;
+
         let closed = self.cache.door_states.expire_locks(now);
         let inventory = &mut self.cache.inventory;
         let mut changed = false;
@@ -136,20 +141,27 @@ pub(super) struct Recharge {
 
 impl InventoryReader {
     pub fn resolve_targeted_action(&mut self, world: &mut InteractiveWorld, now: Duration) -> bool {
-        let (key, method, impact) = if let Some((key, due)) = world.ability.casting {
+        let (key, method, impact) = if let Some((key, method, due)) = world.ability.casting {
             if now < due {
                 return false;
             }
             world.ability.casting = None;
-            (key, Method::UnlockingCantrip, true)
+            (key, method, true)
         } else if let Some((key, method)) = world.ability.request.take() {
             (key, method, false)
         } else {
             return false;
         };
-        match self.resolve_action(world, key, method, now, impact) {
+        let result = match (method, key) {
+            (Method::Spell(id), aim) => self.cast_spell(world, id, aim, now, impact),
+            (Method::PickLocks(_), abilities::Aim::Object(key)) => {
+                self.resolve_action(world, key, method)
+            }
+            _ => Err("Select a portal or container".into()),
+        };
+        match result {
             Ok((message, result)) => {
-                world.ability.message = message.into();
+                world.ability.message = message;
                 world.ability.last = Some(result);
             }
             Err(e) => world.ability.reject(method, &e),
@@ -161,9 +173,7 @@ impl InventoryReader {
         world: &mut InteractiveWorld,
         key: WorldOrder,
         method: Method,
-        now: Duration,
-        impact: bool,
-    ) -> Result<(&'static str, Value), String> {
+    ) -> Result<(String, Value), String> {
         let id = world
             .lock_id(key)
             .ok_or("Lock target is no longer available")?;
@@ -216,30 +226,25 @@ impl InventoryReader {
         let target = LockTarget {
             id,
             key,
-            tile,
             difficulty,
             flags,
             near,
-            player,
         };
         let mut result = json!({"method":method,"target":id.label(),"difficulty":difficulty,"flags_before":flags,"fatigue_cost":0,"notify_npc":notify});
-        let message = match method {
-            Method::PickLocks(tool) => pick_lock(world, &target, &stats, tool, &mut result)?,
-            Method::UnlockingCantrip => {
-                self.cast_cantrip(world, &target, &stats, &mut result, now, impact)?
-            }
+        let Method::PickLocks(tool) = method else {
+            return Err("Expected lockpicks".into());
         };
+        let message = pick_lock(world, &target, &stats, tool, &mut result)?;
         result["flags_after"] = json!(world.cache.door_states.flags(id, original));
         world.cache.inventory.revision += u64::from(result["outcome"] != "casting");
-        Ok((message, result))
+        Ok((message.into(), result))
     }
 }
 
 struct LockTarget {
     key: WorldOrder,
     id: LockId,
-    tile: Tile,
-    player: Tile,
+
     difficulty: i32,
     flags: u32,
     near: bool,
@@ -365,106 +370,10 @@ fn pick_lock(
     Ok(message)
 }
 
-impl InventoryReader {
-    fn play_cantrip_effect(
-        &mut self,
-        world: &mut InteractiveWorld,
-        target: Option<WorldOrder>,
-        now: Duration,
-    ) -> (Duration, Value) {
-        let result = self.spell_fx[usize::from(target.is_some())]
-            .as_ref()
-            .map_err(Clone::clone)
-            .and_then(|definition| match definition {
-                Some(def) => world
-                    .play_spell_effect(&mut self.vfs, &mut self.frames, def, target, now)
-                    .map_err(|e| e.to_string()),
-                None => Ok((Duration::ZERO, Value::Null)),
-            });
-        result.unwrap_or_else(|error| (Duration::ZERO, json!({"error":error})))
-    }
-
-    fn cast_cantrip(
-        &mut self,
-        world: &mut InteractiveWorld,
-        target: &LockTarget,
-        stats: &CharacterStatistics,
-        result: &mut Value,
-        now: Duration,
-        impact: bool,
-    ) -> Result<&'static str, String> {
-        let LockTarget {
-            id,
-            tile,
-            difficulty,
-            player,
-            ..
-        } = *target;
-        let spell = self.cantrip.as_ref().map_err(Clone::clone)?;
-        let clears = spell.clears;
-        let pc = &world.cache.inventory.character;
-        let fatigue = stats.current_fatigue;
-
-        let kind = usize::from(matches!(id, LockId::Container(_)));
-        if !spell.targets[kind] {
-            return Err("Invalid target for Unlocking Cantrip".into());
-        }
-        if player.0.abs_diff(tile.0).max(player.1.abs_diff(tile.1)) > spell.range {
-            return Err("Target outside spell range".into());
-        }
-        if pc.colleges[0] < 2 {
-            return Err("Unlocking Cantrip is unknown".into());
-        }
-        if stats.attributes[4] < 5 || stats.attributes[6] < spell.willpower {
-            return Err("You lose your concentration".into());
-        }
-        let (remaining, item_mana) =
-            world
-                .cache
-                .inventory
-                .charge_spell(spell.cost, fatigue, world.game_second, impact)?;
-        result["spell_source"] = super::super::super::diagnostics::source(&spell.source);
-        result["aptitude"] = json!(stats.aptitude);
-        if !impact {
-            if let Some(facing) = npc::facing(player, tile)
-                && let Some(player) = &mut world.cache.player
-            {
-                player.set_facing(facing);
-            }
-            let (delay, effect) = self.play_cantrip_effect(world, None, now);
-            world.ability.casting = Some((target.key, now + delay));
-            result["casting_effect"] = effect;
-            result["outcome"] = json!("casting");
-            return Ok("Casting Unlocking Cantrip");
-        }
-        if let Some(previous) = &world.ability.last {
-            result["casting_effect"] = previous["casting_effect"].clone();
-        }
-        result["fatigue_cost"] = json!(remaining);
-        result["item_mana_cost"] = json!(item_mana);
-        let message = if remaining > 0 && fatigue < i64::from(remaining) {
-            result["outcome"] = json!("exhausted");
-            "Not enough energy — exhausted"
-        } else {
-            if result["notify_npc"] != 0 {
-                result["guard_notice"] = json!({"loudness":"loud","failed":false});
-            }
-            result["target_effect"] = self.play_cantrip_effect(world, Some(target.key), now).1;
-            if clears[kind] && (difficulty < 0 || stats.aptitude >= difficulty) {
-                world.cache.door_states.locks.entry(id).or_default().locked = Some(false);
-                result["outcome"] = json!("success");
-                "Unlocking Cantrip succeeded"
-            } else {
-                result["outcome"] = json!("failed");
-                "Unlocking Cantrip failed"
-            }
-        };
-        Ok(message)
-    }
-}
 impl Session {
-    fn charge_spell(
+    pub(super) fn charge_spell(
         &mut self,
+        college: u32,
         base_cost: i32,
         fatigue: i64,
         now: u64,
@@ -481,7 +390,7 @@ impl Session {
             n
         };
         let check = cost(base_cost);
-        let charge = cost(if pc.mastery == Some(0) {
+        let charge = cost(if pc.mastery == Some(college) {
             let half = base_cost / 2;
             half + (half & 1)
         } else {
@@ -538,16 +447,16 @@ mod tests {
         let mut inventory = Session::default();
         inventory.character.base[27] = 1;
         inventory.character.mastery = Some(0);
-        assert!(inventory.charge_spell(10, 5, 1, true).is_err());
+        assert!(inventory.charge_spell(0, 10, 5, 1, true).is_err());
         assert_eq!(inventory.character.fatigue_damage, 0);
         assert_eq!(inventory.character.recover_at, None);
-        assert_eq!(inventory.charge_spell(10, 6, 1, false).unwrap(), (12, 0));
+        assert_eq!(inventory.charge_spell(0, 10, 6, 1, false).unwrap(), (12, 0));
         assert_eq!(inventory.character.fatigue_damage, 0);
         assert_eq!(inventory.character.recover_at, None);
-        assert_eq!(inventory.charge_spell(10, 6, 1, true).unwrap(), (12, 0));
+        assert_eq!(inventory.charge_spell(0, 10, 6, 1, true).unwrap(), (12, 0));
         assert_eq!(inventory.character.recover_at, Some(81));
         inventory.character.critter_flags |= 0x80000000;
-        assert_eq!(inventory.charge_spell(10, 6, 20, true).unwrap(), (6, 0));
+        assert_eq!(inventory.charge_spell(0, 10, 6, 20, true).unwrap(), (6, 0));
         assert_eq!(inventory.character.fatigue_damage, 18);
         assert_eq!(inventory.character.recover_at, Some(81));
     }

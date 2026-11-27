@@ -110,15 +110,13 @@ pub fn decode_direction(
         return Err(Error::InputTooLarge);
     }
     let header = section(input, 0, HEADER_BYTES, "header")?;
-    let rotation_count = match word(header, 0) {
-        0 | 0x02 => 8,
-        0x01 | 0x05 | 0x09 => 1,
-        _ => {
-            return Err(Error::Unsupported(
-                "expected verified ART flags 0x00, 0x01, 0x02, 0x05 or 0x09",
-            ));
-        }
-    };
+    // TIG sub_51BE30 uses only bit zero to size the on-disk frame table.
+    // Indexed EyeCandy, for example, combines it with the 0x10 display flag.
+    let flags = word(header, 0);
+    if flags & !0x3f != 0 {
+        return Err(Error::Unsupported("unknown ART header flags"));
+    }
+    let rotation_count = if flags & 1 == 0 { 8 } else { 1 };
     let stored_rotation = if rotation_count == 1 { 0 } else { rotation };
     if word(header, 8) != 8 {
         return Err(Error::Unsupported(

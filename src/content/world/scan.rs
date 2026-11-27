@@ -508,6 +508,7 @@ pub fn compatibility_scan(
     {
         Ok(r) => {
             json!({"sources":r.sources,"spell_definitions":r.spells.iter().filter(|s|s.willpower.is_ok()).count(),
+            "decoded_spell_programs":r.spells.iter().filter(|s|s.program.is_ok()).count(),"spell_program_errors":r.spells.iter().filter_map(|s|s.program.as_ref().err()).collect::<Vec<_>>(),
             "degree_definitions":r.recipes.values().filter(|r|r.is_ok()).count(),"issues":r.spells.iter().filter_map(|s|s.willpower.as_ref().err()).chain(r.recipes.values().filter_map(|r|r.as_ref().err())).collect::<Vec<_>>() })
         }
         Err(e) => json!({"error":e.to_string()}),

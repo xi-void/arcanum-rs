@@ -243,6 +243,7 @@ pub enum DeveloperAction {
 /// Sound cues emitted by committed gameplay actions.
 pub enum SoundEvent {
     Effect(i32),
+    EffectVariant { preferred: i32, fallback: i32 },
     Footstep { surface: u8, armor: u8 },
 }
 
@@ -281,7 +282,7 @@ pub struct InteractiveWorld {
     pickup_request: Option<crate::sector::objects::OriginalId>,
     route_goal: Option<((u32, u32), bool)>,
     wait_for_door: Option<Duration>,
-    notice: Option<String>,
+    pub(super) notice: Option<String>,
     diagnostic_completion: Option<(u64, bool, Duration)>,
 }
 
@@ -617,12 +618,13 @@ impl InteractiveWorld {
     pub fn player_wait(&self, now: Duration) -> Option<Duration> {
         self.ability
             .finish_at
-            .or(self.ability.casting.map(|(_, due)| due))
+            .or(self.ability.casting.map(|(_, _, due)| due))
             .map(|due| due.saturating_sub(now))
     }
 
     pub fn player_moving(&self) -> bool {
         self.pending_use.is_some()
+            || self.ability.request.is_some()
             || self.ability.casting.is_some()
             || self.wait_for_door.is_some()
             || self.cache.player.as_ref().is_some_and(Player::moving)
@@ -665,6 +667,47 @@ impl InteractiveWorld {
         if let Some(method) = selection {
             if self.unconscious() {
                 self.ability.reject(method, "Unconscious from fatigue");
+                return;
+            }
+            if let abilities::Method::Spell(id) = method {
+                let picked = self
+                    .cache
+                    .pick_raster(point, self.reference, elapsed, false);
+                let player = self.cache.player.as_ref().unwrap().sample(elapsed);
+                let player_key = (
+                    true,
+                    super::super::scenery::order(player.tile, player.offset, false, usize::MAX),
+                );
+                let hit_self = picked.is_none_or(|k| k < player_key)
+                    && interaction::hits_scaled(
+                        SpriteDraw {
+                            frame: &self
+                                .cache
+                                .form_asset(elapsed)
+                                .unwrap_or(player.asset)
+                                .decoded
+                                .frame,
+                            anchor: self.cache.player_body_anchor(player.tile, player.anchor),
+                        },
+                        point,
+                        self.cache.player_scale(),
+                    );
+                let aim = if self.aims_at_ground(id) {
+                    crate::isometric::world_tile_at_pixel(point, self.reference)
+                        .map(abilities::Aim::Tile)
+                } else if hit_self {
+                    Some(abilities::Aim::Player)
+                } else if let Some(key) = picked {
+                    Some(abilities::Aim::Object(key))
+                } else {
+                    crate::isometric::world_tile_at_pixel(point, self.reference)
+                        .map(abilities::Aim::Tile)
+                };
+                if let Some(aim) = aim {
+                    self.ability.request = Some((aim, method))
+                } else {
+                    self.ability.reject(method, "Target is outside the map")
+                }
                 return;
             }
             let valid = self
@@ -728,11 +771,11 @@ impl InteractiveWorld {
                     i64::from(cx) + i64::from(x) - i64::from(viewport.0 / 2),
                     i64::from(cy) + i64::from(y) - i64::from(viewport.1 / 2),
                 );
-                if self.ability.selected.is_some() {
+                if let Some(method) = self.ability.selected {
                     return self
                         .cache
                         .pick_raster(point, self.reference, elapsed, false)
-                        .filter(|&key| self.lock_id(key).is_some());
+                        .filter(|&key| !method.is_skill() || self.lock_id(key).is_some());
                 }
                 let key = self.cache.pick(point, self.reference, elapsed)?;
                 (!matches!(
@@ -797,6 +840,9 @@ impl InteractiveWorld {
         self.cache.door_states = states;
     }
 
+    pub(super) fn spell_transition(&mut self, dest: Destination) {
+        self.transition = Some((dest, self.player_facing().unwrap_or(4)))
+    }
     pub fn take_transition(&mut self) -> Option<(Destination, u8)> {
         self.transition.take()
     }
@@ -810,8 +856,8 @@ impl InteractiveWorld {
                 _ => None,
             });
         serde_json::json!({
-            "ability": self.ability.diagnostic(),
-            "spell_effects":self.cache.effect_report(),
+            "ability": self.ability.diagnostic(), "magick":self.cache.inventory.magick.report(),
+            "spell_effects":self.cache.effect_report(), "spell_models":self.cache.spell_models(),
             "hovered_lock":self.cache.hover.and_then(|k| self.lock_id(k)).map(|id|id.label()),
             "hovered_item":hovered_item,
             "hovered_npc":self.hovered_npc(),
@@ -945,7 +991,7 @@ impl InteractiveWorld {
             }
             self.ability.finish_at = None;
             if let Some(method) = self.ability.pending.take() {
-                self.ability.request = Some((key, method));
+                self.ability.request = Some((abilities::Aim::Object(key), method));
                 return true;
             }
             match self.cache.target(key).map(|target| &target.action) {
