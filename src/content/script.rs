@@ -63,6 +63,12 @@ pub struct State {
     attachments: BTreeMap<String, BTreeMap<Event, Local>>,
     #[serde(default)]
     pub quests: Ledger,
+    #[serde(default)]
+    pub rumors: BTreeMap<i32, u64>,
+    #[serde(skip)]
+    slides: Option<Vec<i32>>,
+    #[serde(default)]
+    pub quelled_rumors: BTreeSet<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     random: Option<Random>,
     #[serde(skip)]
@@ -242,6 +248,28 @@ impl State {
         }
         Some(())
     }
+    pub(super) fn learn_rumor(&mut self, id: i32, quell: bool) -> Option<()> {
+        if !(1000..3000).contains(&id) {
+            return None;
+        }
+        if quell {
+            self.quelled_rumors.insert(id);
+        } else {
+            self.rumors.entry(id).or_insert(self.game_minute);
+        }
+        Some(())
+    }
+    pub(super) fn choose_rumor(&mut self, mut ids: Vec<i32>) -> Option<i32> {
+        ids.retain(|id| !self.rumors.contains_key(id) && !self.quelled_rumors.contains(id));
+        if ids.is_empty() {
+            return None;
+        }
+        let index = self
+            .random
+            .get_or_insert_with(Random::fresh)
+            .below(ids.len() as u64);
+        Some(ids[index as usize])
+    }
     pub(super) fn initialize_random(&mut self) {
         self.random.get_or_insert_with(Random::fresh);
     }
@@ -286,6 +314,14 @@ impl State {
                 .then(|| (self.local(attachment).counters >> (8 * index)) as i32);
         }
         self.read(attachment, slot)
+    }
+
+    pub(crate) fn set_global_flag(&mut self, index: i32) -> Result<(), String> {
+        if !(0..GLOBAL_FLAGS).contains(&index) {
+            return Err("Invalid starting global flag".into());
+        }
+        self.flags.insert(index, true);
+        Ok(())
     }
 
     pub(crate) fn write(&mut self, attachment: &Attachment, slot: Slot, value: i32) -> Option<()> {
@@ -409,6 +445,7 @@ pub(crate) enum Actor {
     Player,
     Item(u32),
     Mobile,
+    None,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -778,7 +815,7 @@ impl Code {
                 10 if cond.focus(0) == 1 && matches!(cond.focus(1), 0 | 21) => input.met,
                 20 if cond.focus(0) == 0 => match input.triggerer {
                     Actor::Item(name) => value(cond, 1).map(|n| i64::from(n) == i64::from(name)),
-                    Actor::Player | Actor::Mobile => None,
+                    Actor::Player | Actor::Mobile | Actor::None => None,
                 },
                 18 if [cond.focus(0), cond.focus(1)] == [1, 0] => input.follows_player,
                 45 => sector_operand(value(cond, 0), value(cond, 1)).and_then(|id| {
@@ -801,6 +838,10 @@ impl Code {
                         let dy = (i64::from(obj_y) - i64::from(y)).abs();
                         dx.max(dy) <= i64::from(range)
                     }),
+                40 if actor(cond.focus(0)) == Some(0) => {
+                    value(cond, 1).map(|id| view.state().rumors.contains_key(&id))
+                }
+                41 => value(cond, 0).map(|id| view.state().quelled_rumors.contains(&id)),
                 39 if cond.focus(0) == 1 => input.npc_flags.map(|flags| flags & 0x20 != 0),
                 43 => value(cond, 0)
                     .and_then(|index| view.state().read(attachment, Slot::GlobalFlag(index)))
@@ -854,6 +895,27 @@ impl Code {
                         i32::from(matches!(action.opcode, 8 | 100)),
                     )
                     .ok_or_else(unresolved)?;
+                    None
+                }
+                131 => {
+                    let id = value(action, 0).ok_or_else(unresolved)?;
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    state.slides.as_mut().ok_or_else(unresolved)?.push(id);
+                    None
+                }
+                50 | 51 => {
+                    let id = value(action, 0).ok_or_else(unresolved)?;
+                    if actor(action.focus(1)) != Some(0) {
+                        return Err(unresolved());
+                    }
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    state
+                        .learn_rumor(id, action.opcode == 51)
+                        .ok_or_else(unresolved)?;
                     None
                 }
                 10..=12 => {
@@ -1093,6 +1155,142 @@ pub(super) struct WieldEffect {
     power_ratio: bool,
     pub sources: [Source; 2],
 }
+/// Original paired insert/remove SCRs store the effective stat in local
+/// counter zero on insert. Removal divides that stored value again.
+#[derive(Clone)]
+pub(crate) struct CarryEffect {
+    pub stat: usize,
+    pub divisor: u8,
+    pub adjustment: Arc<crate::content::character::Adjustments>,
+}
+impl CarryEffect {
+    pub(crate) fn load(vfs: &mut Vfs, attachments: [(i32, Local); 2]) -> Result<Self, String> {
+        let [(insert, locals), (remove, _)] = attachments;
+        let enter = Script::load(vfs, insert)?;
+        let exit = Script::load(vfs, remove)?;
+        let invalid = || {
+            format!(
+                "Unsupported carry scripts {} and {}",
+                enter.source, exit.source
+            )
+        };
+        let [
+            get,
+            div,
+            stop,
+            add,
+            dec,
+            jump,
+            again,
+            empty,
+            sub,
+            decr,
+            back,
+        ] = enter.code.statements.as_slice()
+        else {
+            return Err(invalid());
+        };
+        let [call, ret] = exit.code.statements.as_slice() else {
+            return Err(invalid());
+        };
+        let instruction = |s: &Statement, condition, action| {
+            s.condition.opcode == condition && s.action.opcode == action && s.otherwise.opcode == 0
+        };
+        let arg = |op: &Operation, i: usize, t, v| op.types[i] == t && op.values[i] == v;
+        let divide = |s: &Statement| {
+            instruction(s, 0, 14)
+                && arg(&s.action, 0, 2, 0)
+                && arg(&s.action, 1, 0, 0)
+                && arg(&s.action, 2, 0, 2)
+        };
+        let done = |s: &Statement| {
+            instruction(s, 4, 2) && arg(&s.condition, 0, 2, 0) && s.condition.literal(1) == Some(0)
+        };
+        let decrement = |s: &Statement| {
+            instruction(s, 0, 12)
+                && arg(&s.action, 0, 2, 0)
+                && arg(&s.action, 1, 2, 0)
+                && s.action.literal(2) == Some(1)
+        };
+        if enter.code.check_flags().is_err()
+            || exit.code.check_flags().is_err()
+            || !instruction(get, 0, 33)
+            || !arg(&get.action, 0, 0, 3)
+            || get.action.focus(1) != 0
+            || !arg(&get.action, 2, 0, 0)
+            || !divide(div)
+            || !divide(again)
+            || !done(stop)
+            || !done(empty)
+            || !decrement(dec)
+            || !decrement(decr)
+            || !instruction(add, 0, 77)
+            || add.action.focus(0) != 0
+            || !arg(&add.action, 1, 0, 1)
+            || add.action.literal(2) != Some(5)
+            || !instruction(sub, 0, 78)
+            || sub.action.focus(0) != 0
+            || !arg(&sub.action, 1, 0, 1)
+            || !instruction(jump, 0, 3)
+            || jump.action.literal(0) != Some(2)
+            || !instruction(back, 0, 3)
+            || back.action.literal(0) != Some(7)
+            || !instruction(call, 0, 81)
+            || call.action.focus(0) != 1
+            || call.action.literal(1) != Some(21)
+            || call.action.literal(2) != Some(6)
+            || !instruction(ret, 0, 2)
+        {
+            return Err(invalid());
+        }
+        let stat = locals.counter(3).unwrap() as usize;
+        let divisor = locals.counter(2).unwrap() as u8;
+        if stat >= 28 || divisor == 0 {
+            return Err(invalid());
+        }
+        let effects =
+            crate::content::load_mes(vfs, "rules/effect.mes").map_err(|e| e.to_string())?;
+        let effect = effects
+            .mes
+            .get(locals.counter(1).unwrap())
+            .ok_or_else(invalid)?;
+        Ok(Self {
+            stat,
+            divisor,
+            adjustment: Arc::new(crate::content::character::Adjustments::parse(effect)?),
+        })
+    }
+}
+
+/// CE slide_ui_prepare invokes a SAP_USE entry with null objects.
+pub fn slide_sequence(vfs: &mut Vfs, script: i32) -> Result<Vec<i32>, String> {
+    let program = Script::load(vfs, script)?;
+    let attachment = Attachment {
+        owner: String::new(),
+        event: Event::Use,
+        script,
+        initial: Local::default(),
+    };
+    let invocation = Invocation {
+        attachment: &attachment,
+        triggerer: Actor::None,
+        position: 0,
+        hour: 0,
+        follows_player: None,
+        npc_flags: None,
+        locations: [None, None],
+        met: None,
+    };
+    let mut state = State {
+        slides: Some(Vec::new()),
+        ..State::default()
+    };
+    program
+        .execute(&invocation, &mut state)
+        .map_err(|e| format!("{}: {e}", program.source))?;
+    Ok(state.slides.unwrap())
+}
+
 impl WieldEffect {
     pub fn load(vfs: &mut Vfs, attachments: [(i32, Local); 2]) -> Result<Self, String> {
         let [(on, initial), (off, _)] = attachments;

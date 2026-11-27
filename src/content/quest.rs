@@ -171,6 +171,9 @@ pub struct Catalog {
     labels: Option<LoadedMes>,
     rules: Option<LoadedMes>,
     calendar: Option<LoadedMes>,
+    rumors: [Option<LoadedMes>; 2],
+    backgrounds: Option<LoadedMes>,
+    definitions: Option<LoadedMes>,
     errors: Vec<String>,
 }
 
@@ -190,6 +193,12 @@ impl Catalog {
             labels: load("mes/logbk_ui.mes"),
             rules: load("rules/gamequest.mes"),
             calendar: load("rules/gameinit.mes"),
+            rumors: [
+                load("mes/game_rd_npc_m2m.mes"),
+                load("mes/game_rd_npc_m2m_dumb.mes"),
+            ],
+            backgrounds: load("mes/gameback.mes"),
+            definitions: load("rules/backgrnd.mes"),
             errors,
         }
     }
@@ -218,6 +227,27 @@ impl Catalog {
         entries
     }
 
+    pub fn rumor(&self, id: i32, intelligence: i32) -> Option<&str> {
+        self.rumors[usize::from(intelligence < 5)]
+            .as_ref()?
+            .mes
+            .get(id.checked_mul(20)?)
+    }
+    pub fn background(&self, id: i32, authored: i32) -> Option<(&str, &str)> {
+        let key = if authored > 0 {
+            authored
+        } else {
+            self.definitions
+                .as_ref()?
+                .mes
+                .get(id * 10)?
+                .trim()
+                .parse()
+                .ok()?
+        };
+        let s = self.backgrounds.as_ref()?.mes.get(key)?;
+        Some(s.split_once('\n').unwrap_or((s, "")))
+    }
     pub fn label(&self, id: i32) -> Option<&str> {
         self.labels.as_ref()?.mes.get(id)
     }

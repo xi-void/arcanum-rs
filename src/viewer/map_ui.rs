@@ -197,6 +197,21 @@ impl MapUi {
         state.explored.clone_from(&self.explored);
     }
 
+    pub(super) fn reset_discovery(&mut self) {
+        self.close();
+        self.atlas.discovered.clear();
+        if let Ok(start) = self.atlas.catalog.new_game() {
+            self.atlas.discover_near(start.map_list_center);
+        }
+        self.atlas.destination = None;
+        self.explored.clear();
+        self.waypoints.clear();
+        self.journey = None;
+        self.origin_map = None;
+        self.tile = None;
+        self.invalidate_sheet();
+    }
+
     pub(super) fn restore_discovery(&mut self, state: arcanum_rs::content::save::State) {
         self.close();
         self.atlas.discovered = state.discovered;

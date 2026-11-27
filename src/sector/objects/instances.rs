@@ -323,6 +323,8 @@ pub(crate) struct ItemStats {
     pub weapon_hit_bonus: Option<i32>,
     pub weapon_speed: Option<i32>,
     pub weapon_min_strength: Option<i32>,
+    pub carry_scripts: [(i32, crate::content::script::Local); 2],
+    pub other_inventory_events: bool,
     pub wield_scripts: [(i32, crate::content::script::Local); 2],
     pub quantity: Option<u32>,
     pub ammo_type: Option<u32>,
@@ -346,7 +348,12 @@ impl ItemStats {
         let signed = scalar.map(|v| v as i32);
         match (category, field) {
             (_, 31) => {
-                self.wield_scripts = [24, 25].map(|slot| {
+                self.other_inventory_events = [4, 5, 32].into_iter().any(|slot| {
+                    value
+                        .array_entry(slot)
+                        .is_some_and(|entry| entry[8..12] != [0; 4])
+                });
+                let attachment = |slot| {
                     value
                         .array_entry(slot)
                         .map_or_else(Default::default, |entry| {
@@ -355,7 +362,9 @@ impl ItemStats {
                                 crate::content::script::Local::from_attachment(entry),
                             )
                         })
-                })
+                };
+                self.carry_scripts = [21, 28].map(attachment);
+                self.wield_scripts = [24, 25].map(attachment);
             }
             (_, 21) => self.name = scalar.unwrap_or_default(),
             (_, 26..=28) => self.hp[field - 26] = signed.unwrap_or_default(),
@@ -434,6 +443,8 @@ pub(crate) struct PrototypeDefaults {
     pub character: Option<Box<[Option<i32>; 28]>>,
     pub portrait: i32,
     pub background: Option<i32>,
+    pub player_name: String,
+    pub background_text: i32,
     pub original_art: Option<u32>,
     pub armor_class: Option<i32>,
     pub resistance: Option<[Option<i32>; 5]>,
@@ -555,6 +566,8 @@ pub(crate) fn prototype_defaults(
     } else {
         None
     };
+    let mut player_name = String::new();
+    let mut background_text = 0;
     let mut portrait = 0;
     let mut background = None;
     let (mut merchant_gold, mut retail, mut substitute, mut inventory_source) = (0, 0, None, None);
@@ -569,7 +582,7 @@ pub(crate) fn prototype_defaults(
     let mut fatigue_damage = 0;
     if category == 15 {
         // PC-specific fields begin in bitmap word four. Background follows the two reputation arrays.
-        for index in (67..=96).chain(128..=132) {
+        for index in (67..=96).chain(128..=145) {
             if field_type(category, index).is_some() {
                 let value = read_value(&mut reader, index, category)?;
                 match index {
@@ -591,6 +604,18 @@ pub(crate) fn prototype_defaults(
                     67 => basic_skills = int_array(value).map(|x| x.unwrap_or_default() as u32),
                     77 => portrait = value.scalar().unwrap_or(0) as i32,
                     132 => background = value.scalar().map(|v| v as i32),
+                    133 => background_text = value.scalar().unwrap_or_default() as i32,
+                    145 => {
+                        if let FieldValue::Text(bytes) = value {
+                            player_name = bytes
+                                .iter()
+                                .map(|&b| {
+                                    crate::mes::windows_1252(b)
+                                        .unwrap_or(char::REPLACEMENT_CHARACTER)
+                                })
+                                .collect();
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -666,6 +691,8 @@ pub(crate) fn prototype_defaults(
         item: item.map(Box::new),
         character,
         background,
+        background_text,
+        player_name,
         portrait,
         original_art,
         armor_class,

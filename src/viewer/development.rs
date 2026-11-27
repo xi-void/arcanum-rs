@@ -1,12 +1,13 @@
 //! Connect typed developer requests to the existing playable runtime.
 use super::{console::Console, *};
+#[cfg(target_os = "linux")]
+use arcanum_rs::developer_ipc::{Job, Reply, Server};
 use arcanum_rs::{
     content::{
         map_atlas::{Atlas, world_pixel},
         world::{DebugObject, DeveloperAction},
     },
     developer::{self, EventHistory, Failure, ObjectFilter, Output, Request, Snapshot},
-    developer_ipc::{Job, Reply, Server},
     vfs::Vfs,
 };
 use serde_json::{Value, json};
@@ -28,6 +29,7 @@ pub(crate) struct Developer {
     status: Option<(String, Arc<LoadedFrame>)>,
     socket: Option<PathBuf>,
     automatic_rpc: bool,
+    #[cfg(target_os = "linux")]
     server: Option<Server>,
     captures: Option<(PathBuf, Arc<cap_std::fs::Dir>)>,
     events: EventHistory,
@@ -63,6 +65,7 @@ impl Developer {
             status: None,
             socket: None,
             automatic_rpc: false,
+            #[cfg(target_os = "linux")]
             server: None,
             captures: None,
             events: EventHistory::default(),
@@ -90,6 +93,14 @@ impl Developer {
         Ok(self)
     }
 
+    #[cfg(not(target_os = "linux"))]
+    pub(super) fn start_automation(&mut self, _: EventLoopProxy<()>) -> Result<(), String> {
+        if self.automatic_rpc || self.socket.is_some() {
+            return Err("Developer RPC sockets require Linux".into());
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
     pub(super) fn start_automation(&mut self, proxy: EventLoopProxy<()>) -> Result<(), String> {
         let wake = move || {
             let _ = proxy.send_event(());
@@ -476,31 +487,34 @@ impl Viewer<'_> {
     }
 
     pub(super) fn pump_automation(&mut self, event_loop: &ActiveEventLoop) {
-        let job = self
-            .developer
-            .as_ref()
-            .and_then(|dev| dev.server.as_ref()?.jobs.try_recv().ok());
-        if let Some(Job { call, reply }) = job {
-            if let Some(dev) = &mut self.developer {
-                dev.correlation = Some(call.id);
-            }
-            let (name, result) = developer::dispatch_args(&call.command, &call.args, self);
-            let clear = matches!(&result, Ok(Output::Clear));
-            let response = Reply::result(call.id, name, result);
-            if let Some(dev) = &mut self.developer {
-                if clear {
-                    dev.console.output(Ok(Output::Clear));
+        #[cfg(target_os = "linux")]
+        {
+            let job = self
+                .developer
+                .as_ref()
+                .and_then(|dev| dev.server.as_ref()?.jobs.try_recv().ok());
+            if let Some(Job { call, reply }) = job {
+                if let Some(dev) = &mut self.developer {
+                    dev.correlation = Some(call.id);
                 }
-                dev.event(
-                    "command",
-                    Some(call.id),
-                    json!({"command":name,"status":response.status,"error":response.error}),
-                );
-                dev.correlation = None;
-            }
-            let _ = reply.try_send(response);
-            if clear && let Some(view) = &self.view {
-                view.window.request_redraw();
+                let (name, result) = developer::dispatch_args(&call.command, &call.args, self);
+                let clear = matches!(&result, Ok(Output::Clear));
+                let response = Reply::result(call.id, name, result);
+                if let Some(dev) = &mut self.developer {
+                    if clear {
+                        dev.console.output(Ok(Output::Clear));
+                    }
+                    dev.event(
+                        "command",
+                        Some(call.id),
+                        json!({"command":name,"status":response.status,"error":response.error}),
+                    );
+                    dev.correlation = None;
+                }
+                let _ = reply.try_send(response);
+                if clear && let Some(view) = &self.view {
+                    view.window.request_redraw();
+                }
             }
         }
         if self.developer.as_ref().is_some_and(|dev| dev.quit) {
@@ -694,7 +708,7 @@ impl Viewer<'_> {
                     "ui":{"hud_theme":hud_theme,"map_theme":map_theme,"console_theme":console_theme,
                         "hud":hud.as_ref().map(|hud|hud.diagnostics()),"scale_percent":scale,"console_open":dev.console.open,
                         "paused":self.pause.is_some(),
-                        "pause_menu":self.pause.as_ref().zip(self.pause_theme.as_ref())
+                        "cinematic":self.movie.as_ref().map(|m|m.diagnostic()),"pause_menu":self.pause.as_ref().zip(self.pause_theme.as_ref())
                             .map(|((menu, _), theme)| menu.diagnostic(theme, [viewport.0,viewport.1], scale)),
                         "save_directory":self.saves.as_ref().ok().map(|store| store.directory()),"reload_generation":dev.reloads,"reload_status":dev.reload_status,
                         "selected":dev.selected.map(InteractiveWorld::debug_selection_id)},

@@ -43,7 +43,8 @@ mod prefetch;
 pub use super::jumps::Destination;
 pub use interaction::{DoorStates, SavedDoors};
 pub use inventory::{
-    InventoryContents, InventoryEntry, InventoryReader, Objects, SchematicComponent,
+    CreationBuild, CreationCatalog, InventoryContents, InventoryEntry, InventoryReader, Objects,
+    SchematicComponent,
 };
 pub use lighting::DynamicLightState;
 pub use prefetch::{DeveloperAction, InteractiveWorld, PrefetchStats, SoundEvent};
@@ -2193,20 +2194,26 @@ impl WorldStream {
 
     /// Spawn the first-playable character at the resolved original map entry.
     pub fn with_player(self) -> Result<Self, Box<dyn std::error::Error>> {
-        self.prepare_player(None, None)
+        self.prepare_player(None, None, None)
+    }
+
+    pub fn with_creation(self, build: &CreationBuild) -> Result<Self, Box<dyn std::error::Error>> {
+        self.prepare_player(None, None, Some(build))
     }
 
     pub fn with_arriving_player(
         self,
         previous: &InteractiveWorld,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        self.prepare_player(previous.cache.player.as_ref(), None)
+        self.prepare_player(previous.cache.player.as_ref(), None, None)
     }
 
     fn prepare_player(
         mut self,
         previous: Option<&Player>,
+        /* A restored inventory already includes its equipped appearance. */
         saved: Option<(inventory::Session, Arc<super::player::Appearance>)>,
+        build: Option<&CreationBuild>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if self.loader.walking || !self.cache.entries.is_empty() {
             return Err("player mode must be selected before loading sectors and without the rabbit preview".into());
@@ -2226,6 +2233,7 @@ impl WorldStream {
                 &mut self.loader.vfs,
                 &mut self.loader.frames,
                 reference,
+                build,
             )?;
         }
         if self.loader.lighting.is_some() {
@@ -2262,6 +2270,10 @@ impl WorldStream {
 
     pub fn lighting_hour(&self) -> Option<u8> {
         self.cache.ambient.map(|_| self.cache.hour)
+    }
+
+    pub fn set_start_flag(&mut self, flag: i32) -> Result<(), String> {
+        self.cache.scripts.set_global_flag(flag)
     }
 
     pub fn set_arrival_facing(&mut self, facing: u8) {

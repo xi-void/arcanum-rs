@@ -15,6 +15,7 @@ pub struct Map {
     pub directory: String,
     pub map_list_center: (u32, u32),
     start_map: bool,
+    shopping_map: bool,
     pub area: Option<i32>,
     pub worldmap: Option<i32>,
 }
@@ -51,13 +52,17 @@ impl Catalog {
                 .parse()
                 .map_err(|_| malformed())?;
             let mut start_map = false;
+            let mut shopping_map = false;
             let mut area = None;
             let mut worldmap = None;
             for field in fields {
                 if let Some((key, value)) = field.split_once(':') {
                     let value = value.trim();
                     match key.trim().to_ascii_lowercase().as_str() {
-                        "type" => start_map = value.eq_ignore_ascii_case("START_MAP"),
+                        "type" => {
+                            start_map = value.eq_ignore_ascii_case("START_MAP");
+                            shopping_map = value.eq_ignore_ascii_case("SHOPPING_MAP");
+                        }
                         "area" => area = Some(value.parse().map_err(|_| malformed())?),
                         "worldmap" => worldmap = Some(value.parse().map_err(|_| malformed())?),
                         _ => {}
@@ -70,6 +75,7 @@ impl Catalog {
                 directory,
                 map_list_center: (x, y),
                 start_map,
+                shopping_map,
                 area,
                 worldmap,
             });
@@ -88,6 +94,15 @@ impl Catalog {
             return Err("original map list has multiple START_MAP entries".into());
         }
         Ok(start)
+    }
+
+    pub fn shopping(&self) -> Result<Option<&Map>, String> {
+        let mut maps = self.maps.iter().filter(|map| map.shopping_map);
+        let first = maps.next();
+        if maps.next().is_some() {
+            return Err("Multiple SHOPPING_MAP entries".into());
+        }
+        Ok(first)
     }
 
     pub fn find(&self, input: &str) -> Result<&Map, String> {

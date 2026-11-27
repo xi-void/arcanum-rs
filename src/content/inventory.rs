@@ -154,11 +154,34 @@ pub(super) struct Item {
     pub effective: Effective,
     pub flags: u32,
     pub scripted: bool,
+    pub carry: Option<crate::content::script::CarryEffect>,
+    pub insert_stat: Option<u8>,
     pub stats: ItemStats,
     pub generated: bool,
 }
 
 impl Item {
+    pub fn worth(&self) -> i32 {
+        if self.stats.complexity.unwrap_or_default() > 0 && self.flags & 1 == 0 {
+            300
+        } else {
+            self.stats.worth.max(2)
+        }
+    }
+
+    pub fn resolve_carry(&mut self, vfs: &mut crate::vfs::Vfs) {
+        if !self.stats.other_inventory_events
+            && self.stats.carry_scripts.iter().all(|(id, _)| *id != 0)
+        {
+            match crate::content::script::CarryEffect::load(vfs, self.stats.carry_scripts) {
+                Ok(effect) => {
+                    self.carry = Some(effect);
+                    self.scripted = false;
+                }
+                Err(error) => eprintln!("Item {}: {error}", self.prototype),
+            }
+        }
+    }
     /// CE sfx_item_sound maps object materials to pickup and drop sound IDs.
     pub fn handling_sound(&self, pickup: bool, aptitude: i32) -> i32 {
         let offset = if self.stats.unknown_description == Some(9056) {

@@ -5,9 +5,7 @@ On Linux, the windowed build requires ALSA development headers (`libasound2-dev`
 `$XDG_CONFIG_HOME/arcanum-rs/config.toml`, or to
 `~/.config/arcanum-rs/config.toml` when `XDG_CONFIG_HOME` is empty, unset or
 relative. Set `game_data` to the directory containing the installed Arcanum
-archives and campaign data. Launch the executable directly. Startup uses the
-game's authored Crash Site start unless the `play` command selects another
-location.
+archives and campaign data. Launch the executable directly. Ordinary startup opens the Classic main menu. **Single Player → New Game** runs character creation and the starting merchant, then enters the campaign’s authored start. **Load Game** opens the slot list and **Last Save** resumes the newest native slot. The explicit map and center overrides remain available for development.
 
 ## Settings and precedence
 

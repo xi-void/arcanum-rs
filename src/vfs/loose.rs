@@ -61,7 +61,7 @@ impl LooseDirectory {
         Ok(Self { root, files })
     }
 
-    pub fn copy(&self, relative: &Path, mut output: impl Write) -> io::Result<u64> {
+    pub fn open(&self, relative: &Path) -> io::Result<std::fs::File> {
         if !self.root.symlink_metadata(relative)?.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -70,13 +70,17 @@ impl LooseDirectory {
         }
         // All opens are relative to the directory capability, including after
         // indexing. A symlink swap cannot redirect a read outside the mount.
-        let mut file = self.root.open(relative)?;
+        let file = self.root.open(relative)?;
         if !file.metadata()?.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "loose resource is no longer a regular file",
             ));
         }
-        io::copy(&mut file, &mut output)
+        Ok(file.into_std())
+    }
+
+    pub fn copy(&self, relative: &Path, mut output: impl Write) -> io::Result<u64> {
+        io::copy(&mut self.open(relative)?, &mut output)
     }
 }

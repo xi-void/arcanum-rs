@@ -317,6 +317,30 @@ impl Vfs {
         self.read_attempts
     }
 
+    /// Open the winning loose resource for seekable streaming. Packed resources
+    /// remain accessible through `copy`, under the same precedence rules.
+    pub fn open_loose(&self, path: &str) -> Result<Option<std::fs::File>, Error> {
+        let resolution = self.resolve(path)?;
+        let winner = resolution
+            .winner()
+            .ok_or_else(|| Error::NotFound(resolution.path.clone()))?;
+        let Some(relative) = winner.loose_path else {
+            return Ok(None);
+        };
+        let mount = self
+            .mounts
+            .iter()
+            .find(|m| m.info.id == winner.mount.id)
+            .unwrap();
+        let Contents::Directory(directory) = &mount.contents else {
+            unreachable!()
+        };
+        directory
+            .open(relative)
+            .map(Some)
+            .map_err(|e| io_error(&mount.info.path.join(relative), e))
+    }
+
     /// Stream the winning regular resource to a writer.
     pub fn copy(&mut self, path: &str, output: impl Write) -> Result<u64, Error> {
         self.read_attempts += 1;

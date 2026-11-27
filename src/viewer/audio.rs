@@ -311,6 +311,7 @@ struct Played {
 }
 
 enum Command {
+    MovieSink(mpsc::Sender<Sink>),
     Variant(i32, i32),
     Location {
         map: String,
@@ -321,6 +322,7 @@ enum Command {
     Volumes(Volumes),
     Voice(Option<String>),
     Pause(bool),
+    MainMenu,
     Effect {
         id: i32,
         world: bool,
@@ -391,6 +393,17 @@ impl Audio {
 
     pub(super) fn volumes(&self, levels: Volumes) {
         self.send(Command::Volumes(levels));
+    }
+
+    pub(super) fn movie_sink(&self) -> Option<Sink> {
+        let (send, receive) = mpsc::channel();
+        self.send(Command::MovieSink(send));
+        receive.recv().ok()
+    }
+
+    pub(super) fn main_menu(&mut self) {
+        self.location = None;
+        self.send(Command::MainMenu);
     }
 
     pub(super) fn pause(&self, paused: bool) {
@@ -503,6 +516,12 @@ impl Mixer<'_> {
 
     fn command(&mut self, command: Command) {
         match command {
+            Command::MovieSink(reply) => {
+                let sink = Sink::connect_new(self.stream.mixer());
+                sink.set_volume(Channel::Voice.gain(self.levels));
+                sink.pause();
+                let _ = reply.send(sink);
+            }
             Command::Location {
                 map,
                 sector,
@@ -544,6 +563,12 @@ impl Mixer<'_> {
                 for clip in &self.clips {
                     clip.apply_volume(levels);
                 }
+            }
+            Command::MainMenu => {
+                self.paused = true;
+                self.map.clear();
+                self.clips.retain(|clip| !clip.world);
+                self.set_schemes([0; 2], true);
             }
             Command::Pause(paused) => {
                 self.paused = paused;

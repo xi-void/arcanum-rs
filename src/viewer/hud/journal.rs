@@ -26,12 +26,16 @@ struct Row {
 #[derive(Default)]
 pub(super) struct Journal {
     pub(super) open: bool,
+    tab: Option<Action>,
     spread: usize,
     pages: Vec<Vec<Row>>,
     entries: Vec<(Status, String)>,
 }
 
 impl Journal {
+    pub(super) fn tab(&self) -> Action {
+        self.tab.unwrap_or(Action::JournalQuests)
+    }
     fn max_spread(&self) -> usize {
         self.pages.len().saturating_sub(1) / 2
     }
@@ -58,6 +62,11 @@ impl Hud {
             })
     }
 
+    pub(in crate::viewer) fn select_journal(&mut self, action: Action) {
+        self.journal.tab = Some(action);
+        self.journal.pages.clear();
+        self.journal.spread = 0;
+    }
     pub(in crate::viewer) fn journal_open(&self) -> bool {
         self.journal.open
     }
@@ -88,14 +97,46 @@ impl Hud {
         if !self.journal.open {
             return;
         }
-        let entries = catalog.entries(
-            &world.script_state().quests,
-            world.character_statistics().attributes[4],
-        );
-        let entries: Vec<_> = entries
-            .iter()
-            .map(|entry| (entry.status, entry_text(catalog, entry)))
-            .collect();
+        let stats = world.character_statistics();
+        let state = world.script_state();
+        let (title, entries) = match self.journal.tab() {
+            Action::JournalRumors => {
+                let mut known = state.rumors.iter().collect::<Vec<_>>();
+                known.sort_by_key(|&(&id, &minute)| (minute, id));
+                let rows = known
+                    .into_iter()
+                    .filter_map(|(&id, &minute)| {
+                        let text = catalog.rumor(id, stats.attributes[4])?;
+                        Some((
+                            if state.quelled_rumors.contains(&id) {
+                                Status::Completed
+                            } else {
+                                Status::Accepted
+                            },
+                            format!("{}\n{text}", timestamp(catalog, minute)),
+                        ))
+                    })
+                    .collect();
+                (catalog.label(0).unwrap_or("Rumors"), rows)
+            }
+            Action::JournalBackground => {
+                let (title, body) = catalog
+                    .background(stats.background, stats.background_text)
+                    .unwrap_or(("Background", ""));
+                (
+                    title.trim(),
+                    vec![(Status::Accepted, body.trim().to_owned())],
+                )
+            }
+            _ => (
+                catalog.label(1).unwrap_or("Quests"),
+                catalog
+                    .entries(&state.quests, stats.attributes[4])
+                    .iter()
+                    .map(|e| (e.status, entry_text(catalog, e)))
+                    .collect(),
+            ),
+        };
         if entries == self.journal.entries && !self.journal.pages.is_empty() {
             return;
         }
@@ -110,7 +151,7 @@ impl Hud {
         self.journal.pages = paginate(&entries, label, style, width, height);
         self.journal.entries = entries;
         self.journal.spread = self.journal.spread.min(self.journal.max_spread());
-        let title = format!("-{}-", catalog.label(1).unwrap_or("Quests"));
+        let title = format!("-{title}-");
         for binding in HEADERS {
             self.set_label(binding, &title);
         }
@@ -208,6 +249,8 @@ impl Hud {
                     Some(
                         Action::ToggleJournal
                             | Action::JournalQuests
+                            | Action::JournalRumors
+                            | Action::JournalBackground
                             | Action::JournalPrevious
                             | Action::JournalNext
                     )
@@ -218,15 +261,12 @@ impl Hud {
                 Some((&c.config.id, [r.x, r.y, r.w as i32, r.h as i32]))
             })
             .collect();
-        json!({"open":self.journal.open,"spread":self.journal.spread,"spread_count":self.journal.max_spread()+1,
+        json!({"open":self.journal.open,"tab":match self.journal.tab(){Action::JournalRumors=>"rumors",Action::JournalBackground=>"background",_=>"quests"},"entries":self.journal.entries.iter().map(|(_,text)|text).collect::<Vec<_>>(),"spread":self.journal.spread,"spread_count":self.journal.max_spread()+1,
             "pages":PAGES.map(bounds),"controls":controls})
     }
 }
 
 fn entry_text(catalog: &Catalog, entry: &Entry<'_>) -> String {
-    let days = entry.minute / 1440;
-    let hour = entry.minute / 60 % 24;
-    let month = catalog.label(7 + (days / 30 % 12) as i32).unwrap_or("?");
     let status = catalog
         .label(19 + entry.status as i32)
         .unwrap_or(match entry.status {
@@ -239,13 +279,23 @@ fn entry_text(catalog: &Catalog, entry: &Entry<'_>) -> String {
         });
     let missing = format!("Quest {} (description unavailable)", entry.id);
     format!(
-        "{month} {}, {}  {}:{:02}{}m    {status}\n{}",
+        "{}    {status}\n{}",
+        timestamp(catalog, entry.minute),
+        entry.description.unwrap_or(&missing)
+    )
+}
+
+fn timestamp(catalog: &Catalog, minute: u64) -> String {
+    let days = minute / 1440;
+    let hour = minute / 60 % 24;
+    let month = catalog.label(7 + (days / 30 % 12) as i32).unwrap_or("?");
+    format!(
+        "{month} {}, {}  {}:{:02}{}m",
         days % 30 + 1,
         catalog.start_year() + days / 360,
         (hour + 11) % 12 + 1,
-        entry.minute % 60,
-        if hour >= 12 { 'p' } else { 'a' },
-        entry.description.unwrap_or(&missing)
+        minute % 60,
+        if hour < 12 { 'a' } else { 'p' }
     )
 }
 

@@ -570,6 +570,55 @@ impl Compositor {
         self.texture_bytes += bytes;
     }
 
+    /// Replace pixels in a persistent RGBA sprite, retaining its texture and bind group.
+    pub fn stream_rgba(&mut self, asset: &Arc<LoadedFrame>, pixels: &[u8]) -> Result<(), String> {
+        let frame = &asset.decoded.frame;
+        let size = (frame.width, frame.height);
+        let bytes = u64::from(size.0) * u64::from(size.1) * 4;
+        let limit = self.device.limits().max_texture_dimension_2d;
+        if size.0 == 0
+            || size.1 == 0
+            || size.0 > limit
+            || size.1 > limit
+            || bytes != pixels.len() as u64
+            || bytes > self.texture_budget.0 as u64
+        {
+            return Err("Invalid streaming sprite dimensions or payload".into());
+        }
+        let id = Arc::as_ptr(asset) as usize;
+        if !self.textures.contains_key(&id) {
+            self.make_room(1, pixels.len());
+            let texture = self.device.create_texture(&TextureDescriptor {
+                label: Some(&asset.source.virtual_path),
+                size: extent(size),
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba8Unorm,
+                usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&Default::default());
+            self.retain_texture(id, asset, &view, pixels.len());
+            self.textures.get_mut(&id).unwrap().target = Some(view);
+        }
+        let view = self.textures[&id]
+            .target
+            .as_ref()
+            .ok_or("Expected a streaming sprite")?;
+        self.queue.write_texture(
+            view.texture().as_image_copy(),
+            pixels,
+            TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size.0 * 4),
+                rows_per_image: None,
+            },
+            extent(size),
+        );
+        self.check_health()
+    }
+
     /// Capture a cropped scene directly into a resident sprite texture.
     /// The caller supplies the logical sprite dimensions and a physical scale.
     pub fn render_sprite<'a>(

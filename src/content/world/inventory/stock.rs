@@ -196,7 +196,7 @@ impl InteractiveWorld {
         Ok(true)
     }
 
-    fn restock_owner(
+    pub(super) fn restock_owner(
         &mut self,
         vfs: &mut Vfs,
         table: &crate::content::LoadedMes,

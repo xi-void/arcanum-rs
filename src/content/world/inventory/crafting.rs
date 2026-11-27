@@ -85,8 +85,11 @@ impl InventoryReader {
     }
 
     pub fn portrait(&mut self, id: i32) -> Result<Arc<LoadedFrame>, String> {
+        self.portrait_size(id, false)
+    }
+    pub fn portrait_size(&mut self, id: i32, large: bool) -> Result<Arc<LoadedFrame>, String> {
         self.portraits
-            .entry(id)
+            .entry((id, large))
             .or_insert_with(|| {
                 let table = if (1..1000).contains(&id) {
                     "portrait/userport.mes"
@@ -99,7 +102,11 @@ impl InventoryReader {
                     .mes
                     .get(key)
                     .ok_or_else(|| format!("Portrait {key} absent in {table}"))?;
-                let path = format!("portrait/{}.bmp", name.trim());
+                let path = format!(
+                    "portrait/{}{}.bmp",
+                    name.trim(),
+                    if large { "_b" } else { "" }
+                );
                 let (source, bytes) = read_bounded(&mut self.vfs, &path, 4 * 1024 * 1024)
                     .map_err(|e| e.to_string())?;
                 let bmp = crate::content::map_atlas::decode_bmp(&bytes)

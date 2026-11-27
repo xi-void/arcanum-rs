@@ -5,7 +5,9 @@ use arcanum_rs::gpu::OverlayDraw;
 
 mod audio;
 pub(crate) use audio::Audio;
+mod cinematic;
 mod classic_menu;
+mod creation;
 pub(crate) use classic_menu::Classic;
 mod console;
 mod development;
@@ -190,6 +192,8 @@ pub type TravelLoader<'a> = Box<
 >;
 
 pub(crate) enum LocationMode<'a> {
+    Creation(&'a arcanum_rs::content::world::CreationBuild),
+    Start(&'a arcanum_rs::content::world::Objects, Option<i32>),
     Travel {
         bypass: bool,
     },
@@ -208,6 +212,7 @@ struct Travel<'a> {
 
 #[derive(Default)]
 pub(crate) struct Startup {
+    pub main_menu: bool,
     pub fullscreen: bool,
     pub settings: Settings,
     pub preferences: Option<ConfigFile>,
@@ -351,6 +356,9 @@ fn run_content(
     let mut app = Viewer {
         title,
         size,
+        movie: None,
+        startup_movie: startup.main_menu,
+        gameplay_hud: None,
         view: None,
         content,
         failure: None,
@@ -365,7 +373,7 @@ fn run_content(
         reset_audio: false,
         fullscreen: startup.fullscreen,
         preferences: startup.preferences,
-        pause: None,
+        pause: startup.main_menu.then(|| (Menu::main(), Instant::now())),
         pause_theme: startup.pause_theme,
         pause_scale: startup.ui_scale.max(50),
         saves: save::Store::user(),
@@ -398,6 +406,9 @@ fn run_content(
 }
 
 struct Viewer<'a> {
+    movie: Option<cinematic::Playback>,
+    startup_movie: bool,
+    gameplay_hud: Option<Option<Box<Hud>>>,
     title: String,
     size: Size,
     view: Option<WindowSurface>,
@@ -590,7 +601,9 @@ impl Viewer<'_> {
         facing: u8,
         mode: LocationMode<'_>,
     ) -> Result<(), String> {
+        let fresh = matches!(mode, LocationMode::Creation(_) | LocationMode::Start(..));
         let (map_hint, hour, bypass) = match &mode {
+            LocationMode::Creation(_) | LocationMode::Start(..) => (None, None, false),
             LocationMode::Save { state, .. } => (
                 Some(state.map.as_str()),
                 Some((state.clock.0 % 24) as u8),
@@ -624,7 +637,7 @@ impl Viewer<'_> {
         let size = view.window.inner_size();
         let saved_scripts = match &mode {
             LocationMode::Save { state, .. } => Some(&state.scripts),
-            LocationMode::Travel { .. } => None,
+            _ => None,
         };
         let (map, next, next_camera) = (travel.loader)(
             map_hint.unwrap_or(&travel.map),
@@ -646,6 +659,8 @@ impl Viewer<'_> {
             .map_err(|err| err.to_string())?;
         if let Some(scripts) = saved_scripts {
             next.restore_script_state(scripts.clone());
+        } else if fresh {
+            travel.doors.clear();
         } else {
             travel
                 .doors
@@ -655,7 +670,12 @@ impl Viewer<'_> {
             }
             next.inherit_object_state(world);
         }
-        eprintln!("Entered {map} at {:?}, game hour {hour:?}", target.tile);
+        eprintln!(
+            "Entered {map} at {:?}, game hour {hour:?}",
+            next.player_map_position()
+                .map(|(tile, _)| tile)
+                .unwrap_or(target.tile)
+        );
         view.window.set_title(&format!("Arcanum-RS | {map} play"));
         view.developer_status = bypass.then(|| menu::developer_status("COLLISION OFF"));
         travel.map = map;
@@ -665,6 +685,10 @@ impl Viewer<'_> {
             audio.voice(None);
         }
         next.set_difficulty(self.settings.difficulty);
+        if fresh {
+            next.set_turn_based(self.settings.turn_based);
+            self.clock = next.game_clock();
+        }
         **world = next;
         if let Some(hud) = hud {
             hud.close_inventory();
@@ -673,7 +697,7 @@ impl Viewer<'_> {
             hud.reset_character();
         }
         self.sounding_container = None;
-        self.reset_audio |= restoring;
+        self.reset_audio |= restoring || fresh;
         *camera = next_camera;
         world.follow_player(Duration::ZERO, camera);
         *last_presented = None;
@@ -970,6 +994,13 @@ impl Viewer<'_> {
                     *shift = false;
                 }
             }
+            hud::Action::JournalQuests
+            | hud::Action::JournalRumors
+            | hud::Action::JournalBackground => {
+                if let ViewContent::Stream { hud: Some(hud), .. } = &mut self.content {
+                    hud.select_journal(action);
+                }
+            }
             hud::Action::JournalPrevious | hud::Action::JournalNext => {
                 if let ViewContent::Stream { hud: Some(hud), .. } = &mut self.content {
                     hud.turn_journal(action == hud::Action::JournalPrevious);
@@ -1030,7 +1061,26 @@ impl Viewer<'_> {
 
     fn menu_action(&mut self, command: MenuCommand, event_loop: &ActiveEventLoop) {
         match command {
+            MenuCommand::BackToIdentity
+            | MenuCommand::EnterGame
+            | MenuCommand::Credits
+            | MenuCommand::Intro
+            | MenuCommand::Preview
+            | MenuCommand::Allocate
+            | MenuCommand::Shop
+            | MenuCommand::BackToAllocation
+            | MenuCommand::Start
+            | MenuCommand::ReturnMain
+            | MenuCommand::LastSave => {
+                if let Err(error) = self.creation_action(command, event_loop) {
+                    eprintln!("New game: {error}");
+                    if let Some((m, _)) = &mut self.pause {
+                        m.message = Some(error);
+                    }
+                }
+            }
             MenuCommand::Continue => {
+                self.restore_gameplay_hud();
                 if let Some((_, paused)) = self.pause.take() {
                     let pause = paused.elapsed();
                     self.paused_for += pause;
@@ -1721,6 +1771,10 @@ impl Viewer<'_> {
 
     fn update_control_flow(&self, event_loop: &ActiveEventLoop) {
         let real_now = Instant::now();
+        if let Some(movie) = &self.movie {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(real_now + movie.next_tick()));
+            return;
+        }
         let clock = self
             .clock
             .as_ref()
@@ -1775,7 +1829,7 @@ impl Viewer<'_> {
             .chain(self.navigation.deadline())
             .chain(self.player_deadline)
             .chain(match &self.content {
-                ViewContent::Stream { hud: Some(hud), .. } if self.pause.is_none() => {
+                ViewContent::Stream { hud: Some(hud), .. } => {
                     hud.cursor_delay().map(|d| real_now + d)
                 }
                 _ => None,
@@ -1901,6 +1955,12 @@ impl ApplicationHandler for Viewer<'_> {
             return;
         }
         let now = Instant::now();
+        if self.movie.is_some() {
+            if let Some(view) = &self.view {
+                view.window.request_redraw();
+            }
+            return;
+        }
         if let Some(view) = &mut self.view
             && view
                 .save_status
@@ -2126,7 +2186,10 @@ impl ApplicationHandler for Viewer<'_> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let cursor_time = self.play_elapsed(Instant::now());
+        if self.movie.is_some() {
+            return;
+        }
+        let cursor_time = self.epoch.elapsed();
         if let Some(view) = &self.view
             && let ViewContent::Stream {
                 world,
@@ -2134,14 +2197,24 @@ impl ApplicationHandler for Viewer<'_> {
                 ..
             } = &mut self.content
         {
-            hud.update_spell_cursor(
-                &view.window,
-                event_loop,
-                self.pause.is_none()
-                    && self.map_since.is_none()
-                    && world.selected_spell().is_some(),
-                cursor_time,
-            );
+            let mode = if self.pause.is_some()
+                || self.map_since.is_some()
+                || hud.inventory_open()
+                || hud.sheet_open()
+                || hud.journal_open()
+                || world.conversation().is_some()
+            {
+                hud::CursorMode::Default
+            } else if world.selected_spell().is_some() {
+                hud::CursorMode::Spell
+            } else if world.selecting_skill() {
+                hud::CursorMode::Skill
+            } else if world.combat_ready() {
+                hud::CursorMode::Combat
+            } else {
+                hud::CursorMode::Default
+            };
+            hud.update_cursor(&view.window, event_loop, mode, cursor_time);
         }
         // Map changes and native loads can make an existing deadline immediately due.
         let play = self.game_elapsed(Instant::now());
@@ -2176,6 +2249,10 @@ impl ApplicationHandler for Viewer<'_> {
             world.take_sounds().for_each(drop);
             return;
         };
+        if self.pause.as_ref().is_some_and(|(m, _)| m.front.is_some()) {
+            world.take_sounds().for_each(drop);
+            return;
+        }
         if let Some((map, sector, hour)) = world.sound_location() {
             audio.location(map, sector, hour, std::mem::take(&mut self.reset_audio));
         }
@@ -2211,6 +2288,22 @@ impl ApplicationHandler for Viewer<'_> {
                 Ok(view) => {
                     view.window.request_redraw();
                     self.view = Some(view);
+                    if std::mem::take(&mut self.startup_movie) {
+                        if let Err(error) = self.prepare_creation_hud() {
+                            self.fail(event_loop, error);
+                            return;
+                        }
+                        self.play_sequence(
+                            [
+                                cinematic::Clip::Path("movies/SierraLogo.bik"),
+                                cinematic::Clip::Path("movies/TroikaLogo.bik"),
+                                cinematic::Clip::Number(8),
+                            ]
+                            .into(),
+                            cinematic::Destination::Menu,
+                            event_loop,
+                        );
+                    }
                 }
                 Err(error) => self.fail(event_loop, error),
             }
@@ -2232,6 +2325,14 @@ impl ApplicationHandler for Viewer<'_> {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         if self.view.as_ref().is_none_or(|view| view.window.id() != id) {
+            return;
+        }
+        if self.movie.is_some() {
+            self.movie_event(event, event_loop);
+            return;
+        }
+        if self.pause.as_ref().is_some_and(|(m, _)| m.front.is_some()) {
+            self.front_event(event_loop, id, event);
             return;
         }
         if self.developer_event(event_loop, &event) {

@@ -36,6 +36,68 @@ pub(super) struct NpcInventory {
     flags: u32,
     pub(super) substitute: Option<OriginalId>,
     pub(super) source: u32,
+    social: (Option<i32>, Option<i32>, u32),
+}
+
+impl InventoryReader {
+    pub fn open_starting_shop(
+        &mut self,
+        world: &mut InteractiveWorld,
+    ) -> Result<Option<String>, String> {
+        let Some(npc) = world
+            .cache
+            .entries
+            .values()
+            .flat_map(|(sector, _)| &sector.mobiles)
+            .find(|m| m.category == 16 && !m.conflict)
+        else {
+            return Ok(None);
+        };
+        let name = self.npc_name(npc, true);
+        let id = npc.id;
+        let key = id.key();
+        let terms = world.records(&mut self.vfs).npc_inventory(id)?;
+        let (base, race, flags) = terms.social;
+        let reaction = super::super::npc::initial_reaction(
+            base,
+            Some(terms.flags),
+            race,
+            flags,
+            &world.character_statistics(),
+        )
+        .unwrap_or(50);
+        let table = load_mes(&mut self.vfs, "rules/invensource.mes").map_err(|e| e.to_string())?;
+        world.exchange(|world| {
+            let mut event = stock::Restock::new(&key);
+            if terms.source > 0 {
+                world.restock_owner(
+                    &mut self.vfs,
+                    &table,
+                    Owner::OriginalObject(world.map.clone(), id),
+                    terms.source,
+                    &mut event,
+                )?;
+            }
+            if let Some(chest) = terms.substitute {
+                let source = world
+                    .records(&mut self.vfs)
+                    .container(chest)?
+                    .inventory_source
+                    .unwrap_or_default();
+                if source > 0 {
+                    world.restock_owner(
+                        &mut self.vfs,
+                        &table,
+                        Owner::Container(world.map.clone(), chest),
+                        source,
+                        &mut event,
+                    )?;
+                }
+            }
+            world.open_trade(&mut self.vfs, &key, name, reaction, (0, 0))
+        })?;
+        Ok(Some(key))
+    }
 }
 
 impl Records<'_> {
@@ -78,6 +140,11 @@ impl Records<'_> {
                     .copied()
             });
         let mut result = NpcInventory {
+            social: (
+                field(143).map(|n| n as i32).or(defaults.reaction_base),
+                race,
+                flags,
+            ),
             portrait,
             predicate: obj
                 .field(31)
@@ -357,11 +424,7 @@ impl InteractiveWorld {
             stats.attributes[6],
         );
         let haggle = (4 * level + 10 + if stats.attributes[4] >= 20 { 10 } else { 0 }).min(95);
-        let worth = if item.stats.complexity.unwrap_or_default() > 0 && item.flags & 1 == 0 {
-            300
-        } else {
-            item.stats.worth.max(2)
-        };
+        let worth = item.worth();
         let reaction = t.reaction.saturating_add(self.reaction_delta(&t.npc));
         let cost = unit_price(buying, worth, t.retail, haggle, reaction, item.stats.hp)?;
         let offer = if buying {
@@ -618,22 +681,7 @@ impl InteractiveWorld {
         let terms = records.npc_inventory(id)?;
         let state = &self.cache.inventory.state;
         let stats = self.character_statistics();
-        let mut values = stats.base.map(Some);
-        for (slot, attribute) in values.iter_mut().zip(stats.attributes) {
-            *slot = Some(attribute)
-        }
-        values[8..17].copy_from_slice(&[
-            Some(stats.carry_capacity),
-            Some(stats.damage_bonus),
-            Some(stats.ac_adjustment),
-            stats.speed,
-            Some(stats.heal_rate),
-            Some(stats.poison_recovery),
-            Some(stats.reaction_modifier),
-            Some(stats.max_followers),
-            Some(stats.aptitude),
-        ]);
-        values[19] = Some(stats.alignment);
+        let values = stats.script_values();
         let mut facts = Interaction {
             alignment_base: stats.base[19],
             alignment_modifier: self.cache.inventory.rules.social(0),

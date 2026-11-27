@@ -463,7 +463,7 @@ fn word(bytes: &[u8], offset: usize) -> Result<u32, &'static str> {
         .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
 }
 
-pub(super) fn decode_bmp(bytes: &[u8]) -> Result<Bitmap, &'static str> {
+pub fn decode_bmp(bytes: &[u8]) -> Result<Bitmap, &'static str> {
     if !bytes.starts_with(b"BM")
         || word(bytes, 14)? != 40
         || word(bytes, 26)? != 0x0008_0001

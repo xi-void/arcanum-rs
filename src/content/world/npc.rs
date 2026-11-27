@@ -498,7 +498,7 @@ impl super::inventory::InventoryReader {
     }
 }
 
-fn initial_reaction(
+pub(super) fn initial_reaction(
     base: Option<i32>,
     flags: Option<u32>,
     race: Option<i32>,
