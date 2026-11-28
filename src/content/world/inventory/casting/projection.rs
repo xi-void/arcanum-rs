@@ -65,13 +65,15 @@ impl SectorCache {
                     || off.contains(&id.key())
                     || state.actors.get(&id.key()).is_some_and(|d| d.decayed)
                 {
-                    if &p.map == map && resident.blocks {
+                    if &p.map == map && resident.blocks && p.prototype.is_none() {
                         *self.door_states.vacated.entry(p.source).or_default() += 1;
                     }
                     continue;
                 }
                 if resident.blocks {
-                    *self.door_states.vacated.entry(p.source).or_default() += 1;
+                    if p.prototype.is_none() {
+                        *self.door_states.vacated.entry(p.source).or_default() += 1;
+                    }
                     if !flat(*id) {
                         self.door_states.summons.insert(p.tile);
                     }

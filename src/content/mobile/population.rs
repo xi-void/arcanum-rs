@@ -330,6 +330,7 @@ impl Effective {
             lock_notify: explicit.lock_notify.or(defaults.lock_notify),
             lock_difficulty: explicit.lock_difficulty.or(defaults.lock_difficulty),
             lock_key_id: explicit.lock_key_id.or(defaults.lock_key_id),
+            bed_occupied: explicit.bed_occupied.or(defaults.bed_occupied),
             use_local: explicit.use_local.or(defaults.use_local),
             portal_flags: explicit.portal_flags.or(defaults.portal_flags),
             critter_flags: explicit.critter_flags.or(defaults.critter_flags),
@@ -389,7 +390,39 @@ pub(crate) struct Resident {
 }
 
 impl Resident {
+    pub(crate) fn generated_npc(
+        id: OriginalId,
+        prototype: u32,
+        tile: (u32, u32),
+        vfs: &mut Vfs,
+        prototypes: &mut Prototypes,
+    ) -> Result<Self, String> {
+        let instance = Instance::from_prototype(id, prototype, 16);
+        let prototype = prototypes.get(vfs, &instance).map_err(|e| e.to_string())?;
+        let effective = Effective::new(&instance, Some(&prototype));
+        Ok(Self {
+            id,
+            category: 16,
+            prototype_id: instance.prototype.0,
+            current_art: effective.current_art,
+            source: prototype.source.clone(),
+            bytes: vec![],
+            prototype: Some(prototype),
+            prototype_error: None,
+            parent: None,
+            inventory: vec![],
+            conflict: false,
+            placement: "generated",
+            tile: Some(tile),
+            blocks: effective.blocks(16),
+            render_issue: None,
+            raster: None,
+        })
+    }
     pub fn instance(&self) -> Instance<'_> {
+        if self.id.kind == u16::MAX {
+            return Instance::from_prototype(self.id, self.prototype_id, self.category);
+        }
         objects::decode_instance(&self.bytes).expect("resident object payload validated")
     }
 

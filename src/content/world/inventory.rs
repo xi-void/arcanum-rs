@@ -12,6 +12,7 @@ pub use crafting::SchematicComponent;
 mod creation;
 mod equipment;
 pub use creation::{CreationBuild, CreationCatalog};
+pub(super) mod rest;
 mod save;
 mod stock;
 pub(super) mod trade;
@@ -44,6 +45,7 @@ pub(super) struct Session {
     game_second: u64,
     skill_random: crate::random::Random,
     pub(super) magick: casting::State,
+    encounter: casting::encounters::Schedule,
     recharges: BTreeMap<String, use_action::Recharge>,
     state: State,
     revision: u64,
@@ -585,6 +587,7 @@ pub struct InventoryEntry {
 }
 
 pub struct InventoryReader {
+    encounter_rules: Option<Result<casting::encounters::Ruleset, String>>,
     portraits: BTreeMap<(i32, bool), Result<Arc<LoadedFrame>, String>>,
     schematic_reports:
         BTreeMap<i32, Result<Arc<crate::content::schematics::SchematicReport>, String>>,
@@ -612,6 +615,7 @@ impl InventoryReader {
             frames: FrameCache::default(),
             descriptions,
             key_descriptions,
+            encounter_rules: None,
             quest_catalog,
             portraits: BTreeMap::new(),
             schematic_reports: BTreeMap::new(),

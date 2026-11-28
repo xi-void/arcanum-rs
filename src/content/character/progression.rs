@@ -62,6 +62,8 @@ pub struct ProgressionRules {
     rewards: BTreeMap<i32, i32>,
     pub spells: Vec<SpellStudy>,
     pub(crate) spell_source: Option<crate::content::Source>,
+    pub(crate) item_programs:
+        BTreeMap<usize, Result<std::sync::Arc<crate::content::magick::Program>, String>>,
     pub(crate) spell_effects: BTreeMap<i32, std::sync::Arc<super::Adjustments>>,
     pub stat_names: Vec<String>,
     pub sheet_labels: Vec<String>,
@@ -134,8 +136,26 @@ impl ProgressionRules {
                     .map(|e| (id, std::sync::Arc::new(e)))
             })
             .collect();
-        for spell in 0..223 {
-            let base = if spell < 140 { 1000 } else { 3000 } + 50 * spell;
+        // CE reserves 8000..10000 for non-spell entries. Discover item programs from
+        // the winning table so content overrides can add spells above the stock list.
+        for (base, _) in list
+            .entries()
+            .filter(|(base, _)| *base >= 1000 && !(8000..10000).contains(base) && base % 50 == 0)
+        {
+            let spell = (base - if base < 8000 { 1000 } else { 3000 }) / 50;
+            if list.get(base + 3).is_some_and(|s| {
+                s.split(',').any(|clause| {
+                    clause.split_once(':').is_some_and(|(k, v)| {
+                        k.trim().eq_ignore_ascii_case("itemtriggers")
+                            && v.trim().eq_ignore_ascii_case("item_used")
+                    })
+                })
+            }) {
+                rules.item_programs.insert(
+                    spell as usize,
+                    crate::content::magick::Program::decode(&list, spell).map(std::sync::Arc::new),
+                );
+            }
             if let Some(ids) = wear_effects(&list, base)
                 && let Some(values) = ids
                     .into_iter()

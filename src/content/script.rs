@@ -12,6 +12,8 @@ use std::{
     sync::Arc,
 };
 
+mod timers;
+
 const STEP_BUDGET: usize = 1000;
 const GLOBAL_FLAGS: i32 = 3200;
 const GLOBAL_VARIABLES: i32 = 2000;
@@ -80,7 +82,17 @@ pub struct State {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     random: Option<Random>,
     #[serde(skip)]
+    pub(in crate::content) print_lines: Option<Vec<i32>>,
+    #[serde(skip)]
     pub(super) game_minute: u64,
+    #[serde(skip)]
+    pub(super) game_second: u64,
+    #[serde(skip)]
+    pub(super) start_hour: u8,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    calls: BTreeMap<u64, std::collections::VecDeque<timers::Call>>,
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    last_call: Option<serde_json::Value>,
     #[serde(skip)]
     pub(super) interaction: Option<Interaction>,
 }
@@ -100,6 +112,7 @@ pub(super) enum ActorAction {
 /// The staged read view for a single SCR/DLG invocation. Operations commit with its state writes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Interaction {
+    pub item_use: Option<ItemUse>,
     pub reaction: Option<i32>,
     pub aptitude: i32,
     pub alignment_base: i32,
@@ -114,6 +127,16 @@ pub(super) struct Interaction {
     pub items: Vec<(u8, u32, String)>,
     pub substitute: Option<String>,
     pub operations: Vec<Transfer>,
+}
+
+/// Staged extra-object context for an item Use attachment.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct ItemUse {
+    pub target_stats: [Option<i32>; 28],
+    pub power_ratio: i32,
+    pub destroy: bool,
+    pub poison_heal: i32,
+    pub visuals: Vec<i32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -336,6 +359,10 @@ impl State {
         self.read(attachment, slot)
     }
 
+    pub(in crate::content) fn global_flag(&self, index: i32) -> bool {
+        self.flags.get(&index).copied().unwrap_or(false)
+    }
+
     pub(crate) fn set_global_flag(&mut self, index: i32) -> Result<(), String> {
         if !(0..GLOBAL_FLAGS).contains(&index) {
             return Err("Invalid starting global flag".into());
@@ -417,6 +444,13 @@ impl State {
     }
 
     pub(super) fn validate(&self) -> Result<(), String> {
+        if self
+            .calls
+            .values()
+            .any(|batch| batch.is_empty() || batch.iter().any(|c| c.script <= 0))
+        {
+            return Err("Invalid saved script timer".into());
+        }
         if self.flags.keys().any(|&i| !(0..GLOBAL_FLAGS).contains(&i))
             || self
                 .variables
@@ -459,7 +493,7 @@ impl Invocation<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Actor {
     Player,
@@ -506,6 +540,7 @@ impl fmt::Display for Fault {
 }
 
 pub(crate) struct Script {
+    initial: Local,
     pub source: Source,
     code: Code,
 }
@@ -632,7 +667,11 @@ impl Script {
             read_bounded(vfs, path, crate::mes::MAX_INPUT_BYTES).map_err(|e| e.to_string())?;
         let code =
             Code::decode(&bytes).map_err(|error| format!("{path} from {source}: {error}"))?;
-        Ok(Self { source, code })
+        Ok(Self {
+            source,
+            code,
+            initial: Local::from_attachment(&bytes),
+        })
     }
 
     pub(super) fn structure(&self) -> serde_json::Value {
@@ -771,6 +810,14 @@ impl Code {
                 } else {
                     actor(focus)
                 }
+            };
+            let extra_target = |focus| {
+                focus == 12
+                    && view
+                        .state()
+                        .interaction
+                        .as_ref()
+                        .is_some_and(|i| i.item_use.is_some())
             };
             let cond = &row.condition;
             let test = match cond.opcode {
@@ -1048,10 +1095,92 @@ impl Code {
                         .ok_or_else(unresolved)?;
                     None
                 }
-                10..=12 => {
+                24 if view.state().print_lines.is_some() => {
+                    let line = value(action, 0).ok_or_else(unresolved)?;
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    state.print_lines.as_mut().unwrap().push(line);
+                    None
+                }
+                96..=98 | 105 => {
+                    let minutes = view.state().game_minute;
+                    let n = match action.opcode {
+                        96 => minutes / 1440 + 1,
+                        97 => u64::from(input.hour),
+                        98 => minutes % 60,
+                        _ => minutes / 60,
+                    };
+                    view.assign(
+                        attachment,
+                        action.operand(0).ok_or_else(unresolved)?,
+                        n.min(i32::MAX as u64) as i32,
+                        &mut temporaries,
+                    )
+                    .ok_or_else(unresolved)?;
+                    None
+                }
+                54 | 55 if action.focus(3) == 1 => {
+                    let script = value(action, 0).filter(|&n| n > 0).ok_or_else(unresolved)?;
+                    let line = value(action, 1)
+                        .and_then(|n| usize::try_from(n).ok())
+                        .ok_or_else(unresolved)?;
+                    let seconds = value(action, 4)
+                        .and_then(|n| u64::try_from(n).ok())
+                        .ok_or_else(unresolved)?;
+                    let triggerer = match action.focus(2) {
+                        21 => Actor::Player,
+                        0 if matches!(input.triggerer, Actor::Player | Actor::None) => {
+                            input.triggerer
+                        }
+                        _ => return Err(unresolved()),
+                    };
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    let now = state.game_second;
+                    let delay = if action.opcode == 54 {
+                        seconds.saturating_mul(8)
+                    } else {
+                        (seconds % 86400 + u64::from(state.start_hour) * 3600 + 86400 - now % 86400)
+                            % 86400
+                    };
+                    state
+                        .calls
+                        .entry(now.saturating_add(delay.max(1)))
+                        .or_default()
+                        .push_back(timers::Call {
+                            script,
+                            line,
+                            owner: attachment.owner.clone(),
+                            triggerer,
+                            map: state.sector_map.as_ref().map(|pair| pair.0.clone()),
+                        });
+                    None
+                }
+                125 if action.focus(1) == 1 => {
+                    let id = value(action, 0).ok_or_else(unresolved)?;
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    if let Some((due, index)) = state.calls.iter().find_map(|(&due, b)| {
+                        b.iter()
+                            .position(|c| c.script == id && c.owner == attachment.owner)
+                            .map(|i| (due, i))
+                    }) {
+                        let batch = state.calls.get_mut(&due).unwrap();
+                        batch.remove(index);
+                        if batch.is_empty() {
+                            state.calls.remove(&due);
+                        }
+                    }
+                    None
+                }
+                10..=13 => {
                     let rhs = value(action, 1).ok_or_else(unresolved)?;
                     let assigned = match action.opcode {
                         11 => rhs.wrapping_add(value(action, 2).ok_or_else(unresolved)?),
+                        13 => rhs.wrapping_mul(value(action, 2).ok_or_else(unresolved)?),
                         12 => rhs.wrapping_sub(value(action, 2).ok_or_else(unresolved)?),
                         _ => rhs,
                     };
@@ -1095,6 +1224,15 @@ impl Code {
                         {
                             facts.reaction
                         }
+                        33 if extra_target(action.focus(1)) => value(action, 0).and_then(|i| {
+                            facts
+                                .item_use
+                                .as_ref()?
+                                .target_stats
+                                .get(i as usize)
+                                .copied()
+                                .flatten()
+                        }),
                         33 if actor(action.focus(1)) == Some(0) && value(action, 0) == Some(16) => {
                             Some(facts.aptitude)
                         }
@@ -1114,7 +1252,66 @@ impl Code {
                     .ok_or_else(unresolved)?;
                     None
                 }
-                107 | 108 if actor(action.focus(0)) == Some(0) => {
+                91 if action.focus(1) == 1 && extra_target(action.focus(2)) => {
+                    let ratio = view
+                        .state()
+                        .interaction
+                        .as_ref()
+                        .unwrap()
+                        .item_use
+                        .as_ref()
+                        .unwrap()
+                        .power_ratio;
+                    let amount = value(action, 0).ok_or_else(unresolved)?;
+                    view.assign(
+                        attachment,
+                        action.operand(3).ok_or_else(unresolved)?,
+                        ((i64::from(amount) * i64::from(ratio) + 50) / 100) as i32,
+                        &mut temporaries,
+                    )
+                    .ok_or_else(unresolved)?;
+                    None
+                }
+                68 | 120 | 128 => {
+                    let amount = match action.opcode {
+                        68 if action.focus(0) == 1 => 0,
+                        120 if extra_target(action.focus(1)) => {
+                            value(action, 0).ok_or_else(unresolved)?
+                        }
+                        128 if extra_target(action.focus(0)) => {
+                            value(action, 1).ok_or_else(unresolved)?
+                        }
+                        _ => return Err(unresolved()),
+                    };
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    let item = state
+                        .interaction
+                        .as_mut()
+                        .and_then(|i| i.item_use.as_mut())
+                        .ok_or_else(unresolved)?;
+                    match action.opcode {
+                        68 => item.destroy = true,
+                        120 => item.visuals.push(amount),
+                        _ => {
+                            item.poison_heal = item.poison_heal.saturating_add(amount);
+                            if let Some(n) = &mut item.target_stats[24] {
+                                *n = n.saturating_sub(amount).max(0);
+                            }
+                        }
+                    }
+                    None
+                }
+                107 | 108
+                    if extra_target(action.focus(0))
+                        || (actor(action.focus(0)) == Some(0)
+                            && view
+                                .state()
+                                .interaction
+                                .as_ref()
+                                .is_none_or(|i| i.item_use.is_none())) =>
+                {
                     let pair = view
                         .state()
                         .interaction
@@ -1132,7 +1329,15 @@ impl Code {
                     }
                     None
                 }
-                75 | 76 if actor(action.focus(0)) == Some(0) => {
+                75 | 76
+                    if extra_target(action.focus(0))
+                        || (actor(action.focus(0)) == Some(0)
+                            && view
+                                .state()
+                                .interaction
+                                .as_ref()
+                                .is_none_or(|i| i.item_use.is_none())) =>
+                {
                     let amount = value(action, 1)
                         .filter(|&n| n >= 0)
                         .ok_or_else(unresolved)?;
@@ -1777,6 +1982,38 @@ mod tests {
             locations: [None; 2],
             met: None,
         }
+    }
+
+    #[test]
+    #[ignore = "requires ARCANUM_GAME_DIR with the original Lloyd Gurloes dialogue and delayed script"]
+    fn installed_delayed_dialogue_call_survives_save_and_executes_once() {
+        let mut vfs = Vfs::from_game(
+            std::env::var_os("ARCANUM_GAME_DIR").unwrap(),
+            crate::vfs::Policy::Ce,
+        )
+        .unwrap();
+        let script = Script::load(&mut vfs, 1140).unwrap();
+        let mut a = attachment("timer-test", Event::Dialogue);
+        a.script = 1140;
+        let mut input = invocation(&a);
+        input.position = 2;
+        let mut state = State {
+            game_second: 6000,
+            ..State::default()
+        };
+        assert!(matches!(
+            script.execute(&input, &mut state).unwrap().outcome,
+            Outcome::Dialogue { .. }
+        ));
+        assert_eq!(state.next_call(), Some(7200));
+        let mut state: State =
+            serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap();
+        assert!(!state.tick_calls(&mut vfs, 7199, |_, _| Ok(())));
+        assert!(!state.global_flag(2069));
+        assert!(state.tick_calls(&mut vfs, 10000, |_, _| Ok(())));
+        assert!(state.global_flag(2069));
+        assert_eq!(state.next_call(), None);
+        assert!(!state.tick_calls(&mut vfs, 11000, |_, _| Ok(())));
     }
 
     #[test]

@@ -312,7 +312,7 @@ impl Viewer<'_> {
                     if drag {
                         if !state.is_pressed() {
                             if *button == MouseButton::Left {
-                                hud.finish_inventory_drag(reader, world, point);
+                                hud.finish_inventory_drag(reader, world, point, false);
                             } else {
                                 hud.cancel_inventory_drag();
                             }

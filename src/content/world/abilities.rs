@@ -55,11 +55,12 @@ impl LockChange {
 #[serde(rename_all = "snake_case")]
 pub(super) enum Method {
     PickLocks(OriginalId),
+    Consumable(OriginalId),
     Spell(usize),
 }
 impl Method {
     pub fn is_skill(self) -> bool {
-        matches!(self, Self::PickLocks(_))
+        matches!(self, Self::PickLocks(_) | Self::Consumable(_))
     }
 }
 

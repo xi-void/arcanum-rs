@@ -719,6 +719,7 @@ impl Viewer<'_> {
         **world = next;
         if let Some(hud) = hud {
             hud.close_inventory();
+            hud.show_rest(None);
             hud.close_journal();
             hud.close_sheet();
             hud.reset_character();
@@ -939,6 +940,8 @@ impl Viewer<'_> {
             if !matches!(
                 action,
                 hud::Action::EndTurn
+                    | hud::Action::Rest(_)
+                    | hud::Action::ToggleRest
                     | hud::Action::ToggleCombat
                     | hud::Action::ToggleRun
                     | hud::Action::ResetZoom
@@ -947,6 +950,38 @@ impl Viewer<'_> {
             }
         }
         match action {
+            hud::Action::ToggleRest | hud::Action::Rest(_) => {
+                let elapsed = self.play_elapsed(Instant::now());
+                if let ViewContent::Stream {
+                    hud: Some(hud),
+                    world,
+                    inventory_reader: Some(reader),
+                    ..
+                } = &mut self.content
+                {
+                    if let hud::Action::Rest(option) = action {
+                        if let Some(mode) = hud.rest_mode()
+                            && let Err(e) = reader.begin_rest(world, mode, option, elapsed)
+                        {
+                            world.rest_feedback(e)
+                        }
+                        hud.show_rest(None);
+                    } else if hud.rest_open() {
+                        hud.show_rest(None);
+                    } else if world.rest_deadline().is_none() {
+                        match reader.rest_mode(world, false) {
+                            Ok(mode) => {
+                                hud.close_inventory();
+                                hud.show_rest(Some(mode));
+                                world.cancel_player_route();
+                            }
+                            Err(e) => world.rest_feedback(e),
+                        }
+                    }
+                    self.navigation = Navigation::default();
+                }
+                self.update_control_flow(event_loop);
+            }
             hud::Action::ToggleSpells
             | hud::Action::CastCantrip
             | hud::Action::CastSpell(_)
@@ -1639,7 +1674,7 @@ impl Viewer<'_> {
         let hours = self
             .clock
             .as_ref()
-            .map(|clock| clock.hours(self.game_elapsed(Instant::now())));
+            .map(|clock| clock.game_second(self.game_elapsed(Instant::now())));
         let ViewContent::Stream {
             map_ui: Some(map),
             hud,
@@ -1841,7 +1876,13 @@ impl Viewer<'_> {
             .clock
             .as_ref()
             .filter(|_| self.pause.is_none() && self.turn_clock.is_none())
-            .map(|clock| real_now + clock.until_next_hour(self.game_elapsed(real_now)));
+            .map(|clock| {
+                real_now
+                    + clock.until_minute(
+                        clock.game_second(self.game_elapsed(real_now)) / 60 + 1,
+                        self.game_elapsed(real_now),
+                    )
+            });
         let travel = match &self.content {
             ViewContent::Stream {
                 map_ui: Some(map), ..
@@ -1885,9 +1926,16 @@ impl Viewer<'_> {
             }
             _ => None,
         };
+        let rest = match &self.content {
+            ViewContent::Stream { world, .. } if self.pause.is_none() => world
+                .rest_deadline()
+                .map(|d| real_now + d.saturating_sub(self.play_elapsed(real_now))),
+            _ => None,
+        };
         let next = self
             .animation_deadline
             .into_iter()
+            .chain(rest)
             .chain(self.navigation.deadline())
             .chain(self.player_deadline)
             .chain(match &self.content {
@@ -2065,12 +2113,12 @@ impl ApplicationHandler for Viewer<'_> {
                     map.advance_travel(now.saturating_duration_since(self.epoch));
                 let mut redraw = steps > 0;
                 if let Some(clock) = &mut self.clock {
-                    clock.step_travel(steps);
+                    clock.advance_hours(steps as u64);
                     if !map.travelling() && arrival.is_none() {
                         redraw |= world.set_game_hour(clock.hour(game_elapsed));
                     }
                     if let Some(hud) = hud {
-                        redraw |= hud.set_game_time(clock.hours(game_elapsed));
+                        redraw |= hud.set_game_time(clock.game_second(game_elapsed));
                     }
                 }
                 if let Some(arrival) = arrival {
@@ -2101,16 +2149,34 @@ impl ApplicationHandler for Viewer<'_> {
                 ..
             } = &mut self.content
             {
-                if let Some(clock) = &self.clock {
+                if let Some(clock) = &mut self.clock {
+                    let mut advance = false;
+                    if let Some(due) = world.rest_deadline() {
+                        if world.combat_blocks_travel() || world.conversation().is_some() {
+                            world.finish_rest("interrupted");
+                            redraw = true
+                        } else if due <= elapsed {
+                            clock.advance_hours(1);
+                            advance = true
+                        }
+                    }
                     redraw |= world.set_game_hour(clock.hour(game_elapsed));
                     let second = clock.game_second(game_elapsed);
                     if let Some(reader) = inventory_reader.as_mut() {
+                        redraw |= reader.tick_script_calls(world, second);
                         redraw |= reader.tick_magick(world, second, elapsed);
                     }
                     redraw |= world.update_ability_time(second);
                     world.set_quest_time(clock.hours(game_elapsed), clock.minute(game_elapsed));
+                    if let Some(reader) = inventory_reader.as_mut() {
+                        redraw |= reader.tick_wilderness_encounter(world, second);
+                    }
+                    if advance {
+                        world.finish_rest_hour(clock.hour(game_elapsed), elapsed);
+                        redraw = true;
+                    }
                     if let Some(hud) = hud.as_mut() {
-                        redraw |= hud.set_game_time(clock.hours(game_elapsed));
+                        redraw |= hud.set_game_time(clock.game_second(game_elapsed));
                     }
                 }
                 if world.playing() {
@@ -2127,6 +2193,7 @@ impl ApplicationHandler for Viewer<'_> {
                         );
                         if !talking && world.conversation().is_some() {
                             if let Some(hud) = hud.as_mut().filter(|h| h.supports_dialogue()) {
+                                hud.show_rest(None);
                                 hud.close_inventory();
                                 hud.cancel_press();
                                 self.navigation = Navigation::default();
@@ -2199,6 +2266,16 @@ impl ApplicationHandler for Viewer<'_> {
                                     eprintln!("Dialogue: {error}");
                                     view.window.set_title(&format!("Arcanum-RS | {error}"));
                                 }
+                            }
+                            redraw = true;
+                        }
+                        if world.take_bed_request()
+                            && let (Some(hud), Some(reader)) =
+                                (hud.as_mut(), inventory_reader.as_mut())
+                        {
+                            match reader.rest_mode(world, true) {
+                                Ok(mode) => hud.show_rest(Some(mode)),
+                                Err(e) => world.rest_feedback(e),
                             }
                             redraw = true;
                         }
@@ -2502,6 +2579,68 @@ impl ApplicationHandler for Viewer<'_> {
         {
             return;
         }
+        if self.pause.is_none()
+            && let ViewContent::Stream {
+                world,
+                hud: Some(hud),
+                ..
+            } = &mut self.content
+        {
+            let active = world.rest_deadline().is_some();
+            if active || hud.rest_open() {
+                let mut action = None;
+                match &event {
+                    WindowEvent::KeyboardInput { event: k, .. }
+                        if k.state.is_pressed() && !k.repeat =>
+                    {
+                        match &k.logical_key {
+                            Key::Named(NamedKey::Escape) => {
+                                world.finish_rest("cancelled");
+                                hud.show_rest(None);
+                            }
+                            Key::Named(NamedKey::Tab) if !active => hud.advance_focus(false),
+                            Key::Named(NamedKey::Enter | NamedKey::Space) if !active => {
+                                action = hud.focused_action()
+                            }
+                            key => {
+                                adjust_hud_scale(hud, &mut self.preferences, key);
+                            }
+                        }
+                    }
+                    WindowEvent::CursorMoved { position, .. } => {
+                        self.cursor = Some((position.x as u32, position.y as u32));
+                        hud.hover(self.cursor);
+                    }
+                    WindowEvent::MouseInput {
+                        button: MouseButton::Left,
+                        state,
+                        ..
+                    } if !active => {
+                        if let Some(p) = self.cursor {
+                            if state.is_pressed() {
+                                hud.press(p);
+                            } else {
+                                action = hud.release(p);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                if matches!(
+                    event,
+                    WindowEvent::KeyboardInput { .. }
+                        | WindowEvent::MouseInput { .. }
+                        | WindowEvent::MouseWheel { .. }
+                        | WindowEvent::CursorMoved { .. }
+                ) {
+                    if let Some(a) = action {
+                        self.hud_action(a, event_loop)
+                    }
+                    self.view.as_ref().unwrap().window.request_redraw();
+                    return;
+                }
+            }
+        }
         if self.dialogue_event(&event) {
             return;
         }
@@ -2689,6 +2828,13 @@ impl ApplicationHandler for Viewer<'_> {
                     self.hud_action(action, event_loop);
                     return;
                 }
+                if *shift
+                    && matches!(&key.logical_key,Key::Character(ch) if ch.eq_ignore_ascii_case("s"))
+                    && hud.has_rest()
+                {
+                    self.hud_action(hud::Action::ToggleRest, event_loop);
+                    return;
+                }
                 if matches!(&key.logical_key, Key::Character(ch) if ch.eq_ignore_ascii_case("c"))
                     && hud.has_sheet()
                 {
@@ -2750,7 +2896,7 @@ impl ApplicationHandler for Viewer<'_> {
                     if !state.is_pressed() {
                         match button {
                             MouseButton::Left => {
-                                hud.finish_inventory_drag(reader, world, self.cursor)
+                                hud.finish_inventory_drag(reader, world, self.cursor, *shift)
                             }
                             MouseButton::Right => {
                                 hud.cancel_inventory_drag();
@@ -3354,7 +3500,7 @@ impl Viewer<'_> {
                         .pause
                         .as_ref()
                         .map_or_else(Instant::now, |(_, paused)| *paused);
-                    clock.hours(self.turn_clock.unwrap_or_else(|| {
+                    clock.game_second(self.turn_clock.unwrap_or_else(|| {
                         now.saturating_duration_since(self.epoch)
                             .saturating_sub(self.clock_paused_for)
                     }))

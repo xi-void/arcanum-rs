@@ -192,6 +192,9 @@ impl InteractiveWorld {
             "palette":asset.decoded.stored_palette,"anchor":sprite.anchor,"scale":raster.scale});
         if let Some(target) = sector.interactions.get(&key) {
             result["interaction"] = match &target.action {
+                interaction::Action::Bed { handler, occupied } => {
+                    json!({"kind":"bed","occupied":occupied,"use_script":handler.as_ref().and_then(|h|h.as_ref().ok()).map(|h|h.1.source.virtual_path.as_str())})
+                }
                 interaction::Action::Npc(id) => json!({"kind":"npc", "id":id.key()}),
                 interaction::Action::Door(door) => {
                     result["rendering"]["frame"] =

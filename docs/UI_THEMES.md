@@ -191,7 +191,7 @@ The HUD, atlas and Classic menus use the same glyph measurement and
 rasterizer. Vulkan draws the prepared UI after the world pass. Theme
 packages own the layout and assets. Gameplay owns settings and actions.
 
-Classic’s map, bag, logbook and character buttons open their respective panels. Health and fatigue vials consume the player's current and maximum values. The spell button exposes learned colleges and their spells, and the schematic book reads acquired degrees. Inventory inspection and advancement feedback use the bottom HUD. The document reader, day/night clock, poison and fate indicators, party portraits and action-slot assignments depend on additional gameplay and presentation support.
+Classic’s map, bag, logbook and character buttons open their respective panels. Health and fatigue vials consume the player's current and maximum values. The spell button exposes learned colleges and their spells, and the schematic book reads acquired degrees. Inventory inspection and advancement feedback use the bottom HUD. The document reader, poison and fate indicators, party portraits and action-slot assignments depend on additional gameplay and presentation support.
 
 Set `journal_panel = true` on a centered gameplay-panel root to add the quest
 spread. Use `toggle-journal` on the HUD button, `journal-quests` for the selected
@@ -267,3 +267,9 @@ HUD buttons can bind `action = "toggle-combat"` and `action = "end-turn"`. A com
 
 
 For spell targeting, `spell_cursor` at the top of the HUD package names a cursor ART resource. Its frame rate, dimensions and hotspot drive the native pointer. Classic resolves `art/interface/spellcur.art` through the VFS. The optional bindings `npc-health`, `npc-poison` and `npc-fatigue` clip the corresponding full bar to the actor’s current percentage. Pair each bar with its `-empty` binding. `npc-hp-text` and `npc-ft-text` show the numeric values for allies and percentages for independent actors. Colors and layout come from the package fonts and components.
+
+### Recovery controls and clock
+
+The top HUD can open the rest selector with `action = "toggle-rest"`. The component with `rest_panel = true` supplies its bounds and background. Child controls use `action = { rest = N }` and text components use `rest_label = N`. Indices 0–7 select one, two, four, eight or 24 hours, morning, evening or full health. Waiting uses the first seven choices. The root `rest_messages` path selects the installed message file containing both sets of labels. The Classic package uses `mes/sleepui.mes`, `sleep_base.art` and `fatebut.art`. The shared layout controls scale, drawing and pointer input for the selector.
+
+The dimensions of the `game-clock` component define the visible strip aperture. Its `image` and eight `clock_phases` provide the original artwork. A child component supplies the stationary pointer. The clock uses elapsed game seconds for the strip position and lunar phase.

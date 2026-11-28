@@ -25,6 +25,8 @@ type Color = [u8; 4];
 pub(super) enum Action {
     Pause,
     ToggleRun,
+    ToggleRest,
+    Rest(usize),
     ToggleCombat,
     EndTurn,
     ResetZoom,
@@ -93,6 +95,7 @@ struct Theme {
     fit_viewport: Option<[u32; 2]>,
     route_color: Option<Color>,
     selected_route_color: Option<Color>,
+    rest_messages: Option<String>,
     journal: Option<journal::Style>,
     sheet: Option<sheet::Style>,
     #[serde(default)]
@@ -264,6 +267,9 @@ struct Element {
     #[serde(default)]
     turn_panel: bool,
     #[serde(default)]
+    rest_panel: bool,
+    rest_label: Option<usize>,
+    #[serde(default)]
     ap_offsets: Vec<i32>,
     #[serde(default)]
     inventory_panel: bool,
@@ -392,19 +398,23 @@ impl Component {
 struct ClockArt {
     day: LoadedFrame,
     moon: Vec<LoadedFrame>,
-    hours: Option<u64>,
+    sample: Option<(u64, usize)>,
 }
 
 impl ClockArt {
-    fn paint(&self, dst: &mut SpriteFrame, hours: u64, fill: Color) {
+    fn paint(&mut self, dst: &mut SpriteFrame, seconds: u64, fill: Color) -> bool {
         let day = &self.day.decoded.frame;
-        let seconds = hours * 3600;
-        let age = (seconds + 43200) / 84600 % 28;
+
+        let age = seconds.saturating_add(43200) / 84600 % 28;
         let phase = [0, 4, 9, 13, 14, 18, 23, 27].partition_point(|&end| end < age);
         let moon = &self.moon[phase].decoded.frame;
         let width = u64::from(day.width) + u64::from(moon.width);
-        let center = ((seconds + 73800) % 86400) * width / 86400 + width;
+        let center = ((seconds % 86400 + 73800) % 86400) * width / 86400 + width;
         let start = (center - u64::from(dst.width / 2) % width) % width;
+        if self.sample == Some((start, phase)) {
+            return false;
+        }
+        self.sample = Some((start, phase));
         for y in 0..dst.height {
             for x in 0..dst.width {
                 let col = ((start + u64::from(x)) % width) as u32;
@@ -421,6 +431,7 @@ impl ClockArt {
                 dst.pixels[(y * dst.width + x) as usize] = if pixel[3] == 0 { fill } else { pixel };
             }
         }
+        true
     }
 }
 
@@ -713,6 +724,8 @@ pub(crate) struct Hud {
     health_percent: u32,
     fatigue_percent: u32,
     fatigue_revision: Option<u64>,
+    rest_mode: Option<arcanum_rs::content::world::RestMode>,
+    rest_messages: Option<arcanum_rs::mes::Mes>,
     spells_open: bool,
     college_levels: [u32; 16],
     maintained: Vec<usize>,
@@ -769,10 +782,12 @@ impl Hud {
                 return Err(format!("duplicate UI component {}", config.id).into());
             }
             let mut base = sprite(
-                if config.fill.is_some()
+                if config.binding == Some(Binding::GameClock)
+                    || config.fill.is_some()
                     || config.text.is_some()
                     || (config.hover_fill.is_some() && config.cell.is_none())
                     || config.binding.is_some_and(Binding::is_label)
+                    || config.rest_label.is_some()
                 {
                     config.size
                 } else {
@@ -799,10 +814,10 @@ impl Hud {
                         .iter()
                         .map(|path| resource(game, &mut files, path, 0))
                         .collect::<Result<_, _>>()?;
-                    let art = ClockArt {
+                    let mut art = ClockArt {
                         day,
                         moon,
-                        hours: None,
+                        sample: None,
                     };
                     art.paint(&mut base, 0, config.fill.unwrap_or([0; 4]));
                     clock = Some(art);
@@ -853,7 +868,8 @@ impl Hud {
                     }
                     base = thumb;
                 }
-                let dynamic = config.binding.is_some_and(Binding::is_label);
+                let dynamic =
+                    config.binding.is_some_and(Binding::is_label) || config.rest_label.is_some();
                 if let Some(text) = config.text.as_deref().or(dynamic.then_some("")) {
                     let id = config
                         .font
@@ -1063,6 +1079,11 @@ impl Hud {
             health_percent: 100,
             fatigue_percent: 100,
             fatigue_revision: None,
+            rest_mode: None,
+            rest_messages: theme
+                .rest_messages
+                .map(|path| arcanum_rs::content::load_mes(game, &path).map(|t| t.mes))
+                .transpose()?,
             spells_open: false,
             college_levels: [0; 16],
             maintained: Vec::new(),
@@ -1267,6 +1288,12 @@ impl Hud {
             .filter(|c| c.parent.is_none() && !c.config.hidden && !c.config.dialogue_only)
         {
             let e = &c.config;
+            if e.rest_panel {
+                if self.rest_mode.is_some() {
+                    middle = middle.max(e.size[1]);
+                }
+                continue;
+            }
             if e.turn_panel {
                 if show_turn {
                     widest = widest.max(e.size[0]);
@@ -1335,7 +1362,8 @@ impl Hud {
         for component in &self.components {
             let parent = component.parent.map_or_else(
                 || {
-                    let area = if component.config.sheet_panel
+                    let area = if component.config.rest_panel
+                        || component.config.sheet_panel
                         || component.config.inventory_panel
                         || component.config.dialogue_only
                         || component.config.journal_panel
@@ -1349,7 +1377,9 @@ impl Hud {
                 |id| bounds[id],
             );
             let placement = parent.and_then(|(parent, clip)| {
-                if component.config.turn_panel && !show_turn
+                if (component.config.rest_panel && self.rest_mode.is_none())
+                    || (self.rest_mode.is_some_and(|m|m.waiting()) && (component.config.rest_label==Some(7) || component.config.action==Some(Action::Rest(7))))
+                    || component.config.turn_panel && !show_turn
                     || !self.sheet.visible(&component.config)
                     || self.map_view.is_some_and(|mode| {
                         !component.config.map_views.is_empty()
@@ -1449,7 +1479,24 @@ impl Hud {
                 Some((&c.config.id, [r.x, r.y, r.w as i32, r.h as i32]))
             })
             .collect();
-        serde_json::json!({"character_sheet":self.sheet_diagnostic(),"spell_controls":spell_controls,"spell_panel":self.spells_open,"journal":self.journal_diagnostic(),"context_message":label(Binding::InventoryHover),
+        let rest: BTreeMap<_, _> = self
+            .components
+            .iter()
+            .zip(&self.placed)
+            .filter(|(c, _)| {
+                matches!(c.config.action, Some(Action::Rest(_) | Action::ToggleRest))
+                    || c.config.binding == Some(Binding::GameClock)
+            })
+            .filter_map(|(c, p)| {
+                let r = p.as_ref()?.rect;
+                Some((&c.config.id, [r.x, r.y, r.w as i32, r.h as i32]))
+            })
+            .collect();
+        let clock_sample = self
+            .bound(Binding::GameClock)
+            .and_then(|i| self.components[i].clock.as_ref()?.sample)
+            .map(|(x, phase)| serde_json::json!({"strip_x":x,"moon_phase":phase}));
+        serde_json::json!({"clock_sample":clock_sample,"rest_controls":rest,"rest_mode":self.rest_mode,"character_sheet":self.sheet_diagnostic(),"spell_controls":spell_controls,"spell_panel":self.spells_open,"journal":self.journal_diagnostic(),"context_message":label(Binding::InventoryHover),
             "npc_context":label(Binding::NpcContext),"npc_gauges":self.npc_gauges,"cursor":self.cursor_diagnostic(),"spell_cursor_frame":self.cursor_frame.filter(|(mode,_)| *mode==CursorMode::Spell).map(|(_,i)| i),"dialogue_responses":responses,"dialogue_scroll":self.dialogue_layout.diagnostics(),
             "map_status":label(Binding::MapStatus),"scale_percent":self.scale,"effective_scale_percent":self.effective_scale,"inventory":self.inventory_diagnostics(),"fonts":self.font_profiles,"image_references":images,
             "focused":control(self.focus),"hovered":control(self.hover),"pressed":control(self.pressed)})
@@ -1621,7 +1668,38 @@ impl Hud {
         }
     }
 
-    pub(super) fn set_game_time(&mut self, hours: u64) -> bool {
+    pub(super) fn has_rest(&self) -> bool {
+        self.components.iter().any(|c| c.config.rest_panel)
+    }
+    pub(super) fn rest_mode(&self) -> Option<arcanum_rs::content::world::RestMode> {
+        self.rest_mode
+    }
+    pub(super) fn rest_open(&self) -> bool {
+        self.rest_mode.is_some()
+    }
+
+    pub(super) fn show_rest(&mut self, mode: Option<arcanum_rs::content::world::RestMode>) {
+        self.rest_mode = mode;
+        if let Some(mode) = mode {
+            for i in 0..self.components.len() {
+                if let Some(row) = self.components[i].config.rest_label {
+                    let key = row as i32 + if mode.waiting() { 12 } else { 0 };
+                    let label = self
+                        .rest_messages
+                        .as_ref()
+                        .and_then(|m| m.get(key))
+                        .unwrap_or("")
+                        .to_owned();
+                    self.write_label(i, &label);
+                }
+            }
+        }
+        self.focus = None;
+        self.cancel_press();
+        self.clear_layout();
+    }
+
+    pub(super) fn set_game_time(&mut self, seconds: u64) -> bool {
         let Some(index) = self.bound(Binding::GameClock) else {
             return false;
         };
@@ -1629,15 +1707,13 @@ impl Hud {
         let Some(clock) = &mut component.clock else {
             return false;
         };
-        if clock.hours == Some(hours) {
+        if !clock.paint(
+            &mut component.base,
+            seconds,
+            component.config.fill.unwrap_or([0; 4]),
+        ) {
             return false;
         }
-        clock.hours = Some(hours);
-        clock.paint(
-            &mut component.base,
-            hours,
-            component.config.fill.unwrap_or([0; 4]),
-        );
         component.art = native_art(component, &component.base, None);
         true
     }
@@ -1851,6 +1927,8 @@ impl Hud {
         let config = &self.components[index].config;
         config.action.filter(|action| {
             !config.disabled
+                && (self.rest_mode.is_none()
+                    || matches!(action, Action::ToggleRest | Action::Rest(_)))
                 && (config.spell_slot.is_none()
                     || config
                         .spell_slot
@@ -2126,6 +2204,7 @@ fn parse(source: &str) -> Result<Theme, Box<dyn Error>> {
             || e.text.is_some()
             || e.fill.is_some()
             || e.binding.is_some_and(Binding::is_label)
+            || e.rest_label.is_some()
             || hover_fill
         {
             pixels += e.size[0]

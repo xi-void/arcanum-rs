@@ -559,6 +559,7 @@ impl Hud {
         reader: &mut InventoryReader,
         world: &mut InteractiveWorld,
         point: Option<(u32, u32)>,
+        self_target: bool,
     ) {
         let Some(drag) = self.inventory.drag.take() else {
             return;
@@ -570,7 +571,7 @@ impl Hud {
                 && drag.equipped.is_none()
                 && self.inventory.view != Some(InventoryView::Trade)
             {
-                match world.select_tool(&drag.id) {
+                match reader.use_backpack_item(world, &drag.id, self_target) {
                     Ok(()) => {
                         self.close_inventory();
                     }
@@ -653,6 +654,12 @@ impl Hud {
         if let Some((slot, _)) = self.equipment_at(point) {
             if self.equipped(slot).is_some() {
                 self.inventory.error = reader.change_equipment(world, slot, None, None).err();
+            }
+        } else if self.inventory.view == Some(InventoryView::Inventory) {
+            if let Some((0, _, item)) = self.grid_item(point)
+                && world.is_food(&item.id)
+            {
+                self.inventory.error = reader.use_backpack_item(world, &item.id, true).err();
             }
         } else if let Some((index, _, item)) = self.grid_item(point)
             && let (Some(from), Some(to)) =

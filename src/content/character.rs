@@ -399,6 +399,45 @@ pub(crate) struct Environment {
     pub dark: bool,
 }
 
+/// Independent CE poison damage and recovery events, on the saved game timeline.
+#[derive(Clone, Copy, Debug, Serialize, serde::Deserialize)]
+pub(crate) struct PoisonTimer {
+    damage: u64,
+    recovery: u64,
+}
+
+impl PoisonTimer {
+    pub(crate) fn synchronize(timer: &mut Option<Self>, level: i32, now: u64) {
+        if level <= 0 {
+            *timer = None;
+        } else {
+            timer.get_or_insert(Self {
+                damage: now.saturating_add(15),
+                recovery: now.saturating_add(120),
+            });
+        }
+    }
+
+    pub(crate) fn due(self) -> u64 {
+        self.damage.min(self.recovery)
+    }
+
+    pub(crate) fn advance(&mut self, level: &mut i32, rate: i32, now: u64) -> i32 {
+        let mut damage: i32 = 0;
+        while *level > 0 && self.due() <= now {
+            if self.recovery <= self.damage {
+                *level = level.saturating_sub(rate.max(1)).max(0);
+                self.recovery = self.recovery.saturating_add(120);
+            } else {
+                let severity = 1 + i32::from(*level >= 200) + i32::from(*level >= 550);
+                damage = damage.saturating_add(severity);
+                self.damage = self.damage.saturating_add(15);
+            }
+        }
+        damage
+    }
+}
+
 #[derive(Clone, Serialize, serde::Deserialize)]
 pub(crate) struct Character {
     #[serde(default)]
@@ -425,6 +464,8 @@ pub(crate) struct Character {
     pub(crate) fatigue_damage: i32,
     #[serde(default)]
     pub(crate) recover_at: Option<u64>,
+    #[serde(default)]
+    pub(crate) poison_timer: Option<PoisonTimer>,
     #[serde(default)]
     pub(crate) critter_flags: u32,
     #[serde(default)]
@@ -469,6 +510,7 @@ impl Default for Character {
             mastery: None,
             fatigue_damage: 0,
             recover_at: None,
+            poison_timer: None,
             critter_flags: 0,
             critter_flags2: 0,
             spell_flags: 0,
@@ -949,6 +991,27 @@ impl Character {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn poison_hour_skip_matches_ordered_damage_and_recovery() {
+        let mut timer = None;
+        PoisonTimer::synchronize(&mut timer, 207, 100);
+        let mut single = timer.unwrap();
+        let mut stepped = single;
+        let (mut a, mut b) = (207, 207);
+        let first_due = single.due();
+        assert_eq!(first_due, 115);
+        let damage = single.advance(&mut a, 9, 3700);
+        let ticks = (100..=3700)
+            .map(|t| stepped.advance(&mut b, 9, t))
+            .sum::<i32>();
+        assert_eq!((a, damage), (0, ticks));
+        assert!(damage > 100);
+        let roundtrip: PoisonTimer =
+            serde_json::from_value(serde_json::to_value(stepped).unwrap()).unwrap();
+        assert_eq!(single.due(), roundtrip.due());
+        PoisonTimer::synchronize(&mut timer, 0, 120);
+        assert!(timer.is_none());
+    }
 
     #[test]
     fn pick_locks_aptitude_and_current_fatigue_use_adjusted_character_values() {

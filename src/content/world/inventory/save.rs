@@ -8,6 +8,8 @@ pub struct Objects {
     #[serde(default)]
     combat: combat::Combat,
     #[serde(default)]
+    encounter: casting::encounters::Schedule,
+    #[serde(default)]
     accounts: trade::Accounts,
     #[serde(default)]
     restocks: stock::Events,
@@ -62,6 +64,7 @@ impl InteractiveWorld {
         let session = &self.cache.inventory;
         Objects {
             combat: session.combat.snapshot(self.cache.effect_time),
+            encounter: session.encounter.clone(),
             accounts: session.accounts.clone(),
             restocks: session.restocks.clone(),
             magick: session.magick.clone(),
@@ -338,6 +341,7 @@ impl Objects {
             }
         }
         session.restocks = self.restocks.clone();
+        session.encounter = self.encounter.clone();
         session.accounts = self.accounts.clone();
         for (map, ids) in &self.unlocked {
             let index = map_index(vfs, catalog, &mut indices, map)?;

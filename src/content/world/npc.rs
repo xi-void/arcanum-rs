@@ -92,6 +92,7 @@ impl InteractiveWorld {
     }
 
     pub fn restore_script_state(&mut self, mut state: State) {
+        state.start_hour = self.cache.scripts.start_hour;
         state.sector_map = self.cache.scripts.sector_map.take();
         state.initialize_random();
         self.cache.scripts = state;

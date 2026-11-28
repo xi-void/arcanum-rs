@@ -41,6 +41,7 @@ pub struct AppearanceFields {
     pub material: Option<u32>,
     pub sound_effect: Option<i32>,
     pub(crate) use_local: Option<crate::content::script::Local>,
+    pub bed_occupied: Option<bool>,
     pub use_script: Option<i32>,
     pub unlock_script: Option<i32>,
     pub(crate) unlock_local: Option<crate::content::script::Local>,
@@ -622,6 +623,9 @@ impl Fields {
     }
 
     fn project(&mut self, index: usize, category: u32, value: FieldValue<'_>) {
+        if category == SCENERY && index == 65 {
+            self.appearance.bed_occupied = Some(value.reference().is_some());
+        }
         if index == 31 {
             let script = |slot| {
                 value.array_entry(slot).map_or(0, |entry| {

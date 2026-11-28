@@ -50,6 +50,16 @@ pub struct Atlas {
     pub start_map: i32,
 }
 
+pub(super) fn town_rule(raw: &str) -> (&str, bool) {
+    let lower = raw.to_ascii_lowercase();
+    lower.find("[w:").map_or((raw.trim(), false), |at| {
+        (
+            raw[..at].trim(),
+            lower[at + 3..].trim_start().starts_with('1'),
+        )
+    })
+}
+
 impl Atlas {
     pub fn load(vfs: &mut Vfs) -> Result<Self, Box<dyn Error>> {
         let catalog = Catalog::load(vfs)?;
@@ -67,9 +77,8 @@ impl Atlas {
                 .entries()
                 .filter_map(|(id, raw)| {
                     let id = u32::try_from(id).ok().filter(|id| *id > 0)?;
-                    let lower = raw.to_ascii_lowercase();
-                    let name = raw[..lower.find("[w:").unwrap_or(raw.len())].trim();
-                    Some((id, (name.to_owned(), lower.contains("[w:1]"))))
+                    let (name, waitable) = town_rule(raw);
+                    Some((id, (name.to_owned(), waitable)))
                 })
                 .collect()
         } else {
