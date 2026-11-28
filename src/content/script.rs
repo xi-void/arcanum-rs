@@ -12,6 +12,7 @@ use std::{
     sync::Arc,
 };
 
+pub(super) mod party;
 mod timers;
 
 const STEP_BUDGET: usize = 1000;
@@ -25,6 +26,8 @@ pub(crate) enum Event {
     Use,
     BuyObject,
     Dying,
+    Resurrect,
+    LeaderKilling,
     FirstHeartbeat,
     Heartbeat,
     Dialogue,
@@ -58,6 +61,12 @@ impl Local {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct State {
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub marked_areas: BTreeSet<i32>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(super) jilted: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) followers: BTreeMap<String, party::Follower>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(super) sector_toggles: BTreeMap<String, BTreeSet<u64>>,
     #[serde(skip)]
@@ -112,6 +121,9 @@ pub(super) enum ActorAction {
 /// The staged read view for a single SCR/DLG invocation. Operations commit with its state writes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Interaction {
+    pub candidate: Option<party::Candidate>,
+    pub worn: BTreeSet<(u8, u32)>,
+    pub bad_associates: bool,
     pub item_use: Option<ItemUse>,
     pub reaction: Option<i32>,
     pub aptitude: i32,
@@ -450,6 +462,12 @@ impl State {
             .any(|batch| batch.is_empty() || batch.iter().any(|c| c.script <= 0))
         {
             return Err("Invalid saved script timer".into());
+        }
+        if self.followers.iter().any(|(key, f)| {
+            crate::sector::objects::OriginalId::parse_key(key).is_none_or(|id| id.kind != 2)
+                || f.leader_level < 0
+        }) {
+            return Err("Invalid saved follower identity or leader level".into());
         }
         if self.flags.keys().any(|&i| !(0..GLOBAL_FLAGS).contains(&i))
             || self
@@ -836,12 +854,22 @@ impl Code {
                     .interaction
                     .as_ref()
                     .map(|s| match cond.opcode {
-                        // The current player has no summoned followers.
-                        11 => false,
+                        11 => s.bad_associates,
                         12 => s.spell_flags & 0x20000 != 0,
                         13 => s.spell_flags & 0x80000 != 0,
                         14 => s.spell_flags & 0x3c != 0,
                         _ => s.spell_flags & 1 != 0,
+                    }),
+                21 => actor(cond.focus(0))
+                    .zip(value(cond, 1))
+                    .and_then(|(side, name)| {
+                        Some(
+                            view.state()
+                                .interaction
+                                .as_ref()?
+                                .worn
+                                .contains(&(side, u32::try_from(name).ok()?)),
+                        )
                     }),
                 17 => {
                     actor(cond.focus(0))
@@ -885,7 +913,22 @@ impl Code {
                     Actor::Item(name) => value(cond, 1).map(|n| i64::from(n) == i64::from(name)),
                     Actor::Player | Actor::Mobile | Actor::None => None,
                 },
-                18 if [cond.focus(0), cond.focus(1)] == [1, 0] => input.follows_player,
+                18 if cond.focus(0) == 1 && actor(cond.focus(1)) == Some(0) => Some(
+                    view.state().followers.contains_key(&attachment.owner)
+                        || input.follows_player.unwrap_or(false),
+                ),
+                23 if actor(cond.focus(0)) == Some(0) => view
+                    .state()
+                    .interaction
+                    .as_ref()
+                    .and_then(|i| i.stats[15])
+                    .map(|limit| view.state().follower_count() >= limit.max(0) as usize),
+                52 if cond.focus(0) == 1 => Some(
+                    view.state()
+                        .followers
+                        .get(&attachment.owner)
+                        .is_some_and(|f| f.waiting),
+                ),
                 45 => sector_operand(value(cond, 0), value(cond, 1)).and_then(|id| {
                     let (map, base) = view.state().sector_map.as_deref()?;
                     Some(
@@ -910,7 +953,11 @@ impl Code {
                     value(cond, 1).map(|id| view.state().rumors.contains_key(&id))
                 }
                 41 => value(cond, 0).map(|id| view.state().quelled_rumors.contains(&id)),
-                39 if cond.focus(0) == 1 => input.npc_flags.map(|flags| flags & 0x20 != 0),
+                39 if cond.focus(0) == 1 => Some(
+                    view.state().jilted.contains(&attachment.owner)
+                        || !view.state().followers.contains_key(&attachment.owner)
+                            && input.npc_flags.is_some_and(|flags| flags & 0x20 != 0),
+                ),
                 43 => value(cond, 0)
                     .and_then(|index| view.state().read(attachment, Slot::GlobalFlag(index)))
                     .map(|v| v != 0),
@@ -1072,6 +1119,23 @@ impl Code {
                         i32::from(matches!(action.opcode, 8 | 100)),
                     )
                     .ok_or_else(unresolved)?;
+                    None
+                }
+                21 | 22 | 67
+                    if action.focus(0) == 1
+                        && (action.opcode != 21 || actor(action.focus(1)) == Some(0)) =>
+                {
+                    let View::Writable(state) = &mut view else {
+                        return Err(unresolved());
+                    };
+                    let order = match action.opcode {
+                        21 => party::Order::Join(true),
+                        22 => party::Order::Leave,
+                        _ => party::Order::Wait,
+                    };
+                    state
+                        .order(&attachment.owner, order, true)
+                        .map_err(|_| unresolved())?;
                     None
                 }
                 131 => {

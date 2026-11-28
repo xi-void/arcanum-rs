@@ -378,7 +378,15 @@ impl InventoryReader {
             } else {
                 0
             };
-            let clip = self.actor_clip(w, Some(id), weapon, dir, &[1])?;
+            let run = w.cache.scripts.following(&id.key())
+                && !w.cache.inventory.combat.active()
+                && w.cache
+                    .player
+                    .as_ref()
+                    .is_some_and(|pc| distance(t.tile, pc.tile()) > 4 || pc.is_running());
+            let clip =
+                self.actor_clip(w, Some(id), weapon, dir, if run { &[6, 1] } else { &[1] })?;
+            let running = run && clip.frames[0].source.virtual_path.ends_with("g.art");
             let art = w
                 .cache
                 .npc(key)
@@ -386,7 +394,7 @@ impl InventoryReader {
                 .or_else(|| w.cache.ordered.iter().find(|r| r.key == key)?.actor_art)
                 .unwrap_or(0);
             let speed = t.stats.as_ref().and_then(|s| s.speed).unwrap_or(8);
-            let period = gait_period(art, speed, false, clip.period());
+            let period = gait_period(art, speed, running, clip.period());
             let duration = tile_period(
                 dir,
                 clip.frames.iter().map(|f| f.decoded.frame.offset),

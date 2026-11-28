@@ -258,9 +258,14 @@ impl Objects {
         }
 
         session.restore_magick(vfs)?;
-        for id in equipment.values() {
-            if let Some(entry) = session.prepare_wield(vfs, &session.state.changes[id].item)? {
-                session.wielded.insert(*id, entry);
+        for c in session
+            .state
+            .changes
+            .values()
+            .filter(|c| matches!(c.place, Place::Equipped(_) | Place::WornBy(..)))
+        {
+            if let Some(entry) = session.prepare_wield(vfs, &c.item)? {
+                session.wielded.insert(c.item.id, entry);
             }
         }
         session.refresh_worn();
@@ -365,11 +370,12 @@ impl Objects {
     }
 }
 
-fn records<'a>(vfs: &'a mut Vfs, map: &'a str, index: Option<&'a Index>) -> Records<'a> {
+pub(super) fn records<'a>(vfs: &'a mut Vfs, map: &'a str, index: Option<&'a Index>) -> Records<'a> {
     Records {
         vfs,
         map,
         index,
+        foreign: None,
         frames: FrameCache::default(),
         prototypes: Prototypes::default(),
     }

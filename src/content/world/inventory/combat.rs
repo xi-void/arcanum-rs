@@ -37,6 +37,8 @@ impl CombatMode {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Participant {
+    #[serde(default)]
+    withdrawing: bool,
     actor: Actor,
     ally: bool,
     #[serde(default)]
@@ -57,6 +59,8 @@ pub(in crate::content::world) struct Combat {
     elapsed_rounds: u64,
     #[serde(default)]
     deaths: Vec<(OriginalId, Actor)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    leader_kills: Vec<OriginalId>,
     ap: i32,
     focus: Actor,
     #[serde(default)]
@@ -87,6 +91,8 @@ pub(in crate::content::world) struct Combat {
     settled_bodies: Vec<OriginalId>,
     #[serde(skip)]
     next_ordinary: Duration,
+    #[serde(skip)]
+    next_loyalty: Duration,
     #[serde(skip)]
     sounds: Vec<(Duration, i32, i32)>,
     #[serde(skip)]
@@ -158,6 +164,9 @@ impl Combat {
             return Err("Invalid saved combat encounter".into());
         }
         Ok(())
+    }
+    pub(super) fn clear_actor_pose(&mut self, id: OriginalId) {
+        self.poses.remove(&Some(id));
     }
     pub(super) fn log(&mut self, event: Value) {
         if self.history.len() == 32 {
@@ -257,6 +266,7 @@ impl Combat {
         if fresh {
             self.armed = true;
             self.party.push(Participant {
+                withdrawing: false,
                 actor: None,
                 ally: true,
                 faction: 0,
@@ -279,6 +289,7 @@ impl Combat {
             self.party.insert(
                 index,
                 Participant {
+                    withdrawing: false,
                     actor: Some(id),
                     ally,
                     faction,
@@ -507,6 +518,38 @@ impl InteractiveWorld {
             .then(|| self.cache.target(key).map(|t| t.tile))
             .flatten()
     }
+    pub(in crate::content::world) fn check_actor_inventory(
+        &self,
+        id: OriginalId,
+    ) -> Result<(), String> {
+        if self.follower_orders(id).is_some() && !self.cache.inventory.magick.down(id) {
+            let Some(Aim::Object(key)) = InventoryReader::subject_aim(self, &Subject::Mobile(id))
+            else {
+                return Err("Follower is outside the active map".into());
+            };
+            let Some((resident, _)) = self.cache.npc(key) else {
+                return Err("Summoned creature cannot exchange equipment".into());
+            };
+            let defaults = resident
+                .prototype
+                .as_ref()
+                .ok_or("Follower prototype unavailable")?;
+            let (actor, _) =
+                self.cache
+                    .inventory
+                    .npc_vitals(id, &defaults.defaults, &resident.instance());
+            if actor.critter_flags & (8 | 0x20000000) != 0 || actor.spell_flags & 0x4000 != 0 {
+                return Err("Creature cannot exchange equipment".into());
+            }
+            let tile = self.cache.target(key).ok_or("Missing follower")?.tile;
+            let pc = self.cache.player.as_ref().ok_or("Player unavailable")?;
+            if !self.unconscious() && reachable(self, pc.tile(), tile, 4) {
+                return Ok(());
+            }
+            return Err("Follower inventory is out of reach".into());
+        }
+        self.check_corpse(id)
+    }
     pub(super) fn check_corpse(&self, id: OriginalId) -> Result<(), String> {
         if self
             .cache
@@ -617,7 +660,7 @@ impl InventoryReader {
                 continue;
             };
             let id = r.id;
-            if distance(at, tile) > perception_range
+            if distance(at, tile) > perception_range && !w.cache.scripts.following(&id.key())
                 || w.cache
                     .inventory
                     .combat
@@ -638,7 +681,7 @@ impl InventoryReader {
                 .unwrap_or(0);
             let (character, s) = w.cache.inventory.npc_vitals(id, d, &o);
             let spell = character.spell_flags;
-            let ally = spell & 0x08000000 != 0;
+            let ally = spell & 0x08000000 != 0 || w.cache.scripts.following(&id.key());
             if s.current_health <= 0 {
                 // A placed flat corpse already supplies its exact ART pose and frame.
                 if o.appearance().flags.or(d.appearance.flags).unwrap_or(0) & 4 == 0 {
@@ -700,6 +743,12 @@ impl InventoryReader {
         }
     }
     pub fn tick_combat(&mut self, w: &mut InteractiveWorld, now: Duration) -> bool {
+        for (key, f) in &mut w.cache.scripts.followers {
+            if let Ok(id) = parse_id(key) {
+                f.dead = w.cache.inventory.magick.down(id);
+            }
+        }
+        self.advance_followers(w);
         let mut changed = self.tick_combat_once(w, now);
         // CE's AGbeginAnimMove finishes the affordable path before presentation.
         // Re-enter the ordinary scheduler at the same instant after each paid NPC
@@ -802,6 +851,38 @@ impl InventoryReader {
             w.cache.inventory.combat.last_tick = Some(now);
             return redraw_motion || cleanup;
         }
+        let orders: Vec<_> = w
+            .cache
+            .scripts
+            .followers
+            .iter()
+            .filter(|(_, f)| !f.waiting && !f.dead)
+            .filter_map(|(key, f)| Some((parse_id(key).ok()?, f.orders.attack?)))
+            .chain(
+                w.cache
+                    .inventory
+                    .magick
+                    .controlled_orders()
+                    .filter_map(|(id, o)| Some((id, o.attack?))),
+            )
+            .collect();
+        for (actor, foe) in orders {
+            if w.cache.inventory.magick.down(foe)
+                || Self::subject_aim(w, &Subject::Mobile(foe)).is_none()
+            {
+                w.follower_orders_mut(actor).unwrap().attack = None;
+            } else if !w
+                .cache
+                .inventory
+                .combat
+                .party
+                .iter()
+                .any(|p| p.actor == Some(foe))
+            {
+                let _ = self.engage(w, foe, false, Some(actor));
+                let _ = self.engage(w, actor, true, Some(actor));
+            }
+        }
         self.scan_combat(w, now, at);
         let c = &mut w.cache.inventory.combat;
         let dt = c.last_tick.replace(now).map_or(0, |last| {
@@ -877,7 +958,10 @@ impl InventoryReader {
                 .find(|p| p.actor == actor)
             {
                 p.speed = t.stats.as_ref().and_then(|s| s.speed).unwrap_or(5);
-                if p.ally && actor.is_some_and(|id| id.kind == 2) && t.spell & 0x08000000 == 0 {
+                if p.ally
+                    && actor.is_some_and(|id| id.kind == 2 && !w.cache.scripts.following(&id.key()))
+                    && t.spell & 0x08000000 == 0
+                {
                     self.remove_fighter(w, actor);
                     continue;
                 }
@@ -910,7 +994,7 @@ impl InventoryReader {
                 continue;
             }
             let Some(id) = actor else { continue };
-            if distance(at, t.tile) > 24 {
+            if distance(at, t.tile) > 24 && !w.cache.scripts.following(&id.key()) {
                 self.remove_fighter(w, actor);
                 continue;
             }
@@ -919,6 +1003,35 @@ impl InventoryReader {
                 continue;
             }
             let ally = member.ally || t.spell & 0x08000000 != 0;
+            let command = w.follower_orders(id);
+            if let Some(goal) = command.and_then(|f| f.destination) {
+                if goal != t.tile
+                    && t.spell & 0x01000000 == 0
+                    && let Some((dir, to)) = combat_step(w, t.tile, goal, false)
+                {
+                    let result = w
+                        .cache
+                        .inventory
+                        .combat
+                        .check(actor, 2, t.stats.as_ref().map_or(0, |s| s.current_fatigue))
+                        .and_then(|()| self.walk_combat_step(w, &t, id, (dir, to), now, 2));
+                    if result.is_err() && w.cache.inventory.combat.timed() {
+                        w.cache.inventory.combat.next_turn();
+                    }
+                    acted = true;
+                    continue;
+                }
+                w.follower_orders_mut(id).unwrap().destination = None;
+            }
+            let command = w.follower_orders(id);
+            let c = &w.cache.inventory.combat;
+            let preferred = command.and_then(|f| f.attack);
+            if command.is_some_and(|f| f.back_off) {
+                if c.timed() {
+                    w.cache.inventory.combat.next_turn();
+                }
+                continue;
+            }
             let target = c
                 .party
                 .iter()
@@ -937,7 +1050,7 @@ impl InventoryReader {
                     };
                     Some((distance(t.tile, tile), p.actor))
                 })
-                .min_by_key(|v| v.0)
+                .min_by_key(|v| (preferred.is_some() && preferred != v.1, v.0))
                 .map(|v| v.1);
             acted = true;
             let result = target
@@ -1016,7 +1129,20 @@ impl InventoryReader {
         if attacker.unable() {
             return Err("Attacker is incapacitated".into());
         }
-        let weapon = w.cache.inventory.weapon(source, &attacker);
+        if let Some(id) = source
+            && w.cache.scripts.following(&id.key())
+            && self.follower_cast(w, id, victim, now)
+        {
+            self.delay(w, source, 800);
+            return Ok(());
+        }
+        let mut weapon = w.cache.inventory.weapon(source, &attacker);
+        if source.is_some_and(|id| w.cache.scripts.following(&id.key()))
+            && weapon.ammo.is_some()
+            && self.ammo_plan(w, source, &weapon).is_err()
+        {
+            weapon = w.cache.inventory.weapon_stats(source, &attacker, None);
+        }
         let c = &w.cache.inventory.combat;
         let fatigue = attacker.stats.as_ref().unwrap().current_fatigue;
         c.check(source, 1, fatigue)?;
@@ -1026,6 +1152,15 @@ impl InventoryReader {
             }
             return Ok(());
         }
+        if let Some(id) = source
+            && w.cache.scripts.following(&id.key())
+            && let Some(step) = self.follower_withdrawal(w, id, &attacker, target.tile)
+        {
+            w.cache.inventory.combat.check(source, 2, fatigue)?;
+            self.walk_combat_step(w, &attacker, id, step, now, 2)?;
+            return Ok(());
+        }
+        let c = &w.cache.inventory.combat;
         let flee = source.is_some() && attacker.critter & 0x10 != 0;
         let approach = flee || !reachable(w, attacker.tile, target.tile, weapon.range);
         let cost = if approach {
@@ -1064,20 +1199,7 @@ impl InventoryReader {
         }
         if let Some((dir, to)) = direction {
             if let Some(id) = source {
-                let duration = self.walk_actor(w, &attacker, id, dir, to, now)?;
-                if let Some(p) = w
-                    .cache
-                    .inventory
-                    .combat
-                    .party
-                    .iter_mut()
-                    .find(|p| p.actor == source)
-                {
-                    p.wait_ms = duration.as_millis().min(u128::from(u64::MAX)) as u64;
-                }
-                w.cache
-                    .inventory
-                    .pay_movement_ap(source, attacker.tile, to, cost);
+                self.walk_combat_step(w, &attacker, id, (dir, to), now, cost)?;
             } else {
                 let p = w.cache.player.as_mut().unwrap();
                 if !p.moving() {
@@ -1116,6 +1238,31 @@ impl InventoryReader {
             self.attack_feedback(w, &attacker, &target, &weapon, event, now);
         }
         self.delay(w, source, wait);
+        Ok(())
+    }
+    fn walk_combat_step(
+        &mut self,
+        w: &mut InteractiveWorld,
+        attacker: &Target,
+        id: OriginalId,
+        (dir, to): (u8, Tile),
+        now: Duration,
+        cost: i32,
+    ) -> Result<(), String> {
+        let duration = self.walk_actor(w, attacker, id, dir, to, now)?;
+        if let Some(p) = w
+            .cache
+            .inventory
+            .combat
+            .party
+            .iter_mut()
+            .find(|p| p.actor == Some(id))
+        {
+            p.wait_ms = duration.as_millis().min(u128::from(u64::MAX)) as u64;
+        }
+        w.cache
+            .inventory
+            .pay_movement_ap(Some(id), attacker.tile, to, cost);
         Ok(())
     }
     fn delay(&self, w: &mut InteractiveWorld, actor: Actor, ms: u64) {

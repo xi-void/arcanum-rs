@@ -1,6 +1,6 @@
 # Arcanum-RS — Known Issues
 
-Baseline includes M82-R Consumables, Rest, Waiting and Game Time. Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
+M83-R party and follower mechanics passed milestone acceptance. Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
 
 ## Triage
 
@@ -15,6 +15,31 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 - **M79 character sheet (P2, open).** The Classic sheet omits the player’s name.
 - **Moving shadows (P2, open).** NPC shadows can lose their anchor while the actor moves.
 - Configurable floating damage numbers remain an optional future enhancement.
+- **Audio output (P2, Needs reproduction).** One native Linux session repeatedly logged an ALSA `poll() returned POLLERR` after combat. The log reached 75 MiB before clean exit. A fresh launch completed the same gameplay checks. The device condition and recovery path need reproduction.
+
+### PARTY-001 — Follower compatibility
+
+- **Resolved in native play.** Original dialogue can establish and release an NPC's leader, including a waiting follower who resumes or leaves. Virgil followed from the Crash Site through the cave and overland to Shrouded Hills. His atlas instructions now discover the intended destinations. His staff retained its identity through removal, return and travel. Sogg’s own greeting override and Charisma branches work in the inn. In a saved-state replay his original AI packet made him leave when his reaction fell below its threshold. Vollinger joined through his original Dernholm dialogue.
+- **Resolved in combat replays.** Recruited actors use the encounter scheduler, original AI packet and learned spells. Virgil used Minor Healing and earned kill credit in all three modes. Vollinger expended ammunition. Casting the original Resurrection spell on Virgil restored the same actor and party portrait. A summoned Familiar accompanied its caster through the cave exit, survived restart, fought and gained a level when its caster leveled.
+- **P2, open.** Follower casting handles direct and callback vital effects. Tactical selection of maintained buffs, projectile spells and inventory spell devices needs broader caster support. Complex quest-specific SCR actions, interjections involving a second dialogue speaker and unsupported equipment scripts retain their interpreter diagnostics.
+
+### PARTY-002 — Follower gait repeatedly stops and restarts
+
+- **P2 · Open.** During ordinary following, the player sees the follower’s movement animation repeatedly stop and restart.
+- **Reproduce.** Recruit Virgil at the Crash Site. Outside combat, click a distant point on clear ground once. Watch his gait while he is still closing the distance, then let him catch up.
+- **Expected.** The walk or run cycle continues across tile boundaries while the follower is moving. It settles to idle when the follower stops within formation range.
+- **Investigate.** Compare movement orders and path replanning with actor velocity and animation frame progression at each visible pause.
+
+### PARTY-003 — Classic follower inventory lacks the equipment paperdoll toggle
+
+- **P2 · Open.** Right-click Virgil’s party portrait and choose **Inventory** while he has his staff equipped. Look for the vanilla/CE control that switches the follower’s inventory to the equipment paperdoll. The toggle is missing.
+- **Expected.** The toggle shows the selected follower’s worn equipment, including Virgil’s staff in the weapon slot, and allows switching back to his carried items.
+- **Investigate.** Compare the Classic follower inventory controls with the vanilla/CE layout and input handling. The authoritative equipment slots already exist and can be inspected with `rpc inventory GUID` using the follower’s identity.
+
+### FAMILIAR-001 — Fluorescent green Familiar
+
+- **Priority P2. Status Needs reproduction.** The player reports that the Familiar uses the expected creature sprite but appears fluorescent green.
+- Compare the same initial form and caster aptitude in vanilla and Arcanum-RS using the installed resources. Record the winning prototype and ART, creature AID, selected palette and summon appearance state. Palette selection, ART palette interpretation, the creature AID and the summoned object's appearance state are hypotheses. The cause is open.
 
 ### CAM-002 — Camera scroll distance from the player
 
@@ -32,21 +57,21 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 ### COMBAT-001 — Remaining combat compatibility
 
 - **Priority P2. Status open.** The stock CE skill rolls, armor and resistance, AP costs, NPC-first turn list, critical damage bonuses and base XP pool rules underpin real-time combat and both turn-based speeds. The Born Under a Sign background supplies both critical severity modifiers. Its hit modifier feeds the original bonus-damage rolls. Its fumble modifier is retained for the remaining weapon and ammunition damage rules. Detailed critical locations, equipment damage and dropped weapons, special critical-chart injuries, ambient light penalties and tactical NPC spell and weapon selection still need coverage. Real-time attack intervals use weapon cost and actor speed. NPCs and summons play the directional walking, attack and death sequences available for their current models. The resolver supports ordinary and torso deaths with the original fallback. Additional injury-specific death variants depend on critical-chart support. Ordinary combat currently sets facing directly when starting an action. CE also has a separate incremental rotation goal for ordinary turns. Fast turns use the final facing directly.
-- Followers need recruitment, commands, party travel and party XP distribution. An allied summon can fight using its current form and ownership. Encounters use original hostility, sight, faction and supported script attachments. Some original dying and encounter scripts use operations beyond the script interpreter, reported by `rpc combat`.
-- **Installed regression baseline.** The M79-R installed-data run reproduced the pre-M78 failures in the Bates lighting composition, the dining-room mobile shadow probe and the Kna Tha rabbit position. The other 74 installed checks passed, including the external VFS smoke check with its mod fixture. The dropped-item eviction assertion follows the item's original identity through the rendered pickup target.
+- Recruitable followers use the original dialogue, party orders, equipment, travel and kill credit. An allied summon can fight using its current form and ownership. Encounters use original hostility, sight, faction and supported script attachments. Some original dying and encounter scripts use operations beyond the script interpreter, reported by `rpc combat`.
+- **Installed regression baseline.** The M79-R installed-data run reproduced the pre-M78 failures in the Bates lighting composition, the dining-room mobile shadow probe and the Kna Tha rabbit position. The other 74 installed checks passed, including the external VFS smoke check with its mod fixture. M83-R reproduced those same three failures in the 43 installed library checks. The other 40 passed, as did all 11 installed prototype and effect checks. The dropped-item eviction assertion follows the item's original identity through the rendered pickup target.
 
 ### PROG-001 — Remaining character and ability execution
 
 - **Priority** P2. **Status** Deferred.
 - The Classic spellbook executes the installed programs for the 16 colleges through the casting and progression systems. Remaining spell dependencies are tracked in MAG-001.
 - The learned schematic book supports the 56 degree recipes through the installed recipe and inventory definitions. Found schematics, followers supplying components, and powered-device use need further runtime support. Recovery consumables use their installed Use scripts and Item_Used programs. Conditional equipment scripts outside the supported reversible effect operations report the winning script when blocked.
-- Manual point allocation, original skill training tiers, dialogue, quest and combat XP, and kill alignment operate for the player. Automatic leveling schemes, pickpocket alignment, follower attitude AI and college mastery quests remain deferred. Some background and item effect operators remain outside the statistic subset and appear in character diagnostics.
+- Manual point allocation, original skill training tiers, dialogue, quest and combat XP, and kill alignment operate for the player. Followers spend earned points using their installed auto-level schemes. Player auto-leveling, pickpocket alignment and college mastery quests remain deferred. Some background and item effect operators remain outside the statistic subset and appear in character diagnostics.
 
 ### MAG-001 — Spell interactions with combat, party and environmental systems
 
 - **Priority** P1. **Status** Open for full M77-R acceptance.
-- The interpreter reads all 80 original programs. Living targets, resistance, health and fatigue, movement, temporary effects, summons, forms and dispel use session-owned state. Combat consumes fear, hostility, paralysis and control flags. Controlled actors and summons select nearby hostile participants. Unarmed strikes use the current form and applicable equipment bonuses. Summons retain their identities and original placement on return to a map. Summoned followers still need party travel to accompany the caster between maps.
-- Damage to carried and loose items has a persistent structural-damage field. Disintegrate can damage or destroy a portable item. Removing an immovable object, updating its collision and running its destruction script require the breakable-world-object lifecycle. The player renderer reads sinkable terrain and the water-walking flag set by Body of Air and Body of Water. Native shore transitions, NPC wading and water shadows remain unverified. Detect Traps needs trap instances and their discovery state. Player transformations store or drop worn gear according to available backpack space and re-equip previously worn items still carried. For authored NPCs, the combat resolver reads equipped armor and resistance. Full NPC loadout restoration after a transformation and tactical weapon selection remain open.
+- The interpreter reads all 80 original programs. Living targets, resistance, health and fatigue, movement, temporary effects, summons, forms and dispel use session-owned state. Combat consumes fear, hostility, paralysis and control flags. Controlled actors and summons select nearby hostile participants. Unarmed strikes use the current form and applicable equipment bonuses. Active summoned creatures accompany the caster through map transitions. Familiar retains its generated identity and installed aptitude-selected form. Spell maintenance, control bindings and NPC recruitment retain their respective lifetimes.
+- Damage to carried and loose items has a persistent structural-damage field. Disintegrate can damage or destroy a portable item. Removing an immovable object, updating its collision and running its destruction script require the breakable-world-object lifecycle. The player renderer reads sinkable terrain and the water-walking flag set by Body of Air and Body of Water. Native shore transitions, NPC wading and water shadows remain unverified. Detect Traps needs trap instances and their discovery state. Player transformations store or drop worn gear according to available backpack space and re-equip previously worn items still carried. For authored NPCs, the combat resolver reads equipped armor and resistance. Full NPC loadout restoration after a transformation and selection of spell devices still need coverage. Recruited actors can equip a better usable weapon and consume its ammunition.
 - Spell-specific results from the native input checks, including maintained state and renderer provenance, are available in the local M77-R visual captures. Representative casts covered every college. The original gate still resists Unlocking Cantrip at aptitude 10 and opens at 20 for ten fatigue each. A controlled summon and the player each receive one Regenerate binding, with its caster EyeCandy on the player.
 
 ### DLG-001 — Dialogue requires unimplemented script and game state
@@ -58,11 +83,11 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
   gameplay dependencies. The Bates house guards use equipment and combat
   checks and floating lines.
 - Direct quest state conditions are implemented. Generated quest responses,
-  reputation, encounter and party checks remain unresolved. Skill, training and alignment conditions read the acting character.
+  reputation and encounter checks require broader gameplay support. Party presence, waiting and membership checks use the saved leader relationships. Skill, training and alignment conditions read the acting character.
   Initial reaction uses the original base and available character modifiers.
   Authored reaction changes persist in the NPC account. Persistent meeting history and live AI changes are pending.
 - Some greetings and response directives need class-, race-, quest- or
-  service-specific dialogue. Companion recruitment and service-specific
+  service-specific dialogue. Companion recruitment uses the installed join and refusal branches. Service-specific
   actions such as identification remain deferred. Scriptless NPCs have no conversation panel.
 
 ### QUEST-001 — Quest rewards and broader logbook coverage
@@ -152,6 +177,12 @@ These cases extend [SH-001](#sh-001--shrouded-hills-interaction-follow-up). Rela
 
 - **Priority:** P2 | **Status:** Deferred
 - Gambling, identification, NPC equipment selection and inventory scripts with unsupported side effects need their corresponding gameplay systems. A purchase predicate that the interpreter cannot evaluate rejects the sale. Shop stock uses original item records and probability tables for replacement.
+
+### TRADE-002 — Barter dialogue response requires a second click
+
+- **P2 · Open.** Speak to a merchant who offers the original **Barter** response, such as the Wise Woman. Click that response once and wait for the trading interface. The player reports that it opens only after a second click.
+- **Expected.** A single click on the available **Barter** response opens trading with the speaking merchant.
+- **Investigate.** Trace the first click through shared dialogue action dispatch and merchant service activation. Check when the accepted response requests trading and when the trading interface opens.
 
 ### MAP-003 — Installed town-map resources rejected
 
@@ -272,7 +303,7 @@ These cases extend [SH-001](#sh-001--shrouded-hills-interaction-follow-up). Rela
 ### Recovery and rest presentation
 
 - **P2, deferred.** Rest uses the original selector and hourly healing. The bed pose, sleep fade and follower sleep notifications need animation and party integration. Overland encounter transitions from the world-map travel screen remain part of travel simulation.
-- Recovery items dispatch their installed Use SCR or supported Item_Used program. Unsupported scripted operations report their dependency and leave the item in the backpack. Remaining non-recovery device programs and follower inventory actions need their respective gameplay systems.
+- Recovery items dispatch their installed Use SCR or supported Item_Used program. Unsupported scripted operations report their dependency and leave the item in the backpack. Remaining non-recovery device programs need their respective gameplay systems. Recruit inventory uses the shared transfer and equipment transactions.
 
 ### AUDIO — Incorrect inventory opening sound
 - Priority: P2

@@ -947,7 +947,12 @@ impl Character {
                 adjusted(value * (100 + percent) / 100, 12, 0, 6)
             },
             poison_recovery: adjusted(i64::from(constitution), 13, 1, 20),
-            max_followers: adjusted(i64::from(charisma / 4), 15, 1, 7),
+            max_followers: adjusted(
+                i64::from(charisma / 4 + i32::from((self.skill(11) >> 6) & 3 >= 2)),
+                15,
+                1,
+                7,
+            ),
             aptitude: self.aptitude(rules),
             age: adjusted(i64::from(self.base[25]), 25, 20, 1000),
             level,

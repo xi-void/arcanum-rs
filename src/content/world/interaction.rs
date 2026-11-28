@@ -708,6 +708,62 @@ impl SectorCache {
         None
     }
 
+    /// NPCs with the open-doors AI permission can use ordinary unlocked doors.
+    /// A door remains a real movement edge and retains its original lock and use rules.
+    pub(super) fn follower_door_step(
+        &mut self,
+        from: Tile,
+        goal: Tile,
+        now: Duration,
+    ) -> Option<(u8, Tile)> {
+        let player = self.player.as_ref()?.tile();
+        let route = super::super::player::path::find_with(from, goal, |tile, dir| {
+            let next = neighbor(tile, dir)?;
+            if next == goal
+                && collision::can_reach_container(tile, next, |at| {
+                    Self::player_cell(&self.entries, &self.door_states, at)
+                })
+            {
+                return Some((next, 0));
+            }
+            if next == player {
+                return None;
+            }
+            let (next, door) = self.planned_edge(tile, dir)?;
+            if let Some((_, door)) = door {
+                if door.on_use.is_some() || door.destination.is_some() {
+                    return None;
+                }
+                door.may_open(&self.door_states, self.hour, false, &self.scripts, tile)
+                    .ok()?;
+            }
+            Some((next, if door.is_some() { 20 } else { 0 }))
+        })?;
+        let dir = *route.front()?;
+        let (next, door) = self.planned_edge(from, dir)?;
+        if next == player {
+            return None;
+        }
+        if let Some((key, _)) = door {
+            let (sector, _) = self.entries.get(&tile_sector_id((key.1.2, key.1.1)))?;
+            let Action::Door(door) = &sector.interactions[&key].action else {
+                return None;
+            };
+            self.door_states
+                .change(
+                    door,
+                    now,
+                    self.hour,
+                    false,
+                    from,
+                    (&mut self.scripts, &mut self.inventory),
+                )
+                .ok()?;
+            return None;
+        }
+        Some((dir, next))
+    }
+
     fn key_or_egress(&self, door: &Door, from: Tile) -> bool {
         if self.inventory.matching_key(door.key_id).is_some() {
             return true;

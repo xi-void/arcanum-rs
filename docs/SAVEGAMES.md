@@ -60,6 +60,8 @@ stream unchanged. Earlier version 1 files without the quest field retain
 their script flags and initialize quests to their new-game defaults. Active
 conversations and interpreter temporaries are transient.
 
+Recruitment and waiting belong to the session's `scripts.followers` table, keyed by the original NPC identity. Formation, active orders and the last leader level are saved with the relationship. An older save without this table starts with no recruited followers. Items keep their original owner identity across maps. Actor deltas retain damage, fatigue and automatic advancement. Spell-created followers keep their identities, orders and caster relationship inside the active spell. Ending a control spell releases its orders with the binding.
+
 Writes sync a complete temporary file in the save directory before publishing
 it atomically. Loads validate the header, checksum and saved state, rebuild
 item and character resources from the mounted VFS, and prepare the destination

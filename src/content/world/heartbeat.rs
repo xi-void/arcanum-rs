@@ -253,6 +253,14 @@ impl InventoryReader {
             }
         }
         let mut staged = w.cache.scripts.clone();
+        let needs_party = program.code().statements.iter().any(|r| {
+            matches!(r.action.opcode, 21 | 22 | 67)
+                || matches!(r.otherwise.opcode, 21 | 22 | 67)
+                || matches!(r.condition.opcode, 21 | 23)
+        });
+        if needs_party {
+            staged.interaction = Some(w.script_inventory(&mut self.vfs, &id.key(), None)?);
+        }
         staged.heartbeat = Some(HeartbeatContext {
             vicinity,
             action: None,
@@ -279,6 +287,8 @@ impl InventoryReader {
             return Err("Unexpected NPC callback outcome".into());
         };
         let action = staged.heartbeat.take().unwrap().action;
+        staged.interaction = None;
+        let party_changed = staged.followers != w.cache.scripts.followers;
         let off = staged.switched_off != w.cache.scripts.switched_off;
         let saved = std::mem::replace(&mut w.cache.scripts, staged);
         let applied = match action {
@@ -293,6 +303,6 @@ impl InventoryReader {
         if off {
             w.cache.activate(&w.cache.active.clone());
         }
-        Ok((run_default, off || action.is_some()))
+        Ok((run_default, off || party_changed || action.is_some()))
     }
 }

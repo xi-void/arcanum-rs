@@ -148,7 +148,7 @@ impl InteractiveWorld {
         &self.ability.message
     }
     pub fn cancel_ability(&mut self) -> bool {
-        if self.ability.cancel() {
+        if self.follower_aim.take().is_some() || self.ability.cancel() {
             self.cancel_player_route();
             true
         } else {

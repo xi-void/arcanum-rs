@@ -47,7 +47,7 @@ pub use inventory::combat::CombatMode;
 pub use inventory::rest::RestMode;
 pub use inventory::{
     CreationBuild, CreationCatalog, InventoryContents, InventoryEntry, InventoryReader, Objects,
-    SchematicComponent,
+    PartyPortrait, SchematicComponent,
 };
 pub use lighting::DynamicLightState;
 pub use prefetch::{DeveloperAction, InteractiveWorld, PrefetchStats, SoundEvent};

@@ -228,9 +228,9 @@ pub struct ViewPreparation {
     pub scheduling: Duration,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 struct ViewPlan {
-    actor_sectors: [u64; 4],
+    actor_sectors: Vec<u64>,
     position: (i32, i32),
     viewport: (u32, u32),
     direction: (i32, i32),
@@ -285,6 +285,7 @@ pub struct InteractiveWorld {
     pub(super) met_npcs: BTreeSet<(String, String)>,
     pub(super) heartbeats: super::heartbeat::Scheduler,
     pub(super) dialogue_status: Option<serde_json::Value>,
+    pub(super) follower_aim: Option<(crate::sector::objects::OriginalId, bool)>,
     pub(super) container_request: Option<crate::sector::objects::OriginalId>,
     pickup_request: Option<crate::sector::objects::OriginalId>,
     route_goal: Option<((u32, u32), bool)>,
@@ -351,6 +352,7 @@ impl InteractiveWorld {
             heartbeats: Default::default(),
             dialogue_status: None,
             met_npcs: BTreeSet::new(),
+            follower_aim: None,
             container_request: None,
             pickup_request: None,
             route_goal: None,
@@ -451,23 +453,34 @@ impl InteractiveWorld {
         }
         let position = camera.position();
         // A detached camera may leave the moving actor and its next step off-screen.
-        let actor_sectors = self.cache.player.as_ref().map_or([u64::MAX; 4], |pc| {
-            let (x, y) = pc.tile();
-            [
+        let mut actor_sectors = Vec::new();
+        for (x, y) in self
+            .cache
+            .player
+            .iter()
+            .map(|p| p.tile())
+            .chain(self.party_navigation_tiles())
+        {
+            for id in [
                 (x.saturating_sub(1), y.saturating_sub(1)),
-                (x.saturating_sub(1), y + 1),
-                (x + 1, y.saturating_sub(1)),
-                (x + 1, y + 1),
+                (x.saturating_sub(1), y.saturating_add(1)),
+                (x.saturating_add(1), y.saturating_sub(1)),
+                (x.saturating_add(1), y.saturating_add(1)),
             ]
             .map(tile_sector_id)
-        });
+            {
+                if !actor_sectors.contains(&id) {
+                    actor_sectors.push(id);
+                }
+            }
+        }
         let plan = ViewPlan {
             actor_sectors,
             position,
             viewport,
             direction,
         };
-        if self.ready_plan == Some(plan) {
+        if self.ready_plan.as_ref() == Some(&plan) {
             return Ok(ViewPreparation {
                 ready: true,
                 scheduling: begin.elapsed(),
@@ -476,7 +489,7 @@ impl InteractiveWorld {
         }
         let needed = self.region.needed(self.reference, position, viewport)?;
         let mut sectors = needed.as_slice().to_vec();
-        for id in actor_sectors {
+        for &id in &plan.actor_sectors {
             if !sectors.contains(&id)
                 && let Some(c) = Coordinates::from_id(id)
                 && (self.region.first.x..=self.region.last.x).contains(&c.x)
@@ -710,6 +723,18 @@ impl InteractiveWorld {
             i64::from(x) + i64::from(screen.0) - i64::from(size.0 / 2),
             i64::from(y) + i64::from(screen.1) - i64::from(size.1 / 2),
         );
+        if let Some((id, attack)) = self.follower_aim.take() {
+            let picked = self
+                .cache
+                .pick_raster(point, self.reference, elapsed, false)
+                .and_then(|k| self.cache.npc(k))
+                .map(|(r, _)| r.id);
+            let tile = crate::isometric::world_tile_at_pixel(point, self.reference);
+            if let Err(e) = self.complete_follower_order(id, attack, picked, tile) {
+                self.notice = Some(e);
+            }
+            return;
+        }
         if self.ability.selected.is_some() && self.ability.casting.is_some() {
             return;
         }
@@ -810,25 +835,29 @@ impl InteractiveWorld {
         if !self.cache.collision_disabled
             && let Some(key) = self.cache.pick(point, self.reference, elapsed)
         {
-            if matches!(
-                self.cache.target(key).map(|target| &target.action),
-                Some(interaction::Action::Npc(_))
-            ) {
-                self.dialogue_status = None;
-            }
-            let steps = self.cache.approach(key, run);
-            self.pending_use = steps.map(|_| key);
-            if steps.is_none() {
-                self.notice = Some("cannot reach the object".into());
-            }
-            if self.trace {
-                eprintln!("Use target {key:?}: {steps:?} steps");
-            }
+            self.approach_interaction(key, run);
             return;
         }
         let tile = crate::isometric::world_tile_at_pixel(point, self.reference);
         if let Some(tile) = tile {
             self.route_to(tile, run);
+        }
+    }
+
+    pub(in crate::content::world) fn approach_interaction(&mut self, key: WorldOrder, run: bool) {
+        if matches!(
+            self.cache.target(key).map(|target| &target.action),
+            Some(interaction::Action::Npc(_))
+        ) {
+            self.dialogue_status = None;
+        }
+        let steps = self.cache.approach(key, run);
+        self.pending_use = steps.map(|_| key);
+        if steps.is_none() {
+            self.notice = Some("cannot reach the object".into());
+        }
+        if self.trace {
+            eprintln!("Use target {key:?}: {steps:?} steps");
         }
     }
 
@@ -1559,13 +1588,13 @@ mod tests {
         let direction = (-64, 32);
         assert!(world.prepare(&camera, VIEWPORT, direction).unwrap().ready);
         assert_eq!(world.speculative, [1]);
-        assert_eq!(world.ready_plan.unwrap().direction, direction);
+        assert_eq!(world.ready_plan.as_ref().unwrap().direction, direction);
         done.recv_timeout(TIMEOUT).unwrap();
         assert!(!world.receive()); // Speculative completion does not redraw.
         assert!(world.ready_plan.is_none());
         let resized = (161, 101);
         assert!(world.prepare(&camera, resized, direction).unwrap().ready);
-        assert_eq!(world.ready_plan.unwrap().viewport, resized);
+        assert_eq!(world.ready_plan.as_ref().unwrap().viewport, resized);
         assert_eq!(world.stats().cache.sector_reads, 2);
         assert_eq!(world.cache.active, [0]);
     }

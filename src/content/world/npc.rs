@@ -451,6 +451,21 @@ impl super::inventory::InventoryReader {
                 let selection = if let Some(next) = after_barter {
                     Selection::AfterBarter(next)
                 } else if session.turn.responses.get(index).is_some_and(|r| r.barter) {
+                    if staged.following(&npc) {
+                        let id = crate::sector::objects::OriginalId::parse_key(&npc)
+                            .ok_or(ResponseRejection::Selection)?;
+                        session.select(index, &stats, &mut staged)?;
+                        world
+                            .check_actor_inventory(id)
+                            .map_err(ResponseRejection::Effect)?;
+                        self.prepare_gear(world, id)
+                            .map_err(ResponseRejection::Effect)?;
+                        world
+                            .commit_script_inventory(&mut self.vfs, &npc, &mut staged)
+                            .map_err(ResponseRejection::Effect)?;
+                        world.container_request = Some(id);
+                        return Ok(false);
+                    }
                     let reaction = session.reaction().ok_or_else(|| {
                         ResponseRejection::Effect("Merchant reaction unavailable".into())
                     })?;

@@ -217,6 +217,7 @@ impl InventoryReader {
                 }
                 if let Some(period) = p.duration {
                     w.cache.inventory.magick.active.push(Active {
+                        caster: None,
                         spell,
                         bindings: vec![b],
                         summons: vec![],

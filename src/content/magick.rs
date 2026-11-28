@@ -74,6 +74,7 @@ pub(crate) enum Field {
 #[derive(Default, Clone, Debug, Serialize)]
 pub(crate) struct Program {
     pub aggressive: bool,
+    pub ai: std::collections::BTreeMap<String, i32>,
     pub cost: i32,
     pub range: u32,
     pub targets: Vec<String>,
@@ -173,9 +174,6 @@ fn mask(s: &str, field: Field) -> Result<u32, String> {
 impl Program {
     pub(crate) fn remaining_dependencies(&self) -> std::collections::BTreeSet<&'static str> {
         let mut dependencies = std::collections::BTreeSet::new();
-        if self.targets.iter().any(|t| t == "tgt_all_party_critters") {
-            dependencies.insert("original_party_membership");
-        }
         for c in &self.components {
             match c.operation {
                 Operation::Flag {
@@ -186,33 +184,11 @@ impl Program {
                     dependencies.insert("trap_discovery");
                 }
                 Operation::Flag {
-                    field: Field::Spell,
-                    mask: 0x00800000 | 0x08000000,
-                    on: true,
-                }
-                | Operation::Flag {
                     field: Field::Critter,
-                    mask: 0x10 | 0x40 | 0x80,
-                    on: true,
-                }
-                | Operation::Flag {
-                    field: Field::Npc,
-                    mask: 0x800,
+                    mask: 0x80,
                     on: true,
                 } => {
-                    if matches!(
-                        c.operation,
-                        Operation::Flag {
-                            field: Field::Critter,
-                            mask: 0x80,
-                            ..
-                        }
-                    ) {
-                        dependencies.insert("sleep_and_noise");
-                    }
-                    if c.apply.iter().any(|a| a == "tgt_summoned") {
-                        dependencies.insert("follower_ai_and_party_travel");
-                    }
+                    dependencies.insert("sleep_and_noise");
                 }
                 _ => {}
             }
@@ -308,7 +284,10 @@ impl Program {
                     "info" => p.aggressive = v == "aggressive",
                     "iq" | "chargebegincost" => (),
                     "no_reflect" => p.no_reflect = num::<u32>(v)? != 0,
-                    k if k.starts_with("ai_") => (),
+                    k if k.starts_with("ai_") => {
+                        let priority = v.parse().or_else(|_| pair(v).and_then(|(n, _)| num(n)))?;
+                        p.ai.insert(k.to_owned(), priority);
+                    }
                     _ => {
                         return Err(format!(
                             "entry {}: unsupported parameter {k}",
