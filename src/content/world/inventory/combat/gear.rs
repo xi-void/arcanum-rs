@@ -3,7 +3,7 @@ use super::*;
 
 impl InventoryReader {
     // Hydrate authored equipment and ammunition once. The same placements are later looted.
-    pub(in crate::content::world::inventory) fn prepare_gear(
+    pub(in crate::content::world) fn prepare_gear(
         &mut self,
         w: &mut InteractiveWorld,
         id: OriginalId,
@@ -27,10 +27,27 @@ impl InventoryReader {
                 .and_then(FieldValue::scalar)
                 .unwrap_or(d.npc_ammo[i])
         });
-        let owner = Owner::OriginalObject(w.map.clone(), id);
+        let (character, stats) = w.cache.inventory.npc_vitals(id, d, &o);
+        let mut wearer = Target::new(
+            Subject::Mobile(id),
+            r.tile.unwrap_or(w.reference),
+            Some(key),
+            Kind::Actor,
+        );
+        wearer.actor(&character, &stats);
+        let owner = w.actor_owner(id);
         let mut layout = w
             .records(&mut self.vfs)
             .layout(&w.cache.inventory.state, &owner, None)?;
+        let mut ammo = [0; 5];
+        for (total, qty) in ammo[1..].iter_mut().zip(counts) {
+            *total = u64::from(qty);
+        }
+        for item in layout.items.values().filter(|i| i.category == 6) {
+            if let Some(kind) = item.stats.ammo_type.filter(|n| *n < 4) {
+                ammo[kind as usize + 1] += u64::from(item.stats.quantity.unwrap_or(0));
+            }
+        }
         let mut wear = BTreeMap::new();
         for item in layout.items.values() {
             let flags = item.stats.equipment_flags.unwrap_or(0);
@@ -44,16 +61,40 @@ impl InventoryReader {
                     .find(|s| s.accepts(item.category, item.inventory_art, flags))
             });
             if let Some(slot) = slot {
-                let rank = (authored.is_some(), item.stats.worth);
+                let value = if slot == EquipmentSlot::Weapon {
+                    let Some(value) = w.cache.inventory.weapon_score(&wearer, item, ammo) else {
+                        continue;
+                    };
+                    value
+                } else {
+                    i64::from(item.worth())
+                };
+                if authored.is_none()
+                    && w.cache
+                        .inventory
+                        .check_wearer(item, slot, &character, Some(id))
+                        .is_err()
+                {
+                    continue;
+                }
+                let rank = (authored.is_some(), value);
                 if wear.get(&slot).is_none_or(|(r, _)| *r < rank) {
                     wear.insert(slot, (rank, item.clone()));
                 }
             }
         }
         let mut stock = Vec::new();
+        let mut effects = Vec::new();
         for (slot, (_, item)) in wear {
+            if let Some(effect) = w.cache.inventory.prepare_wield(&mut self.vfs, &item)? {
+                effects.push((item.id, effect));
+            }
             layout.grid.items.remove(&item.id);
-            stock.push((item, Place::WornBy(w.map.clone(), id, slot), None));
+            stock.push((
+                item,
+                Place::WornBy(w.actor_origin(id).to_owned(), id, slot),
+                None,
+            ));
         }
         let mut next = w.cache.inventory.state.next_generated;
         for (i, qty) in counts.into_iter().enumerate().filter(|(_, n)| *n > 0) {
@@ -79,6 +120,7 @@ impl InventoryReader {
             stock.push((item, Place::Owned(owner.clone()), Some(cell)));
         }
         let session = &mut w.cache.inventory;
+        session.wielded.extend(effects);
         session.state.next_generated = next;
         for (item, place, cell) in stock {
             session.state.put(item, place, cell)
@@ -94,14 +136,16 @@ impl InventoryReader {
     ) -> Result<Vec<(Item, u32, usize)>, String> {
         // CE combat_consume_ammo exempts independent NPCs.
         if actor.is_some_and(|id| {
-            id.kind == 2 && w.cache.inventory.magick.flags(&Subject::Mobile(id)).0 & 0x08000000 == 0
+            id.kind == 2
+                && !w.cache.scripts.following(&id.key())
+                && w.cache.inventory.magick.flags(&Subject::Mobile(id)).0 & 0x08000000 == 0
         }) {
             return Ok(vec![]);
         }
         let Some((kind, mut needed)) = weapon.ammo else {
             return Ok(vec![]);
         };
-        let owner = actor.map_or(Owner::Player, |id| Owner::OriginalObject(w.map.clone(), id));
+        let owner = actor.map_or(Owner::Player, |id| w.actor_owner(id));
         let layout = w
             .records(&mut self.vfs)
             .layout(&w.cache.inventory.state, &owner, None)?;
@@ -156,7 +200,7 @@ impl InventoryReader {
     ) -> Result<(), String> {
         w.check_corpse(id)?;
         self.prepare_gear(w, id)?;
-        let owner = Owner::OriginalObject(w.map.clone(), id);
+        let owner = w.actor_owner(id);
         let mut grid = w
             .records(&mut self.vfs)
             .layout(&w.cache.inventory.state, &owner, None)?

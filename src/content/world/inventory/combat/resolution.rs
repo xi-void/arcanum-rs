@@ -56,15 +56,7 @@ impl Weapon {
 }
 impl Session {
     pub(super) fn worn(&self, actor: Actor, slot: EquipmentSlot) -> Option<&Item> {
-        self.state
-            .changes
-            .values()
-            .find(|c| match c.place {
-                Place::Equipped(s) => actor.is_none() && s == slot,
-                Place::WornBy(_, id, s) => actor == Some(id) && s == slot,
-                _ => false,
-            })
-            .map(|c| &c.item)
+        self.equipment_change(actor, slot).map(|c| &c.item)
     }
     pub(super) fn weapon(&self, actor: Actor, t: &Target) -> Weapon {
         let weapon = self
@@ -73,7 +65,7 @@ impl Session {
         self.weapon_stats(actor, t, weapon)
     }
 
-    fn weapon_stats(&self, actor: Actor, t: &Target, weapon: Option<&Item>) -> Weapon {
+    pub(super) fn weapon_stats(&self, actor: Actor, t: &Target, weapon: Option<&Item>) -> Weapon {
         let s = t.stats.as_ref().expect("actor statistics");
         let empty = ItemStats::default();
         let item = weapon.map_or(&empty, |i| &i.stats);
@@ -171,24 +163,28 @@ impl Session {
     }
 
     /// CE item_wield_best compares the last damage channel for each eligible weapon.
-    pub(in crate::content::world::inventory) fn starting_weapon_score(
+    pub(in crate::content::world::inventory) fn weapon_score(
         &self,
-        player: &Target,
+        wielder: &Target,
         item: &Item,
         counts: [u64; 5],
     ) -> Option<i64> {
-        let weapon = self.weapon_stats(None, player, Some(item));
+        let actor = match wielder.subject {
+            Subject::Mobile(id) => Some(id),
+            _ => None,
+        };
+        let weapon = self.weapon_stats(actor, wielder, Some(item));
         if weapon
             .ammo
             .is_some_and(|(kind, need)| u64::from(need) > counts[kind as usize + 1])
         {
             return None;
         }
-        let skill = player.stats.as_ref()?.skills[weapon.skill];
+        let skill = wielder.stats.as_ref()?.skills[weapon.skill];
         let effectiveness = if weapon.skill != 2 && skill.level == 0 {
             -1
         } else {
-            self.attack_rating(player, player, &weapon).0
+            self.attack_rating(wielder, wielder, &weapon).0
         };
         let [min, max] = weapon.bounds[4];
         Some((i64::from(min) + i64::from(max)) / 2 * i64::from(effectiveness) / 100)
@@ -366,12 +362,12 @@ impl Session {
         let credit = allied(attacker);
         let credit_burn = burn && allied(defender);
         let mut xp = if credit {
-            self.combat_reward(t, before)
+            self.combat_reward(t, before, attacker.is_none())
         } else {
             0
         };
         if credit_burn {
-            xp = xp.saturating_add(self.combat_reward(a, source_before));
+            xp = xp.saturating_add(self.combat_reward(a, source_before, defender.is_none()));
         }
         let outcome = match (hit, critical, dodge) {
             (true, true, _) => "Critical hit",
@@ -386,6 +382,7 @@ impl Session {
         &mut self,
         t: &Target,
         before: i32,
+        player_damage: bool,
     ) -> i32 {
         let Subject::Mobile(id) = t.subject else {
             return 0;
@@ -406,7 +403,11 @@ impl Session {
         let ratio = i64::from(t.hp - before) * 100 / i64::from(t.maximum);
         let mut xp = (i64::from(pool[0]) * ratio / 100).min(i64::from(pool[1])) as i32;
         pool[1] -= xp;
+        if !player_damage {
+            xp = 0;
+        }
         if t.hp >= t.maximum {
+            self.combat.leader_kills.push(id);
             xp = xp.saturating_add(pool[0] / 5);
             *pool = [0; 2];
             let alignment = t.alignment;
@@ -519,7 +520,7 @@ impl InventoryReader {
                 percent(s.current_fatigue, s.max_fatigue),
             ],
             poisoned: t.poison > 0,
-            allied: t.spell & 0x08004000 != 0,
+            allied: t.party || t.spell & 0x08004000 != 0,
             values: [
                 s.current_health,
                 s.max_health,

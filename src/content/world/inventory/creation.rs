@@ -140,7 +140,7 @@ impl InventoryReader {
                 })
                 .filter_map(|c| {
                     let rank = if slot == EquipmentSlot::Weapon {
-                        session.starting_weapon_score(&player, &c.item, counts)?
+                        session.weapon_score(&player, &c.item, counts)?
                     } else {
                         i64::from(c.item.worth())
                     };

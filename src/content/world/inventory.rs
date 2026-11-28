@@ -7,6 +7,7 @@ use crate::sector::objects::ItemStats;
 
 pub(super) mod casting;
 pub(super) mod combat;
+pub use casting::follower::PartyPortrait;
 mod crafting;
 pub use crafting::SchematicComponent;
 mod creation;
@@ -32,6 +33,7 @@ const CLICK_THROUGH: u32 = 0x800;
 
 #[derive(Default)]
 pub(super) struct Session {
+    origin_indices: BTreeMap<String, Arc<std::sync::OnceLock<Index>>>,
     pub(super) combat: combat::Combat,
     difficulty: crate::content::Difficulty,
     wielded: BTreeMap<
@@ -186,6 +188,7 @@ struct Records<'a> {
     vfs: &'a mut Vfs,
     map: &'a str,
     index: Option<&'a Index>,
+    foreign: Option<&'a BTreeMap<String, Arc<std::sync::OnceLock<Index>>>>,
     frames: FrameCache,
     prototypes: Prototypes,
 }
@@ -213,6 +216,14 @@ impl Records<'_> {
     fn item(&mut self, id: OriginalId, state: &State) -> Result<Item, String> {
         if let Some(change) = state.changes.get(&id) {
             return Ok(change.item.clone());
+        }
+        if self.index.is_none_or(|index| index.path(id).is_none())
+            && let Some((map, index)) = self.foreign.into_iter().flatten().find_map(|(map, i)| {
+                let index = i.get()?;
+                index.owner(id).map(|_| (map, index))
+            })
+        {
+            return save::records(self.vfs, map, Some(index)).item(id, state);
         }
         let (source, bytes) = self.read(id)?;
         let object = objects::decode_instance(&bytes).map_err(|e| e.to_string())?;
@@ -356,6 +367,16 @@ impl Records<'_> {
         owner: &Owner,
         container: Option<&Container>,
     ) -> Result<Layout, String> {
+        if let Owner::OriginalObject(map, _) = owner
+            && map != self.map
+        {
+            let index = self
+                .foreign
+                .and_then(|indices| indices.get(map))
+                .and_then(|i| i.get())
+                .ok_or("Follower origin index unavailable")?;
+            return save::records(self.vfs, map, Some(index)).layout(state, owner, container);
+        }
         let mut layout = Layout::default();
         let members = match owner {
             Owner::OriginalObject(map, id)
@@ -587,6 +608,7 @@ pub struct InventoryEntry {
 }
 
 pub struct InventoryReader {
+    summon_defaults: BTreeMap<u32, (u32, Arc<objects::PrototypeDefaults>)>,
     encounter_rules: Option<Result<casting::encounters::Ruleset, String>>,
     portraits: BTreeMap<(i32, bool), Result<Arc<LoadedFrame>, String>>,
     schematic_reports:
@@ -615,6 +637,7 @@ impl InventoryReader {
             frames: FrameCache::default(),
             descriptions,
             key_descriptions,
+            summon_defaults: BTreeMap::new(),
             encounter_rules: None,
             quest_catalog,
             portraits: BTreeMap::new(),
@@ -669,9 +692,12 @@ impl InventoryReader {
             t.stock.clone()
         } else {
             match target {
-                Some(id) if world.corpse_tile(id).is_some() => {
-                    world.check_corpse(id)?;
-                    Owner::OriginalObject(world.map.clone(), id)
+                Some(id)
+                    if world.corpse_tile(id).is_some()
+                        || world.cache.scripts.following(&id.key()) =>
+                {
+                    world.check_actor_inventory(id)?;
+                    world.actor_owner(id)
                 }
                 Some(id) => Owner::Container(world.map.clone(), id),
                 None => Owner::Player,
@@ -688,7 +714,31 @@ impl InventoryReader {
         {
             container.check_access(world, id, world.cache.hour)?;
         }
-        let layout = records.layout(&world.cache.inventory.state, &owner, container.as_ref())?;
+        let mut layout =
+            records.layout(&world.cache.inventory.state, &owner, container.as_ref())?;
+        if let Owner::OriginalObject(_, actor) = &owner
+            && world.cache.scripts.following(&actor.key())
+        {
+            for c in world
+                .cache
+                .inventory
+                .state
+                .changes
+                .values()
+                .filter(|c| matches!(c.place, Place::WornBy(_, id, _) if id == *actor))
+            {
+                let item = &c.item;
+                let cell = layout
+                    .grid
+                    .fit(item.id, item.footprint.cells, owner.rows(), None)
+                    .ok_or("Insufficient display space for worn equipment")?;
+                layout
+                    .grid
+                    .items
+                    .insert(item.id, (cell, item.footprint.cells));
+                layout.items.insert(item.id, item.clone());
+            }
+        }
         let mut entries = Vec::new();
         let mut equipment = Vec::new();
         let grid_items = layout
@@ -800,6 +850,7 @@ impl InteractiveWorld {
             vfs,
             map: &self.map,
             index: self.mobile_index.get(),
+            foreign: Some(&self.cache.inventory.origin_indices),
             frames: FrameCache::default(),
             prototypes: Prototypes::default(),
         }
@@ -811,10 +862,11 @@ impl InteractiveWorld {
         }
         let id = parse_id(key)?;
         Ok(
-            if self.mobile_index.get().and_then(|index| index.category(id)) == Some(16)
+            if self.cache.inventory.displaced_actor(id).is_some()
+                || self.mobile_index.get().and_then(|index| index.category(id)) == Some(16)
                 || self.cache.inventory.magick.owns_spawn(&self.map, id)
             {
-                Owner::OriginalObject(self.map.clone(), id)
+                self.actor_owner(id)
             } else {
                 Owner::Container(self.map.clone(), id)
             },
@@ -847,6 +899,23 @@ impl InteractiveWorld {
                 item.id,
             )
         });
+        let equipment = match &owner {
+            Owner::Player => Some(None),
+            Owner::OriginalObject(_, id) => Some(Some(*id)),
+            Owner::Container(..) => None,
+        }
+        .map(|actor| {
+            EquipmentSlot::ALL.map(|slot| {
+                self.cache
+                    .inventory
+                    .equipment_change(actor, slot)
+                    .map(|change| {
+                        self.cache
+                            .inventory
+                            .item_report(&change.item, &change.place, None)
+                    })
+            })
+        });
         Ok(
             json!({"owner":place.report(),"gold":npc_gold,"columns":COLUMNS,"rows":owner.rows(),
             "container":container.as_ref().map(|container| {
@@ -865,10 +934,7 @@ impl InteractiveWorld {
             "abilities":(owner == Owner::Player).then(||self.ability_character()),
             "character":(owner == Owner::Player).then(|| self.character_statistics()),
             "counters":(owner == Owner::Player).then(|| self.inventory_counters()),
-            "equipment":(owner == Owner::Player).then(|| EquipmentSlot::ALL.map(|slot| {
-                state.changes.values().find(|change| change.place == Place::Equipped(slot))
-                    .map(|change| self.cache.inventory.item_report(&change.item, &change.place, None))
-            })),
+            "equipment":equipment,
             "items":items.into_iter().map(|item| self.cache.inventory.item_report(item, &place, layout.grid.items.get(&item.id).map(|entry| entry.0))).collect::<Vec<_>>() }),
         )
     }
@@ -1042,11 +1108,15 @@ impl InteractiveWorld {
                 if !authorized {
                     for owner in [&from, &to] {
                         if let Owner::OriginalObject(_, npc) = owner {
-                            self.check_corpse(*npc)?;
+                            self.check_actor_inventory(*npc)?;
                         }
                     }
                 }
-                if current != Place::Owned(from) {
+                let worn = matches!((&current,&from), (Place::WornBy(_, id, _),Owner::OriginalObject(_,actor)) if id == actor && self.cache.scripts.following(&id.key()));
+                if worn {
+                    check_removal(&item)?;
+                }
+                if !worn && current != Place::Owned(from) {
                     return Err("Item does not belong to the specified source".into());
                 }
                 (Place::Owned(to), slot)
@@ -1076,6 +1146,94 @@ impl InteractiveWorld {
                 > i64::from(inventory.statistics().carry_capacity)
             {
                 return Err("Item exceeds the character's carry capacity".into());
+            }
+        }
+        if current != destination {
+            item.insert_stat = None;
+        }
+        let mut wear = None;
+        if let Place::Owned(Owner::OriginalObject(_, actor)) = &destination
+            && current != destination
+            && self.cache.scripts.following(&actor.key())
+        {
+            let Some(super::abilities::Aim::Object(key)) =
+                InventoryReader::subject_aim(self, &casting::Subject::Mobile(*actor))
+            else {
+                return Err("Follower unavailable".into());
+            };
+            let (r, tile) = self.cache.npc(key).ok_or("Follower unavailable")?;
+            let (character, stats) = self.cache.inventory.npc_vitals(
+                *actor,
+                &r.prototype
+                    .as_ref()
+                    .ok_or("Follower prototype unavailable")?
+                    .defaults,
+                &r.instance(),
+            );
+            if let Some(carry) = &item.carry {
+                item.insert_stat = Some(stats.script_values()[carry.stat].unwrap_or(0) as u8);
+            }
+            let owner = self.actor_owner(*actor);
+            let layout = records.layout(state, &owner, None)?;
+            let weight: i64 = layout
+                .items
+                .values()
+                .chain(state.changes.values().filter_map(|c| {
+                    matches!(c.place, Place::WornBy(_,id,_) if id==*actor).then_some(&c.item)
+                }))
+                .filter(|i| i.id != item.id)
+                .map(|i| i.weight(stats.aptitude))
+                .sum();
+            if weight.saturating_add(item.weight(stats.aptitude)) > i64::from(stats.carry_capacity)
+            {
+                return Err("Item exceeds the follower's carrying capacity".into());
+            }
+            // CE item_wield_best_all runs on insertion. Keep the complete exchange
+            // staged until both the incoming equipment and the old item's grid cell fit.
+            if let Some(slot) = EquipmentSlot::ALL.into_iter().find(|&slot| {
+                self.cache
+                    .inventory
+                    .check_wearer(&item, slot, &character, Some(*actor))
+                    .is_ok()
+            }) {
+                let equipped = state.changes.values().find(|c| matches!(c.place, Place::WornBy(_, id, worn) if id == *actor && worn == slot));
+                let mut wearer = casting::Target::new(
+                    casting::Subject::Mobile(*actor),
+                    tile,
+                    Some(key),
+                    casting::Kind::Actor,
+                );
+                wearer.actor(&character, &stats);
+                let mut counts = [0; 5];
+                for ammo in layout.items.values().filter(|i| i.category == 6) {
+                    if let Some(kind) = ammo.stats.ammo_type.filter(|n| *n < 4) {
+                        counts[kind as usize + 1] += u64::from(ammo.stats.quantity.unwrap_or(0));
+                    }
+                }
+                let score = |candidate: &Item| {
+                    if slot == EquipmentSlot::Weapon {
+                        self.cache
+                            .inventory
+                            .weapon_score(&wearer, candidate, counts)
+                    } else {
+                        Some(i64::from(candidate.worth()))
+                    }
+                };
+                let rank = score(&item);
+                let replacement = equipped
+                    .filter(|old| score(&old.item) < rank && check_removal(&old.item).is_ok())
+                    .and_then(|old| {
+                        layout
+                            .grid
+                            .fit(old.item.id, old.item.footprint.cells, owner.rows(), None)
+                            .map(|cell| (old.item.clone(), owner.clone(), cell))
+                    });
+                if rank.is_some() && (equipped.is_none() || replacement.is_some()) {
+                    wear = Some((
+                        Place::WornBy(self.actor_origin(*actor).to_owned(), *actor, slot),
+                        replacement,
+                    ));
+                }
             }
         }
         let mut ground = None;
@@ -1164,10 +1322,25 @@ impl InteractiveWorld {
                 .cloned()
         });
         let world_changed = matches!(current, Place::Ground(..)) || ground.is_some();
+        let wield = if wear.is_some() {
+            self.cache.inventory.prepare_wield(vfs, &item)?
+        } else {
+            None
+        };
         let session = &mut self.cache.inventory;
         let moved_id = item.id;
         let sound = item.handling_sound(pickup, session.aptitude());
-        let mut result = if let Some(mut target) = merge {
+        let mut result = if let Some((worn, old)) = wear {
+            if let Some((old, owner, cell)) = old {
+                session.state.put(old, Place::Owned(owner), Some(cell));
+            }
+            let result = json!({"id":item.id.key(),"from":current.report(),"to":worn.report(),"slot":null,"auto_equipped":true});
+            if let Some(effect) = wield {
+                session.wielded.insert(item.id, effect);
+            }
+            session.state.put(item, worn, None);
+            result
+        } else if let Some(mut target) = merge {
             let quantity = item.stats.quantity.expect("matching stack");
             let total = target
                 .stats
@@ -1225,7 +1398,7 @@ impl InteractiveWorld {
         let source = self.inventory_owner(target)?;
         let mut records = self.records(vfs);
         let container = if matches!(source, Owner::OriginalObject(..)) {
-            self.check_corpse(id)?;
+            self.check_actor_inventory(id)?;
             None
         } else {
             let c = records.container(id)?;
@@ -1369,6 +1542,7 @@ impl InteractiveWorld {
     }
 
     pub fn inherit_object_state(&mut self, previous: &mut Self) {
+        self.arrive_with_followers(previous);
         self.met_npcs = std::mem::take(&mut previous.met_npcs);
         self.cache.inventory = std::mem::take(&mut previous.cache.inventory);
         self.cache.inventory.combat.new_map();

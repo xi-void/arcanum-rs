@@ -54,10 +54,19 @@ impl Session {
         &self,
         slot: EquipmentSlot,
     ) -> Option<&super::super::super::inventory::Change> {
-        self.state
-            .changes
-            .values()
-            .find(|change| change.place == Place::Equipped(slot))
+        self.equipment_change(None, slot)
+    }
+
+    pub(super) fn equipment_change(
+        &self,
+        actor: Option<OriginalId>,
+        slot: EquipmentSlot,
+    ) -> Option<&crate::content::inventory::Change> {
+        self.state.changes.values().find(|c| match c.place {
+            Place::Equipped(s) => actor.is_none() && s == slot,
+            Place::WornBy(_, id, s) => actor == Some(id) && s == slot,
+            _ => false,
+        })
     }
 
     pub(super) fn prepare_wield(
@@ -141,7 +150,10 @@ impl Session {
                         effect.adjustment.clone(),
                         usize::from(stat / effect.divisor),
                     ));
-                } else {
+                } else if !matches!(
+                    change.place,
+                    Place::Owned(Owner::OriginalObject(..)) | Place::WornBy(..)
+                ) {
                     change.item.insert_stat = None;
                 }
             }
@@ -240,6 +252,17 @@ impl Session {
     }
 
     pub(super) fn check_equipment(&self, item: &Item, slot: EquipmentSlot) -> Result<(), String> {
+        self.check_wearer(item, slot, &self.character, None)
+    }
+
+    pub(super) fn check_wearer(
+        &self,
+        item: &Item,
+        slot: EquipmentSlot,
+        character: &Character,
+        actor: Option<OriginalId>,
+    ) -> Result<(), String> {
+        let equipped = |s| self.equipment_change(actor, s);
         check_item(item, &self.state)?;
         check_removal(item)?;
         let stats = &item.stats;
@@ -250,7 +273,7 @@ impl Session {
                 slot.name()
             ));
         }
-        if self.character.background == 69 && stats.complexity.is_some_and(|value| value > 0) {
+        if character.background == 69 && stats.complexity.is_some_and(|value| value > 0) {
             return Err("Magick allergy prevents equipping magickal items".into());
         }
         let art = item
@@ -262,14 +285,10 @@ impl Session {
             return Err("Broken items cannot be equipped".into());
         }
         if slot == EquipmentSlot::Armor {
-            if self
-                .character
-                .armor_size()
-                .is_none_or(|size| flags & size == 0)
-            {
+            if character.armor_size().is_none_or(|size| flags & size == 0) {
                 return Err("Body armor does not fit this character's race".into());
             }
-            let gender = self.character.gender();
+            let gender = character.gender();
             if (flags & 8 != 0 && gender != 1) || (flags & 8 == 0 && flags & 16 != 0 && gender != 0)
             {
                 return Err("Body armor does not fit this character's gender".into());
@@ -278,10 +297,9 @@ impl Session {
         let two_handed = |flags: u32| flags & 0xc == 0xc;
         if (slot == EquipmentSlot::Weapon
             && two_handed(flags)
-            && self.equipped(EquipmentSlot::Shield).is_some())
+            && equipped(EquipmentSlot::Shield).is_some())
             || (slot == EquipmentSlot::Shield
-                && self
-                    .equipped(EquipmentSlot::Weapon)
+                && equipped(EquipmentSlot::Weapon)
                     .and_then(|change| change.item.stats.equipment_flags)
                     .is_some_and(two_handed))
         {

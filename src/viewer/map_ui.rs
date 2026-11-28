@@ -269,6 +269,12 @@ impl MapUi {
         scripts: &crate::content::script::State,
         combat_blocked: bool,
     ) {
+        self.atlas.discovered.extend(
+            scripts
+                .marked_areas
+                .iter()
+                .filter(|id| self.atlas.areas.contains_key(id)),
+        );
         let blocks_changed = self
             .travel_map
             .as_mut()

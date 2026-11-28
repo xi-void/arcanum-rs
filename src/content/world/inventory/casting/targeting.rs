@@ -62,6 +62,7 @@ impl InventoryReader {
                         })
                     });
                     t.actor(&pc, &stats);
+                    t.party = w.cache.scripts.following(&r.id.key());
                     let f = r.instance().appearance();
                     t.sound = f.sound_effect.or(d.appearance.sound_effect);
                     t.material = f.material.or(d.appearance.material);
@@ -75,7 +76,13 @@ impl InventoryReader {
                 let tile = selected.tile;
                 if let interaction::Action::Summon(id) = selected.action {
                     let s = inv.magick.spawn(id).ok_or("Summon expired")?;
-                    let (cat, d) = spawn_defaults(&mut self.vfs, s.prototype)?;
+                    let (cat, d) = match self.summon_defaults.entry(s.prototype) {
+                        std::collections::btree_map::Entry::Occupied(e) => e.get().clone(),
+                        std::collections::btree_map::Entry::Vacant(e) => {
+                            let (cat, defaults) = spawn_defaults(&mut self.vfs, s.prototype)?;
+                            e.insert((cat, Arc::new(defaults))).clone()
+                        }
+                    };
                     let mut t = Target::new(
                         Subject::Mobile(id),
                         tile,
@@ -92,7 +99,7 @@ impl InventoryReader {
                         ..Rules::default()
                     };
                     t.natural = d.natural_damage;
-                    t.actor(&pc, &inv.npc_statistics(id, &pc, &rules));
+                    t.actor(&pc, &inv.npc_statistics(id, &pc, rules));
                     t.spell |= s.spell_flags | 0x4000;
                     t.critter |= s.critter_flags;
                     return Ok(t);
@@ -135,7 +142,7 @@ impl InventoryReader {
 fn distance(a: Tile, b: Tile) -> u32 {
     a.0.abs_diff(b.0).max(a.1.abs_diff(b.1))
 }
-fn sees(w: &InteractiveWorld, from: Tile, to: Tile, portal: bool) -> bool {
+pub(super) fn sees(w: &InteractiveWorld, from: Tile, to: Tile, portal: bool) -> bool {
     let cell = |t| SectorCache::player_cell(&w.cache.entries, &w.cache.door_states, t);
     collision::sight(from, to, portal, cell)
 }
@@ -280,7 +287,10 @@ impl InventoryReader {
                         continue;
                     }
                     let member = self.target(w, Aim::Object(raster.key))?;
-                    if member.spell & 0x08000000 != 0 && member.matches(&p.targets)? {
+                    if (member.spell & 0x08000000 != 0
+                        || matches!(member.subject, Subject::Mobile(id) if w.cache.scripts.following(&id.key())))
+                        && member.matches(&p.targets)?
+                    {
                         targets.push(member);
                     }
                 }

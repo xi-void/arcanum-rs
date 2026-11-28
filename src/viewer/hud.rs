@@ -23,6 +23,12 @@ type Color = [u8; 4];
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(super) enum Action {
+    PartyHide,
+    PartyShow,
+    PartyPrevious,
+    PartyNext,
+    PartySlot(usize),
+    PartyCommand(usize),
     Pause,
     ToggleRun,
     ToggleRest,
@@ -96,6 +102,7 @@ struct Theme {
     route_color: Option<Color>,
     selected_route_color: Option<Color>,
     rest_messages: Option<String>,
+    party_messages: Option<String>,
     journal: Option<journal::Style>,
     sheet: Option<sheet::Style>,
     #[serde(default)]
@@ -269,6 +276,13 @@ struct Element {
     #[serde(default)]
     rest_panel: bool,
     rest_label: Option<usize>,
+    party_slot: Option<usize>,
+    #[serde(default)]
+    party_portrait: bool,
+    party_gauge: Option<usize>,
+    #[serde(default)]
+    party_menu: bool,
+    party_label: Option<usize>,
     #[serde(default)]
     ap_offsets: Vec<i32>,
     #[serde(default)]
@@ -712,6 +726,12 @@ pub(crate) struct Hud {
     travel_available: bool,
     combat_ap: Option<i32>,
     npc_gauges: Option<([u32; 2], bool)>,
+    party: Vec<arcanum_rs::content::world::PartyPortrait>,
+    party_top: usize,
+    party_slots: usize,
+    party_hidden: bool,
+    party_selection: Option<String>,
+    party_messages: Option<arcanum_rs::mes::Mes>,
     cursors: BTreeMap<CursorMode, CursorClip>,
     cursor_frame: Option<(CursorMode, usize)>,
     cursor_hidden: bool,
@@ -787,7 +807,7 @@ impl Hud {
                     || config.text.is_some()
                     || (config.hover_fill.is_some() && config.cell.is_none())
                     || config.binding.is_some_and(Binding::is_label)
-                    || config.rest_label.is_some()
+                    || (config.rest_label.is_some() || config.party_label.is_some())
                 {
                     config.size
                 } else {
@@ -868,8 +888,8 @@ impl Hud {
                     }
                     base = thumb;
                 }
-                let dynamic =
-                    config.binding.is_some_and(Binding::is_label) || config.rest_label.is_some();
+                let dynamic = config.binding.is_some_and(Binding::is_label)
+                    || (config.rest_label.is_some() || config.party_label.is_some());
                 if let Some(text) = config.text.as_deref().or(dynamic.then_some("")) {
                     let id = config
                         .font
@@ -1048,6 +1068,19 @@ impl Hud {
             cursor_frame: None,
             cursor_hidden: false,
             npc_gauges: None,
+            party: Vec::new(),
+            party_top: 0,
+            party_slots: components
+                .iter()
+                .filter_map(|c| c.config.party_slot)
+                .max()
+                .map_or(0, |n| n + 1),
+            party_hidden: false,
+            party_selection: None,
+            party_messages: theme
+                .party_messages
+                .map(|path| arcanum_rs::content::load_mes(game, &path).map(|m| m.mes))
+                .transpose()?,
             components,
             font_profiles,
             placed: Vec::new(),
@@ -1140,6 +1173,98 @@ impl Hud {
             self.clear_layout();
         }
     }
+    pub(super) fn refresh_party(
+        &mut self,
+        reader: &mut arcanum_rs::content::world::InventoryReader,
+        world: &InteractiveWorld,
+    ) {
+        if self.party_messages.is_none() {
+            return;
+        }
+        let next = reader.party_portraits(world);
+        let old_top = self.party_top;
+        self.party_top = self
+            .party_top
+            .min(next.len().saturating_sub(self.party_slots));
+        if next == self.party && old_top == self.party_top {
+            return;
+        }
+        let changed = self.party.len() != next.len()
+            || self.party.iter().zip(&next).any(|(a, b)| a.id != b.id);
+        for c in &mut self.components {
+            if c.config.party_portrait
+                && let Some(slot) = c.config.party_slot
+                && let Some(f) = next.get(self.party_top + slot)
+                && self.party.get(old_top + slot).is_none_or(|old| {
+                    (old.portrait, old.interface_icon) != (f.portrait, f.interface_icon)
+                })
+                && let Ok(frame) = reader.party_portrait_frame(world, f)
+            {
+                c.art = frame;
+            }
+        }
+        self.party = next;
+        if changed {
+            self.party_selection = None;
+            self.clear_layout();
+        }
+    }
+    pub(super) fn party_actor(&self, index: usize) -> Option<&str> {
+        Some(&self.party.get(self.party_top + index)?.id)
+    }
+    pub(super) fn navigate_party(&mut self, action: Action) {
+        match action {
+            Action::PartyShow => self.party_hidden = false,
+            Action::PartyHide => self.party_hidden = true,
+            Action::PartyPrevious => self.party_top = self.party_top.saturating_sub(1),
+            Action::PartyNext => {
+                self.party_top =
+                    (self.party_top + 1).min(self.party.len().saturating_sub(self.party_slots))
+            }
+            _ => return,
+        }
+        // The following presentation pass reloads the visible portrait bindings from the frame cache.
+        self.party.clear();
+        self.party_selection = None;
+        self.clear_layout();
+    }
+    pub(super) fn party_slot_menu(&mut self, index: usize) {
+        let Some(member) = self.party.get(self.party_top + index) else {
+            return;
+        };
+        self.party_selection = Some(member.id.clone());
+        let origin = self
+            .components
+            .iter()
+            .find(|c| c.config.action == Some(Action::PartySlot(index)))
+            .map(|c| (c.config.offset, c.config.size));
+        for i in 0..self.components.len() {
+            let c = &mut self.components[i];
+            if c.config.party_menu
+                && let Some((offset, size)) = origin
+            {
+                c.config.offset = [offset[0] + size[0] as i32, offset[1]];
+            }
+            if let Some(row) = c.config.party_label {
+                let label = self
+                    .party_messages
+                    .as_ref()
+                    .and_then(|m| m.get(row as i32))
+                    .unwrap_or("")
+                    .to_owned();
+                self.write_label(i, &label);
+            }
+        }
+        self.clear_layout();
+    }
+    pub(super) fn close_party_menu(&mut self) -> Option<String> {
+        let prev = self.party_selection.take();
+        if prev.is_some() {
+            self.clear_layout();
+        }
+        prev
+    }
+
     pub fn refresh_spellbook(
         &mut self,
         reader: &mut arcanum_rs::content::world::InventoryReader,
@@ -1288,6 +1413,20 @@ impl Hud {
             .filter(|c| c.parent.is_none() && !c.config.hidden && !c.config.dialogue_only)
         {
             let e = &c.config;
+            if e.party_slot.is_some()
+                || e.party_menu
+                || matches!(
+                    e.action,
+                    Some(
+                        Action::PartyShow
+                            | Action::PartyHide
+                            | Action::PartyPrevious
+                            | Action::PartyNext
+                    )
+                )
+            {
+                continue;
+            }
             if e.rest_panel {
                 if self.rest_mode.is_some() {
                     middle = middle.max(e.size[1]);
@@ -1377,7 +1516,19 @@ impl Hud {
                 |id| bounds[id],
             );
             let placement = parent.and_then(|(parent, clip)| {
-                if (component.config.rest_panel && self.rest_mode.is_none())
+                let nav=matches!(component.config.action,Some(Action::PartyShow|Action::PartyHide|Action::PartyPrevious|Action::PartyNext));
+                if (component.config.party_slot.is_some() || component.config.party_menu || nav)
+                    && (self.dialogue_open || panel.is_some() || self.sheet.open || self.journal.open || self.rest_mode.is_some() || external_panel.is_some()
+                        || self.party.is_empty()
+                        || match component.config.action {
+                            Some(Action::PartyHide)=>self.party_hidden,
+                            Some(Action::PartyShow)=>!self.party_hidden,
+                            Some(Action::PartyPrevious)=>self.party_hidden || self.party_top==0,
+                            Some(Action::PartyNext)=>self.party_hidden || self.party_top+self.party_slots>=self.party.len(),
+                            _=>self.party_hidden,
+                        }
+                        || component.config.party_slot.is_some_and(|i|i+self.party_top>=self.party.len()) || component.config.party_menu && self.party_selection.is_none())
+                    || (component.config.rest_panel && self.rest_mode.is_none())
                     || (self.rest_mode.is_some_and(|m|m.waiting()) && (component.config.rest_label==Some(7) || component.config.action==Some(Action::Rest(7))))
                     || component.config.turn_panel && !show_turn
                     || !self.sheet.visible(&component.config)
@@ -1479,6 +1630,28 @@ impl Hud {
                 Some((&c.config.id, [r.x, r.y, r.w as i32, r.h as i32]))
             })
             .collect();
+        let party_controls: BTreeMap<_, _> = self
+            .components
+            .iter()
+            .zip(&self.placed)
+            .filter(|(c, _)| {
+                matches!(
+                    c.config.action,
+                    Some(
+                        Action::PartyHide
+                            | Action::PartyShow
+                            | Action::PartyPrevious
+                            | Action::PartyNext
+                            | Action::PartySlot(_)
+                            | Action::PartyCommand(_)
+                    )
+                )
+            })
+            .filter_map(|(c, p)| {
+                let r = p.as_ref()?.rect;
+                Some((&c.config.id, [r.x, r.y, r.w as i32, r.h as i32]))
+            })
+            .collect();
         let rest: BTreeMap<_, _> = self
             .components
             .iter()
@@ -1497,7 +1670,7 @@ impl Hud {
             .and_then(|i| self.components[i].clock.as_ref()?.sample)
             .map(|(x, phase)| serde_json::json!({"strip_x":x,"moon_phase":phase}));
         serde_json::json!({"clock_sample":clock_sample,"rest_controls":rest,"rest_mode":self.rest_mode,"character_sheet":self.sheet_diagnostic(),"spell_controls":spell_controls,"spell_panel":self.spells_open,"journal":self.journal_diagnostic(),"context_message":label(Binding::InventoryHover),
-            "npc_context":label(Binding::NpcContext),"npc_gauges":self.npc_gauges,"cursor":self.cursor_diagnostic(),"spell_cursor_frame":self.cursor_frame.filter(|(mode,_)| *mode==CursorMode::Spell).map(|(_,i)| i),"dialogue_responses":responses,"dialogue_scroll":self.dialogue_layout.diagnostics(),
+            "party":self.party,"party_controls":party_controls,"party_first":self.party_top,"party_hidden":self.party_hidden,"party_menu":self.party_selection,"npc_context":label(Binding::NpcContext),"npc_gauges":self.npc_gauges,"cursor":self.cursor_diagnostic(),"spell_cursor_frame":self.cursor_frame.filter(|(mode,_)| *mode==CursorMode::Spell).map(|(_,i)| i),"dialogue_responses":responses,"dialogue_scroll":self.dialogue_layout.diagnostics(),
             "map_status":label(Binding::MapStatus),"scale_percent":self.scale,"effective_scale_percent":self.effective_scale,"inventory":self.inventory_diagnostics(),"fonts":self.font_profiles,"image_references":images,
             "focused":control(self.focus),"hovered":control(self.hover),"pressed":control(self.pressed)})
     }
@@ -1987,6 +2160,7 @@ impl Hud {
                     || (p.live_asset.is_none()
                         && component.config.sheet_image.is_none()
                         && component.config.spell_slot.is_none()
+                        && !component.config.party_portrait
                         && component.config.maintained_slot.is_none()
                         && component.config.image.is_none()
                         && component.config.fill.is_none()
@@ -2077,6 +2251,15 @@ impl Hud {
                         clip.w = (clip.w * value).div_ceil(100);
                         return Some(overlay(asset, p.full, clip.intersect(p.rect)?));
                     }
+                }
+                if let (Some(slot), Some(gauge)) =
+                    (component.config.party_slot, component.config.party_gauge)
+                {
+                    let mut clip = p.full;
+                    clip.w = (clip.w
+                        * *self.party.get(self.party_top + slot)?.percent.get(gauge)?)
+                    .div_ceil(100);
+                    return Some(overlay(asset, p.full, clip.intersect(p.rect)?));
                 }
                 if let Some(row) = component.config.skill_gauge {
                     let mut clip = p.rect;
@@ -2205,6 +2388,7 @@ fn parse(source: &str) -> Result<Theme, Box<dyn Error>> {
             || e.fill.is_some()
             || e.binding.is_some_and(Binding::is_label)
             || e.rest_label.is_some()
+            || e.party_label.is_some()
             || hover_fill
         {
             pixels += e.size[0]

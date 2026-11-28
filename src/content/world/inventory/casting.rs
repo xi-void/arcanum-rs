@@ -4,6 +4,7 @@ use super::super::abilities::{Aim, LockId, Method};
 use super::super::spell_fx::Cue;
 use super::*;
 use crate::content::magick::{Channel, Component, Field, Operation, Phase, Program};
+use crate::content::script::party::FollowerOrders;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,6 +18,10 @@ pub(in crate::content::world) enum Subject {
 }
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
 struct VitalChanges {
+    #[serde(default)]
+    cast_again: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    advancement: Option<crate::content::character::progression::NpcAdvancement>,
     #[serde(default)]
     dead: bool,
     #[serde(default)]
@@ -47,6 +52,8 @@ struct VitalChanges {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Binding {
+    #[serde(default, skip_serializing_if = "FollowerOrders::idle")]
+    orders: FollowerOrders,
     target: Subject,
     effects: Vec<(i32, i32)>,
     spell: u32,
@@ -73,6 +80,7 @@ struct Binding {
 impl Binding {
     fn new(target: Subject) -> Self {
         Self {
+            orders: Default::default(),
             target,
             effects: vec![],
             spell: 0,
@@ -93,6 +101,10 @@ impl Binding {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Spawn {
+    #[serde(default, skip_serializing_if = "FollowerOrders::idle")]
+    orders: FollowerOrders,
+    #[serde(default)]
+    leader_level: i32,
     id: OriginalId,
     map: String,
     tile: Tile,
@@ -116,6 +128,8 @@ struct Spawn {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Active {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    caster: Option<OriginalId>,
     spell: usize,
     bindings: Vec<Binding>,
     summons: Vec<Spawn>,
@@ -169,6 +183,8 @@ struct Hazard {
 #[derive(Clone, Serialize, Deserialize)]
 struct Placement {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin_map: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     prototype: Option<u32>,
     map: String,
     source: Tile,
@@ -177,6 +193,7 @@ struct Placement {
 }
 pub(super) struct Target {
     pub(super) stats: Option<CharacterStatistics>,
+    pub(super) party: bool,
     pub(super) worth: [i32; 2],
     pub(super) critter2: u32,
     pub(super) natural: [i32; 10],
@@ -211,9 +228,15 @@ pub(super) enum Kind {
     Tile,
     Item,
 }
+impl Placement {
+    fn origin(&self) -> &str {
+        self.origin_map.as_deref().unwrap_or(&self.map)
+    }
+}
 impl Target {
     pub(super) fn new(subject: Subject, tile: Tile, key: Option<WorldOrder>, kind: Kind) -> Self {
         Self {
+            party: false,
             critter2: 0,
             stats: None,
             worth: [0; 2],
@@ -242,7 +265,7 @@ impl Target {
             sound: None,
         }
     }
-    fn actor(&mut self, pc: &Character, stats: &CharacterStatistics) {
+    pub(super) fn actor(&mut self, pc: &Character, stats: &CharacterStatistics) {
         self.critter2 = pc.critter_flags2;
         self.stats = Some(stats.clone());
         self.hp = pc.health_damage;
@@ -269,6 +292,9 @@ impl Target {
         self
     }
     fn matches(&self, flags: &[String]) -> Result<bool, String> {
+        self.matches_from(flags, &Subject::Player)
+    }
+    fn matches_from(&self, flags: &[String], caster: &Subject) -> Result<bool, String> {
         let mut categories = false;
         let mut matched = false;
         for flag in flags {
@@ -285,7 +311,7 @@ impl Target {
                 }
                 "tgt_obj_t_pc" => self.subject == Subject::Player,
                 "tgt_non_party_critters" => {
-                    self.subject != Subject::Player && self.spell & 0x08000000 == 0
+                    !self.party && self.subject != Subject::Player && self.spell & 0x08004000 == 0
                 }
                 "tgt_obj_weight_below_5" => {
                     self.kind == Kind::Item && self.weight.is_some_and(|n| n < 5)
@@ -296,7 +322,8 @@ impl Target {
                         || self.kind == Kind::Actor
                             && flags.iter().any(|s| s == "tgt_obj_t_critter")
                 }
-                "tgt_obj_no_self" | "tgt_obj_no_t_pc" => self.subject != Subject::Player,
+                "tgt_obj_no_self" => &self.subject != caster,
+                "tgt_obj_no_t_pc" => self.subject != Subject::Player,
                 "tgt_obj_no_st_critter_dead" => self.kind != Kind::Actor || self.hp < self.maximum,
                 "tgt_obj_st_critter_dead" => self.kind == Kind::Actor && self.hp >= self.maximum,
                 "tgt_obj_st_critter_animal" => self.critter & 8 != 0,
@@ -454,6 +481,18 @@ impl State {
             .and_then(|d| d.death_anim)
             .unwrap_or(7)
     }
+    pub(in crate::content::world) fn bad_associates(&self) -> bool {
+        self.active
+            .iter()
+            .filter(|r| !r.ending)
+            .flat_map(|r| &r.summons)
+            .any(|s| {
+                !s.hidden
+                    && s.spell_flags & 0x4000 != 0
+                    && s.npc_flags & 0x8000 == 0
+                    && s.critter_flags & 8 == 0
+            })
+    }
     pub(in crate::content::world) fn down(&self, id: OriginalId) -> bool {
         self.actors.get(&id.key()).is_some_and(|d| d.dead)
     }
@@ -551,6 +590,7 @@ mod actors;
 mod appearance;
 mod consumable;
 pub(in crate::content::world::inventory) mod encounters;
+pub(super) mod follower;
 mod lifecycle;
 mod loadout;
 mod projection;
@@ -646,8 +686,13 @@ impl InteractiveWorld {
 fn has(flags: &[String], name: &str) -> bool {
     flags.iter().any(|s| s == name)
 }
-fn saving_throw(p: &Program, t: &Target, rng: &mut crate::random::Random) -> (bool, i32) {
-    if t.subject == Subject::Player || t.kind != Kind::Actor {
+fn saving_throw(
+    p: &Program,
+    t: &Target,
+    self_cast: bool,
+    rng: &mut crate::random::Random,
+) -> (bool, i32) {
+    if self_cast || t.kind != Kind::Actor {
         return (true, 0);
     }
     let mut resistance = t.resistance[4];
@@ -734,6 +779,7 @@ impl InventoryReader {
             targets = self.spell_targets(w, &program, aim)?;
         }
         let mut run = Active {
+            caster: None,
             spell: id,
             bindings: vec![],
             summons: vec![],
@@ -1116,8 +1162,12 @@ impl InventoryReader {
                 result["reflected_by"] = json!(t.subject);
                 *t = self.target(w, Aim::Player)?;
             }
-            let (passed, resistance) =
-                saving_throw(&program, t, &mut w.cache.inventory.skill_random);
+            let (passed, resistance) = saving_throw(
+                &program,
+                t,
+                t.subject == Subject::Player,
+                &mut w.cache.inventory.skill_random,
+            );
             if !passed || t.spell & 0x800 != 0 {
                 applied
                     .push(json!({"target":t.subject,"outcome":"resisted","resistance":resistance}));
@@ -1323,7 +1373,7 @@ impl InventoryReader {
                         }
                     }
                     Operation::Vital { .. } => {
-                        apply_vital(&mut w.cache.inventory, t, c, stats.aptitude, resistance)
+                        self.apply_actor_vital(w, t, c, stats.aptitude, resistance, None);
                     }
                     Operation::Dispel => {
                         while let Some(i) = w.cache.inventory.magick.active.iter().position(|r| {
@@ -1403,6 +1453,8 @@ impl InventoryReader {
                         inv.state.next_generated += 1;
                         gear.commit(inv, &w.map, sid);
                         run.summons.push(Spawn {
+                            orders: Default::default(),
+                            leader_level: stats.level,
                             id: sid,
                             map: w.map.clone(),
                             tile: t.tile,
@@ -1487,7 +1539,47 @@ impl InventoryReader {
     }
 }
 
+impl InventoryReader {
+    fn apply_actor_vital(
+        &mut self,
+        w: &mut InteractiveWorld,
+        t: &mut Target,
+        c: &Component,
+        apt: i32,
+        resistance: i32,
+        source: Option<OriginalId>,
+    ) {
+        if let Operation::Vital {
+            heal: true, flags, ..
+        } = &c.operation
+            && t.hp >= t.maximum
+            && t.maximum > 0
+            && (has(flags, "resurrect") || has(flags, "reanimate"))
+            && let Subject::Mobile(id) = t.subject
+            && id.kind == 2
+            && !self.dispatch_actor_event(
+                w,
+                id,
+                Some(source.map_or(Subject::Player, Subject::Mobile)),
+                crate::content::script::Event::Resurrect,
+            )
+        {
+            return;
+        }
+        apply_vital_from(&mut w.cache.inventory, t, c, apt, resistance, source);
+    }
+}
 fn apply_vital(inv: &mut Session, t: &mut Target, c: &Component, apt: i32, resisted: i32) {
+    apply_vital_from(inv, t, c, apt, resisted, None);
+}
+fn apply_vital_from(
+    inv: &mut Session,
+    t: &mut Target,
+    c: &Component,
+    apt: i32,
+    resisted: i32,
+    source: Option<OriginalId>,
+) {
     let Operation::Vital {
         heal,
         channel,
@@ -1504,6 +1596,14 @@ fn apply_vital(inv: &mut Session, t: &mut Target, c: &Component, apt: i32, resis
             || matches!(channel, Channel::Poison | Channel::Fatigue))
     {
         return;
+    }
+    if *heal && t.kind == Kind::Actor && t.hp >= t.maximum && t.maximum > 0 {
+        let reanimate = has(flags, "reanimate");
+        if !(reanimate || has(flags, "resurrect"))
+            || t.critter & if reanimate { 0x800000 } else { 0x1000000 } != 0
+        {
+            return;
+        }
     }
     let mut amount = if has(flags, "full") {
         if *heal { i32::MAX } else { t.maximum }
@@ -1526,8 +1626,8 @@ fn apply_vital(inv: &mut Session, t: &mut Target, c: &Component, apt: i32, resis
     let before = t.hp;
     inv.change_vitals(t, *channel, if *heal { -amount } else { amount });
     if !heal {
-        inv.note_death(t, before, None);
-        inv.combat_reward(t, before);
+        inv.note_death(t, before, source);
+        inv.combat_reward(t, before, source.is_none());
     }
     if *heal && has(flags, "full") {
         inv.change_vitals(t, Channel::Fatigue, -i32::MAX);
@@ -1610,6 +1710,7 @@ impl InteractiveWorld {
                     id.key(),
                     Placement {
                         prototype: None,
+                        origin_map: None,
                         map: self.map.clone(),
                         source: tile,
                         tile: to,

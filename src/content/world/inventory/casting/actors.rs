@@ -32,6 +32,8 @@ pub(super) fn npc_character(
     }
     pc.basic_skills = std::array::from_fn(|i| array(67, i, defaults.basic_skills[i] as i32) as u32);
     pc.tech_skills = std::array::from_fn(|i| array(68, i, defaults.tech_skills[i] as i32) as u32);
+    pc.colleges = std::array::from_fn(|i| array(69, i, defaults.colleges[i] as i32) as u32);
+    pc.portrait = scalar(77, defaults.portrait);
     pc.base_ac = scalar(25, defaults.armor_class.unwrap_or(0));
     pc.critter_flags2 = scalar(65, defaults.appearance.critter_flags2.unwrap_or(0) as i32) as u32;
     pc.hp = std::array::from_fn(|i| scalar(26 + i, defaults.hp[i]));
@@ -91,6 +93,13 @@ impl Session {
         &mut self,
         vfs: &mut Vfs,
     ) -> Result<(), String> {
+        for delta in self.magick.actors.values() {
+            if let Some(profile) = &delta.advancement {
+                let mut pc = Character::default();
+                profile.apply(&mut pc);
+                pc.validate_progression()?;
+            }
+        }
         let mut frames = FrameCache::default();
         let mut art = BTreeMap::new();
         let mut ids = BTreeSet::new();
@@ -179,8 +188,8 @@ impl Session {
                 return Err("Invalid original mobile identity".into());
             }
             let index = indices
-                .entry(placement.map.clone())
-                .or_insert_with(|| Index::load(vfs, &placement.map));
+                .entry(placement.origin().to_owned())
+                .or_insert_with(|| Index::load(vfs, placement.origin()));
             if index.category(id) != Some(16) {
                 return Err("Displaced mobile missing from original map".into());
             }
@@ -214,6 +223,17 @@ impl Session {
             })?;
             moved.insert(id, (Arc::new(r), frame));
         }
+        self.origin_indices.extend(
+            indices
+                .into_iter()
+                .filter(|(map, _)| {
+                    self.magick
+                        .offsets
+                        .values()
+                        .any(|p| p.origin_map.as_deref() == Some(map))
+                })
+                .map(|(m, i)| (m, Arc::new(std::sync::OnceLock::from(i)))),
+        );
         self.magick.moved = moved;
         self.magick.stun = stuns;
         self.magick.art = art;
@@ -222,6 +242,9 @@ impl Session {
     }
     pub(super) fn apply_actor_changes(&self, id: OriginalId, pc: &mut Character) {
         if let Some(d) = self.magick.actors.get(&id.key()) {
+            if let Some(advancement) = &d.advancement {
+                advancement.apply(pc);
+            }
             pc.health_damage = d.health.unwrap_or(pc.health_damage);
             pc.fatigue_damage = d.fatigue.unwrap_or(pc.fatigue_damage);
             pc.base[24] = d.poison.unwrap_or(pc.base[24]);
@@ -251,18 +274,53 @@ impl Session {
             temporary: self.magick.effects(&Subject::Mobile(id), &self.rules),
             ..Rules::default()
         };
-        let stats = self.npc_statistics(id, &pc, &rules);
+        let stats = self.npc_statistics(id, &pc, rules);
         (pc, stats)
     }
     pub(in crate::content::world::inventory) fn npc_statistics(
         &self,
         id: OriginalId,
         pc: &Character,
-        rules: &Rules,
+        mut rules: Rules,
     ) -> CharacterStatistics {
         let mut armor = 0;
         let mut resistance = [0; 5];
-        let aptitude = pc.aptitude(rules);
+        for c in self.state.changes.values() {
+            let worn = matches!(c.place,Place::WornBy(_,who,_) if who==id);
+            if worn && pc.spell_flags & 0x2003c == 0 {
+                rules.worn.extend(
+                    c.item
+                        .stats
+                        .spells
+                        .iter()
+                        .map(|s| s.unwrap_or(10000))
+                        .take_while(|&s| s != 10000)
+                        .filter_map(|s| self.rules.progression.worn_spells.get(&(s & 255)))
+                        .flatten()
+                        .cloned(),
+                );
+            }
+            if (worn || matches!(c.place,Place::Owned(Owner::OriginalObject(_,who)) if who==id))
+                && let (Some(carry), Some(value)) = (&c.item.carry, c.item.insert_stat)
+            {
+                rules.worn.extend(std::iter::repeat_n(
+                    carry.adjustment.clone(),
+                    usize::from(value / carry.divisor),
+                ));
+            }
+        }
+        let aptitude = pc.aptitude(&rules);
+        for (item, (program, effect)) in &self.wielded {
+            if let Some(c) = self.state.changes.get(item)
+                && matches!(c.place,Place::WornBy(_,who,_) if who==id)
+                && pc.spell_flags & 0x2003c == 0
+            {
+                rules.worn.extend(std::iter::repeat_n(
+                    effect.clone(),
+                    program.count(c.item.stats.complexity.unwrap_or(0), aptitude),
+                ));
+            }
+        }
         for c in self.state.changes.values().filter(|c| {
             pc.spell_flags & 0x2003c == 0
                 && matches!(c.place,Place::WornBy(_,who,_) if who==id)
@@ -276,7 +334,7 @@ impl Session {
                     + item.adjust_magic(item.magic_resistance.unwrap_or_default()[i], aptitude);
             }
         }
-        pc.statistics(rules, Some(0), armor, resistance, false)
+        pc.statistics(&rules, Some(0), armor, resistance, false)
     }
     pub(in crate::content::world::inventory) fn tick_actor_poison(&mut self, now: u64) -> bool {
         let mut hits = Vec::new();
@@ -409,6 +467,9 @@ impl Session {
                                 .then(|| self.game_second.saturating_add(86400));
                             self.combat.falls.insert(*id);
                         } else if !d.dead {
+                            if !previously_alive {
+                                self.combat.clear_actor_pose(*id);
+                            }
                             d.death_anim = None;
                             d.decay_at = None;
                             self.combat.falls.remove(id);
@@ -478,6 +539,173 @@ impl Session {
     }
 }
 
+impl InteractiveWorld {
+    /// Keep the next walking edges available even when the camera or leader leaves a follower's sector.
+    pub(in crate::content::world) fn party_navigation_tiles(
+        &self,
+    ) -> impl Iterator<Item = Tile> + '_ {
+        let magick = &self.cache.inventory.magick;
+        let recruited = self
+            .cache
+            .scripts
+            .followers
+            .iter()
+            .filter(|(_, m)| !m.waiting && !m.dead)
+            .filter_map(|(key, _)| magick.offsets.get(key));
+        let controlled = magick
+            .active
+            .iter()
+            .flat_map(|r| &r.bindings)
+            .filter_map(|b| match b.target {
+                Subject::Mobile(id) if b.spell & 0x08000000 != 0 => magick.offsets.get(&id.key()),
+                _ => None,
+            });
+        recruited
+            .chain(controlled)
+            .filter(|p| p.map == self.map)
+            .map(|p| p.tile)
+            .chain(
+                magick
+                    .active
+                    .iter()
+                    .filter(|r| !r.ending)
+                    .flat_map(|r| &r.summons)
+                    .filter(|s| {
+                        s.map == self.map
+                            && !s.hidden
+                            && !magick.down(s.id)
+                            && magick
+                                .art
+                                .get(&s.model_key(&self.cache.inventory.state))
+                                .is_some_and(|model| model.actor)
+                    })
+                    .map(|s| s.tile),
+            )
+    }
+    pub(in crate::content::world::inventory) fn actor_origin(&self, id: OriginalId) -> &str {
+        self.cache
+            .inventory
+            .magick
+            .offsets
+            .get(&id.key())
+            .map_or(&self.map, Placement::origin)
+    }
+
+    pub(in crate::content::world::inventory) fn actor_owner(&self, id: OriginalId) -> Owner {
+        Owner::OriginalObject(self.actor_origin(id).to_owned(), id)
+    }
+
+    pub(in crate::content::world::inventory) fn actor_records<'a>(
+        &'a self,
+        vfs: &'a mut Vfs,
+        id: OriginalId,
+    ) -> Records<'a> {
+        let map = self.actor_origin(id);
+        if map == self.map {
+            return self.records(vfs);
+        }
+        save::records(
+            vfs,
+            map,
+            self.cache
+                .inventory
+                .origin_indices
+                .get(map)
+                .and_then(|i| i.get()),
+        )
+    }
+
+    pub(in crate::content::world::inventory) fn arrive_with_followers(&self, previous: &mut Self) {
+        let Some(pc) = self.cache.player.as_ref() else {
+            return;
+        };
+        let tile = pc.tile();
+        let inv = &previous.cache.inventory;
+        let mut members: BTreeSet<_> = previous
+            .cache
+            .scripts
+            .followers
+            .iter()
+            .filter(|(_, f)| !f.waiting)
+            .filter_map(|(key, _)| parse_id(key).ok())
+            .collect();
+        members.extend(
+            inv.magick
+                .active
+                .iter()
+                .flat_map(|r| &r.bindings)
+                .filter_map(|b| match b.target {
+                    Subject::Mobile(id) if b.spell & 0x08000000 != 0 => Some(id),
+                    _ => None,
+                }),
+        );
+        for id in members {
+            if previous.cache.inventory.magick.down(id) {
+                continue;
+            }
+            if let Some(Aim::Object(key)) =
+                InventoryReader::subject_aim(previous, &Subject::Mobile(id))
+                && let Some((r, at)) = previous.cache.npc(key)
+                && let Some(d) = &r.prototype
+            {
+                let (_, stats) =
+                    previous
+                        .cache
+                        .inventory
+                        .npc_vitals(id, &d.defaults, &r.instance());
+                if stats.current_fatigue <= 0 || stats.current_health <= 0 {
+                    if let Some(f) = previous.cache.scripts.followers.get_mut(&id.key()) {
+                        f.waiting = true;
+                    }
+                    continue;
+                }
+                previous.relocate_actor(id, Some(key), at, at);
+            }
+            if let Some(orders) = previous.follower_orders_mut(id) {
+                orders.clear_target();
+            }
+            let inv = &mut previous.cache.inventory;
+            if let Some(p) = inv.magick.offsets.get_mut(&id.key())
+                && p.map == previous.map
+            {
+                if p.map != self.map && p.origin_map.is_none() {
+                    inv.origin_indices
+                        .insert(p.map.clone(), previous.mobile_index.clone());
+                    p.origin_map = Some(p.map.clone());
+                }
+                p.map.clone_from(&self.map);
+                p.tile = tile;
+            }
+        }
+        let inv = &mut previous.cache.inventory;
+        let summons: BTreeSet<_> = inv
+            .magick
+            .following_summons(&previous.map, &inv.state)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        for spawn in inv
+            .magick
+            .active
+            .iter_mut()
+            .flat_map(|r| &mut r.summons)
+            .filter(|s| summons.contains(&s.id))
+        {
+            spawn.orders.clear_target();
+            spawn.tile = tile;
+            spawn.map.clone_from(&self.map);
+        }
+        for c in inv.state.changes.values_mut() {
+            if let Place::Owned(Owner::OriginalObject(map, id)) | Place::WornBy(map, id, _) =
+                &mut c.place
+                && summons.contains(id)
+            {
+                map.clone_from(&self.map);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,7 +745,7 @@ mod tests {
             let xp = inv.character.base[18];
             assert_eq!(xp, 192);
             assert!(inv.character.base[19] < 0);
-            assert_eq!(inv.combat_reward(&t, t.hp), 0);
+            assert_eq!(inv.combat_reward(&t, t.hp, true), 0);
             apply_vital(&mut inv, &mut t, &harm.components[0], 100, 0);
             assert_eq!(inv.character.base[18], xp);
         }

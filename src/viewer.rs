@@ -1018,6 +1018,43 @@ impl Viewer<'_> {
                     }
                 }
             }
+            act @ (hud::Action::PartyShow
+            | hud::Action::PartyHide
+            | hud::Action::PartyPrevious
+            | hud::Action::PartyNext) => {
+                if let ViewContent::Stream { hud: Some(hud), .. } = &mut self.content {
+                    hud.navigate_party(act);
+                }
+            }
+            hud::Action::PartySlot(slot) => {
+                if let ViewContent::Stream {
+                    hud: Some(hud),
+                    world,
+                    ..
+                } = &mut self.content
+                    && let Some(id) = hud.party_actor(slot)
+                {
+                    world.select_party_actor(id, self.settings.run);
+                    self.player_deadline = Some(Instant::now());
+                }
+            }
+            hud::Action::PartyCommand(command) => {
+                if let ViewContent::Stream {
+                    hud: Some(hud),
+                    world,
+                    inventory_reader: Some(reader),
+                    ..
+                } = &mut self.content
+                    && let Some(key) = hud.close_party_menu()
+                {
+                    if command == 7 {
+                        hud.open_follower_sheet(key);
+                    } else if let Err(e) = reader.issue_follower_order(world, &key, command) {
+                        world.rest_feedback(e);
+                    }
+                    self.player_deadline = Some(Instant::now());
+                }
+            }
             hud::Action::DismissSpell(slot) => {
                 let elapsed = self.play_elapsed(Instant::now());
                 if let ViewContent::Stream {
@@ -2945,6 +2982,33 @@ impl ApplicationHandler for Viewer<'_> {
                 }
                 return;
             }
+            if let hud::Hit::Button(hud::Action::PartySlot(slot)) = hit
+                && matches!(
+                    event,
+                    WindowEvent::MouseInput {
+                        state: ElementState::Released,
+                        button: MouseButton::Right,
+                        ..
+                    }
+                )
+            {
+                hud.party_slot_menu(slot);
+                view.window.request_redraw();
+                return;
+            }
+            if matches!(hit, hud::Hit::World)
+                && matches!(
+                    event,
+                    WindowEvent::MouseInput {
+                        state: ElementState::Pressed,
+                        ..
+                    }
+                )
+                && hud.close_party_menu().is_some()
+            {
+                view.window.request_redraw();
+                return;
+            }
             if hit != hud::Hit::World {
                 match event {
                     WindowEvent::MouseInput {
@@ -3794,6 +3858,7 @@ impl WindowSurface {
             if let Some(reader) = inventory_reader.as_deref_mut() {
                 hud.refresh_journal(&reader.quest_catalog, world);
                 hud.refresh_sheet(reader, world);
+                hud.refresh_party(reader, world);
                 hud.refresh_spellbook(reader, world);
                 hud.layout((size.width, size.height));
             }

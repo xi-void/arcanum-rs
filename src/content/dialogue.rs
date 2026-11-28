@@ -354,10 +354,16 @@ impl Conversation {
         if matches!(response.service, Some(training::Service::Expert { .. })) {
             return Ok(response.next);
         }
+        let mut next = response.next;
         match effects(&response.effect) {
             Some(effects) => {
                 self.apply_effects(&effects, scripts, response.id.unwrap_or(self.turn.line))
                     .map_err(ResponseRejection::Effect)?;
+                for effect in &effects {
+                    if let Effect::Order(_, Some(success)) = effect {
+                        next = *success;
+                    }
+                }
                 self.state.unresolved.retain(|slot| {
                     !effects
                         .iter()
@@ -373,7 +379,7 @@ impl Conversation {
                 ));
             }
         }
-        Ok(response.next)
+        Ok(next)
     }
 
     pub(crate) fn choose(
@@ -520,10 +526,18 @@ impl Conversation {
         for &effect in writes {
             let (slot, value) = match effect {
                 Effect::Write(slot, value) => (slot, value),
+                Effect::MarkArea(id) => {
+                    scripts.marked_areas.insert(id);
+                    continue;
+                }
                 Effect::Rumor(id, quell) => {
                     scripts
                         .learn_rumor(id, quell)
                         .ok_or("Invalid rumor number")?;
+                    continue;
+                }
+                Effect::Order(order, _) => {
+                    scripts.order(&attachment.owner, order, false)?;
                     continue;
                 }
                 Effect::Attack => {
@@ -851,10 +865,6 @@ impl Conversation {
         // CE sub_419260: ordinary G: greetings in the current, spell-free
         // exploration runtime. Numeric greeting directives remain unresolved.
         let reaction = self.state.reaction?;
-        // A dialogue override can change the selected greeting.
-        if self.override_script != 0 {
-            return None;
-        }
         let genders = |gender| if gender == 1 { 'm' } else { 'f' };
         let dumb = self.npc_intelligence? <= 4;
         let mut start = match self.player_armor? {
@@ -873,6 +883,18 @@ impl Conversation {
                 (true, ..=0) => 5000,
             },
         };
+        // CE checks the NPC's SAP_DIALOG_OVERRIDE line before its generic table.
+        let override_line = start / 1000 + if start >= 8000 { 9999 } else { 10999 };
+        if self.override_script > 0
+            && let Ok(path) = super::script::path(vfs, self.override_script)
+            && let Some(stem) = path
+                .strip_prefix("scr/")
+                .and_then(|p| p.strip_suffix(".scr"))
+            && let Ok(table) = Dialogue::load(vfs, &format!("dlg/{stem}.dlg"))
+            && let Some(message) = table.printed_line(override_line, stats.gender == 0)
+        {
+            return Some(message.to_owned());
+        }
         let family = if start >= 8000 {
             if !dumb {
                 start += 50 * self.social_class?.clamp(0, 18);
@@ -1018,8 +1040,10 @@ fn state_operands(code: &str, raw: &str) -> Option<(Slot, i32)> {
 
 #[derive(Clone, Copy)]
 enum Effect {
+    MarkArea(i32),
     Rumor(i32, bool),
     Attack,
+    Order(super::script::party::Order, Option<i32>),
     Training(usize, u32),
     Experience(i32),
     Alignment(super::character::progression::Alignment),
@@ -1036,9 +1060,34 @@ fn effects(raw: &str) -> Option<Vec<Effect>> {
         .map(|effect| {
             let effect = effect.trim();
             match effect.get(..2)?.to_ascii_lowercase().as_str() {
+                "mm" => effect[2..]
+                    .trim()
+                    .parse()
+                    .ok()
+                    .filter(|n| *n >= 0)
+                    .map(Effect::MarkArea),
                 op @ ("ru" | "rq") => {
                     Some(Effect::Rumor(effect[2..].trim().parse().ok()?, op == "rq"))
                 }
+                op @ ("jo" | "uw") => {
+                    let mut args = effect[2..].split_ascii_whitespace();
+                    let force = args.next()?.parse::<i32>().ok()? != 0;
+                    let dest = args.next()?.parse().ok()?;
+                    args.next().is_none().then_some(Effect::Order(
+                        if op == "jo" {
+                            super::script::party::Order::Join(force)
+                        } else {
+                            super::script::party::Order::Resume(force)
+                        },
+                        Some(dest),
+                    ))
+                }
+                "wa" => Some(Effect::Order(super::script::party::Order::Wait, None)),
+                "lv" => Some(Effect::Order(super::script::party::Order::Leave, None)),
+                op @ ("sc" | "so") => Some(Effect::Order(
+                    super::script::party::Order::Spread(op == "so"),
+                    None,
+                )),
                 "co" => Some(Effect::Attack),
                 "tr" => {
                     let (id, tier) = skill_operands(&effect[2..])?;
@@ -1143,63 +1192,85 @@ fn conditions(
                 })
         } else {
             args.parse::<i32>().ok().and_then(|n| {
-                let stat =
-                    match code.as_str() {
-                        "ru" | "rq" => {
-                            let id = n.checked_abs()?;
-                            let set = if code == "ru" {
-                                scripts.rumors.contains_key(&id)
+                let stat = match code.as_str() {
+                    "ru" | "rq" => {
+                        let id = n.checked_abs()?;
+                        let set = if code == "ru" {
+                            scripts.rumors.contains_key(&id)
+                        } else {
+                            scripts.quelled_rumors.contains(&id)
+                        };
+                        return Some(set == (n >= 0));
+                    }
+                    "wa" => {
+                        return Some(
+                            scripts
+                                .followers
+                                .get(&attachment.owner)
+                                .is_some_and(|f| f.waiting)
+                                == (n == 1),
+                        );
+                    }
+                    "fo" => {
+                        return Some(scripts.followers.contains_key(&attachment.owner) == (n == 0));
+                    }
+                    "pa" => {
+                        return Some(
+                            scripts
+                                .followers
+                                .values()
+                                .any(|f| !f.waiting && f.name == n.unsigned_abs())
+                                == (n >= 0),
+                        );
+                    }
+                    "ch" => stats.attributes[7],
+                    "re" => state.reaction?,
+                    "me" if matches!(n, 0 | 1) => return Some(state.met == (n == 1)),
+                    "pe" => stats.attributes[5],
+                    "al" | "na" => {
+                        let alignment = scripts
+                            .interaction
+                            .as_ref()
+                            .and_then(|f| f.stats[19])
+                            .unwrap_or(stats.alignment);
+                        if code == "na" {
+                            return Some(if n < 0 {
+                                alignment <= n
                             } else {
-                                scripts.quelled_rumors.contains(&id)
-                            };
-                            return Some(set == (n >= 0));
+                                i64::from(alignment) >= -i64::from(n)
+                            });
                         }
-                        "ch" => stats.attributes[7],
-                        "re" => state.reaction?,
-                        "me" if matches!(n, 0 | 1) => return Some(state.met == (n == 1)),
-                        "pe" => stats.attributes[5],
-                        "al" | "na" => {
-                            let alignment = scripts
+                        alignment
+                    }
+                    "ma" => stats.aptitude,
+                    "ta" => -stats.aptitude,
+                    "le" => -stats.level,
+                    "ra" => {
+                        return Some((i64::from(stats.race) + 1 == i64::from(n).abs()) == (n > 0));
+                    }
+                    "$$" => {
+                        return Some(threshold(
+                            scripts
                                 .interaction
                                 .as_ref()
-                                .and_then(|f| f.stats[19])
-                                .unwrap_or(stats.alignment);
-                            if code == "na" {
-                                return Some(if n < 0 {
-                                    alignment <= n
-                                } else {
-                                    i64::from(alignment) >= -i64::from(n)
-                                });
-                            }
-                            alignment
-                        }
-                        "ma" => stats.aptitude,
-                        "ta" => -stats.aptitude,
-                        "le" => -stats.level,
-                        "ra" => {
-                            return Some(
-                                (i64::from(stats.race) + 1 == i64::from(n).abs()) == (n > 0),
-                            );
-                        }
-                        "$$" => {
-                            return Some(threshold(
-                                scripts
-                                    .interaction
-                                    .as_ref()
-                                    .map_or(gold as i64, |s| s.gold[0]),
-                                n,
-                            ));
-                        }
-                        "in" | "ni" => {
-                            let has = scripts.interaction.as_ref()?.items.iter().any(
-                                |(side, name, _)| {
+                                .map_or(gold as i64, |s| s.gold[0]),
+                            n,
+                        ));
+                    }
+                    "in" | "ni" => {
+                        let has =
+                            scripts
+                                .interaction
+                                .as_ref()?
+                                .items
+                                .iter()
+                                .any(|(side, name, _)| {
                                     (*side == 0) == (n >= 0) && *name == n.unsigned_abs()
-                                },
-                            );
-                            return Some(if code == "in" { has } else { !has });
-                        }
-                        _ => return None,
-                    };
+                                });
+                        return Some(if code == "in" { has } else { !has });
+                    }
+                    _ => return None,
+                };
                 Some(threshold(i64::from(stat), n))
             })
         };

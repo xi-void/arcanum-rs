@@ -91,6 +91,7 @@ pub(super) struct Style {
 
 #[derive(Default)]
 pub(super) struct Sheet {
+    follower: Option<String>,
     pub open: bool,
     page: Page,
     group: usize,
@@ -115,6 +116,16 @@ impl Sheet {
             return false;
         }
         if c.sheet_page.is_some_and(|p| p != self.page || !self.open) {
+            return false;
+        }
+        if self.follower.is_some()
+            && matches!(
+                c.action,
+                Some(Action::Sheet(
+                    Control::Buy(_) | Control::Refund(_) | Control::Combine
+                ))
+            )
+        {
             return false;
         }
         match c.action {
@@ -281,8 +292,19 @@ impl Hud {
             Action::ToggleCharacter
         }
     }
+    pub(in crate::viewer) fn open_follower_sheet(&mut self, key: String) {
+        self.close_inventory();
+        self.close_journal();
+        self.sheet.open = true;
+        self.sheet.page = Page::Skills;
+        self.sheet.follower = Some(key);
+        self.sheet.revision = None;
+        self.sheet.message.clear();
+        self.clear_layout();
+    }
     pub(in crate::viewer) fn close_sheet(&mut self) {
         if self.sheet.open {
+            self.sheet.follower = None;
             self.sheet.open = false;
             self.sheet.revision = None;
             self.sheet.message.clear();
@@ -332,7 +354,8 @@ impl Hud {
                     self.sheet.rank = 1;
                 }
                 Control::Buy(entry) | Control::Refund(entry) => {
-                    if let Some(purchase) = self.sheet.investment(entry)
+                    if self.sheet.follower.is_none()
+                        && let Some(purchase) = self.sheet.investment(entry)
                         && let Err(e) =
                             world.invest(purchase, matches!(control, Control::Refund(_)))
                     {
@@ -363,7 +386,15 @@ impl Hud {
         if !self.sheet.open || self.sheet.revision == Some(world.inventory_revision()) {
             return;
         }
-        let s = world.character_statistics();
+        let s = if let Some(key) = &self.sheet.follower {
+            let Some(stats) = reader.follower_statistics(world, key) else {
+                self.close_sheet();
+                return;
+            };
+            stats
+        } else {
+            world.character_statistics()
+        };
         let r = world.progression_rules();
         self.sheet.known = s.colleges[self.sheet.college];
         self.sheet.degree = s.degrees[self.sheet.discipline];

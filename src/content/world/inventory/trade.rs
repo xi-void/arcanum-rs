@@ -188,7 +188,7 @@ impl InteractiveWorld {
         self.cache
             .inventory
             .accounts
-            .get(&self.map)
+            .get(parse_id(npc).map_or(self.map.as_str(), |id| self.actor_origin(id)))
             .and_then(|a| a.get(npc))
             .map_or(0, |a| a.reaction_delta)
     }
@@ -222,11 +222,18 @@ impl InteractiveWorld {
     pub(super) fn npc_gold(&self, vfs: &mut Vfs, npc: &str) -> Result<u32, String> {
         match self.account(npc) {
             Some(account) => Ok(account.gold),
-            None => Ok(self.records(vfs).npc_inventory(parse_id(npc)?)?.gold),
+            None => {
+                let id = parse_id(npc)?;
+                Ok(self.actor_records(vfs, id).npc_inventory(id)?.gold)
+            }
         }
     }
     fn account(&self, npc: &str) -> Option<&Account> {
-        self.cache.inventory.accounts.get(&self.map)?.get(npc)
+        self.cache
+            .inventory
+            .accounts
+            .get(self.actor_origin(parse_id(npc).ok()?))?
+            .get(npc)
     }
 
     pub(in crate::content::world) fn open_trade(
@@ -238,7 +245,7 @@ impl InteractiveWorld {
         (response, destination): (usize, i32),
     ) -> Result<(), String> {
         let id = parse_id(npc)?;
-        let mut records = self.records(vfs);
+        let mut records = self.actor_records(vfs, id);
         let terms = records.npc_inventory(id)?;
         let mut sources = vec![terms.source];
         let stock = if let Some(chest) = terms.substitute {
@@ -447,6 +454,7 @@ impl InteractiveWorld {
             vfs,
             map: &self.map,
             index: self.mobile_index.get(),
+            foreign: None,
             frames: FrameCache::default(),
             prototypes: Prototypes::default(),
         };
@@ -514,10 +522,11 @@ impl InteractiveWorld {
         if !(0..=i64::from(i32::MAX)).contains(&after) {
             return Err("Merchant has insufficient gold or currency limit exceeded".into());
         }
+        let origin = self.actor_origin(parse_id(npc)?).to_owned();
         self.cache
             .inventory
             .accounts
-            .entry(self.map.clone())
+            .entry(origin)
             .or_default()
             .entry(npc.into())
             .or_default()
@@ -680,12 +689,38 @@ impl InteractiveWorld {
     ) -> Result<crate::content::script::Interaction, String> {
         use crate::content::script::Interaction;
         let id = parse_id(npc)?;
-        let mut records = self.records(vfs);
+        let mut records = self.actor_records(vfs, id);
         let terms = records.npc_inventory(id)?;
         let state = &self.cache.inventory.state;
         let stats = self.character_statistics();
         let values = stats.script_values();
         let mut facts = Interaction {
+            bad_associates: self.cache.inventory.magick.bad_associates(),
+            candidate: self.cache.ordered.iter().find_map(|r| {
+                let (resident, _) = self.cache.npc(r.key)?;
+                if resident.id != id {
+                    return None;
+                }
+                let obj = resident.instance();
+                let d = &resident.prototype.as_ref()?.defaults;
+                let field = |i| obj.field(i).and_then(FieldValue::scalar);
+                let (_, npc) = self.cache.inventory.npc_vitals(id, d, &obj);
+                Some(crate::content::script::party::Candidate {
+                    name: field(21).unwrap_or(d.object_name),
+                    level: npc.level,
+                    alignment: npc.alignment,
+                    flags: terms.flags,
+                    packet: self
+                        .progression_rules()
+                        .ai_packets
+                        .get(&field(130).unwrap_or(d.ai_packet))
+                        .copied(),
+                    other_leader: obj
+                        .field(129)
+                        .map_or(d.npc_leader, FieldValue::reference)
+                        .is_some(),
+                })
+            }),
             alignment_base: stats.base[19],
             alignment_modifier: self.cache.inventory.rules.social(0),
             reaction_modifiers: [
@@ -713,7 +748,7 @@ impl InteractiveWorld {
         };
         let owners = [
             Some(Owner::Player),
-            Some(Owner::OriginalObject(self.map.clone(), id)),
+            Some(self.actor_owner(id)),
             terms
                 .substitute
                 .map(|id| Owner::Container(self.map.clone(), id)),
@@ -744,6 +779,13 @@ impl InteractiveWorld {
                     .and_then(FieldValue::scalar)
                     .or_else(|| proto.defaults.item.as_ref().map(|stats| stats.name))
                     .ok_or("Missing inventory item name")?;
+                if object
+                    .field(71)
+                    .and_then(FieldValue::scalar)
+                    .is_some_and(|v| (1000..1009).contains(&v))
+                {
+                    facts.worn.insert((side as u8, name));
+                }
                 entries.push((
                     object
                         .field(71)
@@ -756,7 +798,11 @@ impl InteractiveWorld {
             for change in state.changes.values() {
                 if matches!(&change.place,Place::Owned(current) if current==&owner)
                     || owner == Owner::Player && matches!(change.place, Place::Equipped(_))
+                    || matches!((&owner, &change.place), (Owner::OriginalObject(_, actor), Place::WornBy(_, wearer, _)) if actor == wearer)
                 {
+                    if matches!(change.place, Place::Equipped(_) | Place::WornBy(..)) {
+                        facts.worn.insert((side as u8, change.item.stats.name));
+                    }
                     entries.push((
                         change.slot.unwrap_or(usize::MAX),
                         change.item.id,
@@ -786,7 +832,7 @@ impl InteractiveWorld {
         if facts.operations.is_empty() {
             return Ok(());
         }
-        let actor = Owner::OriginalObject(self.map.clone(), parse_id(npc)?);
+        let actor = self.actor_owner(parse_id(npc)?);
         let substitute = facts
             .substitute
             .as_deref()
@@ -823,11 +869,12 @@ impl InteractiveWorld {
                     }
                     Transfer::Reaction(n) => {
                         world.adjust_npc_gold(vfs, npc, 0)?;
+                        let origin = world.actor_origin(parse_id(npc)?).to_owned();
                         let account = world
                             .cache
                             .inventory
                             .accounts
-                            .get_mut(&world.map)
+                            .get_mut(&origin)
                             .and_then(|row| row.get_mut(npc))
                             .ok_or("Unresolved NPC reaction")?;
                         account.reaction_delta = account.reaction_delta.saturating_add(n);

@@ -375,6 +375,7 @@ fn spawn_group(
             id.key(),
             Placement {
                 prototype: Some(r.prototype_id),
+                origin_map: None,
                 map: w.map.clone(),
                 source: tile,
                 tile,

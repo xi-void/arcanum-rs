@@ -186,7 +186,7 @@ impl InventoryReader {
                 }
                 match &c.operation {
                     Operation::Vital { .. } => {
-                        apply_vital(&mut w.cache.inventory, &mut t, c, r.aptitude, resisted)
+                        self.apply_actor_vital(w, &mut t, c, r.aptitude, resisted, r.caster)
                     }
                     Operation::Flag { field, mask, on } if phase == Phase::Callback => w
                         .cache
@@ -364,7 +364,7 @@ impl InventoryReader {
                 let inv = &mut w.cache.inventory;
                 inv.change_vitals(&mut t, channel, total);
                 inv.note_death(&t, before, Some(emitter));
-                inv.combat_reward(&t, before);
+                inv.combat_reward(&t, before, true);
                 changed |= total != 0;
             }
         }
@@ -706,7 +706,7 @@ impl InventoryReader {
         tile: Tile,
     ) -> Result<(), String> {
         self.prepare_gear(w, id)?;
-        let owner = Owner::OriginalObject(w.map.clone(), id);
+        let owner = w.actor_owner(id);
         let coins = self.corpse_coins(w, id)?;
         let inv = &w.cache.inventory;
         let mut records = w.records(&mut self.vfs);

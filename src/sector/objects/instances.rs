@@ -471,6 +471,9 @@ pub(crate) struct PrototypeDefaults {
     pub fatigue: [i32; 2],
     pub faction: i32,
     pub npc_flags: Option<u32>,
+    pub ai_packet: u32,
+    pub level_scheme: i32,
+    pub object_name: u32,
     pub xp: [i32; 2],
     pub natural_damage: [i32; 10],
     pub npc_ammo: [u32; 4],
@@ -538,6 +541,7 @@ pub(crate) fn prototype_defaults(
     // The prototype stores all slots. Read the prefixes used by runtime systems.
     let mut fields = Fields::default();
     let mut description = None;
+    let mut object_name = 0;
     let mut inventory_scripts = false;
     let mut buy_script = Default::default();
     let mut hp = [0; 2];
@@ -552,6 +556,7 @@ pub(crate) fn prototype_defaults(
     for index in 0..COMMON.len() {
         let value = read_value(&mut reader, index, category)?;
         match index {
+            21 => object_name = value.scalar().unwrap_or_default(),
             22 => description = value.scalar(),
             23 => original_art = value.scalar(),
             25 if matches!(category, 15 | NPC) => armor_class = value.scalar().map(|v| v as i32),
@@ -591,6 +596,8 @@ pub(crate) fn prototype_defaults(
     let mut background = None;
     let (mut merchant_gold, mut retail, mut substitute, mut inventory_source) = (0, 0, None, None);
     let mut faction = 0;
+    let mut ai_packet = 0;
+    let mut level_scheme = 0;
     let (mut npc_flags, mut reaction_base, mut npc_leader, mut social_class) =
         (None, None, None, None);
     let mut degrees = [0; 8];
@@ -660,6 +667,10 @@ pub(crate) fn prototype_defaults(
                     140 => faction = value.scalar().unwrap_or(0) as i32,
                     128 => npc_flags = value.scalar(),
                     129 => npc_leader = value.reference(),
+                    91 => level_scheme = value.scalar().unwrap_or_default() as i32,
+                    77 => portrait = value.scalar().unwrap_or_default() as i32,
+                    130 => ai_packet = value.scalar().unwrap_or_default(),
+                    69 => colleges = int_array(value).map(|n| n.unwrap_or_default() as u32),
                     143 => reaction_base = value.scalar().map(|v| v as i32),
                     144 => social_class = value.scalar().map(|v| v as i32),
                     _ => {}
@@ -720,6 +731,9 @@ pub(crate) fn prototype_defaults(
         fatigue,
         faction,
         npc_flags,
+        ai_packet,
+        level_scheme,
+        object_name,
         xp,
         natural_damage,
         npc_ammo,

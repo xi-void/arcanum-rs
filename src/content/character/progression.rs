@@ -57,6 +57,8 @@ pub enum Investment {
 #[derive(Default)]
 pub struct ProgressionRules {
     thresholds: Vec<i32>,
+    schemes: BTreeMap<i32, String>,
+    pub(crate) ai_packets: BTreeMap<u32, [i32; 17]>,
     pub(crate) quest_levels: std::sync::Arc<BTreeMap<i32, (i32, i32)>>,
     pub(crate) worn_spells: BTreeMap<u32, Vec<std::sync::Arc<super::Adjustments>>>,
     rewards: BTreeMap<i32, i32>,
@@ -100,6 +102,34 @@ impl ProgressionRules {
                 .insert(path.to_owned(), table.source.to_string());
             Ok::<_, crate::content::Error>(table.mes)
         };
+        for path in ["rules/ai_params.mes", "rules/gameai.mes"] {
+            if let Ok(table) = load(path) {
+                for (id, row) in table.entries() {
+                    if let Ok(id) = u32::try_from(id)
+                        && let Ok(values) = row
+                            .split_ascii_whitespace()
+                            .map(str::parse::<i32>)
+                            .collect::<Result<Vec<_>, _>>()
+                        && let Ok(packet) = values.try_into()
+                    {
+                        rules.ai_packets.insert(id, packet);
+                    }
+                }
+            }
+        }
+        for (path, range) in [
+            ("rules/userlevel.mes", 1..50),
+            ("rules/gamelevel.mes", 50..200),
+        ] {
+            if let Ok(table) = load(path) {
+                rules.schemes.extend(
+                    table
+                        .entries()
+                        .filter(|(n, _)| range.contains(n))
+                        .map(|(n, line)| (n, line.to_owned())),
+                );
+            }
+        }
         let xp = load("rules/xp_level.mes")?;
         rules.thresholds.push(0);
         // The final contiguous level is the XP ceiling. Installations can extend the table.
@@ -582,5 +612,165 @@ mod tests {
             pc.invest(Investment::Attribute(6), &rules.progression, &stats, true)
                 .is_err()
         );
+    }
+}
+
+/// Purchased statistics are independent of the actor's current injuries, effects and inventory.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct NpcAdvancement {
+    attributes: [i32; 8],
+    level: i32,
+    points: [i32; 3],
+    basic: [u32; 12],
+    technological: [u32; 4],
+    colleges: [u32; 16],
+    degrees: [u32; 8],
+    vital_points: [i32; 2],
+}
+
+impl NpcAdvancement {
+    pub(crate) fn apply(&self, pc: &mut Character) {
+        pc.base[..8].copy_from_slice(&self.attributes);
+        pc.base[17] = self.level;
+        pc.base[21..24].copy_from_slice(&self.points);
+        pc.basic_skills = self.basic;
+        pc.tech_skills = self.technological;
+        pc.colleges = self.colleges;
+        pc.degrees = self.degrees;
+        pc.hp[0] = self.vital_points[0];
+        pc.fatigue[0] = self.vital_points[1];
+    }
+}
+
+impl Character {
+    pub(crate) fn advance_as_follower(
+        &mut self,
+        scheme: i32,
+        old: i32,
+        new: i32,
+        rules: &Rules,
+    ) -> Option<NpcAdvancement> {
+        let current = self.base[17];
+        let level = if current <= old {
+            current.saturating_add(new - old)
+        } else {
+            new
+        };
+        let level = level.min(rules.progression.thresholds.len() as i32);
+        if level <= current {
+            return None;
+        }
+        self.base[17] = level;
+        self.base[21] = self.base[21].saturating_add(level - current + level / 5 - current / 5);
+        if scheme != 0
+            && let Some(rule) = rules.progression.schemes.get(&scheme)
+        {
+            let fallback = rules.progression.schemes.get(&70).filter(|_| scheme != 70);
+            for clause in std::iter::once(rule)
+                .chain(fallback)
+                .flat_map(|s| s.split(','))
+            {
+                let mut parts = clause.split_ascii_whitespace();
+                let (Some(key), Some(score)) = (
+                    parts.next(),
+                    parts.next().and_then(|s| s.parse::<i32>().ok()),
+                ) else {
+                    break;
+                };
+                let key = key.to_ascii_lowercase();
+                while self.base[21] > 0 {
+                    let stats = self.statistics(&Rules::default(), Some(0), 0, [0; 5], false);
+                    let locate = |names: &[&str]| names.iter().position(|&s| s == key);
+                    let (value, purchase, prereq) = if let Some(i) =
+                        locate(&["st", "dx", "cn", "be", "in", "pe", "wp", "ch"])
+                    {
+                        (self.base[i], Investment::Attribute(i), None)
+                    } else if let Some(i) = locate(&SKILL_KEYS) {
+                        (
+                            stats.skills[i].level,
+                            Investment::Skill(i),
+                            Some(KEY_STATS[i]),
+                        )
+                    } else if let Some(i) = locate(&[
+                        "conveyance",
+                        "divination",
+                        "air",
+                        "earth",
+                        "fire",
+                        "water",
+                        "force",
+                        "mental",
+                        "meta",
+                        "morph",
+                        "nature",
+                        "necro_evil",
+                        "necro_good",
+                        "phantasm",
+                        "summoning",
+                        "temporal",
+                    ]) {
+                        let rank = self.colleges[i] as usize;
+                        if rank >= 5 || SPELL_LEVEL[rank] > level {
+                            break;
+                        }
+                        (
+                            rank as i32,
+                            Investment::Spell(i * 5 + rank),
+                            Some(if stats.attributes[4] < 5 { 4 } else { 6 }),
+                        )
+                    } else if let Some(i) = locate(&[
+                        "anatomical",
+                        "chemistry",
+                        "electric",
+                        "explosives",
+                        "gun_smithy",
+                        "mechanical",
+                        "smithy",
+                        "therapeutics",
+                    ]) {
+                        (
+                            self.degrees[i] as i32,
+                            Investment::Degree {
+                                discipline: i,
+                                rank: self.degrees[i] + 1,
+                            },
+                            Some(4),
+                        )
+                    } else if key == "maxhps" {
+                        (stats.max_health as i32, Investment::Health, None)
+                    } else if key == "maxfatigue" {
+                        (stats.max_fatigue as i32, Investment::Fatigue, None)
+                    } else {
+                        break;
+                    };
+                    if value >= score {
+                        break;
+                    }
+                    if self
+                        .invest(purchase, &rules.progression, &stats, false)
+                        .is_err()
+                        && !prereq.is_some_and(|i| {
+                            self.invest(Investment::Attribute(i), &rules.progression, &stats, false)
+                                .is_ok()
+                        })
+                    {
+                        break;
+                    }
+                }
+                if self.base[21] == 0 {
+                    break;
+                }
+            }
+        }
+        Some(NpcAdvancement {
+            attributes: self.base[..8].try_into().unwrap(),
+            level,
+            points: self.base[21..24].try_into().unwrap(),
+            basic: self.basic_skills,
+            technological: self.tech_skills,
+            colleges: self.colleges,
+            degrees: self.degrees,
+            vital_points: [self.hp[0], self.fatigue[0]],
+        })
     }
 }
