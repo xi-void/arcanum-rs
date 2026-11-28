@@ -49,6 +49,8 @@ struct Participant {
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(in crate::content::world) struct Combat {
+    #[serde(skip)]
+    pub(super) god_mode: bool,
     pub(in crate::content::world) armed: bool,
     #[serde(flatten)]
     mode: CombatMode,
@@ -223,7 +225,10 @@ impl Combat {
             if self.party[self.turn].actor != actor {
                 return Err("Wait for your turn".into());
             }
-            if self.ap < cost && !(actor.is_none() && self.ap > 0 && fatigue > 1) {
+            if !(self.god_mode && actor.is_none())
+                && self.ap < cost
+                && !(actor.is_none() && self.ap > 0 && fatigue > 1)
+            {
                 return Err(format!("Requires {cost} AP ({} available)", self.ap));
             }
         }
@@ -368,7 +373,7 @@ impl InteractiveWorld {
 
     pub fn combat_report(&self) -> Value {
         let c = &self.cache.inventory.combat;
-        json!({"difficulty":self.cache.inventory.difficulty,"armed":c.armed,"mode":c.mode.name(),"fast_turn_based":c.mode.fast_turn_based,"participants":c.party,"round":c.round,"turn":c.party.get(c.turn).map(|p|subject(p.actor)), "ap":c.ap,"target":c.focus.map(OriginalId::key),"message":c.message,"history":c.history,"poses":c.pose_report(self.cache.effect_time),"projectiles":c.shots,"experience_pools":c.pools})
+        json!({"god_mode":c.god_mode,"difficulty":self.cache.inventory.difficulty,"armed":c.armed,"mode":c.mode.name(),"fast_turn_based":c.mode.fast_turn_based,"participants":c.party,"round":c.round,"turn":c.party.get(c.turn).map(|p|subject(p.actor)), "ap":c.ap,"target":c.focus.map(OriginalId::key),"message":c.message,"history":c.history,"poses":c.pose_report(self.cache.effect_time),"projectiles":c.shots,"experience_pools":c.pools})
     }
     pub fn take_elapsed_combat_rounds(&mut self) -> u64 {
         std::mem::take(&mut self.cache.inventory.combat.elapsed_rounds)
@@ -1332,21 +1337,26 @@ impl Session {
         cost: i32,
     ) {
         if self.combat.timed() {
-            self.pay_combat_ap(actor, cost);
+            let spent = self.pay_combat_ap(actor, cost);
             let instant = self.combat.instant_movement(actor);
             self.combat.movement_due = instant;
-            self.combat.log(json!({"event":"move","actor":subject(actor),"from":from,"to":to,"cost":cost,"ap":self.combat.ap,"instant":instant}));
+            self.combat.log(json!({"event":"move","actor":subject(actor),"from":from,"to":to,"cost":cost,"ap_spent":spent,"ap":self.combat.ap,"instant":instant}));
         }
     }
 
-    pub(in crate::content::world) fn pay_combat_ap(&mut self, actor: Actor, cost: i32) {
+    pub(in crate::content::world) fn pay_combat_ap(&mut self, actor: Actor, cost: i32) -> i32 {
+        if self.combat.god_mode && actor.is_none() {
+            return 0;
+        }
         if self.combat.timed() && actor.is_none() && self.combat.ap < cost {
             self.character.fatigue_damage = self.character.fatigue_damage.saturating_add(2);
             self.character
                 .recover_at
                 .get_or_insert(self.game_second.saturating_add(80));
         }
+        let before = self.combat.ap;
         self.combat.spend(cost);
+        before - self.combat.ap
     }
     pub(super) fn note_death(&mut self, target: &Target, before: i32, source: Actor) {
         if before < target.maximum

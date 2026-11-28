@@ -312,7 +312,7 @@ impl Console {
                 self.push(&format!("> {command}"), self.theme.accent);
                 return Some(command);
             }
-            Key::Named(NamedKey::Tab) if !repeat && !self.input.contains(char::is_whitespace) => {
+            Key::Named(NamedKey::Tab) if !repeat => {
                 let options: Vec<_> = developer::complete(&self.input).collect();
                 if let [only] = options.as_slice() {
                     self.input = format!("{only} ");

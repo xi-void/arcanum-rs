@@ -445,7 +445,7 @@ impl InteractiveWorld {
         Ok((offer, worth))
     }
 
-    fn adjust_player_gold(&mut self, vfs: &mut Vfs, amount: i64) -> Result<(), String> {
+    pub(super) fn adjust_player_gold(&mut self, vfs: &mut Vfs, amount: i64) -> Result<(), String> {
         if amount == 0 {
             return Ok(());
         }
@@ -473,6 +473,7 @@ impl InteractiveWorld {
             return Err("Insufficient gold or currency limit exceeded".into());
         }
         if amount > 0 && stacks.is_empty() {
+            let next = state.next_item_counter()?;
             let mut gold = Session::prototype_item(
                 records.vfs,
                 &mut records.frames,
@@ -486,7 +487,7 @@ impl InteractiveWorld {
                 Place::Owned(Owner::Player),
                 Some((&layout.grid, None)),
             )?;
-            state.next_generated += 1;
+            state.next_generated = next;
         } else {
             let mut delta = amount;
             for mut stack in stacks {

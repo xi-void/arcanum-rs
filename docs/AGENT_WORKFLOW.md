@@ -183,6 +183,18 @@ to 120 seconds for a response. A timeout or disconnect can leave a dispatched
 mutation in effect. Reconnect and query state before retrying, especially for
 toggles such as `tcl`. Use `rpc --id N COMMAND ...` to correlate requests.
 
+## Gameplay testing commands
+
+Open the developer console with **F10** or send the same arguments with the local RPC client. Use `help player` for discovery and `progression` for installed spell names, IDs and learned schematic IDs. The individual grants, writable stats, limits and God Mode rules are in the [developer console reference](DEVELOPER_CONSOLE.md#player-testing-commands).
+
+For an inventory check, grant `player additem basic:8132 2` and `player additem 15093`. Inspect the two Copper Ring identities and the Capacitor with `itemowner`. Grant `player learntech 2410`, set Intelligence to 19, and combine the components in the Classic schematic book. The winning loose schematic defines serialized prototypes 8152 and 15093 as ingredients and 8077 as the product.
+
+For a shared-currency check, record the gold item ID, its quantity and `inventory.counters[0]`. In M84-R a console grant of 2,000 raised a 400-coin stack to 2,400. Splitting off 2,399 coins made the Gnome Shopkeeper's eight-coin Metal Can unaffordable. Picking up the split reunited it with the original stack. Right-click purchase and resale left 2,394. Lukan’s response 97 then left 1,394 and line 139 delivered the original key. The same inventory counter reports every step.
+
+For protection, toggle `tgm` on the player’s turn and cast a learned spell or fire a bow. Compare `combat.god_mode`, AP, the attack and spell history, fatigue and ammunition before and after the action. Press **E** to let opponents attack. Combat history distinguishes rolled damage channels from the health damage actually applied. Spell and movement events report the standard action cost and actual `ap_spent`. Toggle again to resume ordinary costs. **F7** saves granted possessions and progression. **F8** loads them with God Mode off.
+
+The native run loaded an isolated copy of an existing Shrouded Hills campaign and used `coc` for the shop, bridge and Crash Site encounter. In solo combat, a hit rolled one point and applied zero with protection active. After disabling protection, a one-point hit reduced HP by one. Agility of Fire normally cost 4 AP and 5 fatigue, and an ordinary bow shot reduced 12 arrows to 11. Restarting the process and choosing Last Save restored the bow, arrow identity, learned ranks, character points, crafted ring, bridge key and purse. A separate configuration with only `game_data` kept the console and socket disabled.
+
 ## Native save diagnostics
 
 Use the actual pause menu and F7/F8 for native input coverage. `pos.result.ui.pause_menu`

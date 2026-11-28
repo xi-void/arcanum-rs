@@ -8,7 +8,7 @@ use crate::vfs::Vfs;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub(super) const SKILL_KEYS: [&str; 16] = [
+pub(crate) const SKILL_KEYS: [&str; 16] = [
     "bow",
     "dodge",
     "melee",
@@ -301,6 +301,53 @@ impl Character {
             &mut self.tech_skills[i - 12]
         }
     }
+    pub(crate) fn set_skill_investment(&mut self, index: usize, rank: u32) -> Result<(), String> {
+        if index >= SKILL_KEYS.len() || rank > 5 {
+            return Err("Expected a skill index 0–15 and an investment of 0–5".into());
+        }
+        let entry = self.skill_mut(index);
+        let previous = *entry & 63;
+        *entry = (*entry & !63) | rank;
+        if index >= 12 {
+            self.adjust_aptitude_points(23, previous, rank);
+        }
+        Ok(())
+    }
+
+    fn adjust_aptitude_points(&mut self, stat: usize, before: u32, after: u32) {
+        self.base[stat] = self.base[stat]
+            .saturating_add(after as i32 - before as i32)
+            .clamp(0, 210);
+    }
+
+    pub(crate) fn set_college_rank(&mut self, college: usize, rank: u32) {
+        self.adjust_aptitude_points(22, self.colleges[college], rank);
+        self.colleges[college] = rank;
+    }
+
+    pub(crate) fn set_degree_rank(&mut self, discipline: usize, rank: u32) {
+        self.adjust_aptitude_points(23, self.degrees[discipline], rank);
+        self.degrees[discipline] = rank;
+    }
+
+    pub(crate) fn set_base_stat(&mut self, index: usize, value: i32) -> Result<(), String> {
+        let range =
+            match index {
+                0..8 => 1..=self.primary_max(index),
+                19 => -1000..=1000,
+                20 => 0..=100,
+                25 => 20..=1000,
+                _ => return Err(
+                    "Writable stats are the eight base attributes, alignment, fate points and age"
+                        .into(),
+                ),
+            };
+        if !range.contains(&value) {
+            return Err(format!("Base stat {index} requires a value in {range:?}"));
+        }
+        self.base[index] = value;
+        Ok(())
+    }
     pub(crate) fn invest(
         &mut self,
         purchase: Investment,
@@ -369,11 +416,7 @@ impl Character {
                         "Skill rank requires a higher governing attribute (rank {points})"
                     ));
                 }
-                let entry = self.skill_mut(i);
-                *entry = (*entry & !63) | points as u32;
-                if i >= 12 {
-                    self.base[23] = self.base[23].saturating_add(delta).clamp(0, 210);
-                }
+                self.set_skill_investment(i, points as u32)?;
             }
             Investment::Spell(i) if i < 80 => {
                 let rank = i % 5;
@@ -398,8 +441,7 @@ impl Character {
                         ));
                     }
                 }
-                self.colleges[i / 5] = (rank + usize::from(!undo)) as u32;
-                self.base[22] = self.base[22].saturating_add(delta).clamp(0, 210);
+                self.set_college_rank(i / 5, (rank + usize::from(!undo)) as u32);
             }
             Investment::Degree { discipline, rank } if recipe_id(discipline, rank).is_some() => {
                 if self.degrees[discipline] != rank - u32::from(!undo) {
@@ -408,8 +450,7 @@ impl Character {
                 if !undo && stats.attributes[4] < DEGREE_INT[rank as usize] {
                     return Err(format!("Requires IN {}", DEGREE_INT[rank as usize]));
                 }
-                self.degrees[discipline] = rank - u32::from(undo);
-                self.base[23] = self.base[23].saturating_add(delta).clamp(0, 210);
+                self.set_degree_rank(discipline, rank - u32::from(undo));
             }
             _ => return Err("Unknown investment".into()),
         }

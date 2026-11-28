@@ -10,6 +10,8 @@ pub enum Request {
     Position,
     Teleport((u32, u32)),
     ToggleCollision,
+    ToggleGodMode,
+    Player(PlayerCommand),
     Inspect(Option<(u32, u32)>),
     Unlock,
     SetTime(u8),
@@ -42,6 +44,38 @@ pub enum Request {
     Events(Option<String>),
     Trace(bool),
     Quit,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum PlayerCommand {
+    AddItem(crate::prototype::SerializedPrototypeId, u32),
+    AddGold(i32),
+    AddXp(i32),
+    AddPoints(i32),
+    SetStat(String, i32),
+    SetSkill(String, u32),
+    LearnSpell(String),
+    LearnAllSpells,
+    LearnTech(String),
+}
+
+fn positive(text: &str) -> Option<i32> {
+    text.parse().ok().filter(|n| *n > 0)
+}
+
+fn add_item(args: &[String]) -> Option<Request> {
+    use crate::prototype::{BasicPrototypeId, SerializedPrototypeId};
+    let (id, quantity) = match args {
+        [id] => (id, 1),
+        [id, n] => (id, positive(n)? as u32),
+        _ => return None,
+    };
+    let prototype = if let Some(id) = id.strip_prefix("basic:") {
+        BasicPrototypeId(id.parse().ok()?).serialized()?
+    } else {
+        SerializedPrototypeId(positive(id.strip_prefix("serialized:").unwrap_or(id))? as u32)
+    };
+    Some(Request::Player(PlayerCommand::AddItem(prototype, quantity)))
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -241,6 +275,95 @@ const COMMANDS: &[Command] = &[
         "tcl",
         "Toggle collision for mouse routes and developer arrivals.",
         ToggleCollision
+    ),
+    simple!(
+        "tgm",
+        "Toggle player damage protection and free combat and spell resources for this session.",
+        ToggleGodMode
+    ),
+    command!(
+        "player additem",
+        "player additem PROTOTYPE_ID [QUANTITY]",
+        "Create backpack units. Use a serialized ID or basic:N.",
+        add_item
+    ),
+    command!(
+        "player addgold",
+        "player addgold AMOUNT",
+        "Credit real gold stacks in the backpack.",
+        |a| {
+            let [n] = a else { return None };
+            Some(Request::Player(PlayerCommand::AddGold(positive(n)?)))
+        }
+    ),
+    command!(
+        "player addxp",
+        "player addxp AMOUNT",
+        "Award XP with normal modifiers and level rewards.",
+        |a| {
+            let [n] = a else { return None };
+            Some(Request::Player(PlayerCommand::AddXp(positive(n)?)))
+        }
+    ),
+    command!(
+        "player addpoints",
+        "player addpoints AMOUNT",
+        "Grant unspent character points up to the original maximum of 56.",
+        |a| {
+            let [n] = a else { return None };
+            Some(Request::Player(PlayerCommand::AddPoints(positive(n)?)))
+        }
+    ),
+    command!(
+        "player setstat",
+        "player setstat STAT VALUE",
+        "Set a base primary attribute, alignment, fate points or age. Primary limits depend on race.",
+        |a| {
+            let [id, n] = a else { return None };
+            Some(Request::Player(PlayerCommand::SetStat(
+                id.clone(),
+                n.parse().ok()?,
+            )))
+        }
+    ),
+    command!(
+        "player setskill",
+        "player setskill SKILL RANK",
+        "Set 0–5 invested ranks by skill name or index 0–15.",
+        |a| {
+            let [id, n] = a else { return None };
+            Some(Request::Player(PlayerCommand::SetSkill(
+                id.clone(),
+                n.parse().ok()?,
+            )))
+        }
+    ),
+    command!(
+        "player learnspell",
+        "player learnspell SPELL",
+        "Learn by spell name or ID 0–79, including earlier ranks in the college.",
+        |a| {
+            let [id] = a else { return None };
+            Some(Request::Player(PlayerCommand::LearnSpell(id.clone())))
+        }
+    ),
+    command!(
+        "player learntech",
+        "player learntech DEGREE",
+        "Learn by schematic name or recipe ID, or use all for all 56 degrees.",
+        |a| {
+            let [id] = a else { return None };
+            Some(Request::Player(PlayerCommand::LearnTech(id.clone())))
+        }
+    ),
+    command!(
+        "player learnspells",
+        "player learnspells all",
+        "Learn all 80 original spells.",
+        |a| {
+            matches!(a, [s] if s.eq_ignore_ascii_case("all"))
+                .then_some(Request::Player(PlayerCommand::LearnAllSpells))
+        }
     ),
     command!(
         "inspect",
@@ -499,6 +622,14 @@ const COMMANDS: &[Command] = &[
             [] => Ok(Output::Data(
                 json!({"commands": COMMANDS.iter().map(Command::metadata).collect::<Vec<_>>() }),
             )),
+            [group] if group.eq_ignore_ascii_case("player") => Ok(Output::Data(json!({
+                "commands": COMMANDS.iter().filter(|c| c.name.starts_with("player ")).map(Command::metadata).collect::<Vec<_>>()
+            }))),
+            [group, sub] if group.eq_ignore_ascii_case("player") => find(&format!("player {sub}"))
+                .map(|c| Output::Data(c.metadata()))
+                .ok_or_else(|| {
+                    Failure::new("invalid_command", format!("Unknown player command {sub}"))
+                }),
             [name] => find(name)
                 .map(|c| Output::Data(c.metadata()))
                 .ok_or_else(|| Failure::new("invalid_command", format!("Unknown command {name}"))),
@@ -548,13 +679,18 @@ impl Command {
         let arguments: Vec<_> = self
             .syntax
             .split_ascii_whitespace()
-            .skip(1)
+            .skip(self.name.split_ascii_whitespace().count())
             .map(|word| {
                 let required = !optional && !word.starts_with('[');
                 optional = (optional || word.starts_with('[')) && !word.ends_with(']');
                 let name = word.trim_matches(['<', '>', '[', ']']);
                 let (kind, constraint) = match name {
                     "X" | "Y" | "FRAME" | "PROTOTYPE" | "TOKEN" => ("integer", "unsigned"),
+                    "AMOUNT" => ("integer", "positive signed 32-bit integer"),
+                    "PROTOTYPE_ID" => ("string", "serialized number, serialized:N or basic:N"),
+                    "VALUE" => ("integer", "within the original statistic limits"),
+                    "RANK" => ("integer", "0..5"),
+                    "all" => ("literal", "all"),
                     "RADIUS" => ("integer", "0..8"),
                     "near" | "id" | "original" | "category" | "prototype" => ("literal", name),
                     "JSON" => ("string", "version-1 snapshot JSON object"),
@@ -589,6 +725,7 @@ impl Command {
             "sectors" => &["bounds", "cached", "required", "speculative", "stats"],
             "objects" | "inspect" => &["map", "objects", "issues", "truncated"],
             "combat" => &[
+                "god_mode",
                 "armed",
                 "mode",
                 "fast_turn_based",
@@ -642,6 +779,15 @@ impl Command {
             "commands" => &["commands", "protocol"],
             "help" => &["commands"],
             "coc" | "teleport" | "restore" => &["map", "tile", "view_ready"],
+            "tgm" => &["god_mode"],
+            "player additem" => &["prototype", "quantity", "items"],
+            "player addgold" => &["gold", "added"],
+            "player addxp" => &["xp", "level", "points"],
+            "player addpoints" => &["points"],
+            "player setstat" => &["stat", "base"],
+            "player setskill" => &["skill", "investment"],
+            "player learnspell" | "player learnspells" => &["learned_spells"],
+            "player learntech" => &["learned_degrees"],
             "tcl" => &["collision_bypass"],
             "settime" => &["hour"],
             "setuiscale" => &["scale_percent"],
@@ -678,12 +824,28 @@ pub fn dispatch_args<'a>(
     args: &[String],
     runtime: &mut dyn Runtime,
 ) -> (&'a str, Result<Output, Failure>) {
-    let Some(command) = find(name) else {
+    let qualified;
+    let (lookup, args) = if name.eq_ignore_ascii_case("player") {
+        let Some((sub, rest)) = args.split_first() else {
+            return (
+                name,
+                Err(Failure::new(
+                    "invalid_arguments",
+                    "Choose a player command. Try help player.",
+                )),
+            );
+        };
+        qualified = format!("player {sub}");
+        (qualified.as_str(), rest)
+    } else {
+        (name, args)
+    };
+    let Some(command) = find(lookup) else {
         return (
             name,
             Err(Failure::new(
                 "invalid_command",
-                format!("Unknown command {name}. Try help."),
+                format!("Unknown command {lookup}. Try help."),
             )),
         );
     };
@@ -784,6 +946,41 @@ mod tests {
         assert_eq!(name, "pos");
         assert!(result.is_ok());
         assert_eq!(runtime.0, Some(Request::Position));
+    }
+
+    #[test]
+    fn player_subcommands_share_help_completion_and_id_conversion() {
+        let mut rt = Recording::default();
+        assert_eq!(complete("player add").count(), 4);
+        let Output::Data(data) = dispatch("help player additem", &mut rt).unwrap() else {
+            panic!()
+        };
+        assert_eq!(data["arguments"][0]["name"], "PROTOTYPE_ID");
+        for input in [
+            "PLAYER additem basic:8132 2",
+            "player additem serialized:8152 2",
+            "player additem 8152 2",
+        ] {
+            dispatch(input, &mut rt).unwrap();
+            assert_eq!(
+                rt.0,
+                Some(Request::Player(PlayerCommand::AddItem(
+                    crate::prototype::SerializedPrototypeId(8152),
+                    2
+                )))
+            );
+        }
+        for input in [
+            "player additem basic:0",
+            "player additem basic:4294967295",
+            "player additem invalid:8152",
+            "player additem 8152 0",
+            "player addgold -1",
+            "player addxp 2147483648",
+            "player learnspells 1",
+        ] {
+            assert!(dispatch(input, &mut rt).is_err(), "{input}");
+        }
     }
 
     #[test]

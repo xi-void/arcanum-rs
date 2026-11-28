@@ -363,6 +363,13 @@ impl State {
         Ok(result)
     }
 
+    pub fn next_item_counter(&self) -> Result<u64, &'static str> {
+        self.next_generated
+            .checked_add(1)
+            .filter(|&n| n <= usize::MAX as u64 / 2 - 2)
+            .ok_or("Generated object identities exhausted")
+    }
+
     pub fn generated_id(&self) -> OriginalId {
         let mut payload = [0; 16];
         payload[..8].copy_from_slice(&self.next_generated.to_le_bytes());

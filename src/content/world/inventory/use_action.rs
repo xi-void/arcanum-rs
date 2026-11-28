@@ -140,7 +140,9 @@ impl InteractiveWorld {
                     stats.poison_recovery,
                     now,
                 );
-                pc.health_damage = pc.health_damage.saturating_add(damage);
+                if !inventory.combat.god_mode {
+                    pc.health_damage = pc.health_damage.saturating_add(damage);
+                }
             }
             if pc.base[24] == 0 || i64::from(pc.health_damage) >= stats.max_health {
                 pc.poison_timer = None;
@@ -442,6 +444,9 @@ impl Session {
         now: u64,
         commit: bool,
     ) -> Result<(i32, i32), String> {
+        if self.combat.god_mode {
+            return Ok((0, 0));
+        }
         let pc = &self.character;
         let cost = |mut n: i32| {
             if pc.race() == 1 {
