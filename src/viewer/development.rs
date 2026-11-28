@@ -904,6 +904,23 @@ impl Viewer<'_> {
                 dev.quit = true;
                 json!({"message":"Engine exit requested"})
             }
+            Request::Player(_) | Request::ToggleGodMode
+                if !world.playing()
+                    || self
+                        .pause
+                        .as_ref()
+                        .and_then(|(menu, _)| menu.front)
+                        .is_some_and(|screen| !screen.panel()) =>
+            {
+                return Err(Failure::new(
+                    "player_unavailable",
+                    "Create or load a character before using player commands",
+                ));
+            }
+            Request::Player(command) => world
+                .player_command(&mut dev.vfs, command)
+                .map_err(|error| Failure::new("player_rejected", error))?,
+            Request::ToggleGodMode => json!({"god_mode":world.toggle_god_mode()}),
             Request::ToggleCollision => {
                 let disabled = world.developer_action(DeveloperAction::ToggleCollision)?;
                 if let Some(view) = &mut self.view {

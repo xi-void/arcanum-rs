@@ -234,8 +234,7 @@ impl InventoryReader {
         }
         let inv = &mut w.cache.inventory;
         inv.state.put(item, Place::Consumed, None);
-        report["ap_cost"] = json!(if inv.combat.timed() { 4 } else { 0 });
-        inv.pay_combat_ap(None, 4);
+        report["ap_cost"] = json!(inv.pay_combat_ap(None, 4));
 
         if target.subject == Subject::Player {
             target.fatigue = inv.character.fatigue_damage;

@@ -11,6 +11,7 @@ pub use casting::follower::PartyPortrait;
 mod crafting;
 pub use crafting::SchematicComponent;
 mod creation;
+mod developer;
 mod equipment;
 pub use creation::{CreationBuild, CreationCatalog};
 pub(super) mod rest;
@@ -1053,9 +1054,22 @@ impl InteractiveWorld {
             return Err("Player is incapacitated".into());
         }
         let id = parse_id(key)?;
+        let item = self.records(vfs).item(id, &self.cache.inventory.state)?;
+        self.place_item(vfs, item, action, hour, quantity)
+    }
+
+    fn place_item(
+        &mut self,
+        vfs: &mut Vfs,
+        mut item: Item,
+        action: Move,
+        hour: u8,
+        quantity: Option<u32>,
+    ) -> Result<Value, String> {
+        let id = item.id;
         let mut records = self.records(vfs);
         let state = &self.cache.inventory.state;
-        let mut item = records.item(id, state)?;
+        let incoming = matches!(action, Move::Grant);
         let current = state.place(&item).clone();
         let flags = check_item(&item, state)?;
         let mut remainder = None;
@@ -1076,6 +1090,7 @@ impl InteractiveWorld {
         let pickup = matches!(action, Move::Pickup(_));
         let authorized = matches!(action, Move::Exchange(..));
         let (destination, requested) = match action {
+            Move::Grant => (Place::Owned(Owner::Player), None),
             Move::Pickup(slot) => {
                 let Place::Ground(map, tile) = &current else {
                     return Err("Item is not on the ground".into());
@@ -1133,7 +1148,13 @@ impl InteractiveWorld {
                 .container(*source)?
                 .check_access(self, *source, hour)?;
         }
-        if destination == Place::Owned(Owner::Player) && current != destination {
+        if destination == Place::Owned(Owner::Player) && (incoming || current != destination) {
+            if item.category == 8
+                && self.inventory_counters()[0] + u64::from(item.stats.quantity.unwrap_or(0))
+                    > i32::MAX as u64
+            {
+                return Err("Player currency limit exceeded".into());
+            }
             let inventory = &self.cache.inventory;
             if inventory.character.background == 72
                 && item.stats.complexity.is_some_and(|value| value < 0)
@@ -1309,7 +1330,8 @@ impl InteractiveWorld {
                         && item_visible(candidate)
                         && !candidate.scripted
                         && layout.grid.items.contains_key(&candidate.id)
-                        && (current != destination
+                        && (incoming
+                            || current != destination
                             || requested
                                 .is_some_and(|slot| layout.grid.contains_cell(candidate.id, slot)))
                 })
@@ -1595,6 +1617,7 @@ fn check_item(item: &Item, state: &State) -> Result<u32, String> {
 }
 
 enum Move {
+    Grant,
     Pickup(Option<usize>),
     Drop,
     Transfer(Owner, Owner, Option<usize>),

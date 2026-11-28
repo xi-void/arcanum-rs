@@ -134,6 +134,9 @@ impl InventoryReader {
         actor: Actor,
         weapon: &Weapon,
     ) -> Result<Vec<(Item, u32, usize)>, String> {
+        if actor.is_none() && w.cache.inventory.combat.god_mode {
+            return Ok(vec![]);
+        }
         // CE combat_consume_ammo exempts independent NPCs.
         if actor.is_some_and(|id| {
             id.kind == 2

@@ -1058,7 +1058,7 @@ impl InventoryReader {
             .combat
             .check(None, 4, stats.current_fatigue)?;
         let cost = program.cost;
-        if impact {
+        let ap_spent = if impact {
             w.cache.inventory.charge_spell(
                 (id / 5) as u32,
                 cost,
@@ -1081,8 +1081,10 @@ impl InventoryReader {
                     }
                 }
             }
-            w.cache.inventory.pay_combat_ap(None, 4);
-        }
+            w.cache.inventory.pay_combat_ap(None, 4)
+        } else {
+            0
+        };
         let xp_before = w.cache.inventory.character.base[18];
         let (fatigue, mana) = w.cache.inventory.charge_spell(
             (id / 5) as u32,
@@ -1525,7 +1527,7 @@ impl InventoryReader {
             let xp = w.cache.inventory.character.base[18].saturating_sub(xp_before);
             w.cache.inventory.combat.log(
                 json!({"event":"spell", "caster":"player", "spell":id, "outcome":result["outcome"],
-                "targets":applied, "cost":4, "fatigue":fatigue, "item_mana":mana, "xp":xp}),
+                "targets":applied, "cost":4, "ap_spent":ap_spent, "fatigue":fatigue, "item_mana":mana, "xp":xp}),
             );
         }
         let message = if all_resisted {

@@ -376,6 +376,9 @@ impl Session {
         channel: Channel,
         delta: i32,
     ) {
+        if self.combat.god_mode && t.subject == Subject::Player && delta > 0 {
+            return;
+        }
         let previous_hp = t.hp;
         let previously_alive = previous_hp < t.maximum;
         let v = match channel {

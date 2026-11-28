@@ -1,6 +1,6 @@
 # Arcanum-RS — Known Issues
 
-M83-R party and follower mechanics passed milestone acceptance. Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
+M84-R developer commands passed milestone acceptance, including the original merchant and bridge payments, player-only combat protection and full-restart persistence. [Native verification](AGENT_WORKFLOW.md#gameplay-testing-commands)
 
 ## Triage
 
@@ -12,6 +12,7 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 
 ## Open issues
 
+- **Kree bandit gear (P2, open).** On the normal installation near map 5000, tile (40664, 76964), targeting either bandit (serialized prototypes 17107 and 17108) with Harm reported unsupported wield behavior from Arcanum2.dat during NPC gear preparation. The cast rejected before charging fatigue. Check the original equipped item and its paired wield scripts when extending equipment script support.
 - **M79 character sheet (P2, open).** The Classic sheet omits the player’s name.
 - **Moving shadows (P2, open).** NPC shadows can lose their anchor while the actor moves.
 - Configurable floating damage numbers remain an optional future enhancement.
@@ -58,7 +59,7 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 
 - **Priority P2. Status open.** The stock CE skill rolls, armor and resistance, AP costs, NPC-first turn list, critical damage bonuses and base XP pool rules underpin real-time combat and both turn-based speeds. The Born Under a Sign background supplies both critical severity modifiers. Its hit modifier feeds the original bonus-damage rolls. Its fumble modifier is retained for the remaining weapon and ammunition damage rules. Detailed critical locations, equipment damage and dropped weapons, special critical-chart injuries, ambient light penalties and tactical NPC spell and weapon selection still need coverage. Real-time attack intervals use weapon cost and actor speed. NPCs and summons play the directional walking, attack and death sequences available for their current models. The resolver supports ordinary and torso deaths with the original fallback. Additional injury-specific death variants depend on critical-chart support. Ordinary combat currently sets facing directly when starting an action. CE also has a separate incremental rotation goal for ordinary turns. Fast turns use the final facing directly.
 - Recruitable followers use the original dialogue, party orders, equipment, travel and kill credit. An allied summon can fight using its current form and ownership. Encounters use original hostility, sight, faction and supported script attachments. Some original dying and encounter scripts use operations beyond the script interpreter, reported by `rpc combat`.
-- **Installed regression baseline.** The M79-R installed-data run reproduced the pre-M78 failures in the Bates lighting composition, the dining-room mobile shadow probe and the Kna Tha rabbit position. The other 74 installed checks passed, including the external VFS smoke check with its mod fixture. M83-R reproduced those same three failures in the 43 installed library checks. The other 40 passed, as did all 11 installed prototype and effect checks. The dropped-item eviction assertion follows the item's original identity through the rendered pickup target.
+- **Installed regression baseline.** The M79-R installed-data run reproduced the pre-M78 failures in the Bates lighting composition, the dining-room mobile shadow probe and the Kna Tha rabbit position. The other 74 installed checks passed, including the external VFS smoke check with its mod fixture. M83-R and M84-R reproduced those same three failures in the 43 installed library checks. The other 40 passed, as did all 11 installed prototype and effect checks. The dropped-item eviction assertion follows the item's original identity through the rendered pickup target.
 
 ### PROG-001 — Remaining character and ability execution
 

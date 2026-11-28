@@ -1,6 +1,6 @@
 # Developer console
 
-Launch at the game’s original Crash Site.
+With the game data configured, run `target/release/arcanum-rs`. Set `enabled = true` under `[developer]` in the configuration to use the console. For an explicit developer launch, run the following command.
 
 ```sh
 cargo run --locked --release --features windowed -- \
@@ -40,6 +40,27 @@ use a numeric map ID. Enter `help` or `help <command>` for in-game usage.
 | `showsectors` | Shows original 64×64 sector boundaries in cyan. Use `pos` for the sector ID. |
 | `fps` | Shows the latest presentation cadence, host frame time, frame count, and streaming statistics. Uses normal frame submissions. |
 | `help [command]`, `clear` | Shows command usage or clears the output. |
+
+## Player testing commands
+
+Enable developer mode and press **F10**. With local RPC enabled, the same commands accept the same arguments, for example `arcanum-rs rpc SOCKET player additem basic:8132 2`. Use `help player` to list the group and `help player additem` for individual usage. Quote names containing spaces.
+
+| Command | Effect |
+| --- | --- |
+| `player additem PROTOTYPE_ID [QUANTITY]` | Grant units to the backpack. Plain numbers and `serialized:N` use the numeric ID in the PRO header. `basic:N` uses the original script/schematic numbering. For example, `basic:8132` and `8152` both create a Copper Ring. The default quantity is one. Ammunition and currency use stack units. Other items receive individual identities. The entire grant must fit. |
+| `player addgold AMOUNT` | Credit actual backpack gold. Merchant sales and dialogue refunds use the same credit operation. Purchases and dialogue payments debit those stacks. The maximum balance is 2,147,483,647. |
+| `player addxp AMOUNT` | Award experience through the installed XP table, including character modifiers, level rewards and the experience ceiling. |
+| `player addpoints AMOUNT` | Add unspent character points. The grant must leave at most 56 points. |
+| `player setstat STAT VALUE` | Set a base attribute by installed name, index 0–7 or abbreviation ST, DX, CN, BE, IN, PE, WP, CH. Primary attributes range from 1 to the racial maximum. Alignment (19), fate points (20) and age (25) also accept their original ranges. Equipment, background and temporary effects apply to the base value. |
+| `player setskill SKILL RANK` | Set investment from 0 to 5 by name or index 0–15. Training is preserved. Governing attributes and modifiers determine the effective level. |
+| `player learnspell SPELL` | Learn a spell by installed name or index 0–79, including earlier spells in its college. |
+| `player learnspells all` | Learn all 80 original spells. |
+| `player learntech DEGREE`, `player learntech all` | Learn a schematic by installed title or recipe ID (for example `2410`), including earlier degrees in its discipline. Use `all` for all 56 degrees. |
+| `tgm` | Toggle player-only God Mode. Inspect `combat.god_mode` through RPC. |
+
+Learning grants bypass study prerequisites and cost no character points. Repeating a grant preserves the learned rank and aptitude. Normal cast eligibility, spell execution support, component requirements and expertise still apply. Use `progression` to inspect IDs and requirements and `inventory` or `itemowner` to inspect the resulting possessions. Save normally to keep grants.
+
+God Mode prevents additional player health, fatigue and poison damage. Casting and upkeep consume zero fatigue and item mana, and player combat actions spend zero AP and ammunition. Normal turn order, manual end turn, existing injuries, consumables, ingredients and prices still apply. God Mode follows the player across map transitions and switches off on save **load**, new game or process restart.
 
 ## Collision and map loading
 

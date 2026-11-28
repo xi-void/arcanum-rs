@@ -393,9 +393,37 @@ impl Session {
         prototype: u32,
         category: u32,
     ) -> Result<Item, String> {
-        let prototype = crate::prototype::SerializedPrototypeId(prototype);
+        let item = Self::load_item_prototype(
+            vfs,
+            frames,
+            id,
+            crate::prototype::SerializedPrototypeId(prototype),
+        )?;
+        if item.category != category {
+            return Err(format!(
+                "Prototype {prototype} has category {}, expected {category}",
+                item.category
+            ));
+        }
+        Ok(item)
+    }
+
+    pub(super) fn load_item_prototype(
+        vfs: &mut Vfs,
+        frames: &mut FrameCache,
+        id: OriginalId,
+        prototype: crate::prototype::SerializedPrototypeId,
+    ) -> Result<Item, String> {
         let (source, bytes) = super::super::super::sector::read_static_prototype(vfs, prototype)
             .map_err(|error| error.to_string())?;
+        let category = crate::prototype::decode_header(&bytes)
+            .map_err(|e| format!("{source}: {e}"))?
+            .object_type;
+        if !(5..=14).contains(&category) {
+            return Err(format!(
+                "{source}: expected a portable item prototype, found category {category}"
+            ));
+        }
         let defaults = objects::prototype_defaults(&bytes, prototype, category)
             .map_err(|error| format!("{source}: {error}"))?;
         let object = objects::Instance {
