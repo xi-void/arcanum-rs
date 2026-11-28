@@ -207,6 +207,15 @@ pub(crate) struct Instance<'a> {
 }
 
 impl<'a> Instance<'a> {
+    pub(crate) fn from_prototype(id: OriginalId, prototype: u32, category: u32) -> Self {
+        Self {
+            id,
+            prototype: SerializedPrototypeId(prototype),
+            category,
+            bitmap: [0; 5],
+            fields: vec![],
+        }
+    }
     pub fn field(&self, key: usize) -> Option<FieldValue<'a>> {
         self.fields
             .binary_search_by_key(&key, |(index, _)| *index)
@@ -332,6 +341,16 @@ pub(crate) struct ItemStats {
 }
 
 impl ItemStats {
+    pub(crate) fn power_ratio(&self, aptitude: i32) -> i32 {
+        let complexity = i64::from(self.complexity.unwrap_or_default());
+        if complexity == 0 {
+            return 100;
+        }
+        let power =
+            ((complexity + i64::from(aptitude)) / 2).clamp(complexity.min(0), complexity.max(0));
+        (100 * power / complexity) as i32
+    }
+
     pub(crate) fn adjust_magic(&self, value: Option<i32>, aptitude: i32) -> i64 {
         let value = i64::from(value.unwrap_or_default());
         let complexity = i64::from(self.complexity.unwrap_or_default());

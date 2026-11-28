@@ -274,6 +274,10 @@ pub struct InteractiveWorld {
     pub(super) transition: Option<(Destination, u8)>,
     pending_use: Option<WorldOrder>,
     pub(super) ability: abilities::UseState,
+    pub(super) rest: Option<super::inventory::rest::Rest>,
+    pub(super) last_rest: Option<serde_json::Value>,
+    bed: Option<WorldOrder>,
+    bed_request: bool,
     pub(super) game_second: u64,
     pub(super) npc_request: Option<WorldOrder>,
     pub(super) trade: Option<super::inventory::trade::Merchant>,
@@ -336,6 +340,10 @@ impl InteractiveWorld {
             transition: None,
             pending_use: None,
             ability: Default::default(),
+            rest: None,
+            last_rest: None,
+            bed: None,
+            bed_request: false,
             game_second: 0,
             npc_request: None,
             trade: None,
@@ -710,7 +718,7 @@ impl InteractiveWorld {
                 self.ability.reject(method, reason);
                 return;
             }
-            if let abilities::Method::Spell(id) = method {
+            if !matches!(method, abilities::Method::PickLocks(_)) {
                 let picked = self
                     .cache
                     .pick_raster(point, self.reference, elapsed, false);
@@ -719,11 +727,16 @@ impl InteractiveWorld {
                     true,
                     super::super::scenery::order(player.tile, player.offset, false, usize::MAX),
                 );
-                let self_allowed = self.cache.inventory.program(id).is_ok_and(|p| {
-                    !p.targets
-                        .iter()
-                        .any(|s| s == "tgt_obj_no_self" || s == "tgt_obj_no_t_pc")
-                });
+                let self_allowed = match method {
+                    abilities::Method::Spell(id) => {
+                        self.cache.inventory.program(id).is_ok_and(|p| {
+                            !p.targets
+                                .iter()
+                                .any(|s| s == "tgt_obj_no_self" || s == "tgt_obj_no_t_pc")
+                        })
+                    }
+                    _ => true,
+                };
                 let hit_self = self_allowed
                     && picked.is_none_or(|k| k < player_key)
                     && interaction::hits_scaled(
@@ -739,7 +752,8 @@ impl InteractiveWorld {
                         point,
                         self.cache.player_scale(),
                     );
-                let aim = if self.aims_at_ground(id) {
+                let aim = if matches!(method, abilities::Method::Spell(id) if self.aims_at_ground(id))
+                {
                     crate::isometric::world_tile_at_pixel(point, self.reference)
                         .map(abilities::Aim::Tile)
                 } else if hit_self {
@@ -837,7 +851,10 @@ impl InteractiveWorld {
                     return self
                         .cache
                         .pick_raster(point, self.reference, elapsed, false)
-                        .filter(|&key| !method.is_skill() || self.lock_id(key).is_some());
+                        .filter(|&key| {
+                            !matches!(method, abilities::Method::PickLocks(_))
+                                || self.lock_id(key).is_some()
+                        });
                 }
                 let key = self.cache.pick(point, self.reference, elapsed)?;
                 (!matches!(
@@ -886,6 +903,46 @@ impl InteractiveWorld {
         }
     }
 
+    pub fn take_bed_request(&mut self) -> bool {
+        std::mem::take(&mut self.bed_request)
+    }
+    pub(super) fn validate_bed(&mut self, vfs: &mut Vfs, commit: bool) -> Result<(), String> {
+        let target = self
+            .bed
+            .and_then(|key| self.cache.target(key))
+            .ok_or("Bed is unavailable")?;
+        let interaction::Action::Bed { handler, occupied } = &target.action else {
+            return Err("Bed is unavailable".into());
+        };
+        let tile = self
+            .cache
+            .player
+            .as_ref()
+            .ok_or("Player unavailable")?
+            .tile();
+        if tile.0.abs_diff(target.tile.0) + tile.1.abs_diff(target.tile.1) > 1 {
+            return Err("Cannot reach the bed".into());
+        }
+        let staged = interaction::bed_access(
+            handler,
+            self.cache.hour,
+            &self.cache.scripts,
+            target.tile,
+            tile,
+            vfs,
+            self.character_statistics().gender == 0,
+        )?;
+        if *occupied {
+            return Err("That bed is occupied.".into());
+        }
+        if commit {
+            self.cache
+                .inventory
+                .apply_quest_rewards(&staged.quests, &self.cache.scripts.quests)?;
+            self.cache.scripts = staged;
+        }
+        Ok(())
+    }
     pub fn take_container_request(&mut self) -> Option<String> {
         self.container_request.take().map(|id| id.key())
     }
@@ -1078,6 +1135,11 @@ impl InteractiveWorld {
             match self.cache.target(key).map(|target| &target.action) {
                 Some(interaction::Action::Npc(_) | interaction::Action::Summon(_)) => {
                     self.npc_request = Some(key);
+                    return true;
+                }
+                Some(interaction::Action::Bed { .. }) => {
+                    self.bed = Some(key);
+                    self.bed_request = true;
                     return true;
                 }
                 Some(interaction::Action::Container(id)) => {

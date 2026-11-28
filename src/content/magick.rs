@@ -150,6 +150,7 @@ pub(crate) fn flag(s: &str) -> Result<(Field, u32), String> {
         "opf_magically_held" => (Portal, 0x0004),
         "ocof_locked" => (Container, 0x0001),
         "oif_identified" => (Item, 0x00000001),
+        "ocf_fatigue_limiting" => (Critter, 0x80000000),
         "ocf_undead" => (Critter, 0x00000004),
         "ocf_fleeing" => (Critter, 0x00000010),
         "ocf_paralyzed" => (Critter, 0x00000040),
@@ -226,7 +227,7 @@ impl Program {
         })
     }
     pub fn decode(mes: &Mes, id: i32) -> Result<Self, String> {
-        let base = 1000 + 50 * id;
+        let base = (if id < 140 { 1000 } else { 3000 }) + 50 * id;
         let mut p = Self {
             range: 99,
             ..Self::default()
@@ -259,6 +260,7 @@ impl Program {
             }
             for (k, v) in clauses(&line) {
                 match k {
+                    "itemtriggers" if v == "item_used" => (),
                     "cost" => p.cost = num::<u32>(v)?.try_into().map_err(|_| "cost overflow")?,
                     "range" => p.range = num(v)?,
                     "maintain" => {
@@ -340,6 +342,7 @@ impl Component {
         let mut spell_flags = 0;
         for (k, v) in input {
             match k {
+                "itemtriggers" if v == "item_used" => (),
                 "aoe" => targets = words(v),
                 "apply_aoe" => apply = words(v),
                 "aoe_sf" => spell_flags = mask(v, Field::Spell)?,
@@ -412,6 +415,7 @@ impl Component {
                     heal: kind == "heal",
                     channel: match get("dmgtype").unwrap_or("dmg_normal") {
                         "dmg_normal" => Channel::Normal,
+                        "dmg_magic" if kind == "heal" => Channel::Fatigue,
                         "dmg_magic" => Channel::Magic,
                         "dmg_fire" => Channel::Fire,
                         "dmg_electrical" => Channel::Electrical,

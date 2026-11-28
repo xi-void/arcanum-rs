@@ -1,6 +1,7 @@
 name = "Classic"
 spell_cursor = "vfs:art/interface/spellcur.art"
 scale = 125
+rest_messages = "mes/sleepui.mes"
 
 [cursors]
 default = "vfs:art/interface/cursor.art"
@@ -127,7 +128,8 @@ parent = "top"
 offset = [605, 9]
 size = [23, 23]
 image = "vfs:art/interface/lilgrnbut.art"
-disabled = true
+action = "toggle-rest"
+pressed_frame = 1
 
 [[hud]]
 id = "maintained-spell-slot-1"
@@ -204,7 +206,7 @@ fill = [0, 0, 0, 255]
 [[hud]]
 id = "clock-daylight"
 parent = "clock-face"
-size = [128, 29]
+size = [128, 30]
 image = "vfs:art/interface/clk_timestrip.art"
 binding = "game-clock"
 clock_phases = [
@@ -213,6 +215,159 @@ clock_phases = [
     "vfs:art/interface/clk_moon5.art", "vfs:art/interface/clk_moon6.art",
     "vfs:art/interface/clk_moon7.art", "vfs:art/interface/clk_moon8.art",
 ]
+
+
+[[hud]]
+id = "clock-pointer"
+parent = "clock-face"
+offset = [60, 1]
+size = [5, 29]
+image = "vfs:art/interface/timepnts.art"
+
+[[hud]]
+id = "rest-options"
+rest_panel = true
+anchor = "top"
+offset = [287, 0]
+size = [227, 152]
+image = "vfs:art/interface/sleep_base.art"
+capture = true
+
+[[hud]]
+id = "rest-0"
+parent = "rest-options"
+offset = [8, 3]
+size = [18, 13]
+image = "vfs:art/interface/fatebut.art"
+pressed_frame = 1
+action = { rest = 0 }
+
+[[hud]]
+id = "rest-label-0"
+parent = "rest-options"
+offset = [36, 2]
+size = [191, 18]
+font = "body"
+rest_label = 0
+
+[[hud]]
+id = "rest-1"
+parent = "rest-options"
+offset = [8, 21]
+size = [18, 13]
+image = "vfs:art/interface/fatebut.art"
+pressed_frame = 1
+action = { rest = 1 }
+
+[[hud]]
+id = "rest-label-1"
+parent = "rest-options"
+offset = [36, 20]
+size = [191, 18]
+font = "body"
+rest_label = 1
+
+[[hud]]
+id = "rest-2"
+parent = "rest-options"
+offset = [8, 39]
+size = [18, 13]
+image = "vfs:art/interface/fatebut.art"
+pressed_frame = 1
+action = { rest = 2 }
+
+[[hud]]
+id = "rest-label-2"
+parent = "rest-options"
+offset = [36, 38]
+size = [191, 18]
+font = "body"
+rest_label = 2
+
+[[hud]]
+id = "rest-3"
+parent = "rest-options"
+offset = [8, 57]
+size = [18, 13]
+image = "vfs:art/interface/fatebut.art"
+pressed_frame = 1
+action = { rest = 3 }
+
+[[hud]]
+id = "rest-label-3"
+parent = "rest-options"
+offset = [36, 56]
+size = [191, 18]
+font = "body"
+rest_label = 3
+
+[[hud]]
+id = "rest-4"
+parent = "rest-options"
+offset = [8, 75]
+size = [18, 13]
+image = "vfs:art/interface/fatebut.art"
+pressed_frame = 1
+action = { rest = 4 }
+
+[[hud]]
+id = "rest-label-4"
+parent = "rest-options"
+offset = [36, 74]
+size = [191, 18]
+font = "body"
+rest_label = 4
+
+[[hud]]
+id = "rest-5"
+parent = "rest-options"
+offset = [8, 93]
+size = [18, 13]
+image = "vfs:art/interface/fatebut.art"
+pressed_frame = 1
+action = { rest = 5 }
+
+[[hud]]
+id = "rest-label-5"
+parent = "rest-options"
+offset = [36, 92]
+size = [191, 18]
+font = "body"
+rest_label = 5
+
+[[hud]]
+id = "rest-6"
+parent = "rest-options"
+offset = [8, 111]
+size = [18, 13]
+image = "vfs:art/interface/fatebut.art"
+pressed_frame = 1
+action = { rest = 6 }
+
+[[hud]]
+id = "rest-label-6"
+parent = "rest-options"
+offset = [36, 110]
+size = [191, 18]
+font = "body"
+rest_label = 6
+
+[[hud]]
+id = "rest-7"
+parent = "rest-options"
+offset = [8, 129]
+size = [18, 13]
+image = "vfs:art/interface/fatebut.art"
+pressed_frame = 1
+action = { rest = 7 }
+
+[[hud]]
+id = "rest-label-7"
+parent = "rest-options"
+offset = [36, 128]
+size = [191, 18]
+font = "body"
+rest_label = 7
 
 [[hud]]
 id = "slot-1"

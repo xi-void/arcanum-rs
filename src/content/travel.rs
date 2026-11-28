@@ -58,7 +58,7 @@ pub fn starting_hour(vfs: &mut Vfs) -> Result<u8, Box<dyn StdError>> {
 pub struct Clock {
     start_hour: u64,
     phase_ms: u64,
-    travel_hours: u64,
+    advanced_hours: u64,
     hour_offset: i64,
 }
 
@@ -67,7 +67,7 @@ impl Clock {
         Self {
             start_hour: u64::from(start_hour),
             phase_ms: 0,
-            travel_hours: 0,
+            advanced_hours: 0,
             hour_offset: 0,
         }
     }
@@ -83,14 +83,14 @@ impl Clock {
             .saturating_add(rounds.saturating_mul(REAL_HOUR / 3600));
     }
 
-    pub fn step_travel(&mut self, steps: usize) {
-        self.travel_hours = self.travel_hours.saturating_add(steps as u64);
+    pub fn advance_hours(&mut self, hours: u64) {
+        self.advanced_hours = self.advanced_hours.saturating_add(hours);
     }
 
     pub fn hours(&self, play: Duration) -> u64 {
         let normal = self
             .start_hour
-            .saturating_add(self.travel_hours)
+            .saturating_add(self.advanced_hours)
             .saturating_add((self.elapsed_ms(play) / u128::from(REAL_HOUR)) as u64);
         normal.saturating_add_signed(self.hour_offset)
     }
@@ -118,7 +118,7 @@ impl Clock {
         Self {
             start_hour: hours,
             phase_ms,
-            travel_hours: 0,
+            advanced_hours: 0,
             hour_offset: 0,
         }
     }
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn set_time_keeps_day_and_elapsed_progression() {
         let mut clock = Clock::new(15);
-        clock.step_travel(25);
+        clock.advance_hours(25);
         let elapsed = Duration::from_millis(REAL_HOUR);
         assert_eq!(clock.hours(elapsed), 41);
         clock.set_hour(2, elapsed);
@@ -497,11 +497,11 @@ mod tests {
         let start = Duration::from_millis(100);
         let mut journey = Journey::new(vec![(32, 32), (96, 32), (160, 32)], start).unwrap();
         assert_eq!(journey.advance(start), 0);
-        clock.step_travel(journey.advance(start + INITIAL_DELAY));
+        clock.advance_hours(journey.advance(start + INITIAL_DELAY) as u64);
         assert_eq!(journey.traversed(), &[(32, 32)]);
         assert_eq!(clock.hour(Duration::ZERO), 16);
         assert!(!journey.finished());
-        clock.step_travel(journey.advance(start + INITIAL_DELAY + STEP_DELAY * 2));
+        clock.advance_hours(journey.advance(start + INITIAL_DELAY + STEP_DELAY * 2) as u64);
         assert!(journey.finished());
         assert!(journey.finished());
         assert_eq!(clock.hour(Duration::ZERO), 18);

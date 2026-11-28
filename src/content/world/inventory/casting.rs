@@ -36,6 +36,10 @@ struct VitalChanges {
     health: Option<i32>,
     fatigue: Option<i32>,
     poison: Option<i32>,
+    #[serde(default)]
+    poison_timer: Option<crate::content::character::PoisonTimer>,
+    #[serde(default)]
+    poison_stats: Option<(i32, i32, u32)>,
     critter_on: u32,
     critter_off: u32,
     spell_on: u32,
@@ -164,6 +168,8 @@ struct Hazard {
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Placement {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prototype: Option<u32>,
     map: String,
     source: Tile,
     tile: Tile,
@@ -299,7 +305,8 @@ impl Target {
                 "tgt_obj_no_st_critter_undead" => self.critter & 4 == 0,
                 "tgt_obj_no_st_critter_unrevivifiable" => self.critter & 0x800000 == 0,
                 "tgt_obj_no_st_magically_held" => self.flags & 4 == 0,
-                "tgt_obj_damaged" => self.hp > 0,
+                "tgt_obj_damaged" => self.hp > 0 || self.critter & 0x780 != 0,
+                "tgt_obj_poisoned" => self.poison > 0,
                 "tgt_obj_inven" => self.kind == Kind::Item && self.key.is_none(),
                 "tgt_object" | "tgt_obj_radius" => self.kind != Kind::Tile,
                 "tgt_tile_empty"
@@ -367,6 +374,10 @@ impl State {
     }
     pub(super) fn owns_spawn(&self, map: &str, id: OriginalId) -> bool {
         self.spawn(id).is_some_and(|s| s.map == map)
+            || self
+                .offsets
+                .get(&id.key())
+                .is_some_and(|p| p.prototype.is_some() && p.map == map)
     }
     fn form(&self, target: &Subject) -> Option<u32> {
         self.bindings(target).find_map(|b| b.form)
@@ -447,7 +458,11 @@ impl State {
         self.actors.get(&id.key()).is_some_and(|d| d.dead)
     }
     pub(super) fn next_recovery(&self) -> Option<u64> {
-        self.actors.values().filter_map(|d| d.recover_at).min()
+        self.actors
+            .values()
+            .flat_map(|d| [d.recover_at, d.poison_timer.map(|t| t.due())])
+            .flatten()
+            .min()
     }
     pub(super) fn recover(&mut self, now: u64) -> bool {
         let mut changed = false;
@@ -534,6 +549,8 @@ fn stun_clip(vfs: &mut Vfs, frames: &mut FrameCache, art: u32) -> Result<Arc<Fra
 }
 mod actors;
 mod appearance;
+mod consumable;
+pub(in crate::content::world::inventory) mod encounters;
 mod lifecycle;
 mod loadout;
 mod projection;
@@ -1592,6 +1609,7 @@ impl InteractiveWorld {
                 inv.magick.offsets.insert(
                     id.key(),
                     Placement {
+                        prototype: None,
                         map: self.map.clone(),
                         source: tile,
                         tile: to,

@@ -44,6 +44,7 @@ mod prefetch;
 pub use super::jumps::Destination;
 pub use interaction::{DoorStates, SavedDoors};
 pub use inventory::combat::CombatMode;
+pub use inventory::rest::RestMode;
 pub use inventory::{
     CreationBuild, CreationCatalog, InventoryContents, InventoryEntry, InventoryReader, Objects,
     SchematicComponent,
@@ -402,6 +403,7 @@ impl Raster {
 
 struct CachedSector {
     mobiles: Vec<mobile::population::Resident>,
+    terrain_word: Option<u16>,
     townmap: u32,
     aptitude: i32,
     sound_schemes: [i32; 2],
@@ -438,6 +440,7 @@ impl CachedSector {
 
     fn missing(id: u64, error: String) -> Self {
         Self {
+            terrain_word: None,
             townmap: 0,
             aptitude: 0,
             sound_schemes: [0; 2],
@@ -677,6 +680,7 @@ impl CachedSector {
         let lights = lights.unwrap_or_default();
         report.diagnostics.extend(lights.issues);
         Self {
+            terrain_word: None,
             townmap: world.townmap,
             aptitude: world.aptitude,
             sound_schemes: world.sound_schemes,
@@ -2225,6 +2229,7 @@ impl WorldStream {
             return Err("player mode must be selected before loading sectors and without the rabbit preview".into());
         }
         let blocks = super::travel::load_blocks(&mut self.loader.vfs, &self.loader.map)?;
+        self.cache.scripts.start_hour = super::travel::starting_hour(&mut self.loader.vfs)?;
         self.cache.scripts.sector_map = Some(Arc::new((self.loader.map.clone(), blocks)));
         self.cache.jumps = super::jumps::load(&mut self.loader.vfs, &self.loader.map)?;
         let reference = self.loader.reference;
@@ -2750,6 +2755,12 @@ impl SectorLoader {
                 let start = Instant::now();
                 let mut cached =
                     CachedSector::from_room(id, room, self.reference, lights, self.audit);
+                cached.terrain_word = self
+                    .terrain
+                    .as_ref()
+                    .ok()
+                    .and_then(Option::as_ref)
+                    .and_then(|t| t.grid.at((sector.x as i32, sector.y as i32)));
                 if self.playing {
                     for raster in &cached.draws {
                         if let ObjectLight::Wall(rotation) = raster.object_light {

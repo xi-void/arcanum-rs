@@ -87,6 +87,8 @@ pub struct ImportedScenery {
     pub appearance: SceneryAppearance,
     pub(super) animation: Option<Arc<art::FrameLoop>>,
     pub(super) light: Option<SceneryLight>,
+    pub(super) bed_occupied: bool,
+    pub(super) use_local: super::script::Local,
     pub(super) use_script: i32,
 }
 
@@ -377,6 +379,16 @@ impl SceneryImport {
                 color: record.fields.light_color.or(parent.appearance.light_color),
             });
         Ok(ImportedScenery {
+            bed_occupied: record
+                .fields
+                .bed_occupied
+                .or(parent.appearance.bed_occupied)
+                .unwrap_or(false),
+            use_local: record
+                .fields
+                .use_local
+                .or(parent.appearance.use_local)
+                .unwrap_or_default(),
             use_script: record
                 .fields
                 .use_script

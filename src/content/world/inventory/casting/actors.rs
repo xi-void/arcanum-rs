@@ -68,6 +68,11 @@ impl Session {
             .min()
     }
     pub(in crate::content::world) fn program(&self, id: usize) -> Result<Arc<Program>, String> {
+        if id >= self.rules.progression.spells.len()
+            && let Some(item) = self.rules.progression.item_programs.get(&id)
+        {
+            return item.clone();
+        }
         self.rules
             .progression
             .spells
@@ -152,6 +157,26 @@ impl Session {
             };
             if !ids.insert(sequence) || self.state.changes.contains_key(&sequence) {
                 return Err("Duplicate runtime object sequence".into());
+            }
+            if let Some(prototype) = placement.prototype {
+                if id != sequence {
+                    return Err("Invalid generated actor identity".into());
+                }
+                let r = mobile::population::Resident::generated_npc(
+                    id,
+                    prototype,
+                    placement.source,
+                    vfs,
+                    &mut prototypes,
+                )?;
+                let art = r.current_art.value().ok_or("Generated actor has no ART")?;
+                let dir = self.magick.facing(id).unwrap_or(((art >> 11) & 7) as u8);
+                let frame = standing(vfs, &mut frames, (art & !(7 << 11)) | u32::from(dir) << 11)?;
+                moved.insert(id, (Arc::new(r), frame));
+                continue;
+            }
+            if id.kind != 2 {
+                return Err("Invalid original mobile identity".into());
             }
             let index = indices
                 .entry(placement.map.clone())
@@ -253,13 +278,48 @@ impl Session {
         }
         pc.statistics(rules, Some(0), armor, resistance, false)
     }
+    pub(in crate::content::world::inventory) fn tick_actor_poison(&mut self, now: u64) -> bool {
+        let mut hits = Vec::new();
+        let mut changed = false;
+        for (key, d) in &mut self.magick.actors {
+            let Some(timer) = d.poison_timer.as_mut().filter(|t| t.due() <= now) else {
+                continue;
+            };
+            let (Some((rate, maximum, flags)), Some(level), Ok(id)) =
+                (d.poison_stats, d.poison.as_mut(), parse_id(key))
+            else {
+                d.poison_timer = None;
+                continue;
+            };
+            let damage = timer.advance(level, rate, now);
+            if *level == 0 {
+                d.poison_timer = None;
+            }
+            if damage > 0 && !d.dead {
+                let mut t = Target::new(Subject::Mobile(id), (0, 0), None, Kind::Actor);
+                t.maximum = maximum;
+                t.hp = d.health.unwrap_or(0);
+                t.critter2 = flags;
+                hits.push((t, damage));
+            }
+            changed = true;
+        }
+        for (mut t, damage) in hits {
+            let before = t.hp;
+            self.change_vitals(&mut t, Channel::Normal, damage);
+            self.note_death(&t, before, None);
+        }
+        changed
+    }
+
     pub(in crate::content::world::inventory) fn change_vitals(
         &mut self,
         t: &mut Target,
         channel: Channel,
         delta: i32,
     ) {
-        let previously_alive = t.hp < t.maximum;
+        let previous_hp = t.hp;
+        let previously_alive = previous_hp < t.maximum;
         let v = match channel {
             Channel::Poison => &mut t.poison,
             Channel::Fatigue => &mut t.fatigue,
@@ -268,7 +328,15 @@ impl Session {
         *v = v.saturating_add(delta).max(0);
         match &t.subject {
             Subject::Player => match channel {
-                Channel::Poison => self.character.base[24] = *v,
+                Channel::Poison => {
+                    *v = (*v).min(1000);
+                    self.character.base[24] = *v;
+                    crate::content::character::PoisonTimer::synchronize(
+                        &mut self.character.poison_timer,
+                        *v,
+                        self.game_second,
+                    );
+                }
                 Channel::Fatigue => {
                     self.character.fatigue_damage = *v;
                     if *v > 0 {
@@ -305,7 +373,19 @@ impl Session {
                 }
                 let d = self.magick.actors.entry(id.key()).or_default();
                 match channel {
-                    Channel::Poison => d.poison = Some(*v),
+                    Channel::Poison => {
+                        *v = (*v).min(1000);
+                        d.poison = Some(*v);
+                        d.health.get_or_insert(previous_hp);
+                        if let Some(s) = &t.stats {
+                            d.poison_stats = Some((s.poison_recovery, t.maximum, t.critter2));
+                        }
+                        crate::content::character::PoisonTimer::synchronize(
+                            &mut d.poison_timer,
+                            *v,
+                            self.game_second,
+                        );
+                    }
                     Channel::Fatigue => {
                         d.fatigue = Some(*v);
                         if *v > 0 && t.critter & 0x04000004 == 0 {
@@ -319,6 +399,9 @@ impl Session {
                     _ => {
                         d.health = Some(*v);
                         d.dead = *v >= t.maximum && t.maximum > 0;
+                        if d.dead {
+                            d.poison_timer = None;
+                        }
                         if d.dead && previously_alive {
                             // CE combat_dmg selects the torso death for untargeted hits over 20 HP.
                             d.death_anim = Some(if delta > 20 { 18 } else { 7 });

@@ -1,6 +1,6 @@
 # Arcanum-RS — Known Issues
 
-Baseline includes M81-R WASD Camera Controls and Configurable Scroll Speed. Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
+Baseline includes M82-R Consumables, Rest, Waiting and Game Time. Update this register as milestones are completed. This is a defect backlog, not a list of every unimplemented feature.
 
 ## Triage
 
@@ -39,7 +39,7 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 
 - **Priority** P2. **Status** Deferred.
 - The Classic spellbook executes the installed programs for the 16 colleges through the casting and progression systems. Remaining spell dependencies are tracked in MAG-001.
-- The learned schematic book supports the 56 degree recipes through the installed recipe and inventory definitions. Found schematics, followers supplying components, powered-device use and consumable effects need further runtime support. Conditional equipment scripts outside the supported reversible effect operations report the winning script when blocked.
+- The learned schematic book supports the 56 degree recipes through the installed recipe and inventory definitions. Found schematics, followers supplying components, and powered-device use need further runtime support. Recovery consumables use their installed Use scripts and Item_Used programs. Conditional equipment scripts outside the supported reversible effect operations report the winning script when blocked.
 - Manual point allocation, original skill training tiers, dialogue, quest and combat XP, and kill alignment operate for the player. Automatic leveling schemes, pickpocket alignment, follower attitude AI and college mastery quests remain deferred. Some background and item effect operators remain outside the statistic subset and appear in character diagnostics.
 
 ### MAG-001 — Spell interactions with combat, party and environmental systems
@@ -106,6 +106,39 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
   Lukan's `02774bridgethugshb.scr` also checks reputation 1050 and can kill
   its attachee. The bridge copy starts with `OF_OFF`. The Wise Woman and
   Black Root Herbalist have no First Heartbeat or Heartbeat attachment.
+
+### Manual gameplay findings — Crash Site, Shrouded Hills and Classic HUD
+
+These observations come from manual playtesting. The subsystem leads below are hypotheses. P1 marks a blocked gameplay action or quest step.
+
+#### Crash Site
+
+- **WORLD-002 — Shrine inscription · P2 · Open.** Click the original shrine at the Crash Site. It should display its authored inscription, but no text appears. The scenery Use handler or the presentation of its text may be involved.
+
+#### Shrouded Hills — NPCs, dialogue and quest items
+
+These cases extend [SH-001](#sh-001--shrouded-hills-interaction-follow-up). Related interpreter and quest coverage is tracked in [DLG-001](#dlg-001--dialogue-requires-unimplemented-script-and-game-state) and [QUEST-001](#quest-001--quest-rewards-and-broader-logbook-coverage).
+
+- **INV-002 — Overlapping bridge ogre corpses · P2 · Open.** Kill two bridge ogres at the same location, then try to select and loot each body. Their corpses overlap and only one can be selected and looted. Each corpse should give access to its own inventory. Picking among overlapping corpses may be involved.
+- **SH-002 — Malochean Hand bridge encounter · P2 · Needs reproduction.** Cross the bridge. The tester expected the Malochean Hand encounter with William Radcliffe, but it did not trigger. Establish the original quest and script prerequisites and repeat the crossing with those conditions met. The relevant quest state or encounter trigger may determine whether the encounter should occur.
+- **DLG-003 — William Radcliffe does not initiate dialogue · P2 · Needs reproduction.** With William present, approach him or walk past him. He does not start the expected conversation. Check when his original script calls for automatic dialogue. Proximity detection, NPC heartbeat dispatch or an authored condition may be involved.
+- **DLG-004 — William Radcliffe’s disabled responses · P2 · Needs reproduction.** With William’s dialogue open, try selecting the greyed-out responses. They cannot be selected. Responses whose authored conditions are met should be selectable. Record the affected lines and character and quest state to distinguish an intended restriction from a response-condition or action the dialogue system cannot evaluate.
+- **SH-003 — Ristezze cannot be spoken to · P1 · Open.** Approach Ristezze and click him to talk. No conversation opens, blocking quest progression that requires speaking to him. His authored dialogue should open for an eligible player. Talk eligibility or dispatch of his dialogue attachment may be involved. See [DLG-002](#dlg-002--generated-greetings-and-talk-eligibility).
+- **QUEST-002 — Doc Roberts’s quest cannot be accepted · P1 · Open.** Talk to Doc Roberts and choose the quest-acceptance response. Instead of accepting the quest, dialogue reports `unresolved script action 7 at statement 30`. The SCR action reached by this response needs review. SH-001 separately records action 21 at statement 17 on the recruitment continuation.
+- **QUEST-003 — Constable Owens’s quest cannot be completed · P1 · Open.** With Owens’s quest active, kill Lukan and return to Owens. The expected turn-in does not complete the quest. Lukan’s death script, the resulting quest state or Owens’s turn-in condition may be involved.
+- **INV-003 — Joachim’s note for Virgil cannot be picked up · P1 · Open.** Click Joachim’s note to pick it up. It should enter the backpack so it can be taken to Virgil. Pickup fails, and the console reports that the item is unavailable or requires an unsupported script or equipment transaction. The item’s pickup script or ownership transfer may be involved. See [scripted inventory dependencies](#deferred-gameplay-dependencies).
+- **SH-004 — Shrouded Hills herbalist missing · P2 · Open.** Visit the herbalist’s expected location in Shrouded Hills. The NPC is missing from the world, so the expected interaction is unavailable. Original mobile placement, visibility or activation conditions may be involved. SH-001 records the working Black Root Herbalist greeting and barter at that separate location.
+
+#### Shrouded Hills — World interactions
+
+- **WORLD-003 — Open windows block traversal · P2 · Open.** Open a window at Jongle Dunne’s house and try to move through it. The open window blocks passage. The tester verified that the same traversal works in vanilla. Check generic window-portal collision and traversal rules against the open state. [WORLD-001](#world-001--incomplete-window-rendering) tracks window appearance.
+- **NPC-002 — Stationary church rats · P2 · Open.** Enter the Shrouded Hills church and observe the rats near the steam engine. They remain stationary instead of exhibiting their original movement. Ambient NPC movement goals, standpoints or script activation may be involved.
+- **QUEST-004 — Steam-engine control box blocks Jongle Dunne’s quest · P1 · Open.** During Jongle Dunne’s quest, try to attack and destroy the steam-engine control box. It cannot be attacked or destroyed, so the quest cannot be completed. Check the original attack eligibility and whether a destruction callback advances the objective. See [Destructible World Objects](#destructible-world-objects).
+
+#### Classic HUD
+
+- **UI-011 — Missing level-up notification on the character-sheet button · P2 · Deferred.** Gain a level and leave character points unspent. The Classic character-sheet HUD button should turn red, but its appearance does not change. Check the level-up notification state and its button artwork in a later UI compatibility pass. [UI-006](#ui-006--missing-inventory-change-notification) tracks the separate inventory-button notification.
+- **UI-012 — Missing experience progress bar · P2 · Open.** With the Classic HUD visible, gain XP and check progress toward the next level. The original experience progress indicator is absent. Check the original HUD artwork and how it reflects authoritative XP and level state. Any restoration should use the shared theme components and bindings.
 
 ### LOCK-001 — Remaining access dependencies
 
@@ -192,11 +225,12 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 ### CHAR-001 — Equipment scripts and conditional background effects
 - **Priority:** P2 | **Status:** Deferred
 - Static race, gender and background modifiers and numerical equipment bonuses are active.
-- Items that require wield scripts report the dependency. Triggered item spells and specialized item lighting need their gameplay systems.
+- Items that require wield scripts report the dependency. Recovery items dispatch Item_Used spells. Other item triggers and specialized item lighting need their gameplay systems.
 - Conditional background modifiers depend on time, the standing tile, lighting and later skill systems. The Classic Attack readout depends on combat skill and damage calculations.
 
 ### INV-001 — Stack consumption
-- **Status:** Deferred
+- **Status:** Partially implemented
+- Original recovery foods consume the selected inventory instance.
 - Gold and ammunition can be split and merged through quantity-aware inventory transactions.
 - Using charges, fuel and other ammunition depends on their associated gameplay mechanics.
 
@@ -231,11 +265,14 @@ Status: **Open**, **Needs reproduction**, **Deferred**, or **Resolved**. Keep re
 - Priority: P2
 - Clicking New requires an additional click on the green confirmation arrow before entering a save name.
 
-### HUD — Missing day/night indicator artwork
-- Priority: P2
-- The day/night indicator in the top HUD displays a blank pale rectangle instead of the original animated artwork.
-- Predates M68-R.
-- Investigate ART selection, frame resolution and game-time binding.
+### HUD — Day/night indicator artwork
+
+- **Resolved in M82-R.** The GameClock binding drew the strips onto a one-pixel surface. It now uses the theme aperture, the original day and eight moon strips, and the clock pointer. Native captures cover afternoon, evening and morning, including after a save, restart and map change.
+
+### Recovery and rest presentation
+
+- **P2, deferred.** Rest uses the original selector and hourly healing. The bed pose, sleep fade and follower sleep notifications need animation and party integration. Overland encounter transitions from the world-map travel screen remain part of travel simulation.
+- Recovery items dispatch their installed Use SCR or supported Item_Used program. Unsupported scripted operations report their dependency and leave the item in the backpack. Remaining non-recovery device programs and follower inventory actions need their respective gameplay systems.
 
 ### AUDIO — Incorrect inventory opening sound
 - Priority: P2
@@ -262,6 +299,12 @@ These are planned capabilities, not regressions. Implement in their own mileston
 - **Inventory extensions:** generated loot, consumption, decay and scripted inventory behavior as their dependencies become available.
 - **Later systems:** combat, broader script and spell execution, and uses of crafted devices.
 - **Use action:** the inventory Use box accepts original lockpicks. Other targeted items need their own gameplay mechanics.
+
+### Destructible World Objects
+
+Original Arcanum allows physical destruction of eligible containers, including some locked chests, as an alternative way to access their contents. Scenery and container destruction are candidates for a dedicated milestone before the first full playthrough. QUEST-004 records the blocked quest. [LOCK-001](#lock-001--remaining-access-dependencies) tracks forced entry, and [MAG-001](#mag-001--spell-interactions-with-combat-party-and-environmental-systems) records the existing portable-item damage support.
+
+Verify attack eligibility and durability against CE and installed object definitions, including examples of destructible and indestructible containers. Trace physical damage and resistance through the transition to a destroyed object. Check who owns the loot, how it becomes accessible, what collision changes, which script callbacks run, and whether partial damage, destruction and loot ownership persist across save/load and map re-entry.
 
 ## Regression watchlist — previously corrected
 

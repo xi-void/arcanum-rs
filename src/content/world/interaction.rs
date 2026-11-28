@@ -69,7 +69,49 @@ fn invocation(attachment: &Attachment, hour: u8, tile: Tile, from: Option<Tile>)
     }
 }
 
+pub(super) fn bed_access(
+    handler: &Handler,
+    hour: u8,
+    scripts: &State,
+    at: Tile,
+    from: Tile,
+    vfs: &mut Vfs,
+    female: bool,
+) -> Result<State, String> {
+    let denied = "You cannot sleep here. Find an inn and pay for a bed.";
+    let (a, s) = handler
+        .as_ref()
+        .ok_or(denied)?
+        .as_deref()
+        .map_err(Clone::clone)?;
+    let mut staged = scripts.clone();
+    staged.print_lines = Some(vec![]);
+    let result = s
+        .execute(&invocation(a, hour, at, Some(from)), &mut staged)
+        .map_err(|e| format!("{}: {e}", s.source))?;
+    let printed = staged.print_lines.take().unwrap();
+    if result.outcome == (Outcome::Return { run_default: false }) {
+        return Ok(staged);
+    }
+    let path = s
+        .source
+        .virtual_path
+        .replace("scr/", "dlg/")
+        .replace(".scr", ".dlg");
+    let message = printed.last().and_then(|&id| {
+        crate::content::dialogue::Dialogue::load(vfs, &path)
+            .ok()?
+            .printed_line(id, female)
+            .map(str::to_owned)
+    });
+    Err(message.unwrap_or_else(|| denied.into()))
+}
+
 pub(super) enum Action {
+    Bed {
+        handler: Handler,
+        occupied: bool,
+    },
     Travel(Destination),
     Door(Box<Door>),
     Window {
@@ -596,14 +638,22 @@ pub(super) fn prepare(
         targets.insert((true, portal.order()), Target { tile, action });
     }
     for object in &room.scenery {
-        if object.use_script <= 0 {
+        let action = if object.art.family == 22 {
+            let owner = format!("{map}/{sector}:{}", object.record.index);
+            Action::Bed {
+                handler: handler(vfs, &owner, Event::Use, object.use_script, object.use_local),
+                occupied: object.bed_occupied,
+            }
+        } else if object.use_script > 0 {
+            use_action(vfs, object.use_script)
+        } else {
             continue;
-        }
+        };
         targets.insert(
             (true, object.order()),
             Target {
                 tile: object.tile,
-                action: use_action(vfs, object.use_script),
+                action,
             },
         );
     }
@@ -986,7 +1036,8 @@ impl SectorCache {
                 Some(Ok(Some(*dst)))
             }
             Action::Unsupported(reason) => Some(Err(reason.clone())),
-            Action::Window { .. }
+            Action::Bed { .. }
+            | Action::Window { .. }
             | Action::Container(_)
             | Action::Pickup(_)
             | Action::Summon(_)

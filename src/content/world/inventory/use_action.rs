@@ -1,5 +1,6 @@
 //! Resolve the selected item or spell against the live target before committing its cost and effects.
 use super::*;
+use crate::content::character::PoisonTimer;
 use abilities::{LockId, Method};
 const DARK_SIGHT_BACKGROUND: i32 = 78;
 
@@ -83,7 +84,7 @@ impl InteractiveWorld {
         let stats = self.character_statistics();
         json!({"pick_locks_points":stats.pick_locks.points,"pick_locks_training":stats.pick_locks.training,"pick_locks":stats.pick_locks,
             "magick":self.cache.inventory.magick.report(), "colleges":pc.colleges,"mastery":pc.mastery,"aptitude":stats.aptitude,"fatigue":stats.current_fatigue,
-            "fatigue_damage":pc.fatigue_damage,"max_fatigue":stats.max_fatigue,"recovery_due":pc.recover_at})
+            "fatigue_damage":pc.fatigue_damage,"max_fatigue":stats.max_fatigue,"recovery_due":pc.recover_at,"poison":pc.base[24],"poison_timer":pc.poison_timer})
     }
 
     pub fn next_ability_second(&self) -> Option<u64> {
@@ -92,9 +93,18 @@ impl InteractiveWorld {
             .locks
             .values()
             .filter_map(|lock| lock.relock_at.first().copied())
+            .chain(self.cache.scripts.next_call())
+            .chain(self.cache.inventory.encounter.due)
             .chain(self.cache.inventory.spell_deadline())
             .chain(self.cache.inventory.magick.next_recovery())
             .chain(self.cache.inventory.character.recover_at)
+            .chain(
+                self.cache
+                    .inventory
+                    .character
+                    .poison_timer
+                    .map(PoisonTimer::due),
+            )
             .chain(
                 self.cache
                     .inventory
@@ -112,6 +122,31 @@ impl InteractiveWorld {
         let inventory = &mut self.cache.inventory;
         inventory.game_second = now;
         let mut changed = inventory.magick.recover(now);
+        changed |= inventory.tick_actor_poison(now);
+        let pc = &mut inventory.character;
+        if pc.base[24] > 0 && pc.poison_timer.is_none() && inventory.statistics().current_health > 0
+        {
+            let pc = &mut inventory.character;
+            PoisonTimer::synchronize(&mut pc.poison_timer, pc.base[24], now);
+        }
+        let pc = &mut inventory.character;
+        if pc.poison_timer.is_some_and(|timer| timer.due() <= now) {
+            let stats = inventory.statistics();
+            let pc = &mut inventory.character;
+            if stats.current_health > 0 {
+                pc.base[24] = pc.base[24].clamp(0, 1000);
+                let damage = pc.poison_timer.as_mut().unwrap().advance(
+                    &mut pc.base[24],
+                    stats.poison_recovery,
+                    now,
+                );
+                pc.health_damage = pc.health_damage.saturating_add(damage);
+            }
+            if pc.base[24] == 0 || i64::from(pc.health_damage) >= stats.max_health {
+                pc.poison_timer = None;
+            }
+            changed = true;
+        }
         if inventory.character.fatigue_damage > 0 {
             inventory
                 .character
@@ -177,6 +212,10 @@ impl InventoryReader {
             return false;
         };
         let result = match (method, key) {
+            (Method::Consumable(id), aim) => {
+                world.ability.selected = None;
+                self.consume(world, id, aim, now)
+            }
             (Method::Spell(id), aim) => self.cast_spell(world, id, aim, now, impact),
             (Method::PickLocks(_), abilities::Aim::Object(key)) => {
                 self.resolve_action(world, key, method)
@@ -408,7 +447,7 @@ impl Session {
             if pc.race() == 1 {
                 n = n.saturating_mul(2);
             }
-            if n > 0 && pc.critter_flags & 0x80000000 != 0 {
+            if n > 0 && (pc.critter_flags | self.rules.temporary_critter) & 0x80000000 != 0 {
                 n = (n / 2).max(1);
             }
             n

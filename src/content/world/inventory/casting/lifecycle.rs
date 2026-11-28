@@ -263,7 +263,10 @@ impl InventoryReader {
         if !run.ending {
             transformation::restore(w, &mut self.vfs, &run.bindings);
         }
-        w.ability.message = format!("{} ended", w.progression_rules().spells[run.spell].name);
+        w.ability.message = w.progression_rules().spells.get(run.spell).map_or_else(
+            || "Item effect ended".to_owned(),
+            |s| format!("{} ended", s.name),
+        );
     }
     pub fn dismiss_spell(&mut self, w: &mut InteractiveWorld, slot: usize, now: Duration) {
         let Some((index, _)) = w

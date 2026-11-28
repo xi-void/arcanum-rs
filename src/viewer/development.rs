@@ -703,7 +703,7 @@ impl Viewer<'_> {
                         "appearance":world.player_appearance(),"statistics":world.character_statistics()},
                     "sector":{"coordinates":coordinates,"id":coordinates.and_then(|sector|sector.id()),
                         "town_map":position.map(|(_,town)|town),"terrain_source_summary":source},
-                    "world":{"hour":current_hour,"world_tile":mapped,"area":area,
+                    "world":{"game_second":self.clock.as_ref().map(|clock|clock.game_second(game)),"rest":world.rest_report(),"hour":current_hour,"world_tile":mapped,"area":area,
                         "atlas_pixel":mapped.and_then(|tile|world_pixel(tile,map_ui.as_ref()?.world_width())),
                         "travel":map_ui.as_ref().map(|map|map.diagnostic())},
                     "camera":{"projected":camera.position(),"viewport":viewport,"zoom":self.settings.zoom,"follow":self.settings.follow,
@@ -948,7 +948,7 @@ impl Viewer<'_> {
                 clock.set_hour(hour, game);
                 world.set_game_hour(hour);
                 if let Some(hud) = hud {
-                    hud.set_game_time(clock.hours(game));
+                    hud.set_game_time(clock.game_second(game));
                 }
                 dev.event("game_time", None, json!({"hour":hour}));
                 json!({"hour":hour})

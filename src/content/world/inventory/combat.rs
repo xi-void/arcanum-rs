@@ -814,7 +814,7 @@ impl InventoryReader {
             if p.dead() {
                 return actor.is_none_or(|id| {
                     !w.cache.inventory.magick.revived_or_decayed(id)
-                        && (id.kind != u16::MAX || w.cache.inventory.magick.has_spawn(id))
+                        && (id.kind != u16::MAX || w.cache.inventory.magick.owns_spawn(&w.map, id))
                 });
             }
             p.hold() || p.animating(now) || p.adjoining_step(now)
@@ -1205,7 +1205,7 @@ impl Session {
         if before < target.maximum
             && target.hp >= target.maximum
             && let Subject::Mobile(id) = target.subject
-            && id.kind == 2
+            && (id.kind == 2 || id.kind == u16::MAX && !self.magick.has_spawn(id))
         {
             self.combat.deaths.push((id, source));
         }

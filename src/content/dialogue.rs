@@ -43,6 +43,15 @@ impl Dialogue {
         Self::decode(source, &bytes).map_err(|error| format!("{path}: {error}"))
     }
 
+    pub(super) fn printed_line(&self, id: i32, female: bool) -> Option<&str> {
+        let row = self.lines.get(&id)?;
+        Some(if female && !row.alternate.is_empty() {
+            &row.alternate
+        } else {
+            &row.text
+        })
+    }
+
     pub(super) fn structure(&self) -> serde_json::Value {
         let speaker_lines = self.lines.values().filter(|line| line.iq == 0).count();
         serde_json::json!({"status":"decoded","records":self.lines.len(),"speaker_lines":speaker_lines,
